@@ -94,9 +94,9 @@ fn attach(machine: &Machine) -> Device {
         .unwrap()
         .with_options(EndpointOptions { official: false });
     device.set_details("phone".into(), None);
-    let minted = machine.host().new_pairing_code();
+    let minted = machine.host().new_invitation();
     let paired: PairedHost =
-        tcode_traverse::pair_blocking(&minted.invite, &minted.code, &device).unwrap();
+        tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();
     let transport = tcode_traverse::connect(&paired, &device);
     wait_state(&transport, ConnectionState::Syncing);
     let tunnels = transport.current_host.as_ref().unwrap().tunnels().unwrap();
@@ -234,7 +234,7 @@ fn a_connect_before_hello_is_refused_and_tunnels_per_connection_are_bounded() {
             .bind(),
     )
     .unwrap();
-    let minted = machine.host().new_pairing_code();
+    let minted = machine.host().new_invitation();
     let addr = iroh::EndpointAddr::from_parts(
         minted.invite.host_id.parse().unwrap(),
         minted
@@ -249,7 +249,7 @@ fn a_connect_before_hello_is_refused_and_tunnels_per_connection_are_bounded() {
         wire::write_line(
             &mut send,
             &ClientLine::Pair {
-                code: minted.code.clone(),
+                secret: minted.invite.secret.clone(),
                 device: DeviceClaim {
                     name: "raw".into(),
                     platform: None,

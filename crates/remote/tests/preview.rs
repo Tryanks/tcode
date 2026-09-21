@@ -67,8 +67,8 @@ impl Machine {
             .unwrap()
             .with_options(EndpointOptions { official: false });
         device.set_details("laptop".into(), None);
-        let minted = host.new_pairing_code();
-        let paired = tcode_traverse::pair_blocking(&minted.invite, &minted.code, &device).unwrap();
+        let minted = host.new_invitation();
+        let paired = tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();
         let transport = tcode_traverse::connect(&paired, &device);
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {

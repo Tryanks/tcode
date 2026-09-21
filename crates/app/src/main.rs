@@ -345,7 +345,7 @@ fn main() {
                 .find(|host| host.host_id == host_id)
             else {
                 eprintln!(
-                    "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <addr> <port> <code>)",
+                    "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <tcode://pair?...>)",
                     data_dir.display()
                 );
                 std::process::exit(1);
