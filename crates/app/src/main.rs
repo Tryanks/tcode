@@ -166,23 +166,16 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
         .map(|pair| pair[1].clone())
 }
 
-/// Hidden `tcode --pair <addr> <port> <code>`: pair with a host over HTTP,
-/// record it in `hosts.json`, print its id and exit. The desktop pairing UI
-/// does the same thing; this is the headless path used by the remote e2e run.
+/// Hidden `tcode --pair <tcode://pair?…>`: pair with the machine an invite
+/// names, record it in `hosts.json`, print its id and exit. The desktop
+/// pairing UI does the same thing; this is the headless path used by the
+/// remote e2e run.
 fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<String, String> {
-    let [addr, port, code] = args else {
-        return Err("usage: tcode --pair <addr> <port> <code>".into());
+    let [invite] = args else {
+        return Err("usage: tcode --pair <tcode://pair?...>".into());
     };
-    let port: u16 = port
-        .parse()
-        .map_err(|error| format!("invalid port: {error}"))?;
-    let host = smol::block_on(client_host.pair(tcode_client::host::PairRequest {
-        origin: tcode_client::pairing::lan_origin(addr, port),
-        code: code.clone(),
-        host_id: None,
-        identity_key: None,
-        candidates: Vec::new(),
-    }))?;
+    let invite = tcode_client::pairing::parse_pair_url(invite).ok_or("invalid invite link")?;
+    let host = smol::block_on(client_host.pair(invite))?;
     let host_id = host.host_id.clone();
     client_host.remember_host(host);
     Ok(host_id)

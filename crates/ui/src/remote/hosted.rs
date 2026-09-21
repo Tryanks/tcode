@@ -162,18 +162,16 @@ impl HostedPanel {
             };
             row = row.p_3().gap_4().items_start().child(code);
             if let Some(code) = state.code {
-                let origin = cx
-                    .global::<super::ClientAttachment>()
-                    .host()
-                    .fixed_pairing_endpoint()
-                    .unwrap_or_default();
+                // TODO(traverse): the hosting state carries no relay or
+                // addresses yet; a scanner on the same LAN finds the machine
+                // by id through discovery.
                 let invite = tcode_client::pairing::pair_url(&tcode_client::pairing::PairInvite {
                     host_id: state.host_id,
                     name: state.host_name,
-                    origin,
-                    candidates: Vec::new(),
-                    identity_key: None,
                     code,
+                    traverse: None,
+                    relay: None,
+                    addrs: Vec::new(),
                 });
                 row = row.children(super::qr::qr_element(&invite));
             }

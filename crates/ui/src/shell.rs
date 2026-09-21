@@ -2542,7 +2542,7 @@ mod tests {
 
         fn pair(
             &self,
-            _: tcode_client::host::PairRequest,
+            _: tcode_client::pairing::PairInvite,
         ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
         {
             panic!("a cold start must reuse the saved pairing")
@@ -2590,10 +2590,9 @@ mod tests {
             saved: tcode_client::pairing::PairedHost {
                 host_id: "last-host".into(),
                 name: "Last machine".into(),
-                origin: "http://127.0.0.1:47503".into(),
-                candidates: Vec::new(),
-                token: "test-token".into(),
-                identity_key: None,
+                traverse: None,
+                relay: None,
+                addrs: vec!["127.0.0.1:47503".into()],
                 last_connected_unix: Some(1),
             },
             transport: RefCell::new(Some(Transport {
@@ -2670,10 +2669,9 @@ mod tests {
             saved: tcode_client::pairing::PairedHost {
                 host_id: "pending-host".into(),
                 name: "Pending host".into(),
-                origin: "http://127.0.0.1:48442".into(),
-                candidates: Vec::new(),
-                token: "fixture".into(),
-                identity_key: None,
+                traverse: None,
+                relay: None,
+                addrs: vec!["127.0.0.1:48442".into()],
                 last_connected_unix: None,
             },
             transport: RefCell::new(Some(Transport {

@@ -1,14 +1,12 @@
+//! The browser listener: static bundle, password login and the `/ws` hello.
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use futures_util::StreamExt as _;
 use serde_json::{Value, json};
-use tcode_client::host::DeviceIdentity;
-use tcode_remote::client::{ConnectionFailure, ConnectionState, connect, pair};
 use tcode_remote::{HostMux, RemoteConfig, serve};
-use tungstenite::Message;
 
 struct TestDir(PathBuf);
 
@@ -26,416 +24,75 @@ impl Drop for TestDir {
     }
 }
 
-/// A client whose persistent device id derives from its name.
-fn device(name: &str) -> DeviceIdentity {
-    DeviceIdentity {
-        id: format!("{name}-id"),
-        name: name.into(),
-        platform: None,
-    }
-}
-
-fn fake_host() -> (HostMux, Arc<AtomicUsize>) {
+/// Acks every command and answers every subscription with an index event.
+fn fake_host() -> HostMux {
     let (to_host, host_rx) = async_channel::unbounded::<String>();
     let (host_tx, from_host) = async_channel::unbounded::<String>();
-    let subscribe_count = Arc::new(AtomicUsize::new(0));
-    let count = subscribe_count.clone();
     std::thread::spawn(move || {
         while let Ok(line) = host_rx.recv_blocking() {
             let value: Value = serde_json::from_str(line.trim_end()).unwrap();
             let id = value["id"].as_u64().unwrap();
-            let kind = value["payload"]["type"].as_str().unwrap();
-            if kind == "subscribe" {
-                count.fetch_add(1, Ordering::Relaxed);
+            if value["payload"]["type"] == "subscribe" {
                 host_tx
                     .send_blocking(
-                        json!({
-                            "type": "event",
-                            "content": {
-                                "topic": "index",
-                                "event": {"type": "index_snapshot", "content": {"sessions": [], "projects": []}}
-                            }
-                        })
-                        .to_string(),
-                    )
-                    .unwrap();
-            }
-            if kind == "command"
-                && value["payload"]["content"]["type"].as_str() == Some("create_project")
-            {
-                host_tx
-                    .send_blocking(
-                        json!({
-                            "type": "event",
-                            "content": {
-                                "topic": "index",
-                                "event": {"type": "index_snapshot", "content": {"sessions": [], "projects": []}}
-                            }
-                        })
-                        .to_string(),
+                        json!({"type": "event", "content": {"topic": "index", "event": {"type": "index_snapshot", "content": {"sessions": [], "projects": []}}}})
+                            .to_string(),
                     )
                     .unwrap();
             }
             host_tx
                 .send_blocking(
-                    json!({
-                        "type": "ack",
-                        "content": {"id": id, "result": {"Ok": {"type": "unit"}}}
-                    })
-                    .to_string(),
+                    json!({"type": "ack", "content": {"id": id, "result": {"Ok": {"type": "unit"}}}})
+                        .to_string(),
                 )
                 .unwrap();
         }
     });
-    (HostMux::new(to_host, from_host), subscribe_count)
+    HostMux::new(to_host, from_host)
 }
 
-fn config(data_dir: PathBuf, port: u16) -> RemoteConfig {
+fn config(data_dir: PathBuf) -> RemoteConfig {
     RemoteConfig {
-        listen: format!("127.0.0.1:{port}").parse().unwrap(),
+        listen: "127.0.0.1:0".parse().unwrap(),
         host_name: "Test Host".into(),
         data_dir,
         static_bundle: None,
         browser_password: false,
+        hosting: None,
     }
 }
 
-fn wait_state(client: &tcode_remote::client::RemoteClient, wanted: ConnectionState) {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline {
-        if let Ok(state) = client.state.try_recv()
-            && state == wanted
-        {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("did not observe state {wanted:?}");
-}
-
-fn recv_type(client: &tcode_remote::client::RemoteClient, kind: &str, id: Option<u64>) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if let Ok(line) = client.from_host.try_recv() {
-            let value: Value = serde_json::from_str(line.trim_end()).unwrap();
-            if value["type"] == kind
-                && id.is_none_or(|id| value["content"]["id"].as_u64() == Some(id))
-            {
-                return value;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("did not receive {kind}");
-}
-
-#[test]
-fn pairing_is_single_use_and_five_failures_invalidate() {
-    let data = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let port = server.local_addr().port();
-    let code = server.new_pairing_code();
-    let paired = pair(
-        &format!("http://127.0.0.1:{}", port),
-        &code.code,
-        &device("phone"),
-    )
-    .unwrap();
-    assert!(!paired.token.is_empty());
-    assert!(
-        pair(
-            &format!("http://127.0.0.1:{}", port),
-            &code.code,
-            &device("again")
-        )
-        .is_err()
-    );
-
-    let code = server.new_pairing_code();
-    let wrong = if code.code == "999999" {
-        "000000"
-    } else {
-        "999999"
-    };
-    for _ in 0..5 {
-        assert!(
-            pair(
-                &format!("http://127.0.0.1:{}", port),
-                wrong,
-                &device("attacker")
-            )
-            .is_err()
-        );
-    }
-    assert!(
-        pair(
-            &format!("http://127.0.0.1:{}", port),
-            &code.code,
-            &device("phone")
-        )
-        .is_err()
-    );
-    server.shutdown();
-}
-
-#[test]
-fn two_clients_route_acks_broadcast_events_and_reconnect() {
-    let data = TestDir::new();
-    let (mux, subscribe_count) = fake_host();
-    let server = serve(mux.clone(), config(data.0.clone(), 0)).unwrap();
-    let port = server.local_addr().port();
-    let code_a = server.new_pairing_code();
-    let host_a = pair(
-        &format!("http://127.0.0.1:{}", port),
-        &code_a.code,
-        &device("A"),
-    )
-    .unwrap();
-    let code_b = server.new_pairing_code();
-    let host_b = pair(
-        &format!("http://127.0.0.1:{}", port),
-        &code_b.code,
-        &device("B"),
-    )
-    .unwrap();
-    let client_a = connect(host_a, device("A"), None);
-    let client_b = connect(host_b, device("B"), None);
-    wait_state(&client_a, ConnectionState::Syncing);
-    wait_state(&client_b, ConnectionState::Syncing);
-    let subscribe = |id| {
-        json!({"id": id, "payload": {"type": "subscribe", "content": {"topic": "index"}}})
-            .to_string()
-    };
-    client_a.to_host.send_blocking(subscribe(10)).unwrap();
-    client_b.to_host.send_blocking(subscribe(20)).unwrap();
-    recv_type(&client_a, "event", None);
-    recv_type(&client_b, "event", None);
-    recv_type(&client_a, "ack", Some(10));
-    recv_type(&client_b, "ack", Some(20));
-    wait_state(&client_a, ConnectionState::Connected);
-    wait_state(&client_b, ConnectionState::Connected);
-    let create = json!({
-        "id": 11,
-        "payload": {"type": "command", "content": {"type": "create_project", "content": {"root": "/tmp/project"}}}
-    })
-    .to_string();
-    client_a.to_host.send_blocking(create).unwrap();
-    recv_type(&client_a, "event", None);
-    recv_type(&client_b, "event", None);
-    recv_type(&client_a, "ack", Some(11));
-    // A reply to B, ordered after A's command by the host, bounds the absence check.
-    client_b
-        .to_host
-        .send_blocking(
-            json!({
-                "id": 21,
-                "payload": {"type":"command", "content":{"type":"open_latest_session"}}
-            })
-            .to_string(),
-        )
+/// One bounded HTTP/1.1 request; returns the status line and body.
+fn http(addr: std::net::SocketAddr, method: &str, path: &str, body: &str) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
         .unwrap();
-    smol::block_on(futures_lite::future::race(
-        async {
-            loop {
-                let line = client_b.from_host.recv().await.unwrap();
-                let value: Value = serde_json::from_str(&line).unwrap();
-                assert_ne!(
-                    value["content"]["id"].as_u64(),
-                    Some(11),
-                    "A's acknowledgment leaked to B"
-                );
-                if value["type"] == "ack" && value["content"]["id"] == 21 {
-                    break;
-                }
-            }
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(5)).await;
-            panic!("B's command barrier was not acknowledged");
-        },
-    ));
-
-    server.shutdown();
-    wait_state(
-        &client_a,
-        ConnectionState::Reconnecting {
-            // This socket lived less than 30 seconds, so it must not reset retry history.
-            attempt: 2,
-            reason: Some(ConnectionFailure::HostClosed),
-        },
-    );
-    let restarted = serve(mux, config(data.0.clone(), port)).unwrap();
-    wait_state(&client_a, ConnectionState::Connected);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while subscribe_count.load(Ordering::Relaxed) < 3 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(subscribe_count.load(Ordering::Relaxed) >= 3);
-    recv_type(&client_a, "event", None);
-    restarted.shutdown();
-}
-
-#[test]
-fn stranger_at_the_saved_address_is_not_terminal_and_the_answering_candidate_is_promoted() {
-    let machine = TestDir::new();
-    let stranger = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(machine.0.clone(), 0)).unwrap();
-    let (mux, _) = fake_host();
-    let other = serve(mux, config(stranger.0.clone(), 0)).unwrap();
-    let origin = format!("http://{}", server.local_addr());
-    let stale = format!("http://{}", other.local_addr());
-    let code = server.new_pairing_code();
-    let paired = pair(&origin, &code.code, &device("phone")).unwrap();
-
-    // hello_ok names the machine and every address it listens on, so the
-    // client can remember where else to look.
-    let port = server.local_addr().port();
-    smol::block_on(async {
-        let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
-            .await
-            .unwrap();
-        let (mut websocket, _) =
-            async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
-                .await
-                .unwrap();
-        websocket
-            .send(Message::Text(
-                json!({"type": "hello", "protocol_version": 4, "token": paired.token, "device_name": "phone"})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-        let Some(Ok(Message::Text(reply))) = websocket.next().await else {
-            panic!("expected hello_ok");
-        };
-        let reply: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(
-            reply,
-            json!({
-                "type": "hello_ok",
-                "host_id": code.host_id,
-                "identity_key": code.identity_key,
-                "host_name": "Test Host",
-                "protocol_version": 4,
-                "addrs": code.addrs,
-                "port": port
-            })
-        );
-    });
-
-    // The phone's record points at an address another machine now owns; the
-    // real machine is only a saved candidate.
-    let client_data = TestDir::new();
-    let mut moved = paired.clone();
-    moved.origin = stale.clone();
-    moved.candidates = vec![origin.clone()];
-    moved.last_connected_unix = Some(7);
-    tcode_remote::client::save_hosts(&client_data.0, std::slice::from_ref(&moved)).unwrap();
-    let client = connect(moved, device("phone"), Some(client_data.0.clone()));
-    smol::block_on(futures_lite::future::race(
-        async {
-            loop {
-                match client.state.recv().await.unwrap() {
-                    ConnectionState::Syncing => return,
-                    ConnectionState::Offline { reason } => {
-                        panic!("a stranger's rejection ended the pairing: {reason:?}")
-                    }
-                    _ => {}
-                }
-            }
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(8)).await;
-            panic!("candidate was never raced");
-        },
-    ));
-    // Candidates race on the first attempt: a healthy candidate can win
-    // without exposing a failed whole round to the UI.
-    let saved = tcode_remote::client::load_hosts(&client_data.0)
-        .unwrap()
-        .remove(0);
-    assert_eq!(saved.origin, origin);
-    assert!(saved.candidates.contains(&stale));
-    assert_eq!(saved.token, paired.token);
-    assert_eq!(saved.identity_key, paired.identity_key);
-    assert_eq!(saved.last_connected_unix, Some(7));
-    client.to_host.close();
-    server.shutdown();
-    other.shutdown();
-}
-
-#[test]
-fn unpaired_and_revoked_tokens_are_rejected_and_closed() {
-    let data = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let port = server.local_addr().port();
-    let code = server.new_pairing_code();
-    let paired = pair(
-        &format!("http://127.0.0.1:{}", port),
-        &code.code,
-        &device("laptop"),
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     )
     .unwrap();
-
-    let devices = server.devices();
-    assert_eq!(devices.len(), 1);
-    assert_eq!(devices[0].name, "laptop");
-    assert!(devices[0].created_unix > 0);
-
-    assert!(server.revoke_device(&devices[0].id).unwrap());
-    assert!(server.devices().is_empty());
-    // A second revoke of the same id is a no-op, not an error.
-    assert!(!server.revoke_device(&devices[0].id).unwrap());
-
-    for token in ["wrong", paired.token.as_str()] {
-        smol::block_on(async {
-            let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
-                .await
-                .unwrap();
-            let (mut websocket, _) =
-                async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
-                    .await
-                    .unwrap();
-            websocket
-            .send(Message::Text(
-                json!({"type": "hello", "protocol_version": tcode_protocol::PROTOCOL_VERSION, "token": token})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-            let Some(Ok(Message::Text(reply))) = websocket.next().await else {
-                panic!("expected text rejection");
-            };
-            let reply: Value = serde_json::from_str(&reply).unwrap();
-            assert_eq!(
-                reply,
-                json!({"type": "hello_rejected", "reason": "token", "host_id": paired.host_id})
-            );
-            assert!(matches!(
-                websocket.next().await,
-                None | Some(Ok(Message::Close(_)))
-            ));
-        });
-    }
-    server.shutdown();
+    let mut bytes = Vec::new();
+    let _ = stream.read_to_end(&mut bytes);
+    let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(bytes[..split].to_vec()).unwrap();
+    (
+        head.lines().next().unwrap().to_owned(),
+        bytes[split + 4..].to_vec(),
+    )
 }
 
 #[test]
 fn static_bundle_get_and_head_share_headers() {
-    use std::io::{Read as _, Write as _};
     let dir = TestDir::new();
-    let (mux, _) = fake_host();
-    let mut config = config(dir.0.clone(), 0);
+    let mut config = config(dir.0.clone());
     config.static_bundle = Some(&[
         ("/index.html", b"<html>tcode</html>"),
         ("/tcode_web_bg.wasm", b"\0asm"),
     ]);
-    let server = serve(mux, config).unwrap();
+    let server = serve(fake_host(), config).unwrap();
     for (path, status, content_type, length) in [
         ("/", "200 OK", "text/html; charset=utf-8", 18),
         ("/index.html", "200 OK", "text/html; charset=utf-8", 18),
@@ -443,7 +100,7 @@ fn static_bundle_get_and_head_share_headers() {
         ("/missing", "404 Not Found", "text/plain; charset=utf-8", 9),
     ] {
         let request = |method| {
-            let stream = std::net::TcpStream::connect(server.local_addr()).unwrap();
+            let stream = TcpStream::connect(server.local_addr()).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
@@ -471,293 +128,132 @@ fn static_bundle_get_and_head_share_headers() {
 }
 
 #[test]
-fn local_admin_invite_pairs_and_persists_private_host_credentials() {
-    let data = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let origin = format!("http://{}", server.local_addr());
-    let bytes = tcode_remote::client::http(&origin, "GET", "/admin/pair", "").unwrap();
-    let reply: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        reply["browser_url"],
-        format!("{origin}/#code={}", reply["code"].as_str().unwrap())
-    );
-    let host = pair(&origin, reply["code"].as_str().unwrap(), &device("phone")).unwrap();
-    let client_data = TestDir::new();
-    tcode_remote::client::save_hosts(&client_data.0, std::slice::from_ref(&host)).unwrap();
-    assert_eq!(
-        tcode_remote::client::load_hosts(&client_data.0).unwrap(),
-        [host]
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        for path in [data.0.join("remote.json"), client_data.0.join("hosts.json")] {
-            assert_eq!(
-                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-    server.shutdown();
-}
-
-#[test]
-fn stalled_native_handshake_becomes_a_retryable_timeout() {
-    let data = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let code = server.new_pairing_code();
-    let mut host = pair(
-        &format!("http://127.0.0.1:{}", server.local_addr().port()),
-        &code.code,
-        &device("deadline"),
-    )
-    .unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    host.origin = format!("http://{}", listener.local_addr().unwrap());
-    let (upgraded, saw_tcp) = async_channel::bounded(1);
-    let (release, held) = async_channel::bounded::<()>(1);
-    let fixture = std::thread::spawn(move || {
-        smol::block_on(async {
-            let listener = smol::Async::new(listener).unwrap();
-            let (stream, _) = listener.accept().await.unwrap();
-            let _stream = stream;
-            upgraded.send(()).await.unwrap();
-            // Keep the TCP connection open, but never answer the upgrade.
-            let _ = held.recv().await;
-        })
-    });
-    let client = connect(host, device("deadline"), None);
-    saw_tcp.recv_blocking().unwrap();
-    smol::block_on(async {
-        futures_lite::future::race(
-            async {
-                loop {
-                    if let ConnectionState::Reconnecting {
-                        reason: Some(reason),
-                        ..
-                    } = client.state.recv().await.unwrap()
-                    {
-                        assert_eq!(reason, ConnectionFailure::Timeout);
-                        break;
-                    }
-                }
-            },
-            async {
-                smol::Timer::after(Duration::from_secs(30)).await;
-                panic!("upgrade escaped the handshake deadline");
-            },
-        )
-        .await;
-    });
-    client.to_host.close();
-    release.close();
-    fixture.join().unwrap();
-    server.shutdown();
-}
-
-#[test]
-fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens() {
-    use tcode_remote::client::http;
+fn browser_password_login_hello_hosting_query_and_lockout() {
     let root = TestDir::new();
-    let (mux, _) = fake_host();
-    let mut config = config(root.0.clone(), 0);
+    let mut config = config(root.0.clone());
     config.browser_password = true;
-    let server = serve(mux, config).unwrap();
-    let origin = format!("http://{}", server.local_addr());
-    let state: Value =
-        serde_json::from_slice(&http(&origin, "GET", "/auth/state", "").unwrap()).unwrap();
-    assert_eq!(state, json!({"mode":"password","configured":false}));
+    let hosting_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = hosting_calls.clone();
+    config.hosting = Some(Arc::new(move |action| {
+        seen.lock().unwrap().push(format!("{action:?}"));
+        tcode_protocol::HostingState {
+            enabled: true,
+            code: Some("123456".into()),
+            expires_in_secs: 299,
+            host_id: "machine".into(),
+            host_name: "Test Host".into(),
+            devices: Vec::new(),
+        }
+    }));
+    let server = serve(fake_host(), config).unwrap();
+    let addr = server.local_addr();
+    let (status, body) = http(addr, "GET", "/auth/state", "");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"mode":"password","configured":false})
+    );
     assert!(
-        http(&origin, "POST", "/auth/setup", r#"{"password":"short"}"#)
-            .unwrap_err()
+        http(addr, "POST", "/auth/setup", r#"{"password":"short"}"#)
+            .0
             .contains("400")
     );
     let password = json!({"password":"secret password"}).to_string();
-    http(&origin, "POST", "/auth/setup", &password).unwrap();
+    assert_eq!(
+        http(addr, "POST", "/auth/setup", &password).0,
+        "HTTP/1.1 200 OK"
+    );
     assert!(
-        http(&origin, "POST", "/auth/setup", &password)
-            .unwrap_err()
+        http(addr, "POST", "/auth/setup", &password)
+            .0
             .contains("409")
     );
-    let state: Value =
-        serde_json::from_slice(&http(&origin, "GET", "/auth/state", "").unwrap()).unwrap();
-    assert_eq!(state, json!({"mode":"password","configured":true}));
+    assert!(server.password_configured());
     let login = json!({"password":"secret password","device_name":"Browser"}).to_string();
-    let paired: Value =
-        serde_json::from_slice(&http(&origin, "POST", "/auth/login", &login).unwrap()).unwrap();
-    let host = tcode_remote::client::PairedHost {
-        host_id: paired["host_id"].as_str().unwrap().into(),
-        name: "Test Host".into(),
-        origin: origin.clone(),
-        candidates: Vec::new(),
-        token: paired["token"].as_str().unwrap().into(),
-        identity_key: None,
-        last_connected_unix: None,
-    };
-    let client = connect(host, device("Browser"), None);
-    wait_state(&client, ConnectionState::Syncing);
-    let phone = pair(&origin, &server.new_pairing_code().code, &device("phone")).unwrap();
-    let hosting = |action| {
-        client
-            .to_host
-            .send_blocking(
-                serde_json::to_string(&tcode_protocol::ClientMessage {
-                    key: None,
-                    id: 900,
-                    payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
-                        action,
-                    }),
-                })
-                .unwrap(),
-            )
+    let (status, body) = http(addr, "POST", "/auth/login", &login);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let paired: Value = serde_json::from_slice(&body).unwrap();
+    let token = paired["token"].as_str().unwrap().to_owned();
+    assert_eq!(paired["host_name"], "Test Host");
+    // The retired native paths are gone from the listener.
+    for (method, path) in [
+        ("POST", "/pair"),
+        ("GET", "/admin/pair"),
+        ("POST", "/identity"),
+    ] {
+        assert_eq!(http(addr, method, path, "{}").0, "HTTP/1.1 404 Not Found");
+    }
+
+    let socket = TcpStream::connect(addr).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let (mut ws, _) = tungstenite::client(format!("ws://{addr}/ws"), socket).unwrap();
+    let send = |ws: &mut tungstenite::WebSocket<TcpStream>, value: Value| {
+        ws.send(tungstenite::Message::Text(value.to_string().into()))
             .unwrap();
-        let reply = recv_type(&client, "query_result", Some(900));
-        reply["content"]["result"]["Ok"]["content"].clone()
     };
-    let state = hosting(tcode_protocol::HostingAction::State);
-    assert_eq!(state["enabled"], true);
-    assert_eq!(state["devices"].as_array().unwrap().len(), 2);
-    let phone_row = state["devices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|device| device["name"] == "phone")
-        .unwrap()
-        .clone();
-    let phone_id = phone_row["id"].as_str().unwrap().to_owned();
-    // Pairing again with the same device id rotates that record instead of
-    // adding one; the earlier token dies with it.
-    let xiaomi = DeviceIdentity {
-        id: device("phone").id,
-        name: "Xiaomi 15".into(),
-        platform: Some("Android 15".into()),
+    let recv = |ws: &mut tungstenite::WebSocket<TcpStream>| -> Value {
+        loop {
+            if let tungstenite::Message::Text(text) = ws.read().unwrap() {
+                return serde_json::from_str(&text).unwrap();
+            }
+        }
     };
-    let phone_again = pair(&origin, &server.new_pairing_code().code, &xiaomi).unwrap();
-    let stale = connect(phone, device("phone"), None);
-    wait_state(
-        &stale,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
-        },
+    send(
+        &mut ws,
+        json!({"type":"hello","protocol_version":3,"supported_versions":[3,4],"token":token,"device_name":"Browser"}),
     );
-    stale.to_host.close();
-    let state = hosting(tcode_protocol::HostingAction::State);
-    let devices = state["devices"].as_array().unwrap();
-    assert_eq!(devices.len(), 2);
+    let hello_ok = recv(&mut ws);
+    assert_eq!(hello_ok["type"], "hello_ok");
+    assert_eq!(hello_ok["protocol_version"], 4);
+    assert_eq!(hello_ok["host_name"], "Test Host");
+    send(
+        &mut ws,
+        json!({"id":900,"payload":{"type":"query","content":{"type":"hosting","content":{"action":{"type":"state"}}}}}),
+    );
+    let reply = recv(&mut ws);
+    assert_eq!(reply["type"], "query_result");
+    assert_eq!(reply["content"]["id"], 900);
     assert_eq!(
-        devices.iter().find(|row| row["id"] == phone_id).unwrap(),
-        &json!({
-            "id": phone_id,
-            "name": "Xiaomi 15",
-            "created_unix": phone_row["created_unix"],
-            "platform": "Android 15",
-        })
+        reply["content"]["result"]["Ok"]["content"]["code"], "123456",
+        "hosting queries are answered by the handler the host installed"
     );
-    // A hello with new details refreshes the record without pairing again.
-    let upgraded = connect(
-        phone_again.clone(),
-        DeviceIdentity {
-            platform: Some("Android 16".into()),
-            ..xiaomi
-        },
-        None,
+    assert_eq!(hosting_calls.lock().unwrap().as_slice(), ["State"]);
+    send(
+        &mut ws,
+        json!({"id":1,"payload":{"type":"subscribe","content":{"topic":"index"}}}),
     );
-    wait_state(&upgraded, ConnectionState::Syncing);
-    let state = hosting(tcode_protocol::HostingAction::State);
-    let refreshed = state["devices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["id"] == phone_id)
-        .unwrap()
-        .clone();
-    assert_eq!(refreshed["platform"], "Android 16");
-    upgraded.to_host.close();
-    hosting(tcode_protocol::HostingAction::RevokeDevice(phone_id));
-    let revoked = connect(phone_again, device("phone"), None);
-    wait_state(
-        &revoked,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
-        },
+    let mut kinds = vec![recv(&mut ws)["type"].as_str().unwrap().to_owned()];
+    kinds.push(recv(&mut ws)["type"].as_str().unwrap().to_owned());
+    kinds.sort();
+    assert_eq!(kinds, ["ack", "event"]);
+
+    let socket = TcpStream::connect(addr).unwrap();
+    let (mut rejected, _) = tungstenite::client(format!("ws://{addr}/ws"), socket).unwrap();
+    send(
+        &mut rejected,
+        json!({"type":"hello","protocol_version":4,"token":"not-a-token","device_name":"Browser"}),
     );
-    revoked.to_host.close();
-    let state = hosting(tcode_protocol::HostingAction::SetEnabled(false));
-    assert_eq!(state["enabled"], false);
-    assert!(state["code"].is_null());
-    assert!(
-        pair(
-            &origin,
-            &server.new_pairing_code().code,
-            &device("disabled phone")
-        )
-        .is_err()
-    );
-    let stored: Value =
-        serde_json::from_slice(&std::fs::read(root.0.join("remote.json")).unwrap()).unwrap();
-    assert_eq!(stored["pairing_enabled"], false);
-    // Disabling native pairing must not disable web login.
-    http(&origin, "POST", "/auth/login", &login).unwrap();
-    let state = hosting(tcode_protocol::HostingAction::SetEnabled(true));
-    assert_eq!(state["enabled"], true);
-    assert_eq!(state["code"].as_str().unwrap().len(), 6);
-    let renewed = hosting(tcode_protocol::HostingAction::NewCode);
-    assert!(
-        pair(
-            &origin,
-            renewed["code"].as_str().unwrap(),
-            &device("renewed phone")
-        )
-        .is_ok()
-    );
+    let reply = recv(&mut rejected);
+    assert_eq!(reply["type"], "hello_rejected");
+    assert_eq!(reply["reason"], "token");
+
     for _ in 0..5 {
         assert!(
             http(
-                &origin,
+                addr,
                 "POST",
                 "/auth/login",
                 &json!({"password":"incorrect","device_name":"Browser"}).to_string()
             )
-            .unwrap_err()
+            .0
             .contains("403")
         );
     }
     assert!(
-        http(&origin, "POST", "/auth/login", &login)
-            .unwrap_err()
-            .contains("403")
+        http(addr, "POST", "/auth/login", &login).0.contains("403"),
+        "five failures lock the right password out"
     );
-    // Browser lockout does not lock out code-based phone pairing.
-    assert!(
-        pair(
-            &origin,
-            &server.new_pairing_code().code,
-            &device("second phone")
-        )
-        .is_ok()
-    );
-    let state = hosting(tcode_protocol::HostingAction::State);
-    let browser_id = state["devices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|device| device["name"] == "Browser")
-        .unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    hosting(tcode_protocol::HostingAction::RevokeDevice(browser_id));
-    // A continuously polling settings page must lose access too, without
-    // waiting for an idle keepalive timer that traffic continually resets.
-    client.to_host.send_blocking(json!({"id":901,"payload":{"type":"query","content":{"type":"hosting","content":{"action":{"type":"state"}}}}}).to_string()).unwrap();
-    wait_state(
-        &client,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
-        },
-    );
-    client.to_host.close();
     server.shutdown();
 }

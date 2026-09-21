@@ -6,18 +6,20 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use tcode_client::host::{
-    ClientHost, ClientPreferences, DiscoveredHost, HostFuture, PairRequest, Transport,
-    persistent_device_id,
-};
-use tcode_client::pairing::PairedHost;
+use tcode_client::host::{ClientHost, ClientPreferences, DiscoveredHost, HostFuture, Transport};
+use tcode_client::pairing::{PairInvite, PairedHost};
+use tcode_traverse::DeviceIdentity;
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
 type HostBrowser = dyn Fn() -> HostFuture<'static, Vec<DiscoveredHost>>;
 type MulticastLock = dyn Fn(bool) + Send + Sync;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
 
-/// Native clients share hosts.json, mobile.json, pairing, and transport policy.
+/// How long a LAN browse listens for machines.
+const BROWSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Native clients share hosts.json, mobile.json, device.json, pairing, and
+/// transport policy.
 pub struct NativeClientHost {
     data_dir: PathBuf,
     default_device_name: String,
@@ -26,6 +28,7 @@ pub struct NativeClientHost {
     browser: Option<Box<HostBrowser>>,
     multicast_lock: Option<Arc<MulticastLock>>,
     editor: Option<Box<EditorOpener>>,
+    device: OnceLock<Result<DeviceIdentity, String>>,
 }
 
 impl NativeClientHost {
@@ -40,7 +43,25 @@ impl NativeClientHost {
             browser: None,
             multicast_lock: None,
             editor: None,
+            device: OnceLock::new(),
         }
+    }
+
+    /// The device's Traverse identity, carrying the current name and platform.
+    fn device(&self) -> Result<DeviceIdentity, String> {
+        let device = self
+            .device
+            .get_or_init(|| {
+                DeviceIdentity::load_or_create(&self.data_dir).map_err(|error| {
+                    format!(
+                        "could not open {}: {error}",
+                        tcode_traverse::identity::DEVICE_FILE
+                    )
+                })
+            })
+            .clone()?;
+        device.set_details(self.device_name(), self.device_platform());
+        Ok(device)
     }
 
     /// `TCODE_DATA_DIR`, else the platform data dir; hostname as device name.
@@ -127,16 +148,15 @@ impl ClientHost for NativeClientHost {
             .unwrap_or_else(|| self.default_device_name.clone())
     }
 
+    /// The device's `EndpointId`; the machine authenticates it on every
+    /// connection.
     fn device_id(&self) -> String {
-        let mut prefs = self.prefs();
-        let stored = prefs
-            .get("device_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        persistent_device_id(stored, |id| {
-            prefs["device_id"] = serde_json::Value::String(id.to_owned());
-            self.write_prefs(&prefs);
-        })
+        self.device()
+            .map(|device| device.endpoint_id().to_string())
+            .unwrap_or_else(|error| {
+                log::error!("{error}");
+                String::new()
+            })
     }
 
     fn device_platform(&self) -> Option<String> {
@@ -180,20 +200,20 @@ impl ClientHost for NativeClientHost {
     }
 
     fn load_hosts(&self) -> Vec<PairedHost> {
-        crate::client::load_hosts(&self.data_dir).unwrap_or_else(|error| {
+        tcode_traverse::hosts::load_hosts(&self.data_dir).unwrap_or_else(|error| {
             log::error!("could not read hosts.json: {error}");
             Vec::new()
         })
     }
 
     fn save_hosts(&self, hosts: &[PairedHost]) {
-        if let Err(error) = crate::client::save_hosts(&self.data_dir, hosts) {
+        if let Err(error) = tcode_traverse::hosts::save_hosts(&self.data_dir, hosts) {
             log::error!("could not write hosts.json: {error}");
         }
     }
 
     fn remember_host(&self, host: PairedHost) {
-        if let Err(error) = crate::client::update_hosts(&self.data_dir, |hosts| {
+        if let Err(error) = tcode_traverse::hosts::update_hosts(&self.data_dir, |hosts| {
             tcode_client::pairing::remember_host(hosts, host);
         }) {
             log::error!("could not save paired machine: {error}");
@@ -201,7 +221,7 @@ impl ClientHost for NativeClientHost {
     }
 
     fn remove_host(&self, host_id: &str) {
-        if let Err(error) = crate::client::update_hosts(&self.data_dir, |hosts| {
+        if let Err(error) = tcode_traverse::hosts::update_hosts(&self.data_dir, |hosts| {
             hosts.retain(|host| host.host_id != host_id);
         }) {
             log::error!("could not remove paired machine: {error}");
@@ -209,7 +229,7 @@ impl ClientHost for NativeClientHost {
     }
 
     fn stamp_connected(&self, host_id: &str, timestamp: u64) {
-        if let Err(error) = crate::client::update_hosts(&self.data_dir, |hosts| {
+        if let Err(error) = tcode_traverse::hosts::update_hosts(&self.data_dir, |hosts| {
             if let Some(host) = hosts.iter_mut().find(|host| host.host_id == host_id) {
                 host.last_connected_unix = Some(timestamp);
             }
@@ -234,9 +254,24 @@ impl ClientHost for NativeClientHost {
         self.write_prefs(&prefs);
     }
 
-    fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
-        let device = self.device_identity();
-        Box::pin(async move { crate::client::pair_request(request, &device).await })
+    /// Pairing runs on the Traverse runtime; the UI executor only awaits the
+    /// result.
+    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
+        let device = self.device();
+        Box::pin(async move {
+            let device = device?;
+            let (done, result) = async_channel::bounded(1);
+            tcode_traverse::runtime().spawn(async move {
+                let paired = tcode_traverse::pair(&invite, &invite.code, &device)
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = done.send(paired).await;
+            });
+            result
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("pairing was interrupted".into()))
+        })
     }
 
     fn open_in_editor(&self, path: &Path) -> Option<Result<(), String>> {
@@ -244,16 +279,25 @@ impl ClientHost for NativeClientHost {
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {
-        let client = crate::client::connect(
-            host.clone(),
-            self.device_identity(),
-            Some(self.data_dir.clone()),
-        );
-        Transport {
-            to_host: client.to_host,
-            from_host: client.from_host,
-            state: client.state,
-            current_host: Some(client.current_host),
+        match self.device() {
+            Ok(device) => tcode_traverse::connect(host, &device),
+            Err(error) => {
+                // A link that reports itself offline instead of a panic in
+                // the shell; the profile directory is the thing to fix.
+                log::error!("{error}");
+                let (to_host, _) = async_channel::unbounded();
+                let (_, from_host) = async_channel::unbounded();
+                let (state_tx, state) = async_channel::unbounded();
+                let _ = state_tx.try_send(tcode_client::ConnectionState::Offline {
+                    reason: tcode_client::ConnectionFailure::Unreachable,
+                });
+                Transport {
+                    to_host: to_host.into(),
+                    from_host,
+                    state,
+                    current_host: None,
+                }
+            }
         }
     }
 
@@ -261,66 +305,36 @@ impl ClientHost for NativeClientHost {
         if let Some(browser) = &self.browser {
             return browser();
         }
-        #[cfg(target_os = "ios")]
-        return Box::pin(async { Vec::new() });
-        #[cfg(not(target_os = "ios"))]
-        {
-            let lock = self.multicast_lock.clone();
-            let (sender, receiver) = async_channel::bounded(1);
-            let spawn = std::thread::Builder::new()
-                .name("tcode-mdns-browse".into())
-                .spawn(move || {
-                    struct Guard(Option<Arc<MulticastLock>>);
-                    impl Drop for Guard {
-                        fn drop(&mut self) {
-                            if let Some(lock) = &self.0 {
-                                lock(false);
-                            }
-                        }
+        let Ok(device) = self.device() else {
+            return Box::pin(async { Vec::new() });
+        };
+        let lock = self.multicast_lock.clone();
+        let (sender, receiver) = async_channel::bounded(1);
+        tcode_traverse::runtime().spawn(async move {
+            struct Guard(Option<Arc<MulticastLock>>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    if let Some(lock) = &self.0 {
+                        lock(false);
                     }
-                    if let Some(lock) = &lock {
-                        lock(true);
-                    }
-                    let _guard = Guard(lock);
-                    let hosts = crate::discovery::browse(std::time::Duration::from_secs(3))
-                        .into_iter()
-                        .map(|beacon| DiscoveredHost {
-                            host_id: beacon.host_id,
-                            name: beacon.name,
-                            origin: tcode_client::pairing::lan_origin(&beacon.addr, beacon.port),
-                        })
-                        .collect();
-                    let _ = sender.send_blocking(hosts);
-                });
-            Box::pin(async move {
-                if spawn.is_err() {
-                    return Vec::new();
                 }
-                receiver.recv().await.unwrap_or_default()
-            })
-        }
-    }
-
-    fn discover_origins(&self, host_id: &str) -> HostFuture<'_, Vec<String>> {
-        let host_id = host_id.to_owned();
-        Box::pin(async move {
-            // The transport never downgrades an HTTPS pairing to a plain LAN
-            // address, so browsing for one would only cost multicast traffic.
-            let plain = self.load_hosts().iter().any(|host| {
-                host.host_id == host_id && crate::client::plain_http_origin(&host.origin)
-            });
-            if !plain {
-                return Vec::new();
             }
-            self.browse_hosts()
+            if let Some(lock) = &lock {
+                lock(true);
+            }
+            let _guard = Guard(lock);
+            let hosts = tcode_traverse::browse(&device, BROWSE_TIMEOUT)
                 .await
                 .into_iter()
-                .filter(|hint| {
-                    hint.host_id == host_id && crate::client::plain_http_origin(&hint.origin)
+                .map(|nearby| DiscoveredHost {
+                    name: nearby.name.unwrap_or_else(|| nearby.id.clone()),
+                    host_id: nearby.id,
+                    addrs: nearby.addrs,
                 })
-                .map(|hint| hint.origin)
-                .collect()
-        })
+                .collect();
+            let _ = sender.send(hosts).await;
+        });
+        Box::pin(async move { receiver.recv().await.unwrap_or_default() })
     }
 
     fn supports_qr(&self) -> bool {
@@ -575,73 +589,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_hints_are_filtered_to_the_machine_identity_and_plain_origins() {
-        let dir = TestDir::new();
-        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-        let observed = calls.clone();
-        let client = NativeClientHost::new(dir.0.clone(), "phone").with_browser(move || {
-            observed.set(observed.get() + 1);
-            Box::pin(async {
-                vec![
-                    DiscoveredHost {
-                        host_id: "wrong".into(),
-                        name: "Wrong".into(),
-                        origin: "http://192.168.1.99:47420".into(),
-                    },
-                    DiscoveredHost {
-                        host_id: "right".into(),
-                        name: "Right".into(),
-                        origin: "http://192.168.1.25:47420".into(),
-                    },
-                    DiscoveredHost {
-                        host_id: "right".into(),
-                        name: "Right".into(),
-                        origin: "https://right.example.com".into(),
-                    },
-                ]
-            })
-        });
-        let mut saved = PairedHost {
-            host_id: "right".into(),
-            name: "My machine".into(),
-            origin: "http://192.168.1.24:47420".into(),
-            candidates: Vec::new(),
-            token: "unchanged-token".into(),
-            identity_key: None,
-            last_connected_unix: Some(42),
-        };
-        client.save_hosts(std::slice::from_ref(&saved));
-        assert_eq!(
-            smol::block_on(client.discover_origins("right")),
-            vec!["http://192.168.1.25:47420".to_owned()]
-        );
-        assert_eq!(calls.get(), 1);
-        assert!(smol::block_on(client.discover_origins("unknown")).is_empty());
-        saved.origin = "https://tunnel.example.com".into();
-        client.save_hosts(&[saved]);
-        assert!(smol::block_on(client.discover_origins("right")).is_empty());
-        assert_eq!(calls.get(), 1, "HTTPS must not browse");
-    }
-
-    #[test]
     fn connection_stamp_preserves_an_address_update_already_in_progress() {
         let dir = TestDir::new();
         let client = NativeClientHost::new(dir.0.clone(), "phone");
         client.remember_host(PairedHost {
             host_id: "machine".into(),
             name: "Machine".into(),
-            origin: "http://192.168.31.5:47420".into(),
-            candidates: Vec::new(),
-            token: "token".into(),
-            identity_key: None,
+            traverse: None,
+            relay: None,
+            addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,
         });
         let (locked, received) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
         let transport_dir = dir.0.clone();
         let transport = std::thread::spawn(move || {
-            crate::client::update_hosts(&transport_dir, |hosts| {
-                hosts[0].promote_origin("http://192.168.1.161:47420");
+            tcode_traverse::hosts::update_hosts(&transport_dir, |hosts| {
+                hosts[0].addrs.insert(0, "192.168.1.161:47420".into());
                 locked.send(()).unwrap();
                 released.recv().unwrap();
             })
@@ -660,8 +624,10 @@ mod tests {
         transport.join().unwrap();
         stamp.join().unwrap();
         let saved = client.load_hosts().remove(0);
-        assert_eq!(saved.origin, "http://192.168.1.161:47420");
-        assert_eq!(saved.candidates, vec!["http://192.168.31.5:47420"]);
+        assert_eq!(
+            saved.addrs,
+            vec!["192.168.1.161:47420", "192.168.31.5:47420"]
+        );
         assert_eq!(saved.last_connected_unix, Some(1234));
     }
 
@@ -771,6 +737,7 @@ mod tests {
         let device_id = host.device_id();
         assert!(tcode_client::host::valid_device_id(&device_id));
         assert_eq!(host.device_id(), device_id);
+        assert!(dir.0.join("device.json").exists());
         host.save_preferences(&ClientPreferences {
             appearance: Some("light".into()),
             language: None,

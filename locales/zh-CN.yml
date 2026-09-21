@@ -980,7 +980,7 @@ remote:
     expired: "连接码已过期"
     new: "生成新码"
     expires: "%{time} 后过期"
-    listening: "正在监听 %{addrs} 端口 %{port}"
+    machine: "机器 ID %{id} · %{addrs}"
     no_addresses: "仅这台主机"
   devices:
     section: "已连接过的设备"
@@ -1020,11 +1020,11 @@ hosts:
   pair:
     title: "添加主机"
     action: "添加主机"
-    description: "输入主机地址及其显示的六位连接码。"
+    description: "输入主机 ID 及其显示的六位连接码，或扫描其二维码。"
     fixed_description: "输入这台主机显示的六位连接码。"
-    address: "地址"
+    address: "机器 ID"
     code: "连接码"
-    address_placeholder: "192.168.1.10:47420"
+    address_placeholder: "机器显示的 64 位十六进制 ID"
     code_placeholder: "123456"
     scan: "扫描二维码"
     bad_invite: "这不是有效的 Tcode 连接链接。"

@@ -1,7 +1,5 @@
-use tcode_client::host::{
-    ClientHost, DeviceIdentity, HostFuture, PairRequest, Transport, persistent_device_id,
-};
-use tcode_client::pairing::PairedHost;
+use tcode_client::host::{ClientHost, DeviceIdentity, HostFuture, Transport, persistent_device_id};
+use tcode_client::pairing::{PairInvite, PairedHost};
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -38,6 +36,32 @@ fn js_error(error: JsValue) -> String {
 
 fn storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
+}
+
+/// `tcode.hosts` as the login page writes it: one record per machine with
+/// the bearer token the browser presents in hello. The shared
+/// [`PairedHost`] carries no token, so the raw records are kept here and
+/// merged back on every save.
+fn raw_hosts() -> Vec<serde_json::Value> {
+    storage()
+        .and_then(|storage| storage.get_item("tcode.hosts").ok().flatten())
+        .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
+        .unwrap_or_default()
+}
+
+fn write_raw_hosts(hosts: &[serde_json::Value]) {
+    if let (Some(storage), Ok(json)) = (storage(), serde_json::to_string(hosts)) {
+        let _ = storage.set_item("tcode.hosts", &json);
+    }
+}
+
+/// The token the browser holds for `host_id`, if it logged in there.
+pub(crate) fn token_for(host_id: &str) -> Option<String> {
+    raw_hosts()
+        .iter()
+        .find(|record| record["host_id"].as_str() == Some(host_id))
+        .and_then(|record| record["token"].as_str())
+        .map(str::to_owned)
 }
 
 fn user_agent() -> String {
@@ -109,16 +133,29 @@ impl ClientHost for WebHost {
     }
 
     fn load_hosts(&self) -> Vec<PairedHost> {
-        storage()
-            .and_then(|storage| storage.get_item("tcode.hosts").ok().flatten())
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default()
+        raw_hosts()
+            .into_iter()
+            .filter_map(|record| serde_json::from_value(record).ok())
+            .collect()
     }
 
     fn save_hosts(&self, hosts: &[PairedHost]) {
-        if let (Some(storage), Ok(json)) = (storage(), serde_json::to_string(hosts)) {
-            let _ = storage.set_item("tcode.hosts", &json);
-        }
+        let existing = raw_hosts();
+        let records: Vec<serde_json::Value> = hosts
+            .iter()
+            .filter_map(|host| {
+                let mut record = serde_json::to_value(host).ok()?;
+                if let Some(token) = existing
+                    .iter()
+                    .find(|record| record["host_id"].as_str() == Some(host.host_id.as_str()))
+                    .and_then(|record| record.get("token"))
+                {
+                    record["token"] = token.clone();
+                }
+                Some(record)
+            })
+            .collect();
+        write_raw_hosts(&records);
     }
 
     fn last_host_id(&self) -> Option<String> {
@@ -138,13 +175,16 @@ impl ClientHost for WebHost {
         window().location().origin().ok()
     }
 
-    fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
+    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
         let device = self.device_identity();
-        Box::pin(async move { pair(&request.code, &device).await })
+        Box::pin(async move { pair(&invite.code, &device).await })
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {
-        crate::transport::connect(host.token.clone(), self.device_identity())
+        crate::transport::connect(
+            token_for(&host.host_id).unwrap_or_default(),
+            self.device_identity(),
+        )
     }
 
     fn supports_artifact_delivery(&self) -> bool {
@@ -177,11 +217,18 @@ fn download(name: &str, mime: &str, bytes: &[u8]) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// The `/pair` request body: the code plus the device fields the host reads.
+fn pair_body(code: &str, device: &DeviceIdentity) -> String {
+    let mut body = serde_json::to_value(device).expect("string fields serialize");
+    body["code"] = code.into();
+    body.to_string()
+}
+
 async fn pair(code: &str, device: &DeviceIdentity) -> Result<PairedHost, String> {
     async fn fetch(code: &str, device: &DeviceIdentity) -> Result<PairedHost, JsValue> {
         let options = web_sys::RequestInit::new();
         options.set_method("POST");
-        options.set_body(&JsValue::from_str(&device.pair_body(code)));
+        options.set_body(&JsValue::from_str(&pair_body(code, device)));
         let request = web_sys::Request::new_with_str_and_init("/pair", &options)?;
         request.headers().set("Content-Type", "application/json")?;
         let response: web_sys::Response = JsFuture::from(window().fetch_with_request(&request))
@@ -205,16 +252,24 @@ async fn pair(code: &str, device: &DeviceIdentity) -> Result<PairedHost, String>
                 .map(str::to_owned)
                 .ok_or_else(|| JsValue::from_str(&format!("Pairing response missing {key}")))
         };
-        let origin = WebHost.fixed_pairing_endpoint().unwrap();
-        Ok(PairedHost {
+        let paired = PairedHost {
             host_id: field("host_id")?,
             name: field("host_name")?,
-            token: field("token")?,
-            identity_key: value["identity_key"].as_str().map(str::to_owned),
-            origin,
-            candidates: Vec::new(),
+            traverse: None,
+            relay: None,
+            addrs: Vec::new(),
             last_connected_unix: None,
-        })
+        };
+        // Keep the token where the login page keeps it, next to the record.
+        let mut records = raw_hosts();
+        records.retain(|record| record["host_id"].as_str() != Some(paired.host_id.as_str()));
+        let mut record =
+            serde_json::to_value(&paired).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        record["token"] = serde_json::Value::String(field("token")?);
+        record["origin"] = serde_json::Value::String(WebHost.fixed_pairing_endpoint().unwrap());
+        records.push(record);
+        write_raw_hosts(&records);
+        Ok(paired)
     }
     fetch(code, device)
         .await

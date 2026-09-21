@@ -251,7 +251,7 @@ async fn connection_loop(
                         }
                     }
                     Input::Event(Event::Open) => {
-                        if socket.send(&device.hello_line(&token)).is_err() {
+                        if socket.send(&browser_hello(&device, &token)).is_err() {
                             break;
                         }
                     }
@@ -398,6 +398,17 @@ fn remember(
     } else {
         buffered.push_back(line);
     }
+}
+
+/// The browser listener still authenticates by bearer token: a version-3
+/// hello with version 4 advertised, the token, and the device fields.
+fn browser_hello(device: &DeviceIdentity, token: &str) -> String {
+    let mut hello = serde_json::to_value(device).expect("string fields serialize");
+    hello["type"] = "hello".into();
+    hello["protocol_version"] = 3.into();
+    hello["supported_versions"] = serde_json::json!([3, 4]);
+    hello["token"] = token.into();
+    hello.to_string()
 }
 
 fn now_ms() -> u64 {

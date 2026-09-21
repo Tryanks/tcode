@@ -1,9 +1,9 @@
 //! Desktop proxy configuration and platform authentication absent from wry's endpoint type.
-use tcode_client::pairing::PairedHost;
+use tcode_remote::preview::ProxyEntry;
 
 pub(super) fn builder<'a>(
     builder: wry::WebViewBuilder<'a>,
-    host: Option<&PairedHost>,
+    host: Option<&ProxyEntry>,
 ) -> Result<wry::WebViewBuilder<'a>, String> {
     let Some(_host) = host else {
         return Ok(builder);
@@ -37,7 +37,7 @@ pub(super) fn builder<'a>(
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn authenticate(raw: &wry::WebView, host: Option<&PairedHost>) -> Result<(), String> {
+pub(super) fn authenticate(raw: &wry::WebView, host: Option<&ProxyEntry>) -> Result<(), String> {
     use webview2_com::{
         BasicAuthenticationRequestedEventHandler,
         Microsoft::Web::WebView2::Win32::ICoreWebView2_10, take_pwstr,

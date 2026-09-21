@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -18,10 +17,9 @@ pub(crate) struct AuthStore {
     pub devices: Vec<Device>,
     #[serde(default)]
     password: Option<PasswordHash>,
-    #[serde(default = "enabled_by_default")]
-    pub pairing_enabled: bool,
-    /// Created lazily when upgrading a host profile made before identity pins.
-    #[serde(default)]
+    /// Retained for `traverse.json`, which adopts this seed as the machine's
+    /// iroh key when it is first created; never generated here any more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     identity_seed: Option<[u8; 32]>,
     #[serde(skip)]
     failures: u8,
@@ -69,11 +67,7 @@ impl AuthStore {
             Ok(bytes) => {
                 let mut store: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
                 store.path = path;
-                let needs_identity = store.identity_seed.is_none();
-                if needs_identity {
-                    store.identity_seed = Some(new_identity_seed()?);
-                }
-                if store.host_name != host_name || needs_identity {
+                if store.host_name != host_name {
                     store.host_name = host_name.to_owned();
                     store.save()?;
                 }
@@ -85,8 +79,7 @@ impl AuthStore {
                     host_name: host_name.to_owned(),
                     devices: Vec::new(),
                     password: None,
-                    pairing_enabled: true,
-                    identity_seed: Some(new_identity_seed()?),
+                    identity_seed: None,
                     failures: 0,
                     locked_until: None,
                     path,
@@ -100,36 +93,6 @@ impl AuthStore {
 
     pub fn password_configured(&self) -> bool {
         self.password.is_some()
-    }
-
-    fn identity_key_pair(&self) -> Ed25519KeyPair {
-        Ed25519KeyPair::from_seed_unchecked(
-            &self
-                .identity_seed
-                .expect("AuthStore::open establishes identity"),
-        )
-        .expect("Ed25519 accepts every 32-byte seed")
-    }
-
-    pub fn identity_public_key(&self) -> String {
-        crate::identity::encode_hex(self.identity_key_pair().public_key().as_ref())
-    }
-
-    pub fn identify(
-        &self,
-        challenge: &crate::identity::IdentityChallenge,
-    ) -> Option<crate::identity::IdentityProof> {
-        if !challenge.is_valid() || challenge.host_id != self.host_id.to_string() {
-            return None;
-        }
-        let token_id = crate::identity::decode_hex::<32>(&challenge.token_id)?;
-        let token_hash = self.devices.iter().find_map(|device| {
-            let hash = crate::identity::decode_hex::<32>(&device.token_sha256_hex)?;
-            (Sha256::digest(hash).as_slice() == token_id).then_some(hash)
-        });
-        // A pinned client must still recognize this host after revocation so
-        // that hello can authoritatively reject the old bearer token.
-        challenge.prove(&self.identity_key_pair(), token_hash.as_ref())
     }
 
     pub fn set_password(&mut self, password: &str, revoke_tokens: bool) -> io::Result<()> {
@@ -251,18 +214,6 @@ impl AuthStore {
         Ok(())
     }
 
-    /// Drop a paired device by id. Returns whether anything was removed.
-    pub fn revoke(&mut self, id: &str) -> io::Result<bool> {
-        let mut updated = self.clone();
-        updated.devices.retain(|device| device.id.to_string() != id);
-        if updated.devices.len() == self.devices.len() {
-            return Ok(false);
-        }
-        updated.save()?;
-        *self = updated;
-        Ok(true)
-    }
-
     pub fn token_is_valid(&self, token: &str) -> bool {
         self.device_for_token(token).is_some()
     }
@@ -304,12 +255,6 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-fn new_identity_seed() -> io::Result<[u8; 32]> {
-    let mut seed = [0; 32];
-    getrandom::fill(&mut seed).map_err(io::Error::other)?;
-    Ok(seed)
-}
-
 pub(crate) fn hex_hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -341,10 +286,6 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             difference | (left ^ right)
         })
         == 0
-}
-
-fn enabled_by_default() -> bool {
-    true
 }
 
 #[cfg(test)]
@@ -420,13 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn failed_auth_writes_do_not_rotate_revoke_or_hide_pending_device_updates() {
+    fn failed_auth_writes_do_not_rotate_or_hide_pending_device_updates() {
         let root = std::env::temp_dir().join(format!("tcode-auth-write-{}", Uuid::new_v4()));
         let mut auth = AuthStore::open(&root, "host").unwrap();
         let token = auth
             .issue_token(Some("phone-id".into()), phone("Phone"))
             .unwrap();
-        let id = auth.devices[0].id.to_string();
         // A directory in place of the temporary file deterministically fails
         // save on every platform, without relying on writable-user permissions.
         fs::create_dir(root.join("remote.json.tmp")).unwrap();
@@ -437,11 +377,6 @@ mod tests {
         assert!(
             auth.token_is_valid(&token),
             "a failed token rotation must keep the existing pairing"
-        );
-        assert!(auth.revoke(&id).is_err());
-        assert!(
-            auth.token_is_valid(&token),
-            "a failed revoke must leave the active token unchanged"
         );
         assert!(auth.refresh_device(&token, phone("Renamed")).is_err());
         assert_eq!(auth.devices[0].name, "Phone");
@@ -475,7 +410,6 @@ mod tests {
         )
         .unwrap();
         let mut auth = AuthStore::open(&root, "host").unwrap();
-        let identity_key = auth.identity_public_key();
         assert_eq!(auth.devices[0].name, "old phone");
         assert_eq!(auth.devices[0].client_id, None);
         assert_eq!(auth.devices[0].platform, None);
@@ -483,42 +417,6 @@ mod tests {
         auth.issue_token(Some("new-id".into()), phone("new phone"))
             .unwrap();
         assert_eq!(auth.devices.len(), 2);
-        assert_eq!(
-            AuthStore::open(&root, "host")
-                .unwrap()
-                .identity_public_key(),
-            identity_key
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn revocation_removes_bootstrap_proof_but_preserves_the_pinned_host_identity() {
-        let root = std::env::temp_dir().join(format!("tcode-identity-{}", Uuid::new_v4()));
-        let mut auth = AuthStore::open(&root, "host").unwrap();
-        let token = auth.issue_token(None, phone("Phone")).unwrap();
-        let host_id = auth.host_id.to_string();
-        let challenge = crate::identity::IdentityChallenge::new(&host_id, &token).unwrap();
-        let proof = serde_json::to_value(auth.identify(&challenge).unwrap()).unwrap();
-        let key = challenge.verify(&token, None, &proof).unwrap();
-        assert_eq!(key, auth.identity_public_key());
-        let wrong_host = crate::identity::IdentityChallenge::new("other-host", &token).unwrap();
-        assert!(auth.identify(&wrong_host).is_none());
-        let mut oversized = serde_json::to_value(&challenge).unwrap();
-        oversized["nonce"] = "12".repeat(33).into();
-        assert!(
-            auth.identify(&serde_json::from_value(oversized).unwrap())
-                .is_none()
-        );
-        let device_id = auth.devices[0].id.to_string();
-        auth.revoke(&device_id).unwrap();
-        let auth = AuthStore::open(&root, "host").unwrap();
-        let challenge = crate::identity::IdentityChallenge::new(&host_id, &token).unwrap();
-        let proof = serde_json::to_value(auth.identify(&challenge).unwrap()).unwrap();
-        assert!(proof.get("mac").is_none());
-        assert!(challenge.verify(&token, None, &proof).is_none());
-        assert_eq!(challenge.verify(&token, Some(&key), &proof), Some(key));
-        assert!(!auth.token_is_valid(&token));
         fs::remove_dir_all(root).unwrap();
     }
 

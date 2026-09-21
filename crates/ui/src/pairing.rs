@@ -1,16 +1,21 @@
-//! Shared origin form; generation stamps discard superseded pairing results.
+//! Shared pairing form; generation stamps discard superseded pairing results.
+//!
+//! TODO(traverse): the address field now holds the machine id; the Machines
+//! page needs a redesign around scanning, nearby machines and fingerprints.
 use gpui::{App, AppContext as _, Entity, Window};
-use tcode_client::host::{DiscoveredHost, PairRequest};
-use tcode_client::pairing::{PairedHost, is_pairing_code, parse_origin, parse_pair_url};
+use tcode_client::host::DiscoveredHost;
+use tcode_client::pairing::{
+    PairInvite, PairedHost, is_pairing_code, parse_pair_url, valid_host_id,
+};
 
 use crate::widgets::input::InputState;
 
-/// Default port a tcode host listens on.
-pub use tcode_client::pairing::DEFAULT_REMOTE_PORT;
+/// Default UDP port a hosting desktop binds its Traverse endpoint to.
+pub const DEFAULT_REMOTE_PORT: u16 = 47_420;
 
 pub struct PairForm {
     fixed_endpoint: Option<String>,
-    invite: Option<tcode_client::pairing::PairInvite>,
+    invite: Option<PairInvite>,
     pub discovered: Vec<DiscoveredHost>,
     pub browsing: bool,
     /// Paired but waiting for the user to connect.
@@ -64,30 +69,46 @@ impl PairForm {
         !self.has_fixed_endpoint() && (self.browsing || !self.discovered.is_empty())
     }
 
-    /// Validate the origin and six-digit code before submission.
-    pub fn request(&self, cx: &App) -> Option<PairRequest> {
-        let origin = parse_origin(
-            self.fixed_endpoint
-                .as_deref()
-                .unwrap_or(self.address.read(cx).value().as_ref()),
-        )
-        .ok()?;
+    /// Validate the machine id and six-digit code before submission. The
+    /// code only ever goes to the id in the field; a scanned invite or a
+    /// discovered machine with that same id contributes its addresses.
+    pub fn request(&self, cx: &App) -> Option<PairInvite> {
         let code = self.code.read(cx).value().to_string();
         if !is_pairing_code(&code) {
             return None;
         }
-        let invite = self
+        if self.fixed_endpoint.is_some() {
+            return Some(PairInvite {
+                host_id: String::new(),
+                name: String::new(),
+                code,
+                traverse: None,
+                relay: None,
+                addrs: Vec::new(),
+            });
+        }
+        let host_id = self.address.read(cx).value().trim().to_ascii_lowercase();
+        if !valid_host_id(&host_id) {
+            return None;
+        }
+        if let Some(invite) = self
             .invite
             .as_ref()
-            .filter(|invite| invite.origin == origin);
-        Some(PairRequest {
-            host_id: invite.map(|invite| invite.host_id.clone()),
-            identity_key: invite.and_then(|invite| invite.identity_key.clone()),
-            candidates: invite
-                .map(|invite| invite.candidates.clone())
-                .unwrap_or_default(),
-            origin,
+            .filter(|invite| invite.host_id == host_id)
+        {
+            return Some(PairInvite {
+                code,
+                ..invite.clone()
+            });
+        }
+        let nearby = self.discovered.iter().find(|host| host.host_id == host_id);
+        Some(PairInvite {
+            host_id,
+            name: nearby.map(|host| host.name.clone()).unwrap_or_default(),
             code,
+            traverse: None,
+            relay: None,
+            addrs: nearby.map(|host| host.addrs.clone()).unwrap_or_default(),
         })
     }
 
@@ -117,7 +138,7 @@ impl PairForm {
     }
 
     /// Mark a submission in flight. Returns the request and its stamp.
-    pub fn begin_pair(&mut self, cx: &App) -> Option<(PairRequest, u64)> {
+    pub fn begin_pair(&mut self, cx: &App) -> Option<(PairInvite, u64)> {
         if self.busy {
             return None;
         }
@@ -161,7 +182,7 @@ impl PairForm {
         };
         if self.fixed_endpoint.is_none() {
             self.address.update(cx, |state, cx| {
-                state.set_value(invite.origin.clone(), window, cx)
+                state.set_value(invite.host_id.clone(), window, cx)
             });
         }
         self.code.update(cx, |state, cx| {
@@ -173,12 +194,12 @@ impl PairForm {
         true
     }
 
-    /// Fill a discovered origin and focus the connection code.
-    pub fn fill_discovered(&mut self, origin: String, window: &mut Window, cx: &mut App) {
+    /// Fill a machine id and focus the connection code.
+    pub fn fill_discovered(&mut self, host_id: String, window: &mut Window, cx: &mut App) {
         self.invite = None;
         self.error = None;
         self.address
-            .update(cx, |state, cx| state.set_value(origin, window, cx));
+            .update(cx, |state, cx| state.set_value(host_id, window, cx));
         self.code.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
@@ -204,6 +225,9 @@ pub fn pair_error(error: &str, address: &str) -> String {
         | "invalid pairing response"
         | "incomplete http response"
         | "invalid http response" => crate::tr!("hosts.pair.unconfirmed").into_owned(),
+        _ if lower.starts_with("invalid pairing response") => {
+            crate::tr!("hosts.pair.unconfirmed").into_owned()
+        }
         "pairing_disabled" | "pairing disabled" => crate::tr!("hosts.pair.disabled").into_owned(),
         "pairing rejected" => crate::tr!("hosts.pair.bad_code").into_owned(),
         _ if lower.contains("403")
@@ -286,7 +310,7 @@ mod tests {
         DiscoveredHost {
             host_id: name.into(),
             name: name.into(),
-            origin: "http://192.168.1.9:47420".into(),
+            addrs: vec!["192.168.1.9:47420".into()],
         }
     }
 
@@ -302,13 +326,13 @@ mod tests {
         });
         // Built by the producer the host actually uses, so the test cannot
         // drift from the invite format.
-        let invite = tcode_client::pairing::pair_url(&tcode_client::pairing::PairInvite {
-            host_id: "h".into(),
+        let invite = tcode_client::pairing::pair_url(&PairInvite {
+            host_id: "ab".repeat(32),
             name: "Host".into(),
-            origin: "http://10.0.0.4:47420".into(),
-            candidates: Vec::new(),
-            identity_key: None,
             code: "123456".into(),
+            traverse: None,
+            relay: None,
+            addrs: vec!["10.0.0.4:47420".into()],
         });
         cx.update(|window, cx| {
             form.update(cx, |holder, cx| {
@@ -323,8 +347,57 @@ mod tests {
             assert_eq!(form.address.read(cx).value(), "https://app.example");
             assert_eq!(form.code.read(cx).value(), "123456");
             let request = form.request(cx).expect("a complete request");
-            assert_eq!(request.origin, "https://app.example");
+            assert_eq!(request.host_id, "", "a browser pairs with its own origin");
+            assert_eq!(request.code, "123456");
         });
+    }
+
+    /// A scanned invite's addresses travel with the code only while the id
+    /// in the field is the invite's; retyping another id drops them.
+    #[gpui::test]
+    fn the_code_goes_only_to_the_machine_id_in_the_field(cx: &mut TestAppContext) {
+        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(None, window, cx)));
+        let invite = PairInvite {
+            host_id: "ab".repeat(32),
+            name: "Host".into(),
+            code: "123456".into(),
+            traverse: None,
+            relay: Some("https://relay.example/".into()),
+            addrs: vec!["10.0.0.4:47420".into()],
+        };
+        let url = tcode_client::pairing::pair_url(&invite);
+        cx.update(|window, cx| {
+            form.update(cx, |holder, cx| {
+                assert!(holder.0.fill_invite(&url, window, cx));
+            });
+        });
+        form.read_with(cx, |holder, cx| {
+            assert_eq!(holder.0.request(cx), Some(invite.clone()));
+        });
+        cx.update(|window, cx| {
+            form.update(cx, |holder, cx| {
+                holder.0.address.update(cx, |state, cx| {
+                    state.set_value("cd".repeat(32), window, cx);
+                });
+                holder.0.code.update(cx, |state, cx| {
+                    state.set_value("123456", window, cx);
+                });
+            });
+        });
+        form.read_with(cx, |holder, cx| {
+            let request = holder.0.request(cx).unwrap();
+            assert_eq!(request.host_id, "cd".repeat(32));
+            assert!(request.addrs.is_empty());
+            assert_eq!(request.relay, None);
+        });
+        cx.update(|window, cx| {
+            form.update(cx, |holder, cx| {
+                holder.0.address.update(cx, |state, cx| {
+                    state.set_value("not an id", window, cx);
+                });
+            });
+        });
+        form.read_with(cx, |holder, cx| assert_eq!(holder.0.request(cx), None));
     }
 
     /// Browsing and pairing outlive the attempt that started them. A reply from
