@@ -311,9 +311,10 @@ relay; to reach a machine from elsewhere, use the native app.
    other devices**, the current invitation QR and link, **New invitation**, and
    removing paired devices. Phones and other desktops always pair with an
    invitation, never with the browser password.
-5. The address is fixed to the page's origin. Open another machine's URL to use
-   that machine. Resizing the page switches between the shared wide and compact
-   layouts.
+5. The address is fixed to the page's origin: **Machines** lists the machine
+   that served the page and offers no way to add another. Open another
+   machine's URL to use that machine. Resizing the page switches between the
+   shared wide and compact layouts.
 
 The browser stores machines and tokens in this origin's `localStorage` under
 `tcode.hosts`, the last machine under `tcode.last_host`, its device id under

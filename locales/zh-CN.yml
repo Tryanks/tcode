@@ -1035,7 +1035,6 @@ hosts:
     title: "添加机器"
     action: "添加机器"
     description: "粘贴机器在“设置 → 多设备”中显示的邀请链接。"
-    fixed_description: "粘贴这台机器显示的邀请链接。"
     invitation: "邀请链接"
     invitation_placeholder: "tcode://pair?…"
     scan: "扫描二维码"
