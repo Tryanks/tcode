@@ -17,8 +17,9 @@ pub mod wire;
 
 pub use client::{NearbyHost, PairError, browse, browse_blocking, connect, pair, pair_blocking};
 pub use host::{
-    DeviceInfo, EndpointAddrSnapshot, HostConfig, LiveInfo, PairingCode, TraverseHost, TraverseMode,
+    DeviceInfo, EndpointAddrSnapshot, HostConfig, PairingCode, TraverseHost, TraverseMode,
 };
 pub use identity::{DeviceIdentity, EndpointOptions};
 pub use mux::{Connection, HostMux};
 pub use runtime::{block_on, runtime};
+pub use tcode_protocol::PathInfo;

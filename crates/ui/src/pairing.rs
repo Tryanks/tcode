@@ -1,31 +1,41 @@
 //! Shared pairing form; generation stamps discard superseded pairing results.
-//!
-//! TODO(traverse): the address field now holds the machine id; the Machines
-//! page needs a redesign around scanning, nearby machines and fingerprints.
 use gpui::{App, AppContext as _, Entity, Window};
-use tcode_client::host::DiscoveredHost;
 use tcode_client::pairing::{
     PairInvite, PairedHost, is_pairing_code, parse_pair_url, valid_host_id,
 };
 
 use crate::widgets::input::InputState;
 
-/// Default UDP port a hosting desktop binds its Traverse endpoint to.
-pub const DEFAULT_REMOTE_PORT: u16 = 47_420;
+/// What the user pasted or typed into the invitation field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Invitation {
+    /// A `tcode://pair?…` link: identity, code and routing hints together.
+    Link(PairInvite),
+    /// A bare machine id; the code and any routing come from elsewhere.
+    MachineId(String),
+}
+
+/// Read an invitation field. A link is taken whole; anything else must be a
+/// machine id, which is accepted in either case.
+pub fn parse_invitation(value: &str) -> Option<Invitation> {
+    let value = value.trim();
+    if value.starts_with("tcode://") {
+        return parse_pair_url(value).map(Invitation::Link);
+    }
+    let id = value.to_ascii_lowercase();
+    valid_host_id(&id).then_some(Invitation::MachineId(id))
+}
 
 pub struct PairForm {
     fixed_endpoint: Option<String>,
     invite: Option<PairInvite>,
-    pub discovered: Vec<DiscoveredHost>,
-    pub browsing: bool,
     /// Paired but waiting for the user to connect.
     pub paired: Option<PairedHost>,
-    pub address: Entity<InputState>,
+    /// The invitation link or machine id.
+    pub invitation: Entity<InputState>,
     pub code: Entity<InputState>,
     pub busy: bool,
     pub error: Option<String>,
-    /// An invite filled the fields in, so the shell can say so.
-    pub filled: bool,
     /// Bumped whenever the form is retargeted; stamps in-flight results.
     pub generation: u64,
     /// Whether the shell has already installed its paste listeners.
@@ -34,15 +44,13 @@ pub struct PairForm {
 
 impl PairForm {
     /// `fixed` is [`tcode_client::host::ClientHost::fixed_pairing_endpoint`]:
-    /// `Some` fixes the origin and hides the address field.
+    /// `Some` fixes the origin and hides the invitation field.
     pub fn new(fixed: Option<String>, window: &mut Window, cx: &mut App) -> Self {
         Self {
-            discovered: Vec::new(),
-            browsing: false,
             paired: None,
-            address: cx.new(|cx| {
+            invitation: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder(crate::tr!("hosts.pair.address_placeholder").into_owned())
+                    .placeholder(crate::tr!("hosts.pair.invitation_placeholder").into_owned())
                     .default_value(fixed.as_ref().cloned().unwrap_or_default())
             }),
             code: cx.new(|cx| {
@@ -51,7 +59,6 @@ impl PairForm {
             }),
             busy: false,
             error: None,
-            filled: false,
             generation: 0,
             fixed_endpoint: fixed,
             invite: None,
@@ -64,20 +71,24 @@ impl PairForm {
         self.fixed_endpoint.is_some()
     }
 
-    /// Whether the "nearby hosts" list is worth showing at all.
-    pub fn show_discovery(&self) -> bool {
-        !self.has_fixed_endpoint() && (self.browsing || !self.discovered.is_empty())
+    /// The machine a scanned or pasted link named, while the field still
+    /// holds its id.
+    pub fn linked_machine(&self, cx: &App) -> Option<&PairInvite> {
+        let invite = self.invite.as_ref()?;
+        let field = self.invitation.read(cx).value();
+        (field.trim().eq_ignore_ascii_case(&invite.host_id)).then_some(invite)
     }
 
     /// Validate the machine id and six-digit code before submission. The
-    /// code only ever goes to the id in the field; a scanned invite or a
-    /// discovered machine with that same id contributes its addresses.
+    /// code only ever goes to the id in the field; a scanned or pasted invite
+    /// with that same id contributes its routing hints, a bare id has none
+    /// and relies on Traverse to find the machine.
     pub fn request(&self, cx: &App) -> Option<PairInvite> {
         let code = self.code.read(cx).value().to_string();
-        if !is_pairing_code(&code) {
-            return None;
-        }
         if self.fixed_endpoint.is_some() {
+            if !is_pairing_code(&code) {
+                return None;
+            }
             return Some(PairInvite {
                 host_id: String::new(),
                 name: String::new(),
@@ -87,8 +98,20 @@ impl PairForm {
                 addrs: Vec::new(),
             });
         }
-        let host_id = self.address.read(cx).value().trim().to_ascii_lowercase();
-        if !valid_host_id(&host_id) {
+        let host_id = match parse_invitation(&self.invitation.read(cx).value())? {
+            Invitation::Link(link) => {
+                // A link pasted without passing through the field listener
+                // still carries its own code; a typed code wins over it.
+                let code = if is_pairing_code(&code) {
+                    code
+                } else {
+                    link.code.clone()
+                };
+                return Some(PairInvite { code, ..link });
+            }
+            Invitation::MachineId(id) => id,
+        };
+        if !is_pairing_code(&code) {
             return None;
         }
         if let Some(invite) = self
@@ -101,40 +124,25 @@ impl PairForm {
                 ..invite.clone()
             });
         }
-        let nearby = self.discovered.iter().find(|host| host.host_id == host_id);
         Some(PairInvite {
             host_id,
-            name: nearby.map(|host| host.name.clone()).unwrap_or_default(),
+            name: String::new(),
             code,
             traverse: None,
             relay: None,
-            addrs: nearby.map(|host| host.addrs.clone()).unwrap_or_default(),
+            addrs: Vec::new(),
         })
     }
 
-    /// Reset for a fresh attempt and stamp it. Any in-flight browse or pair
-    /// result from the previous generation is discarded when it lands.
+    /// Reset for a fresh attempt and stamp it. Any in-flight pairing result
+    /// from the previous generation is discarded when it lands.
     pub fn restart(&mut self) -> u64 {
         self.paired = None;
         self.invite = None;
         self.error = None;
-        self.filled = false;
         self.busy = false;
-        self.discovered.clear();
-        self.browsing = true;
         self.generation = self.generation.wrapping_add(1);
         self.generation
-    }
-
-    /// Apply a discovery result. Returns `false` when it belongs to a
-    /// superseded attempt and was dropped.
-    pub fn accept_browse(&mut self, generation: u64, hosts: Vec<DiscoveredHost>) -> bool {
-        if generation != self.generation {
-            return false;
-        }
-        self.discovered = hosts;
-        self.browsing = false;
-        true
     }
 
     /// Mark a submission in flight. Returns the request and its stamp.
@@ -174,14 +182,15 @@ impl PairForm {
         self.paired.take()
     }
 
-    /// Parse a `tcode://pair?…` invite. A fixed-origin client keeps its own
-    /// origin and adopts only the code.
+    /// Adopt a `tcode://pair?…` invite: the field shows the machine id and
+    /// the code is filled in. A fixed-origin client keeps its own origin and
+    /// adopts only the code.
     pub fn fill_invite(&mut self, value: &str, window: &mut Window, cx: &mut App) -> bool {
         let Some(invite) = parse_pair_url(value) else {
             return false;
         };
         if self.fixed_endpoint.is_none() {
-            self.address.update(cx, |state, cx| {
+            self.invitation.update(cx, |state, cx| {
                 state.set_value(invite.host_id.clone(), window, cx)
             });
         }
@@ -189,16 +198,16 @@ impl PairForm {
             state.set_value(invite.code.clone(), window, cx)
         });
         self.invite = Some(invite);
-        self.filled = true;
         self.error = None;
         true
     }
 
-    /// Fill a machine id and focus the connection code.
-    pub fn fill_discovered(&mut self, host_id: String, window: &mut Window, cx: &mut App) {
+    /// Fill a machine id and focus the connection code. Nothing is sent
+    /// until the user types the code the machine shows.
+    pub fn fill_machine_id(&mut self, host_id: String, window: &mut Window, cx: &mut App) {
         self.invite = None;
         self.error = None;
-        self.address
+        self.invitation
             .update(cx, |state, cx| state.set_value(host_id, window, cx));
         self.code.update(cx, |state, cx| {
             state.set_value("", window, cx);
@@ -252,7 +261,6 @@ pub fn pair_error(error: &str, address: &str) -> String {
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
-    use tcode_client::host::DiscoveredHost;
 
     use super::*;
 
@@ -306,12 +314,89 @@ mod tests {
         }
     }
 
-    fn discovered(name: &str) -> DiscoveredHost {
-        DiscoveredHost {
-            host_id: name.into(),
-            name: name.into(),
-            addrs: vec!["192.168.1.9:47420".into()],
+    /// The invitation field takes what a machine shows: the link behind its
+    /// QR, or the id alone for a user typing it next to the code. Case and
+    /// surrounding whitespace come from copy-paste, not from the machine.
+    #[test]
+    fn an_invitation_is_a_pair_link_or_a_bare_machine_id() {
+        let invite = PairInvite {
+            host_id: "ab".repeat(32),
+            name: "Studio".into(),
+            code: "123456".into(),
+            traverse: Some("https://traverse.example/".into()),
+            relay: Some("https://relay.example/".into()),
+            addrs: vec!["10.0.0.4:47420".into()],
+        };
+        let link = tcode_client::pairing::pair_url(&invite);
+        assert_eq!(
+            parse_invitation(&format!("  {link}\n")),
+            Some(Invitation::Link(invite))
+        );
+        assert_eq!(
+            parse_invitation(&format!(" {} ", "AB".repeat(32))),
+            Some(Invitation::MachineId("ab".repeat(32)))
+        );
+        for rejected in [
+            "",
+            "tcode://pair?v=1&id=abc&code=123456",
+            "tcode://pair?v=2&id=nope&code=123456",
+            &"ab".repeat(31),
+            "192.168.1.9:47420",
+            "https://example.com/pair",
+        ] {
+            assert_eq!(parse_invitation(rejected), None, "{rejected:?}");
         }
+    }
+
+    /// A pasted link that never passed through the field listener is still
+    /// a complete request; a machine id alone waits for its code and then
+    /// carries no routing hints of its own.
+    #[gpui::test]
+    fn a_pasted_link_pairs_whole_and_a_bare_machine_id_waits_for_its_code(cx: &mut TestAppContext) {
+        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(None, window, cx)));
+        let invite = PairInvite {
+            host_id: "ab".repeat(32),
+            name: "Studio".into(),
+            code: "123456".into(),
+            traverse: None,
+            relay: Some("https://relay.example/".into()),
+            addrs: vec!["10.0.0.4:47420".into()],
+        };
+        let url = tcode_client::pairing::pair_url(&invite);
+        cx.update(|window, cx| {
+            form.update(cx, |holder, cx| {
+                holder.0.invitation.update(cx, |state, cx| {
+                    state.set_value(url.clone(), window, cx);
+                });
+            });
+        });
+        form.read_with(cx, |holder, cx| {
+            assert_eq!(holder.0.request(cx), Some(invite.clone()));
+        });
+
+        cx.update(|window, cx| {
+            form.update(cx, |holder, cx| {
+                holder.0.fill_machine_id("cd".repeat(32), window, cx);
+            });
+        });
+        form.read_with(cx, |holder, cx| {
+            assert_eq!(holder.0.code.read(cx).value(), "");
+            assert_eq!(holder.0.request(cx), None, "no code, nothing to send");
+        });
+        cx.update(|window, cx| {
+            form.update(cx, |holder, cx| {
+                holder.0.code.update(cx, |state, cx| {
+                    state.set_value("654321", window, cx);
+                });
+            });
+        });
+        form.read_with(cx, |holder, cx| {
+            let request = holder.0.request(cx).expect("id and code");
+            assert_eq!(request.host_id, "cd".repeat(32));
+            assert_eq!(request.code, "654321");
+            assert!(request.addrs.is_empty());
+            assert_eq!(request.relay, None);
+        });
     }
 
     /// A pasted invite cannot retarget the browser away from its serving origin.
@@ -343,8 +428,7 @@ mod tests {
         form.read_with(cx, |holder, cx| {
             let form = &holder.0;
             assert!(form.has_fixed_endpoint());
-            assert!(!form.show_discovery(), "a fixed origin cannot browse");
-            assert_eq!(form.address.read(cx).value(), "https://app.example");
+            assert_eq!(form.invitation.read(cx).value(), "https://app.example");
             assert_eq!(form.code.read(cx).value(), "123456");
             let request = form.request(cx).expect("a complete request");
             assert_eq!(request.host_id, "", "a browser pairs with its own origin");
@@ -376,7 +460,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             form.update(cx, |holder, cx| {
-                holder.0.address.update(cx, |state, cx| {
+                holder.0.invitation.update(cx, |state, cx| {
                     state.set_value("cd".repeat(32), window, cx);
                 });
                 holder.0.code.update(cx, |state, cx| {
@@ -392,7 +476,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             form.update(cx, |holder, cx| {
-                holder.0.address.update(cx, |state, cx| {
+                holder.0.invitation.update(cx, |state, cx| {
                     state.set_value("not an id", window, cx);
                 });
             });
@@ -400,8 +484,8 @@ mod tests {
         form.read_with(cx, |holder, cx| assert_eq!(holder.0.request(cx), None));
     }
 
-    /// Browsing and pairing outlive the attempt that started them. A reply from
-    /// a superseded attempt is dropped, so reopening the form cannot be
+    /// Pairing outlives the attempt that started it. A reply from a
+    /// superseded attempt is dropped, so reopening the form cannot be
     /// retargeted by an answer the user has already moved on from.
     #[gpui::test]
     fn results_from_a_superseded_attempt_are_dropped(cx: &mut TestAppContext) {
@@ -412,17 +496,6 @@ mod tests {
         assert_ne!(stale, current);
 
         form.update(cx, |holder, _| {
-            assert!(
-                !holder.0.accept_browse(stale, vec![discovered("stale")]),
-                "a browse from the previous attempt must be dropped"
-            );
-            assert!(holder.0.discovered.is_empty());
-            assert!(holder.0.browsing, "the current browse is still running");
-
-            assert!(holder.0.accept_browse(current, vec![discovered("live")]));
-            assert_eq!(holder.0.discovered.len(), 1);
-            assert!(!holder.0.browsing);
-
             assert!(
                 !holder.0.finish_pair(stale, Err("HTTP 403".into()), "a:1"),
                 "a pairing answer from the previous attempt must be dropped"

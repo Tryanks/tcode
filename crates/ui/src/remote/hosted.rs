@@ -162,16 +162,13 @@ impl HostedPanel {
             };
             row = row.p_3().gap_4().items_start().child(code);
             if let Some(code) = state.code {
-                // TODO(traverse): the hosting state carries no relay or
-                // addresses yet; a scanner on the same LAN finds the machine
-                // by id through discovery.
                 let invite = tcode_client::pairing::pair_url(&tcode_client::pairing::PairInvite {
                     host_id: state.host_id,
                     name: state.host_name,
                     code,
-                    traverse: None,
-                    relay: None,
-                    addrs: Vec::new(),
+                    traverse: state.traverse,
+                    relay: state.relay,
+                    addrs: state.addrs,
                 });
                 row = row.children(super::qr::qr_element(&invite));
             }
@@ -187,6 +184,10 @@ impl HostedPanel {
             devices = devices.child(div().p_3().child(crate::tr!("remote.devices.empty")));
         }
         for device in state.devices {
+            let status_color = match &device.path {
+                Some(_) => cx.theme().success,
+                None => cx.theme().muted_foreground,
+            };
             devices = devices.child(
                 h_flex()
                     .p_3()
@@ -195,6 +196,13 @@ impl HostedPanel {
                         &device.name,
                         device.platform.as_deref(),
                     )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(13.))
+                            .text_color(status_color)
+                            .child(super::path_label(device.path.as_ref())),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("revoke-{}", device.id)))
                             .disabled(self.pending)

@@ -111,10 +111,9 @@ pub struct WorkspaceStore {
     host: HostLink,
     attachment: WorkspaceAttachment,
     client_host: Option<Rc<dyn ClientHost>>,
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    /// The transport's live view of the attached machine: its authenticated
+    /// pairing and how the connection is carried. `None` locally and in a
+    /// browser.
     current_host: Option<LiveHost>,
     client_preferences: ClientPreferences,
     image_namespace: u64,
@@ -275,7 +274,7 @@ impl WorkspaceStore {
         host: HostLink,
         attachment: WorkspaceAttachment,
         client_host: Option<Rc<dyn ClientHost>>,
-        _current_host: Option<LiveHost>,
+        current_host: Option<LiveHost>,
         seed_blocking: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -298,11 +297,7 @@ impl WorkspaceStore {
             host: host.clone(),
             attachment,
             client_host,
-            #[cfg(all(
-                feature = "native-preview",
-                any(target_os = "macos", target_os = "windows", target_os = "android")
-            ))]
-            current_host: _current_host,
+            current_host,
             client_preferences,
             image_namespace,
             attachment_tasks: Vec::new(),
@@ -536,6 +531,12 @@ impl WorkspaceStore {
 
     pub fn is_remote(&self) -> bool {
         matches!(self.attachment, WorkspaceAttachment::Remote { .. })
+    }
+
+    /// How the transport currently reaches the attached machine, when it
+    /// can tell.
+    pub fn connection_path(&self) -> Option<tcode_protocol::PathInfo> {
+        self.current_host.as_ref().and_then(LiveHost::path)
     }
 
     pub fn remote_host_name(&self) -> Option<&str> {
