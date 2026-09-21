@@ -109,11 +109,12 @@ devices only; it does not serve the browser app.
    "$HOME/.local/bin/tcode-headless" pair --data-dir "$HOME/.local/share/tcode-host"
    ```
 
-   `pair` reads `invitation.json`, which `serve` writes in the data directory
-   at startup and removes on shutdown. It cannot mint a new invitation, and it
-   does not know about invitations created later from a paired device: after
-   five minutes, or once a device has used it, create one from a paired
-   device's **Settings → Other devices → New invitation** or restart `serve`.
+   `pair` reads `invitation.json`, which `serve` keeps current in the data
+   directory: written whenever an invitation is minted, at startup or from a
+   paired device, and removed once it is used, expires, pairing is turned off
+   or `serve` stops. `pair` cannot mint one: when it reports no valid
+   invitation, create one from a paired device's **Settings → Other devices →
+   New invitation** or restart `serve`.
 7. From a paired device (or the logged-in browser), **Settings → Other
    devices** shows this machine's invitation QR and link, creates a new
    invitation, lists connected devices with their path, and removes devices.
@@ -583,7 +584,7 @@ list in memory and writes it back.
 | **Access rejected · Pair again** | The machine no longer lists this device (removed, or the machine's data directory was replaced). Pair again with a new invitation if access is intended. |
 | **Protocol mismatch · Update the app** | The machine and the device run different protocol versions. Update both. |
 | **Connected … · Relay** when both are on the same LAN | Hole punching has not found a direct path yet, or the LAN blocks UDP between the two. The path can switch to **Direct** while connected; a fixed desktop UDP port (`47420`) that is allowed through the firewall helps. |
-| `tcode-headless pair` says there is no invitation or it has expired | `pair` only reprints what a running `serve` wrote. Restart `serve`, or create a new invitation from a paired device's **Settings → Other devices**. |
+| `tcode-headless pair` says there is no valid invitation | The last one was used or expired, or `serve` is not running. Create a new invitation from a paired device's **Settings → Other devices**, or restart `serve`. |
 | `could not start Traverse` on a self-hosted URL | The instance's `relays.json` could not be fetched and nothing is cached. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
 | Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if logged-in browsers should lose access. |
 | Browser page unreachable from another device | The listener binds `127.0.0.1:47420` by default. Start `serve --browser-listen 0.0.0.0:47420` (with a password set) and open the machine's LAN address. |

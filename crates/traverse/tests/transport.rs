@@ -240,6 +240,58 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     host.shutdown();
 }
 
+/// Whoever keeps a copy of the invitation hears every change, in order:
+/// each mint, the burn after five wrong secrets, its use and pairing being
+/// turned off. A listener added later hears only what follows.
+#[test]
+fn invitation_changes_are_reported_in_order() {
+    let host_dir = TestDir::new("events-host");
+    let (mux, _, _) = fake_host();
+    let host = start_host(mux, &host_dir, None);
+    let phone_dir = TestDir::new("events-phone");
+    let phone = device(&phone_dir, "phone");
+    let events = host.invitation_events();
+
+    let first = host.new_invitation();
+    assert_eq!(events.recv_blocking().unwrap(), Some(first));
+    let second = host.new_invitation();
+    assert_eq!(events.recv_blocking().unwrap(), Some(second.clone()));
+    let wrong = PairInvite {
+        secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        ..second.invite
+    };
+    for attempt in 0..5 {
+        assert_eq!(
+            tcode_traverse::pair_blocking(&wrong, &phone),
+            Err(PairError::Invalid)
+        );
+        if attempt < 4 {
+            assert!(events.try_recv().is_err(), "a wrong secret changes nothing");
+        }
+    }
+    assert_eq!(
+        events.recv_blocking().unwrap(),
+        None,
+        "five wrong secrets burn it"
+    );
+    let third = host.new_invitation();
+    assert_eq!(events.recv_blocking().unwrap(), Some(third.clone()));
+    tcode_traverse::pair_blocking(&third.invite, &phone).unwrap();
+    assert_eq!(events.recv_blocking().unwrap(), None, "used");
+    host.set_pairing_enabled(false);
+    assert!(events.try_recv().is_err(), "nothing to withdraw");
+    host.set_pairing_enabled(true);
+    let late = host.invitation_events();
+    let fourth = host.new_invitation();
+    assert_eq!(events.recv_blocking().unwrap(), Some(fourth.clone()));
+    assert_eq!(late.recv_blocking().unwrap(), Some(fourth));
+    host.set_pairing_enabled(false);
+    assert_eq!(events.recv_blocking().unwrap(), None, "pairing off");
+    assert_eq!(late.recv_blocking().unwrap(), None);
+    assert!(events.try_recv().is_err());
+    host.shutdown();
+}
+
 fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen = device.relays();

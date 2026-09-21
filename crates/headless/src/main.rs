@@ -9,6 +9,7 @@ use tcode_client::pairing::{PairInvite, pair_url, parse_pair_url};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::SessionStore;
 use tcode_traverse::browser::{BrowserConfig, StaticBundle, serve, set_password};
+use tcode_traverse::identity::write_private;
 use tcode_traverse::native_host::default_device_name;
 use tcode_traverse::{HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
 
@@ -31,7 +32,7 @@ const STATIC_BUNDLE: Option<StaticBundle> = None;
 /// The browser listener stays on loopback unless asked otherwise; devices
 /// reach the machine through Traverse.
 const DEFAULT_BROWSER_LISTEN: &str = "127.0.0.1:47420";
-/// The current invitation, for `pair` to print while it is valid.
+/// The current invitation, for `pair` to print; absent while none is valid.
 const INVITATION_FILE: &str = "invitation.json";
 
 fn main() {
@@ -57,7 +58,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse selects the relay and\ndiscovery service: official (default), off (invite addresses only),\nor the base URL of a self-hosted instance.\n\npair reprints the invitation link and QR that serve wrote to {INVITATION_FILE}\nwhile it is still valid. Scanning or pasting the link is the whole pairing;\nan invitation lasts five minutes and admits one device. A new one needs a\nrestart or the hosting page.\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse selects the relay and\ndiscovery service: official (default), off (invite addresses only),\nor the base URL of a self-hosted instance.\n\npair prints the current invitation link and QR: serve keeps {INVITATION_FILE}\ncurrent, whether the invitation was minted at startup or from a paired\ndevice, and removes it once it is used or expires. Scanning or pasting the\nlink is the whole pairing; an invitation lasts five minutes and admits one\ndevice. A new one comes from a paired device's Settings → Other devices or a\nrestart.\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
@@ -135,6 +136,19 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         )
         .map_err(|error| format!("could not start Traverse: {error}"))?,
     );
+    // The file follows every change for as long as the host runs; the
+    // thread ends with the host's event stream. A copy left by a serve that
+    // did not shut down goes first.
+    let events = traverse_host.invitation_events();
+    sync_invitation_file(&remote_data_dir, None)?;
+    let invitation_dir = remote_data_dir.clone();
+    std::thread::spawn(move || {
+        while let Ok(invitation) = events.recv_blocking() {
+            if let Err(error) = sync_invitation_file(&invitation_dir, invitation.as_ref()) {
+                eprintln!("tcode-headless: {error}");
+            }
+        }
+    });
     let hosting = traverse_host.clone();
     let server = serve(
         mux.clone(),
@@ -154,9 +168,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         traverse_host.wait_online(Duration::from_secs(5));
     }
     if traverse_host.pairing_enabled() {
-        let invitation = traverse_host.new_invitation();
-        write_invitation_file(&remote_data_dir, &invitation)?;
-        print_invitation(&invitation)?;
+        print_invitation(&traverse_host.new_invitation())?;
     } else {
         println!("Pairing disabled; enable Allow other devices from a paired client");
     }
@@ -233,7 +245,7 @@ fn set_password_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `serve` leaves the current invitation here for `pair` to print.
+/// `serve` keeps the current invitation here for `pair` to print.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct InvitationFile {
     expires_unix: u64,
@@ -247,24 +259,22 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn write_invitation_file(data_dir: &Path, invitation: &Invitation) -> Result<(), String> {
+/// Write the invitation in effect, or remove the file when there is none.
+fn sync_invitation_file(data_dir: &Path, invitation: Option<&Invitation>) -> Result<(), String> {
+    let path = data_dir.join(INVITATION_FILE);
+    let Some(invitation) = invitation else {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("could not remove {}: {error}", path.display())),
+        };
+    };
     let file = InvitationFile {
         expires_unix: now_unix() + invitation.remaining().as_secs(),
         invite: invitation.url(),
     };
     let bytes = serde_json::to_vec_pretty(&file).map_err(|error| error.to_string())?;
-    let path = data_dir.join(INVITATION_FILE);
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    use std::io::Write as _;
-    options
-        .open(&path)
-        .and_then(|mut file| file.write_all(&bytes))
+    write_private(&path, &bytes)
         .map_err(|error| format!("could not write {}: {error}", path.display()))
 }
 
@@ -276,16 +286,15 @@ fn pair_command(args: &[String]) -> Result<(), String> {
     }
     .map_err(|error| error.to_string())?;
     let path = store.root().join(INVITATION_FILE);
-    let file: InvitationFile = std::fs::read(&path)
+    let file: Option<InvitationFile> = std::fs::read(&path)
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .ok_or("no running serve has written an invitation; start serve first")?;
-    let remaining = file.expires_unix.saturating_sub(now_unix());
-    if remaining == 0 {
-        return Err("the invitation has expired; restart serve or use the hosting page".into());
-    }
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let valid = file.filter(|file| file.expires_unix > now_unix());
+    let Some(file) = valid else {
+        return Err("no valid invitation; a paired device can create one from Settings → Other devices, or restart serve".into());
+    };
     let invite = parse_pair_url(&file.invite).ok_or("invalid invitation file")?;
-    print_invite(&invite, remaining)
+    print_invite(&invite, file.expires_unix - now_unix())
 }
 
 fn print_invitation(invitation: &Invitation) -> Result<(), String> {

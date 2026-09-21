@@ -285,7 +285,7 @@ fn decode_hex(hex: &str) -> Option<[u8; 32]> {
 }
 
 /// Write `bytes` to `path` atomically, readable by the owner only.
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("tmp");
     let mut options = fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);

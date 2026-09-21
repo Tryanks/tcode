@@ -115,6 +115,11 @@ struct Shared {
     endpoint: Endpoint,
     mux: HostMux,
     state: Mutex<State>,
+    /// Told the invitation in effect after every change; see
+    /// [`TraverseHost::invitation_events`].
+    listeners: Mutex<Vec<async_channel::Sender<Option<Invitation>>>>,
+    /// Ends the active invitation when its lifetime runs out.
+    expiry: Mutex<Option<tokio::task::AbortHandle>>,
     /// What invitations say about this machine's Traverse instance; see
     /// [`PairInvite::traverse`].
     traverse: Option<String>,
@@ -217,6 +222,8 @@ impl TraverseHost {
                     invitation: None,
                     live: HashMap::new(),
                 }),
+                listeners: Mutex::new(Vec::new()),
+                expiry: Mutex::new(None),
                 traverse,
                 allow_pairing: config.pairing_enabled,
             });
@@ -267,6 +274,15 @@ impl TraverseHost {
         self.shared.current_invitation(&state, &addr)
     }
 
+    /// Every change to the invitation, carrying what is in effect after it:
+    /// the invitation minted, or `None` once it is used, expires or pairing
+    /// is turned off. Each call gets its own stream of every later change.
+    pub fn invitation_events(&self) -> async_channel::Receiver<Option<Invitation>> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.shared.listeners.lock().unwrap().push(sender);
+        receiver
+    }
+
     pub fn pairing_enabled(&self) -> bool {
         self.shared.allow_pairing && self.shared.state.lock().unwrap().identity.pairing_enabled
     }
@@ -295,6 +311,9 @@ impl TraverseHost {
         if let Some(refresh) = self.refresh {
             refresh.abort();
         }
+        if let Some(expiry) = self.shared.expiry.lock().unwrap().take() {
+            expiry.abort();
+        }
         let router = self.router;
         block_on(async move {
             let _ = router.shutdown().await;
@@ -303,7 +322,7 @@ impl TraverseHost {
 }
 
 impl Shared {
-    fn mint(&self) -> Invitation {
+    fn mint(self: &Arc<Self>) -> Invitation {
         let mut random = [0_u8; tcode_client::pairing::SECRET_BYTES];
         getrandom::fill(&mut random).expect("the OS random source is available");
         let addr = self.snapshot();
@@ -323,7 +342,43 @@ impl Shared {
             invitation: invitation.clone(),
             failures: 0,
         });
+        // The timer holds no reference that would keep a stopped host alive,
+        // and checks it is still ending the invitation it was set for.
+        let shared = Arc::downgrade(self);
+        let secret = invitation.invite.secret.clone();
+        let expires_at = invitation.expires_at + Duration::from_millis(10);
+        let expiry = crate::runtime::runtime().spawn(async move {
+            tokio::time::sleep_until(expires_at.into()).await;
+            if let Some(shared) = shared.upgrade() {
+                shared.expire(&secret);
+            }
+        });
+        if let Some(previous) = self.expiry.lock().unwrap().replace(expiry.abort_handle()) {
+            previous.abort();
+        }
+        self.notify(Some(invitation.clone()));
         invitation
+    }
+
+    /// The invitation `secret` ran out of time.
+    fn expire(&self, secret: &str) {
+        let mut state = self.state.lock().unwrap();
+        let expired = state.invitation.as_ref().is_some_and(|active| {
+            active.invitation.invite.secret == secret && active.invitation.remaining().is_zero()
+        });
+        if expired {
+            state.invitation = None;
+            self.notify(None);
+        }
+    }
+
+    /// Under the state lock, so listeners hear changes in the order they
+    /// happened.
+    fn notify(&self, invitation: Option<Invitation>) {
+        self.listeners
+            .lock()
+            .unwrap()
+            .retain(|listener| listener.try_send(invitation.clone()).is_ok());
     }
 
     /// The unexpired invitation with `addr` as its routing hints. The
@@ -385,8 +440,8 @@ impl Shared {
         if let Err(error) = state.identity.save() {
             log::error!("could not persist the pairing switch: {error}");
         }
-        if !enabled {
-            state.invitation = None;
+        if !enabled && state.invitation.take().is_some() {
+            self.notify(None);
         }
     }
 
@@ -432,7 +487,7 @@ impl Shared {
         }
     }
 
-    fn hosting(&self, action: HostingAction) -> HostingState {
+    fn hosting(self: &Arc<Self>, action: HostingAction) -> HostingState {
         match action {
             HostingAction::State => {}
             HostingAction::SetEnabled(enabled) => {
@@ -497,6 +552,7 @@ impl Shared {
             None => false,
             Some(active) if active.invitation.remaining().is_zero() => {
                 state.invitation = None;
+                self.notify(None);
                 false
             }
             Some(active) => {
@@ -505,11 +561,13 @@ impl Shared {
                     secret.as_bytes(),
                 ) {
                     state.invitation = None;
+                    self.notify(None);
                     true
                 } else {
                     active.failures += 1;
                     if active.failures >= MAX_PAIRING_FAILURES {
                         state.invitation = None;
+                        self.notify(None);
                     }
                     false
                 }
