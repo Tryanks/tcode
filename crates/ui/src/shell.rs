@@ -1539,14 +1539,22 @@ impl AppShell {
 
     /// New thread: one project starts a draft directly, several go through the
     /// palette, which already owns "new thread in <project>" and can search.
+    /// On a phone the palette opens without the keyboard: the projects are
+    /// there to tap, and the search pill still raises it on demand.
     fn start_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(attachment) = &self.attachment else {
             return;
         };
         let projects = attachment.link.store.read(cx).projects();
         let Some(project) = projects.first().cloned().filter(|_| projects.len() == 1) else {
-            self.window_state
-                .update(cx, |state, cx| state.open_palette(cx));
+            let mobile = crate::window_seam::is_mobile(cx);
+            self.window_state.update(cx, |state, cx| {
+                if mobile {
+                    state.open_palette_without_keyboard(cx);
+                } else {
+                    state.open_palette(cx);
+                }
+            });
             return;
         };
         attachment.link.store.update(cx, |store, cx| {
@@ -2395,12 +2403,17 @@ impl Render for AppShell {
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
         // The palette takes focus on the frame it opens, at either width.
-        let palette_open = self.window_state.read(cx).palette_open;
+        let (palette_open, focus_query) = {
+            let state = self.window_state.read(cx);
+            (state.palette_open, state.palette_focuses_query)
+        };
         if palette_open
             && !self.palette_was_open
             && let Some(attachment) = &self.attachment
         {
-            attachment.palette.update(cx, |p, cx| p.focus(window, cx));
+            attachment
+                .palette
+                .update(cx, |p, cx| p.open(focus_query, window, cx));
         }
         self.palette_was_open = palette_open;
         let body = if self.compact(cx) {
@@ -3548,6 +3561,24 @@ mod tests {
             draw(cx);
             if project_count > 1 || !compact {
                 assert!(shell.read_with(cx, |shell, cx| shell.window_state.read(cx).palette_open));
+                cx.update(|window, cx| {
+                    let palette = &shell.read(cx).attachment.as_ref().unwrap().palette;
+                    let query = palette.read(cx).query_focus_handle(cx);
+                    // The chooser is tapped through on a phone; a desktop
+                    // window (even a narrow one) types into it.
+                    assert_eq!(
+                        query.is_focused(window),
+                        !(compact && crate::window_seam::is_mobile(cx)),
+                        "project chooser raises the keyboard only off-phone"
+                    );
+                    assert!(
+                        palette
+                            .read(cx)
+                            .focus_handle(cx)
+                            .contains_focused(window, cx),
+                        "the palette owns focus so Escape closes it"
+                    );
+                });
                 let row = cx
                     .debug_bounds("palette-new-thread-project-1")
                     .expect("project choice");

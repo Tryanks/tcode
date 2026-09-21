@@ -164,14 +164,26 @@ impl CommandPalette {
         }
     }
 
-    /// Focus the search input when the palette opens.
-    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Reset the palette as it opens. With `focus_query` the search input
+    /// takes focus; without it the overlay does, so Escape still closes the
+    /// palette but no software keyboard is raised.
+    pub fn open(&mut self, focus_query: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.query.update(cx, |state, cx| {
             state.set_value(String::new(), window, cx);
-            state.focus(window, cx);
+            if focus_query {
+                state.focus(window, cx);
+            }
         });
+        if !focus_query {
+            self.focus_handle.focus(window, cx);
+        }
         self.selected = 0;
         self.content_hits.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_focus_handle(&self, cx: &gpui::App) -> FocusHandle {
+        self.query.read(cx).focus_handle(cx)
     }
 
     /// Debounce, then ask the host for content hits. The index, cache and
