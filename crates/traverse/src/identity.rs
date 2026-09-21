@@ -140,7 +140,9 @@ impl HostIdentity {
 }
 
 /// `device.json`: this device's key and how it introduces itself. Cloning
-/// shares one identity; the client endpoint built on it is shared too.
+/// shares one identity; the client endpoint built on it is shared too. The
+/// endpoint's relays and lookups follow the machines in `hosts.json`; see
+/// [`DeviceIdentity::hosts_changed`].
 #[derive(Clone)]
 pub struct DeviceIdentity {
     inner: Arc<DeviceInner>,
@@ -151,7 +153,6 @@ pub(crate) struct DeviceInner {
     pub(crate) data_dir: PathBuf,
     details: Mutex<Details>,
     pub(crate) endpoint: tokio::sync::OnceCell<crate::client::ClientEndpoint>,
-    pub(crate) options: Mutex<EndpointOptions>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -168,21 +169,6 @@ struct DeviceFile {
     secret_key: String,
     #[serde(flatten)]
     details: Details,
-}
-
-/// How a device endpoint reaches the wider network. Tests turn it off to
-/// stay on loopback; phones keep it on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EndpointOptions {
-    /// Use the official relay and lookup services for machines that publish
-    /// to them.
-    pub official: bool,
-}
-
-impl Default for EndpointOptions {
-    fn default() -> Self {
-        Self { official: true }
-    }
 }
 
 pub const DEVICE_FILE: &str = "device.json";
@@ -220,15 +206,8 @@ impl DeviceIdentity {
                 data_dir: data_dir.to_owned(),
                 details: Mutex::new(details),
                 endpoint: tokio::sync::OnceCell::new(),
-                options: Mutex::new(EndpointOptions::default()),
             }),
         })
-    }
-
-    /// Must be set before the first connection; later calls are ignored.
-    pub fn with_options(self, options: EndpointOptions) -> Self {
-        *self.inner.options.lock().unwrap() = options;
-        self
     }
 
     pub fn endpoint_id(&self) -> EndpointId {
@@ -306,7 +285,7 @@ fn decode_hex(hex: &str) -> Option<[u8; 32]> {
 }
 
 /// Write `bytes` to `path` atomically, readable by the owner only.
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("tmp");
     let mut options = fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);

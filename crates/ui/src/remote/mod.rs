@@ -147,6 +147,9 @@ pub struct RemotePanel {
     /// back to whatever asked for it.
     window_state: Entity<WindowState>,
     form: PairForm,
+    /// [`ClientHost::fixed_machine`]: a browser lists its one machine and
+    /// no way to add or re-pair one.
+    fixed_machine: bool,
     page_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -158,10 +161,10 @@ impl RemotePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let fixed = cx
+        let fixed_machine = cx
             .try_global::<ClientAttachment>()
-            .and_then(|attachment| attachment.host.fixed_pairing_endpoint());
-        let form = PairForm::new(fixed, window, cx);
+            .is_some_and(|attachment| attachment.host.fixed_machine());
+        let form = PairForm::new(window, cx);
         let subscriptions = vec![cx.subscribe_in(
             &form.invitation,
             window,
@@ -181,6 +184,7 @@ impl RemotePanel {
             store,
             window_state,
             form,
+            fixed_machine,
             page_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
@@ -362,7 +366,8 @@ impl RemotePanel {
         } else {
             None
         };
-        let needs_pairing = reason == Some(tcode_client::ConnectionFailure::AuthenticationRejected);
+        let needs_pairing = reason == Some(tcode_client::ConnectionFailure::AuthenticationRejected)
+            && !self.fixed_machine;
         let subtitle = format!(
             "{} · {}",
             fingerprint(&host.host_id),
@@ -382,6 +387,7 @@ impl RemotePanel {
             name.clone(),
             cx,
         )
+        .debug_selector(|| format!("host-{}", host.host_id))
         .child(
             v_flex()
                 .flex_1()
@@ -474,22 +480,17 @@ impl RemotePanel {
             .into_any_element()
     }
 
-    /// The whole Hosts surface: this computer, the saved hosts, one way to add
-    /// another, and whatever is on the network.
+    /// The whole Hosts surface: this computer, the saved hosts and, where
+    /// the client can pair, the ways to add another.
     pub(crate) fn render_hosts(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // A browser that has not paired with its own origin has exactly one
-        // thing to do here, so it is the page rather than a hop away from it.
         let hosts = self
             .client(cx)
             .map(|client| client.load_hosts())
             .unwrap_or_default();
-        if self.form.has_fixed_endpoint() && hosts.is_empty() {
-            return self.render_pair(window, cx);
-        }
         let current_id = self.attached_host_id(cx);
         let mut column = v_flex().w_full().gap_4().pt(px(8.)).pb(px(24.));
         if let Some(local) = self.local_row(cx) {
@@ -521,7 +522,9 @@ impl RemotePanel {
                     .child(plain_list(rows, cx)),
             );
         }
-        column = column.child(self.add_machine(cx));
+        if !self.fixed_machine {
+            column = column.child(self.add_machine(cx));
+        }
         self.page(column.into_any_element(), cx)
     }
 
@@ -529,8 +532,7 @@ impl RemotePanel {
     /// everywhere. Both lead to the same form; a first pairing is always by
     /// invitation, never by finding a machine on the network.
     fn add_machine(&self, cx: &mut Context<Self>) -> AnyElement {
-        let scannable = self.client(cx).is_some_and(|client| client.supports_qr())
-            && !self.form.has_fixed_endpoint();
+        let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let entry = |id: &'static str,
                      title: SharedString,
                      subtitle: SharedString,
@@ -591,6 +593,7 @@ impl RemotePanel {
         );
         v_flex()
             .w_full()
+            .debug_selector(|| "hosts-add-machine".into())
             .child(list_caption(
                 crate::tr!("hosts.pair.title").into_owned().into(),
                 cx,
@@ -610,11 +613,10 @@ impl RemotePanel {
         if let Some(paired) = self.form.paired.clone() {
             return self.render_pair_confirm(&paired.name, cx);
         }
-        let fixed = self.form.has_fixed_endpoint();
         let busy = self.form.busy;
         let request = self.form.request(cx);
         let ready = !busy && request.is_some();
-        let scannable = self.client(cx).is_some_and(|client| client.supports_qr()) && !fixed;
+        let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         // A pairing failure outranks the field's own complaint.
         let error = self.form.error.clone().or_else(|| {
             self.form
@@ -632,17 +634,13 @@ impl RemotePanel {
                     .line_height(px(20.))
                     .min_w_0()
                     .text_color(cx.theme().muted_foreground)
-                    .child(if fixed {
-                        crate::tr!("hosts.pair.fixed_description")
-                    } else {
-                        crate::tr!("hosts.pair.description")
-                    }),
+                    .child(crate::tr!("hosts.pair.description")),
             )
             .child(self.field(
                 crate::tr!("hosts.pair.invitation").into_owned().into(),
                 &self.form.invitation,
             ))
-            .when_some(request.filter(|_| !fixed), |column, invite| {
+            .when_some(request, |column, invite| {
                 column.child(
                     div()
                         .text_size(px(13.))
@@ -844,6 +842,78 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+
+    /// The browser is signed in with the machine that served it: its Hosts
+    /// page lists that machine and nothing that would add or re-pair one.
+    #[gpui::test]
+    fn a_fixed_machine_client_has_no_way_to_add_one(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        struct Browser;
+        impl ClientHost for Browser {
+            fn device_name(&self) -> String {
+                "Safari".into()
+            }
+            fn device_id(&self) -> String {
+                "browser".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                vec![PairedHost {
+                    host_id: "served-by".into(),
+                    name: "Build server".into(),
+                    traverse: None,
+                    relay: None,
+                    addrs: Vec::new(),
+                    last_connected_unix: None,
+                }]
+            }
+            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+                Default::default()
+            }
+            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
+            fn save_hosts(&self, _: &[PairedHost]) {}
+            fn last_host_id(&self) -> Option<String> {
+                Some("served-by".into())
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn fixed_machine(&self) -> bool {
+                true
+            }
+            fn connect(&self, _: &PairedHost) -> tcode_client::host::Transport {
+                unreachable!("the page only lists the machine")
+            }
+        }
+        struct HostsProbe(Entity<RemotePanel>);
+        impl Render for HostsProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                v_flex().size_full().child(
+                    self.0
+                        .update(cx, |panel, cx| panel.render_hosts(window, cx)),
+                )
+            }
+        }
+        cx.update(crate::theme::init);
+        cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Browser), false, |_, _, _| {})));
+        let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
+            let state = cx.new(|_| WindowState::new(false));
+            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+        });
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("host-served-by").is_some(),
+            "the serving machine is listed"
+        );
+        assert!(
+            cx.debug_bounds("hosts-add-machine").is_none(),
+            "a browser has no way to add a machine"
+        );
     }
 
     #[cfg(feature = "remote-hosting")]

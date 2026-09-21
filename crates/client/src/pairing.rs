@@ -15,8 +15,8 @@ pub struct PairedHost {
     /// The machine's `EndpointId`.
     pub host_id: String,
     pub name: String,
-    /// Base URL of the Traverse instance the machine publishes to, `None`
-    /// for the official service.
+    /// Base URL of the Traverse instance the machine publishes to: `None`
+    /// for the official service, [`TRAVERSE_OFF`] for none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traverse: Option<String>,
     /// The machine's home relay, if it has one.
@@ -31,6 +31,10 @@ pub struct PairedHost {
 
 /// Direct addresses kept per machine.
 pub const MAX_ADDRS: usize = 16;
+/// The `traverse` value of a machine that publishes to no service, so a
+/// device tells it apart from one on the official service and loads no
+/// manifest for it.
+pub const TRAVERSE_OFF: &str = "off";
 
 /// Record a host in the saved list. A host is identified by `host_id`, so
 /// pairing again or stamping a reconnection replaces its record instead of
@@ -51,6 +55,7 @@ pub struct PairInvite {
     pub name: String,
     /// [`SECRET_BYTES`] random bytes as unpadded base64url.
     pub secret: String,
+    /// See [`PairedHost::traverse`].
     pub traverse: Option<String>,
     pub relay: Option<String>,
     pub addrs: Vec<String>,
@@ -129,7 +134,9 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
     }
     let traverse = field("traverse");
     let relay = field("relay");
-    if traverse.as_deref().is_some_and(|url| !valid_url(url))
+    if traverse
+        .as_deref()
+        .is_some_and(|url| url != TRAVERSE_OFF && !valid_url(url))
         || relay.as_deref().is_some_and(|url| !valid_url(url))
     {
         return None;
@@ -266,6 +273,12 @@ mod tests {
         .unwrap();
         assert_eq!(lan_only.addrs, ["10.0.0.4:5000"]);
         assert_eq!(lan_only.relay, None);
+        let off = parse_pair_url(&format!(
+            "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&traverse=off&addr=10.0.0.4%3A5000"
+        ))
+        .unwrap();
+        assert_eq!(off.traverse.as_deref(), Some(TRAVERSE_OFF));
+        assert!(pair_url(&off).contains("&traverse=off&"));
         for (field, replacement) in [
             ("v=2", "v=1"),
             ("tcode://", "https://"),
@@ -282,6 +295,10 @@ mod tests {
             (
                 "relay=https%3A%2F%2Frelay.example%2F",
                 "relay=ftp%3A%2F%2Frelay",
+            ),
+            (
+                "traverse=https%3A%2F%2Ftraverse.example%2F",
+                "traverse=disabled",
             ),
         ] {
             assert!(

@@ -64,6 +64,14 @@ impl NativeClientHost {
         }
     }
 
+    /// The saved machines changed: the device endpoint, if it is up, follows
+    /// their Traverse instances.
+    fn hosts_changed(&self) {
+        if let Some(Ok(device)) = self.device.get() {
+            device.hosts_changed();
+        }
+    }
+
     /// `TCODE_DATA_DIR`, else the platform data dir; hostname as device name.
     pub fn from_env() -> Self {
         Self::from_env_with_device_name(default_device_name())
@@ -197,6 +205,7 @@ impl ClientHost for NativeClientHost {
         if let Err(error) = crate::hosts::save_hosts(&self.data_dir, hosts) {
             log::error!("could not write hosts.json: {error}");
         }
+        self.hosts_changed();
     }
 
     fn remember_host(&self, host: PairedHost) {
@@ -205,6 +214,7 @@ impl ClientHost for NativeClientHost {
         }) {
             log::error!("could not save paired machine: {error}");
         }
+        self.hosts_changed();
     }
 
     fn remove_host(&self, host_id: &str) {
@@ -213,6 +223,7 @@ impl ClientHost for NativeClientHost {
         }) {
             log::error!("could not remove paired machine: {error}");
         }
+        self.hosts_changed();
     }
 
     fn stamp_connected(&self, host_id: &str, timestamp: u64) {
