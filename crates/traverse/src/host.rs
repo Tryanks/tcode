@@ -643,6 +643,7 @@ impl ProtocolHandler for MainHandler {
         };
         let hello_done = Arc::new(AtomicBool::new(false));
         let open_streams = Arc::new(AtomicUsize::new(0));
+        let tunnels = Arc::new(AtomicUsize::new(0));
         loop {
             let accepted = tokio::select! {
                 accepted = connection.accept_bi() => accepted,
@@ -661,6 +662,7 @@ impl ProtocolHandler for MainHandler {
                 connection: connection.clone(),
                 hello_done: hello_done.clone(),
                 open_streams: open_streams.clone(),
+                tunnels: tunnels.clone(),
             };
             tokio::spawn(async move {
                 let result = stream.run(send, wire::reader(recv)).await;
@@ -691,6 +693,27 @@ struct StreamTask {
     connection: Connection,
     hello_done: Arc<AtomicBool>,
     open_streams: Arc<AtomicUsize>,
+    tunnels: Arc<AtomicUsize>,
+}
+
+/// One of the connection's [`wire::MAX_TUNNELS`] tunnel slots, held while a
+/// tunnel is served.
+struct TunnelSlot(Arc<AtomicUsize>);
+
+impl TunnelSlot {
+    fn take(tunnels: &Arc<AtomicUsize>) -> Option<Self> {
+        if tunnels.fetch_add(1, Ordering::AcqRel) >= wire::MAX_TUNNELS {
+            tunnels.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(Self(tunnels.clone()))
+    }
+}
+
+impl Drop for TunnelSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl StreamTask {
@@ -733,12 +756,17 @@ impl StreamTask {
                 .await?;
                 self.bridge(send, reader).await
             }
-            ClientLine::Connect { .. } => {
+            ClientLine::Connect { host, port } => {
                 if !self.hello_done.load(Ordering::Acquire) {
                     return refuse(send, "hello required").await;
                 }
-                // TODO(traverse): Traverse preview streams.
-                refuse(send, "preview streams are not available yet").await
+                if !wire::valid_tunnel_target(&host, port) {
+                    return refuse(send, "invalid tunnel target").await;
+                }
+                let Some(_slot) = TunnelSlot::take(&self.tunnels) else {
+                    return refuse(send, "too many tunnels").await;
+                };
+                crate::tunnel::serve(send, reader, &host, port).await
             }
             ClientLine::Pair { .. } => refuse(send, "pairing uses tcode/pair/1").await,
         }
