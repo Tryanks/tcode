@@ -64,6 +64,16 @@ impl NativeClientHost {
         Ok(device)
     }
 
+    /// The platform saw connectivity change or the app return to the
+    /// foreground: rebind the device endpoint's paths and probe every live
+    /// transport now. Before the first connection there is nothing to
+    /// notify, so the identity is not loaded for this.
+    pub fn network_changed(&self) {
+        if let Some(Ok(device)) = self.device.get() {
+            device.network_changed();
+        }
+    }
+
     /// `TCODE_DATA_DIR`, else the platform data dir; hostname as device name.
     pub fn from_env() -> Self {
         Self::from_env_with_device_name(default_device_name())

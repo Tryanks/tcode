@@ -27,8 +27,10 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <!-- Machines advertise this type through iroh's mDNS lookup; the app does
+         not browse it yet (crates/ios/src/host.rs). -->
     <key>NSBonjourServices</key>
-    <array><string>_tcode._tcp</string></array>
+    <array><string>_tcode._udp</string></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>查找同一网络中的 Tcode 执行端以进行配对。</string>
     <key>NSCameraUsageDescription</key>
