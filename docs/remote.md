@@ -354,7 +354,7 @@ added, lookup services rebuilt.
 
 | Mode | Machine | Devices | The service sees |
 | --- | --- | --- | --- |
-| **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's lookup service (`https://dns.iroh.link/pkarr`, DNS origin `dns.iroh.link.`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device's own endpoint also uses the bundled relay list for its home relay and the bundled lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL and its current direct addresses (LAN and public `ip:port`), republished every five minutes. Anyone who knows a machine id can read that record. Devices publish nothing. |
+| **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's lookup service (`https://dns.iroh.link/pkarr`, DNS origin `dns.iroh.link.`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device's own endpoint also uses the bundled relay list for its home relay and the bundled lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
 | **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch and fails to start if the instance is unreachable; it never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's lookup to what it already has. Its own home relay still comes from the bundled official list. | Your instance sees what the official one would. The official relays still see the device's end of the connection; the official lookup service is not used for this machine. |
 | **Off** | No relay and no lookup: the endpoint publishes nothing and dials nothing but direct addresses. The invitation carries only the machine's current addresses (`Relay: none (LAN only)`). | The device dials the addresses from the invitation and the ones it learned on later connections. Its own endpoint still has the official relay list for its side. | Nothing about this machine. |
 
@@ -514,9 +514,9 @@ the machine accepts a connection only from a device id on its allow list, and
 answers anything else with `unpaired` and closes it.
 
 The lookup service holds a public, signed record per machine: the machine's
-relay URL and direct addresses. It tells anyone who knows the machine id where
-the machine is; it does not let them connect, because the machine refuses
-unpaired devices.
+relay URL, never its IP addresses. It tells anyone who knows the machine id
+which relay reaches it; it does not let them connect, because the machine
+refuses unpaired devices.
 
 The browser client is different: it is plain HTTP on the machine's own
 listener, protected by the password and a bearer token. Keep it on loopback or
