@@ -16,6 +16,7 @@ typedef struct GpuiIosTouch {
 } GpuiIosTouch;
 
 void tcode_ios_start(void);
+void tcode_ios_network_changed(void);
 void tcode_ios_camera_scan_completed(uint64_t request_id,
                                      const uint8_t *value_bytes,
                                      size_t value_length,

@@ -1,6 +1,5 @@
 //! The device side: one iroh endpoint per [`DeviceIdentity`], pairing over
-//! `tcode/pair/1`, a reconnecting main-stream [`Transport`] over `tcode/1`,
-//! and LAN browsing.
+//! `tcode/pair/1` and a reconnecting main-stream [`Transport`] over `tcode/1`.
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
@@ -17,7 +16,7 @@ use iroh::{
 use tcode_client::{
     ConnectionFailure, ConnectionState,
     heartbeat::{Heartbeat, LIVENESS_REPLY_MS, NATIVE_IDLE_MS, Tick},
-    host::{LiveHost, Transport},
+    host::{LiveHost, Transport, Tunnel, TunnelFuture, TunnelOpener},
     outgoing::{Outgoing, OutgoingReceiver, subscription_key},
     pairing::{MAX_ADDRS, PairInvite, PairedHost},
     recovery::{Backoff, Wake},
@@ -36,19 +35,9 @@ const CONNECT_BUDGET: Duration = Duration::from_secs(20);
 const CLOSE_UNPAIRED: u32 = 1;
 const CLOSE_REVOKED: u32 = 3;
 
-/// A machine advertising itself on the local network.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NearbyHost {
-    /// The machine's `EndpointId`; the only thing a pairing may be sent to.
-    pub id: String,
-    pub name: Option<String>,
-    pub addrs: Vec<String>,
-}
-
 /// The endpoint a device dials from, built on first use.
 pub(crate) struct ClientEndpoint {
     endpoint: Endpoint,
-    lan: Option<crate::mdns::LanLookup>,
     /// Transports to probe when the network changes.
     transports: Mutex<Vec<Outgoing>>,
     /// Traverse instances whose resolvers are already installed.
@@ -78,17 +67,9 @@ impl DeviceIdentity {
                 builder = builder
                     .secret_key(secret_key.clone())
                     .transport_config(wire::transport_config());
-                let lan = if options.lan_discovery {
-                    let lan = crate::mdns::LanLookup::new(secret_key.public(), false, None)?;
-                    builder = builder.address_lookup(lan.clone());
-                    Some(lan)
-                } else {
-                    None
-                };
                 let endpoint = builder.bind().await.map_err(io::Error::other)?;
                 Ok(ClientEndpoint {
                     endpoint,
-                    lan,
                     transports: Mutex::new(Vec::new()),
                     resolvers: Mutex::new(HashSet::new()),
                 })
@@ -248,14 +229,54 @@ pub fn pair_blocking(
     block_on(pair(invite, code, device))
 }
 
+/// Preview tunnels of one attachment: opened on whichever connection the
+/// main stream currently runs on, and none while it is reconnecting. The
+/// transport publishes it through `LiveHost::tunnels` on its `current_host`.
+#[derive(Clone, Default)]
+pub struct AttachmentTunnels {
+    current: Arc<Mutex<Option<Connection>>>,
+}
+
+impl AttachmentTunnels {
+    fn set(&self, connection: Option<Connection>) {
+        *self.current.lock().unwrap() = connection;
+    }
+}
+
+impl TunnelOpener for AttachmentTunnels {
+    fn open(&self, host: &str, port: u16) -> TunnelFuture {
+        let current = self.current.lock().unwrap().clone();
+        let host = host.to_owned();
+        Box::pin(async move {
+            let connection = current.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "not connected to the machine")
+            })?;
+            // The handshake needs the runtime's timers; the caller may be on
+            // any executor.
+            let (done, result) = async_channel::bounded::<io::Result<Tunnel>>(1);
+            runtime().spawn(async move {
+                let _ = done
+                    .send(crate::tunnel::open(&connection, &host, port).await)
+                    .await;
+            });
+            result
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(io::Error::other("tunnel opener stopped")))
+        })
+    }
+}
+
 /// Open a reconnecting link to `host`. Dropping the returned channels ends
 /// it. The stored relay and addresses are refreshed in `hosts.json` after
-/// each authenticated connection.
+/// each authenticated connection. The transport's `current_host` carries
+/// the attachment's [`AttachmentTunnels`].
 pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
     let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
-    let current_host = LiveHost::new(host.clone());
+    let tunnels = AttachmentTunnels::default();
+    let current_host = LiveHost::with_tunnels(host.clone(), Arc::new(tunnels.clone()));
     let live = current_host.clone();
     let device = device.clone();
     let registered = to_host.clone();
@@ -266,6 +287,7 @@ pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
         connection_loop(
             device,
             live,
+            tunnels,
             Arc::new(outgoing),
             incoming,
             StateSender::new(state_tx),
@@ -338,6 +360,7 @@ async fn watch_paths(connection: Connection, live: LiveHost, state: Arc<StateSen
 async fn connection_loop(
     device: DeviceIdentity,
     live: LiveHost,
+    tunnels: AttachmentTunnels,
     outgoing: Arc<OutgoingReceiver>,
     incoming: Sender<String>,
     state: StateSender,
@@ -386,6 +409,8 @@ async fn connection_loop(
                 learn_addresses(&mut host, &established.connection);
                 live.authenticated(&host);
                 persist_addresses(&device, &host);
+                // Tunnels are available by the time Syncing is observable.
+                tunnels.set(Some(established.connection.clone()));
                 let _ = state.send(ConnectionState::Syncing).await;
                 let paths = tokio::spawn(watch_paths(
                     established.connection.clone(),
@@ -404,6 +429,7 @@ async fn connection_loop(
                 .await;
                 paths.abort();
                 live.set_path(None);
+                tunnels.set(None);
                 if lost.healthy {
                     stable_ms = started.elapsed().as_millis() as u64;
                 }
@@ -771,60 +797,4 @@ fn jitter_sample() -> f64 {
         .unwrap_or_default()
         .subsec_nanos();
     f64::from(nanos % 1_000_001) / 1_000_000.
-}
-
-/// Machines advertising on the local network, collected for `timeout`.
-pub async fn browse(device: &DeviceIdentity, timeout: Duration) -> Vec<NearbyHost> {
-    use futures_lite::StreamExt as _;
-    let Ok(client) = device.client().await else {
-        return Vec::new();
-    };
-    let Some(lan) = &client.lan else {
-        return Vec::new();
-    };
-    let own_id = device.endpoint_id();
-    let mut events = lan.inner.subscribe().await;
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    let mut found: HashMap<EndpointId, NearbyHost> = HashMap::new();
-    loop {
-        tokio::select! {
-            event = events.next() => match event {
-                Some(iroh_mdns_address_lookup::DiscoveryEvent::Discovered { endpoint_info, .. }) => {
-                    let id = endpoint_info.endpoint_id;
-                    if id == own_id {
-                        continue;
-                    }
-                    let entry = found.entry(id).or_insert_with(|| NearbyHost {
-                        id: id.to_string(),
-                        name: None,
-                        addrs: Vec::new(),
-                    });
-                    if let Some(name) = endpoint_info.data.user_data() {
-                        entry.name = Some(name.to_string());
-                    }
-                    for addr in endpoint_info.data.ip_addrs() {
-                        let addr = addr.to_string();
-                        if !entry.addrs.contains(&addr) && entry.addrs.len() < MAX_ADDRS {
-                            entry.addrs.push(addr);
-                        }
-                    }
-                }
-                Some(iroh_mdns_address_lookup::DiscoveryEvent::Expired { endpoint_id }) => {
-                    found.remove(&endpoint_id);
-                }
-                Some(_) => {}
-                None => break,
-            },
-            _ = &mut deadline => break,
-        }
-    }
-    let mut hosts: Vec<NearbyHost> = found.into_values().collect();
-    hosts.sort_by(|a, b| a.id.cmp(&b.id));
-    hosts
-}
-
-/// [`browse`] from a thread outside the runtime.
-pub fn browse_blocking(device: &DeviceIdentity, timeout: Duration) -> Vec<NearbyHost> {
-    block_on(browse(device, timeout))
 }

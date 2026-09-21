@@ -181,23 +181,18 @@ struct DeviceFile {
     details: Details,
 }
 
-/// How a device endpoint reaches the wider network. Tests turn both off to
-/// stay on loopback; phones keep both on.
+/// How a device endpoint reaches the wider network. Tests turn it off to
+/// stay on loopback; phones keep it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointOptions {
     /// Use the official relay and lookup services for machines that publish
     /// to them.
     pub official: bool,
-    /// Browse and resolve machines on the local network with mDNS.
-    pub lan_discovery: bool,
 }
 
 impl Default for EndpointOptions {
     fn default() -> Self {
-        Self {
-            official: true,
-            lan_discovery: true,
-        }
+        Self { official: true }
     }
 }
 

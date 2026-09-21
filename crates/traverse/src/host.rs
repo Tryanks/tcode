@@ -42,7 +42,8 @@ pub enum TraverseMode {
     /// A self-hosted instance described by its manifest; see
     /// [`crate::manifest`] for how the manifest is obtained.
     Custom(Url),
-    /// No relay and no wide-area lookup: LAN discovery and invite addresses only.
+    /// No relay and no wide-area lookup: invite addresses and the direct
+    /// addresses iroh learns afterwards only.
     Off,
 }
 
@@ -53,9 +54,6 @@ pub struct HostConfig {
     /// Whether this host may pair devices at all. The user's persisted
     /// pairing switch applies on top of it.
     pub pairing_enabled: bool,
-    /// Advertise on the local network and let nearby devices find this
-    /// machine by name.
-    pub lan_discovery: bool,
     /// A fixed UDP port instead of a random one, so invite addresses and
     /// firewall rules survive restarts.
     pub bind_port: Option<u16>,
@@ -121,11 +119,10 @@ pub struct TraverseHost {
 }
 
 impl TraverseHost {
-    /// Bind the endpoint, start accepting and, when asked, advertise on the LAN.
+    /// Bind the endpoint and start accepting connections.
     pub fn start(mux: HostMux, config: HostConfig) -> io::Result<TraverseHost> {
         let identity = HostIdentity::load_or_create(&config.data_dir, &config.host_name)?;
         let secret_key = identity.secret_key().clone();
-        let host_name = identity.host_name.clone();
         let traverse = match &config.traverse {
             TraverseMode::Custom(url) => Some(url.clone()),
             TraverseMode::Official | TraverseMode::Off => None,
@@ -155,11 +152,6 @@ impl TraverseHost {
                 builder = builder
                     .secret_key(secret_key.clone())
                     .transport_config(wire::transport_config());
-                if config.lan_discovery {
-                    let lan =
-                        crate::mdns::LanLookup::new(secret_key.public(), true, Some(&host_name))?;
-                    builder = builder.address_lookup(lan);
-                }
                 if let Some(port) = config.bind_port {
                     let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
                     let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
@@ -649,6 +641,7 @@ impl ProtocolHandler for MainHandler {
         };
         let hello_done = Arc::new(AtomicBool::new(false));
         let open_streams = Arc::new(AtomicUsize::new(0));
+        let tunnels = Arc::new(AtomicUsize::new(0));
         loop {
             let accepted = tokio::select! {
                 accepted = connection.accept_bi() => accepted,
@@ -667,6 +660,7 @@ impl ProtocolHandler for MainHandler {
                 connection: connection.clone(),
                 hello_done: hello_done.clone(),
                 open_streams: open_streams.clone(),
+                tunnels: tunnels.clone(),
             };
             tokio::spawn(async move {
                 let result = stream.run(send, wire::reader(recv)).await;
@@ -697,6 +691,27 @@ struct StreamTask {
     connection: Connection,
     hello_done: Arc<AtomicBool>,
     open_streams: Arc<AtomicUsize>,
+    tunnels: Arc<AtomicUsize>,
+}
+
+/// One of the connection's [`wire::MAX_TUNNELS`] tunnel slots, held while a
+/// tunnel is served.
+struct TunnelSlot(Arc<AtomicUsize>);
+
+impl TunnelSlot {
+    fn take(tunnels: &Arc<AtomicUsize>) -> Option<Self> {
+        if tunnels.fetch_add(1, Ordering::AcqRel) >= wire::MAX_TUNNELS {
+            tunnels.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(Self(tunnels.clone()))
+    }
+}
+
+impl Drop for TunnelSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl StreamTask {
@@ -739,12 +754,17 @@ impl StreamTask {
                 .await?;
                 self.bridge(send, reader).await
             }
-            ClientLine::Connect { .. } => {
+            ClientLine::Connect { host, port } => {
                 if !self.hello_done.load(Ordering::Acquire) {
                     return refuse(send, "hello required").await;
                 }
-                // TODO(traverse): Traverse preview streams.
-                refuse(send, "preview streams are not available yet").await
+                if !wire::valid_tunnel_target(&host, port) {
+                    return refuse(send, "invalid tunnel target").await;
+                }
+                let Some(_slot) = TunnelSlot::take(&self.tunnels) else {
+                    return refuse(send, "too many tunnels").await;
+                };
+                crate::tunnel::serve(send, reader, &host, port).await
             }
             ClientLine::Pair { .. } => refuse(send, "pairing uses tcode/pair/1").await,
         }

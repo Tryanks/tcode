@@ -141,8 +141,7 @@ impl RemoteController {
         self.host.as_ref().map(TraverseHost::endpoint_id)
     }
 
-    /// Bind the endpoint, publish to `traverse`, advertise on the LAN and
-    /// mint a first code.
+    /// Bind the endpoint, publish to `traverse` and mint a first invitation.
     pub fn start_hosting(
         &mut self,
         traverse: &TraverseSetting,
@@ -158,7 +157,6 @@ impl RemoteController {
                 data_dir: self.data_dir.clone(),
                 traverse: traverse_mode(traverse)?,
                 pairing_enabled: true,
-                lan_discovery: true,
                 bind_port: Some(BIND_PORT),
             },
         )

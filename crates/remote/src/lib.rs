@@ -7,7 +7,7 @@ mod auth;
 pub mod client_host;
 #[cfg(feature = "server")]
 pub mod server;
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "client"))]
 mod wire;
 
 #[cfg(feature = "client")]

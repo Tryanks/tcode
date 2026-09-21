@@ -3,8 +3,9 @@
 //! This contract deliberately contains no UI-runtime types. Adapters await the
 //! returned local futures and marshal their results onto their own UI thread.
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, io, pin::Pin};
 
+use futures_lite::{AsyncRead, AsyncWrite};
 use serde::{Deserialize, Serialize};
 pub use tcode_protocol::PathInfo;
 
@@ -28,48 +29,84 @@ pub struct Transport {
 
 /// The transport publishes its current pairing before emitting Syncing, and
 /// how the link is carried while it is up. Consumers take an atomic snapshot;
-/// saved hosts are only restart storage.
+/// saved hosts are only restart storage. A transport that can carry raw
+/// tunnels to the machine attaches its [`TunnelOpener`] here, so Preview
+/// reaches the machine over the same authenticated link as the protocol.
 #[derive(Clone)]
-pub struct LiveHost(std::sync::Arc<std::sync::Mutex<LiveHostState>>);
-
-struct LiveHostState {
-    host: PairedHost,
-    path: Option<PathInfo>,
+pub struct LiveHost {
+    host: std::sync::Arc<std::sync::Mutex<PairedHost>>,
+    path: std::sync::Arc<std::sync::Mutex<Option<PathInfo>>>,
+    tunnels: Option<std::sync::Arc<dyn TunnelOpener>>,
 }
 
 impl LiveHost {
     pub fn new(host: PairedHost) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(LiveHostState {
-            host,
-            path: None,
-        })))
+        Self {
+            host: std::sync::Arc::new(std::sync::Mutex::new(host)),
+            path: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            tunnels: None,
+        }
+    }
+
+    pub fn with_tunnels(host: PairedHost, tunnels: std::sync::Arc<dyn TunnelOpener>) -> Self {
+        Self {
+            tunnels: Some(tunnels),
+            ..Self::new(host)
+        }
     }
 
     pub fn snapshot(&self) -> PairedHost {
-        self.0.lock().unwrap().host.clone()
+        self.host.lock().unwrap().clone()
     }
 
     /// Called by the owning transport only after authenticating the endpoint.
     pub fn authenticated(&self, host: &PairedHost) {
-        self.0.lock().unwrap().host = host.clone();
+        *self.host.lock().unwrap() = host.clone();
     }
 
     /// How the current connection reaches the host; `None` between
     /// connections or on a transport that cannot tell.
     pub fn path(&self) -> Option<PathInfo> {
-        self.0.lock().unwrap().path.clone()
+        self.path.lock().unwrap().clone()
     }
 
     /// Set by the owning transport when a connection comes up or its
     /// selected path changes. Returns whether anything changed.
     pub fn set_path(&self, path: Option<PathInfo>) -> bool {
-        let mut state = self.0.lock().unwrap();
-        if state.path == path {
+        let mut current = self.path.lock().unwrap();
+        if *current == path {
             return false;
         }
-        state.path = path;
+        *current = path;
         true
     }
+
+    pub fn tunnels(&self) -> Option<std::sync::Arc<dyn TunnelOpener>> {
+        self.tunnels.clone()
+    }
+}
+
+/// One raw byte tunnel to a TCP service on the paired machine. Closing the
+/// write half tells the machine to shut down its write side to the service;
+/// end of stream on the read half means the service closed its side.
+pub struct Tunnel {
+    pub read: Box<dyn AsyncRead + Send + Unpin>,
+    pub write: Box<dyn AsyncWrite + Send + Unpin>,
+}
+
+impl std::fmt::Debug for Tunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Tunnel")
+    }
+}
+
+pub type TunnelFuture = Pin<Box<dyn Future<Output = io::Result<Tunnel>> + Send>>;
+
+/// Opens tunnels to `host:port` as dialled from the paired machine, over the
+/// attachment's current connection. Fails at once while the attachment is
+/// reconnecting; tunnels opened on an earlier connection end with it.
+pub trait TunnelOpener: Send + Sync {
+    fn open(&self, host: &str, port: u16) -> TunnelFuture;
 }
 
 /// A host advertised on the client's local network: its `EndpointId` and the
@@ -148,63 +185,6 @@ pub struct ClientPreferences {
     pub navigation: Option<serde_json::Value>,
 }
 
-/// Parse bounded JSON supplied by platform discovery bridges: one object per
-/// advertisement with `host_id`, `name`, `addr` and `port`.
-pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
-    if json.len() > 65_536 {
-        return Vec::new();
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    let Some(hosts) = value.as_array() else {
-        return Vec::new();
-    };
-    let mut found: Vec<DiscoveredHost> = Vec::new();
-    for value in hosts.iter().take(128) {
-        let field = |name| {
-            value
-                .get(name)?
-                .as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
-                .map(str::to_owned)
-        };
-        let (Some(host_id), Some(name), Some(addr), Some(port)) = (
-            field("host_id"),
-            field("name"),
-            field("addr").and_then(|addr| addr.parse::<std::net::IpAddr>().ok()),
-            value
-                .get("port")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|port| u16::try_from(port).ok())
-                .filter(|port| *port != 0),
-        ) else {
-            continue;
-        };
-        if addr.is_loopback() {
-            continue;
-        }
-        let addr = std::net::SocketAddr::new(addr, port).to_string();
-        // A machine may advertise Wi-Fi, virtual bridge and IPv6 addresses.
-        // Keep every distinct address so an unreachable first choice cannot
-        // hide it.
-        match found.iter_mut().find(|host| host.host_id == host_id) {
-            Some(host) => {
-                if !host.addrs.contains(&addr) && host.addrs.len() < crate::pairing::MAX_ADDRS {
-                    host.addrs.push(addr);
-                }
-            }
-            None => found.push(DiscoveredHost {
-                host_id,
-                name,
-                addrs: vec![addr],
-            }),
-        }
-    }
-    found.sort_by(|a, b| a.host_id.cmp(&b.host_id));
-    found
-}
-
 /// Persistence, pairing, transport, and platform facilities for a tcode client.
 pub trait ClientHost: 'static {
     /// Name this device presents to hosts while pairing and connecting.
@@ -275,10 +255,6 @@ pub trait ClientHost: 'static {
 
     /// Open a reconnecting link. Dropping the returned channels ends it.
     fn connect(&self, host: &PairedHost) -> Transport;
-
-    fn browse_hosts(&self) -> HostFuture<'_, Vec<DiscoveredHost>> {
-        Box::pin(async { Vec::new() })
-    }
 
     fn supports_qr(&self) -> bool {
         false
@@ -351,61 +327,5 @@ mod tests {
             assert!(valid_device_id(&minted));
             assert_eq!(stored.take().as_deref(), Some(minted.as_str()));
         }
-    }
-
-    #[test]
-    fn discovered_hosts_are_bounded_validated_and_grouped_by_machine() {
-        let json = serde_json::json!([
-            {"host_id":"b","name":"IPv6","addr":"fd00::2","port":47420},
-            {"host_id":"a","name":"Loopback","addr":"127.0.0.1","port":47420},
-            {"host_id":"b","name":"IPv4","addr":"192.168.1.2","port":47420},
-            {"host_id":"b","name":"IPv4 duplicate","addr":"192.168.1.2","port":47420},
-            {"host_id":"b","name":"Virtual bridge","addr":"192.168.139.3","port":47420},
-            {"host_id":"d","name":"Bad port","addr":"192.168.1.4","port":0}
-        ]);
-
-        assert_eq!(
-            parse_discovered_hosts(&json.to_string()),
-            vec![DiscoveredHost {
-                host_id: "b".into(),
-                name: "IPv6".into(),
-                addrs: vec![
-                    "[fd00::2]:47420".into(),
-                    "192.168.1.2:47420".into(),
-                    "192.168.139.3:47420".into()
-                ],
-            }]
-        );
-        assert!(parse_discovered_hosts("not json").is_empty());
-        assert!(parse_discovered_hosts("{}").is_empty());
-        assert!(parse_discovered_hosts(&" ".repeat(65_537)).is_empty());
-        let valid =
-            serde_json::json!({"host_id":"h","name":"Desk","addr":"192.168.1.2","port":47420});
-        for (field, invalid) in [
-            ("host_id", serde_json::json!("")),
-            ("name", serde_json::json!("line\nbreak")),
-            ("name", serde_json::json!("x".repeat(257))),
-            ("addr", serde_json::json!("::1")),
-            ("addr", serde_json::json!("user@desk")),
-            ("port", serde_json::json!(65536)),
-            ("port", serde_json::json!(-1)),
-        ] {
-            let mut invalid_host = valid.clone();
-            invalid_host[field] = invalid;
-            assert!(
-                parse_discovered_hosts(&serde_json::json!([invalid_host]).to_string()).is_empty(),
-                "{field}"
-            );
-        }
-        let many: Vec<_> = (0..129)
-            .map(|index| {
-                let mut host = valid.clone();
-                host["host_id"] = serde_json::json!(format!("host-{index:03}"));
-                host
-            })
-            .collect();
-        let bounded = parse_discovered_hosts(&serde_json::to_string(&many).unwrap());
-        assert_eq!(bounded.len(), 128);
-        assert_eq!(bounded.last().unwrap().host_id, "host-127");
     }
 }
