@@ -9,12 +9,42 @@ import java.util.ArrayList;
 /** Exercises the production connection against Android's real Editable/InputConnection code. */
 @SuppressWarnings("deprecation")
 public final class GpuiInputConnectionTest extends AndroidTestCase {
+    private static final class FakeClipboard implements GpuiInputConnection.Clipboard {
+        String text;
+        @Override public String read() { return text; }
+        @Override public void write(String value) { text = value; }
+    }
+
+    public void testImeEditPanelActionsEditTheDraftAndClipboard() {
+        SpannableStringBuilder text = new SpannableStringBuilder("hello 世界");
+        Selection.setSelection(text, 0);
+        ArrayList<GpuiInputConnection.State> sent = new ArrayList<>();
+        FakeClipboard clipboard = new FakeClipboard();
+        GpuiInputConnection input =
+                new GpuiInputConnection(new View(getContext()), text, clipboard, sent::add);
+        assertFalse(input.performContextMenuAction(android.R.id.paste));
+        assertFalse(input.performContextMenuAction(android.R.id.copy));
+        assertTrue(sent.isEmpty());
+        assertTrue(input.performContextMenuAction(android.R.id.selectAll));
+        assertEquals(new GpuiInputConnection.State("hello 世界", 0, 8, -1, -1), sent.get(0));
+        assertTrue(input.performContextMenuAction(android.R.id.copy));
+        assertEquals("hello 世界", clipboard.text);
+        assertEquals(1, sent.size());
+        input.setSelection(6, 8);
+        assertTrue(input.performContextMenuAction(android.R.id.cut));
+        assertEquals("世界", clipboard.text);
+        assertEquals(new GpuiInputConnection.State("hello ", 6, 6, -1, -1), sent.get(sent.size() - 1));
+        clipboard.text = "again";
+        assertTrue(input.performContextMenuAction(android.R.id.paste));
+        assertEquals(new GpuiInputConnection.State("hello again", 11, 11, -1, -1), sent.get(sent.size() - 1));
+    }
+
     public void testAutocompletePublishesTheCompleteReplacementOnce() {
         for (boolean composing : new boolean[] {false, true}) {
             SpannableStringBuilder text = new SpannableStringBuilder("an exmple here");
             Selection.setSelection(text, 9);
             ArrayList<GpuiInputConnection.State> sent = new ArrayList<>();
-            GpuiInputConnection input = new GpuiInputConnection(new View(getContext()), text, sent::add);
+            GpuiInputConnection input = new GpuiInputConnection(new View(getContext()), text, new FakeClipboard(), sent::add);
             input.beginBatchEdit();
             if (composing) {
                 input.setComposingRegion(3, 9);
@@ -33,7 +63,7 @@ public final class GpuiInputConnectionTest extends AndroidTestCase {
         SpannableStringBuilder text = new SpannableStringBuilder("😀word中");
         Selection.setSelection(text, text.length());
         ArrayList<GpuiInputConnection.State> sent = new ArrayList<>();
-        GpuiInputConnection input = new GpuiInputConnection(new View(getContext()), text, sent::add);
+        GpuiInputConnection input = new GpuiInputConnection(new View(getContext()), text, new FakeClipboard(), sent::add);
         input.setSelection(2, 6);
         assertEquals(new GpuiInputConnection.State("😀word中", 2, 6, -1, -1), sent.get(0));
         input.commitText("example", 0);
@@ -48,7 +78,7 @@ public final class GpuiInputConnectionTest extends AndroidTestCase {
         SpannableStringBuilder text = new SpannableStringBuilder("old");
         Selection.setSelection(text, text.length());
         ArrayList<GpuiInputConnection.State> sent = new ArrayList<>();
-        GpuiInputConnection input = new GpuiInputConnection(new View(getContext()), text, sent::add);
+        GpuiInputConnection input = new GpuiInputConnection(new View(getContext()), text, new FakeClipboard(), sent::add);
         input.closeConnection();
         text.replace(0, text.length(), "new");
         input.commitText("stale suggestion", 1);
