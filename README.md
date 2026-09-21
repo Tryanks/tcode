@@ -95,17 +95,21 @@ speaks ACP.
 
 Tcode runs on the machine that holds your projects, starts your agents, and
 keeps your threads. You can open that machine from another desktop, a phone or
-tablet, or a browser tab. Today everything travels over your own LAN or overlay
-network (Tailscale, EasyTier). The planned replacement is direct, end-to-end
-encrypted connections over iroh, with an optional discovery and relay service,
-**Traverse**, that only introduces devices to each other and carries ciphertext
-when a direct connection fails; see
-[#376](https://github.com/Tryanks/tcode/issues/376).
+tablet, or a browser tab. Native apps connect over **Traverse**: one
+end-to-end encrypted connection per device, direct when the network allows it
+and through a relay when it does not. Traverse is the relay and lookup service
+a machine publishes to; it has no accounts, sees only encrypted traffic and
+machine and device ids, and is never part of authentication — the machine
+itself decides which devices may connect. It is on by default, can point at a
+self-hosted `tcode-traverse` instance, or can be turned off, in which case
+devices reach the machine only at the addresses its invitation carries (a
+LAN). The default instance uses n0's public iroh relays and lookup service,
+which n0 describes as rate-limited with no uptime guarantee.
 
 Every device shows the *same* app. There is no reduced phone build: a phone, or
 a tablet narrower than 900px, shows a machines → threads → thread stack; a
-wider tablet and every desktop window use the split layout. Some actions depend on the
-device in your hands, such as opening a native file dialog or driving the
+wider tablet and every desktop window use the split layout. Some actions depend
+on the device in your hands, such as opening a native file dialog or driving the
 embedded preview browser.
 
 **Use your desktop as the machine.** In **Settings → Other devices**, turn on
@@ -119,29 +123,30 @@ with that device.
 on the server, then:
 
 ```sh
-tcode-headless serve --name build-server   # prints the invitation link and QR
+tcode-headless serve --name build-server   # prints the machine id, invitation link and QR
 tcode-headless pair      # reprints the current invitation while it is valid
 ```
 
-Headless release builds also serve the browser app at `http://<machine>:47420/`. Set a
-password on first open, or preset it with `TCODE_PASSWORD`. Saved browser tokens
-skip login on later visits.
+`serve --traverse off` or `--traverse https://your.instance` changes the
+Traverse mode. Headless release builds also serve the browser app, on
+`http://127.0.0.1:47420/` by default; `--browser-listen` binds it to a LAN
+address. Set a password on first open, or preset it with `TCODE_PASSWORD`.
 
 **Connect another device.** Open the sidebar's **Machines** row on a desktop,
 or the opening screen on a phone. Scan the machine's QR code or paste its
 invitation link, then connect. In a browser, open the printed HTTP link and
-log in with the password. The browser’s **Settings → Other devices** shows the
-machine's invitation QR for native clients and controls new pairings and
-device revocation.
-See [Use Tcode from other devices](docs/remote.md) for the native-app and
-browser steps.
+log in with the password; the browser is for direct access on the machine or
+its LAN and does not use Traverse. Its **Settings → Other devices** shows the
+machine's invitation for native clients and controls pairing and revocation.
+See [Use Tcode from other devices](docs/remote.md) for the full guide.
 
-**Security.** LAN connections use plain HTTP and WebSockets. Adding a machine
-creates a device token that can be revoked on that machine. Anyone who captures
-LAN traffic can read the token; use a VPN or HTTPS tunnel on untrusted networks.
-See [Reaching your machine from outside](docs/remote.md#reaching-your-machine-from-outside)
-for Tailscale, WireGuard, Cloudflare Tunnel and frp, and the
-[remote guide](docs/remote.md) for setup and troubleshooting.
+**Security.** Native connections are authenticated by device and machine keys
+and encrypted end to end; a relay carries ciphertext. Removing a device on the
+machine closes its connection at once. The browser page is plain HTTP,
+protected by the password; keep it on loopback or a trusted LAN. See
+[Security](docs/remote.md#security) and
+[Self-hosting Traverse](docs/remote.md#self-hosting-traverse) in the remote
+guide.
 
 ## Getting started
 
