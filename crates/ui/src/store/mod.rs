@@ -103,6 +103,17 @@ pub enum WorkspaceAttachment {
     Remote { host_id: String, host_name: String },
 }
 
+/// Where a remote attachment's Preview goes: the paired machine and the
+/// tunnels the attachment's transport opens to it.
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows", target_os = "android")
+))]
+pub(crate) type PreviewTarget = (
+    tcode_client::pairing::PairedHost,
+    std::sync::Arc<dyn tcode_client::host::TunnelOpener>,
+);
+
 /// The client-facing projection and command boundary for workspace state.
 ///
 /// Views observe this entity and use its typed accessors instead of retaining
@@ -516,22 +527,21 @@ impl WorkspaceStore {
         self.remote_preview.1.clone()
     }
 
+    /// The paired machine Preview reaches and the tunnels that reach it.
     #[cfg(all(
         feature = "native-preview",
         any(target_os = "macos", target_os = "windows", target_os = "android")
     ))]
-    pub(crate) fn preview_proxy(
-        &self,
-    ) -> Result<Option<tcode_client::pairing::PairedHost>, String> {
+    pub(crate) fn preview_proxy(&self) -> Result<Option<PreviewTarget>, String> {
         if !self.is_remote() {
             return Ok(None);
         }
         self.current_host
             .as_ref()
-            .map(LiveHost::snapshot)
-            .filter(|host| Some(host.host_id.as_str()) == self.remote_host_id())
+            .filter(|live| Some(live.snapshot().host_id.as_str()) == self.remote_host_id())
+            .and_then(|live| Some((live.snapshot(), live.tunnels()?)))
             .map(Some)
-            .ok_or_else(|| "remote preview requires a paired machine credential".into())
+            .ok_or_else(|| "remote preview requires a paired machine connection".into())
     }
 
     pub fn is_remote(&self) -> bool {
@@ -2783,7 +2793,13 @@ mod tests {
             last_connected_unix: None,
         };
         client.remember_host(host.clone());
-        let current_host = LiveHost::new(host.clone());
+        struct NoTunnels;
+        impl tcode_client::host::TunnelOpener for NoTunnels {
+            fn open(&self, _host: &str, _port: u16) -> tcode_client::host::TunnelFuture {
+                Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::NotConnected)) })
+            }
+        }
+        let current_host = LiveHost::with_tunnels(host.clone(), std::sync::Arc::new(NoTunnels));
         let (to_host, _outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
         let store = cx.new(|cx| {
@@ -2801,7 +2817,7 @@ mod tests {
         });
         host.addrs = vec!["192.168.1.161:47420".into()];
         current_host.authenticated(&host);
-        cx.update(|cx| assert_eq!(store.read(cx).preview_proxy().unwrap().unwrap(), host));
+        cx.update(|cx| assert_eq!(store.read(cx).preview_proxy().unwrap().unwrap().0, host));
         assert_eq!(client.load_hosts()[0].addrs, ["192.168.31.5:47420"]);
         std::fs::remove_dir_all(root).unwrap();
     }
