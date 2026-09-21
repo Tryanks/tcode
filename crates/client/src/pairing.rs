@@ -232,7 +232,7 @@ mod tests {
         for bad in [
             "",
             "123456",
-            "AAECAwQFBgcICQoLDA0OD",     // 15 bytes and a half
+            "AAECAwQFBgcICQoLDA0OD",    // 15 bytes and a half
             "AAECAwQFBgcICQoLDA0ODw==", // padded
             "AAECAwQFBgcICQoLDA0ODx",   // non-canonical trailing bits
             "AAECAwQFBgcICQoLDA0OD+",   // standard alphabet
@@ -272,7 +272,10 @@ mod tests {
             // A link from before the secret carried a six-digit code.
             (&format!("secret={SECRET}"), "code=123456"),
             (&format!("secret={SECRET}"), "secret=123456"),
-            (&format!("secret={SECRET}"), "secret=AAECAwQFBgcICQoLDA0ODw%3D%3D"),
+            (
+                &format!("secret={SECRET}"),
+                "secret=AAECAwQFBgcICQoLDA0ODw%3D%3D",
+            ),
             (&format!("id={ID}"), "id=desk"),
             ("addr=192.168.1.2%3A47420", "addr=192.168.1.2"),
             ("addr=192.168.1.2%3A47420", "addr=192.168.1.2%3A0"),

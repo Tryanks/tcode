@@ -241,7 +241,7 @@ pub struct AppShell {
     window_state: Entity<WindowState>,
     setup: ShellSetup,
     attachment: Option<ShellAttachment>,
-    /// Saved hosts, discovery, pairing and authentication repair: the hosts
+    /// Saved hosts, pairing by invitation and authentication repair: the hosts
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
     nav: Entity<NavStackState>,
@@ -1380,6 +1380,59 @@ fn compact_label(key: &str) -> String {
     crate::tr!(format!("mobile.{key}")).into_owned()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BannerTone {
+    Live,
+    Degraded,
+    Lost,
+}
+
+/// What the connection banner says about the link to `host`. Connected with a
+/// known path names the path; connected over a transport that cannot tell
+/// (a browser) shows nothing, as before the path existed.
+fn connection_banner(
+    state: &tcode_client::ConnectionState,
+    path: Option<&tcode_protocol::PathInfo>,
+    host: &str,
+) -> Option<(String, BannerTone)> {
+    use tcode_client::ConnectionState;
+    let (text, tone) = match state {
+        ConnectionState::Connected => {
+            let path = path?;
+            let path = if path.direct {
+                crate::tr!("remote.path.direct")
+            } else {
+                crate::tr!("remote.path.relay")
+            };
+            (
+                crate::tr!("remote.banner.connected", host = host, path = path).into_owned(),
+                BannerTone::Live,
+            )
+        }
+        ConnectionState::Syncing => (
+            crate::tr!("remote.banner.syncing", host = host).into_owned(),
+            BannerTone::Degraded,
+        ),
+        ConnectionState::Reconnecting { attempt, .. } => (
+            crate::tr!("remote.banner.reconnecting", host = host, attempt = attempt).into_owned(),
+            BannerTone::Degraded,
+        ),
+        ConnectionState::Offline { .. } => (
+            crate::tr!("remote.banner.offline", host = host).into_owned(),
+            BannerTone::Lost,
+        ),
+    };
+    let text = match state {
+        ConnectionState::Offline { reason }
+        | ConnectionState::Reconnecting {
+            reason: Some(reason),
+            ..
+        } => format!("{text} · {}", crate::remote::failure_label(*reason)),
+        _ => text,
+    };
+    Some((text, tone))
+}
+
 impl AppShell {
     /// The machine this window is attached to, as the Threads page's subtitle.
     fn attached_machine(&self, cx: &App) -> SharedString {
@@ -1967,34 +2020,20 @@ impl AppShell {
         .into_any_element()
     }
 
-    /// A slim status bar above the chat column, shown only over a remote link
-    /// that is not currently connected.
+    /// A slim status bar above the chat column over a remote link: how the
+    /// link is carried while it is up, and what is wrong while it is not.
     fn render_connection_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let store = self.attachment.as_ref()?.link.store.read(cx);
         let host = store.remote_host_name()?;
-        let (text, accent) = match store.connection_state() {
-            tcode_client::ConnectionState::Connected => return None,
-            tcode_client::ConnectionState::Syncing => (
-                crate::tr!("remote.banner.syncing", host = host).into_owned(),
-                cx.theme().warning,
-            ),
-            tcode_client::ConnectionState::Reconnecting { attempt, .. } => (
-                crate::tr!("remote.banner.reconnecting", host = host, attempt = attempt)
-                    .into_owned(),
-                cx.theme().warning,
-            ),
-            tcode_client::ConnectionState::Offline { .. } => (
-                crate::tr!("remote.banner.offline", host = host).into_owned(),
-                cx.theme().danger,
-            ),
-        };
-        let text = match store.connection_state() {
-            tcode_client::ConnectionState::Offline { reason }
-            | tcode_client::ConnectionState::Reconnecting {
-                reason: Some(reason),
-                ..
-            } => format!("{text} · {}", crate::remote::failure_label(*reason)),
-            _ => text,
+        let (text, tone) = connection_banner(
+            store.connection_state(),
+            store.connection_path().as_ref(),
+            host,
+        )?;
+        let accent = match tone {
+            BannerTone::Live => cx.theme().success,
+            BannerTone::Degraded => cx.theme().warning,
+            BannerTone::Lost => cx.theme().danger,
         };
         let count = store.pending_write_count();
         let text = if count > 0 {
@@ -2477,6 +2516,66 @@ mod tests {
     };
 
     use super::*;
+
+    /// The banner names the path while the link is up and the failure while
+    /// it is not; a connected browser, whose transport cannot tell how it is
+    /// carried, keeps its chat column clear.
+    #[test]
+    fn the_connection_banner_names_the_path_or_the_failure() {
+        use tcode_client::{ConnectionFailure, ConnectionState};
+        use tcode_protocol::PathInfo;
+        let direct = PathInfo {
+            direct: true,
+            relay: None,
+        };
+        let relayed = PathInfo {
+            direct: false,
+            relay: Some("https://relay.example/".into()),
+        };
+        assert_eq!(
+            connection_banner(&ConnectionState::Connected, Some(&direct), "Studio"),
+            Some((
+                crate::tr!("remote.banner.connected", host = "Studio", path = "Direct")
+                    .into_owned(),
+                BannerTone::Live
+            ))
+        );
+        assert_eq!(
+            connection_banner(&ConnectionState::Connected, Some(&relayed), "Studio"),
+            Some((
+                crate::tr!("remote.banner.connected", host = "Studio", path = "Relay").into_owned(),
+                BannerTone::Live
+            ))
+        );
+        assert_eq!(
+            connection_banner(&ConnectionState::Connected, None, "Studio"),
+            None
+        );
+        assert_eq!(
+            connection_banner(&ConnectionState::Syncing, Some(&direct), "Studio"),
+            Some((
+                crate::tr!("remote.banner.syncing", host = "Studio").into_owned(),
+                BannerTone::Degraded
+            ))
+        );
+        assert_eq!(
+            connection_banner(
+                &ConnectionState::Offline {
+                    reason: ConnectionFailure::AuthenticationRejected
+                },
+                None,
+                "Studio"
+            ),
+            Some((
+                format!(
+                    "{} · {}",
+                    crate::tr!("remote.banner.offline", host = "Studio"),
+                    crate::remote::failure_label(ConnectionFailure::AuthenticationRejected)
+                ),
+                BannerTone::Lost
+            ))
+        );
+    }
 
     /// One shell over a transport the test holds both ends of, so what the
     /// client says to its host is observable.

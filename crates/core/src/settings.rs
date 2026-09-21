@@ -867,9 +867,30 @@ pub enum SettingsPatch {
     FallbackReviewProfileId(Option<String>),
     SidebarLayout(SidebarLayout),
     RemoteHostingEnabled(bool),
-    RemotePort(Option<u16>),
+    Traverse(TraverseSetting),
     RemoteHostName(Option<String>),
     LastProject(Option<String>),
+}
+
+/// Which Traverse instance this machine publishes to while hosting: relay
+/// fallback and wide-area discovery for devices off the LAN.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum TraverseSetting {
+    /// The official service.
+    #[default]
+    Official,
+    /// A self-hosted instance, by the base URL its manifest is served from.
+    Custom { url: String },
+    /// No relay and no wide-area discovery: devices reach this machine on
+    /// the LAN or at the addresses an invite carries.
+    Off,
+}
+
+impl TraverseSetting {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl Default for BrowserSettings {
@@ -1004,9 +1025,9 @@ pub struct Settings {
     /// clients. Absent in legacy files → hosting off.
     #[serde(default)]
     pub remote_hosting_enabled: bool,
-    /// Port the remote listener binds. None uses the 47420 default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_port: Option<u16>,
+    /// Traverse instance used while hosting. Absent in legacy files → official.
+    #[serde(default, skip_serializing_if = "TraverseSetting::is_default")]
+    pub traverse: TraverseSetting,
     /// Name this host advertises while pairing and on the discovery beacon.
     /// None uses the machine name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1086,7 +1107,7 @@ impl Default for Settings {
             project_sort: ProjectSort::default(),
             sidebar_layout: SidebarLayout::default(),
             remote_hosting_enabled: false,
-            remote_port: None,
+            traverse: TraverseSetting::default(),
             remote_host_name: None,
             last_visited: HashMap::new(),
             last_project_id: None,
@@ -1183,7 +1204,7 @@ impl Settings {
             }
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
             SettingsPatch::RemoteHostingEnabled(value) => self.remote_hosting_enabled = value,
-            SettingsPatch::RemotePort(value) => self.remote_port = value,
+            SettingsPatch::Traverse(value) => self.traverse = value,
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
         }
@@ -1356,8 +1377,10 @@ impl Settings {
         self.acp_agents.values().collect()
     }
 
-    /// Fold the pre-`providers` binary overrides into the map (once, on load).
+    /// Fold the pre-`providers` binary overrides into the map (once, on load)
+    /// and drop the port of the retired HTTP listener, which no build reads.
     pub fn migrate_legacy(&mut self) {
+        self.unknown.remove("remote_port");
         for (provider, legacy) in [
             (ProviderKind::Codex, self.codex_binary.take()),
             (ProviderKind::ClaudeCode, self.claude_binary.take()),
@@ -1386,7 +1409,7 @@ mod tests {
         assert!(!legacy.sidebar_provider_marks);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);
-        assert_eq!(legacy.remote_port, None);
+        assert_eq!(legacy.traverse, TraverseSetting::Official);
         assert_eq!(legacy.remote_host_name, None);
         assert!(legacy.profiles.is_empty());
         assert_eq!(legacy.title_generation.profile_id, None);
@@ -1947,6 +1970,45 @@ mod tests {
         );
         assert_eq!(back.get("another"), Some(&serde_json::json!("value")));
         assert_eq!(back.get("diff_view_mode"), Some(&serde_json::json!("line")));
+    }
+
+    /// A settings file written by the HTTP-listener builds names a port and no
+    /// Traverse mode. It must load as hosting on the official service with the
+    /// name kept, and the retired port must not be written back.
+    #[test]
+    fn hosting_settings_from_the_http_listener_builds_migrate_to_official_traverse() {
+        let mut legacy: Settings = serde_json::from_str(
+            r#"{"remote_hosting_enabled":true,"remote_port":47421,"remote_host_name":"Studio"}"#,
+        )
+        .unwrap();
+        legacy.migrate_legacy();
+        assert!(legacy.remote_hosting_enabled);
+        assert_eq!(legacy.traverse, TraverseSetting::Official);
+        assert_eq!(legacy.remote_host_name.as_deref(), Some("Studio"));
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        assert_eq!(written.get("remote_port"), None);
+        assert_eq!(written.get("traverse"), None, "the default is not written");
+
+        let custom: Settings = serde_json::from_str(
+            r#"{"traverse":{"mode":"custom","url":"https://traverse.example/"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            custom.traverse,
+            TraverseSetting::Custom {
+                url: "https://traverse.example/".into()
+            }
+        );
+        let off: Settings = serde_json::from_str(r#"{"traverse":{"mode":"off"}}"#).unwrap();
+        assert_eq!(off.traverse, TraverseSetting::Off);
+
+        let mut patched = Settings::default();
+        patched.apply(SettingsPatch::Traverse(TraverseSetting::Off));
+        assert_eq!(
+            serde_json::to_value(&patched).unwrap().get("traverse"),
+            Some(&serde_json::json!({"mode": "off"}))
+        );
     }
 }
 

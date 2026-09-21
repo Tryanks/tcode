@@ -390,15 +390,12 @@ fn main() {
                 local_settings.clone(),
             ));
             if local_settings.remote_hosting_enabled {
-                let port = local_settings
-                    .remote_port
-                    .unwrap_or(tcode_ui::remote::DEFAULT_REMOTE_PORT);
                 let name = local_settings
                     .remote_host_name
                     .clone()
                     .unwrap_or_else(machine_name);
                 cx.update_global::<RemoteController, _>(|controller, _| {
-                    if let Err(error) = controller.start_hosting(port, name) {
+                    if let Err(error) = controller.start_hosting(&local_settings.traverse, name) {
                         log::error!("remote hosting could not start: {error}");
                     }
                 });

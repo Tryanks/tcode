@@ -92,19 +92,13 @@ impl DeviceClaim {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientLine {
     /// Present an invitation's secret to join the allow list.
-    Pair {
-        secret: String,
-        device: DeviceClaim,
-    },
+    Pair { secret: String, device: DeviceClaim },
     Hello {
         protocol_version: u32,
         device: DeviceClaim,
     },
     /// Open a Preview tunnel; see the module documentation.
-    Connect {
-        host: String,
-        port: u16,
-    },
+    Connect { host: String, port: u16 },
 }
 
 /// Whether a `connect` line names something the machine will dial: a host

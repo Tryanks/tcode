@@ -34,8 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-pub const OFFICIAL_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/Tryanks/tcode/main/crates/traverse/src/traverse_manifest.json";
+pub const OFFICIAL_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Tryanks/tcode/main/crates/traverse/src/traverse_manifest.json";
 /// Debug builds may point the official fetch elsewhere (`file://` included)
 /// to exercise the fetch path before the manifest is published.
 #[cfg(debug_assertions)]
@@ -54,11 +53,7 @@ pub struct Manifest {
     pub version: u32,
     /// ISO-8601 UTC edit date. Same-format timestamps order lexicographically,
     /// and an undated manifest counts as older than any dated one.
-    #[serde(
-        rename = "updatedAt",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "updatedAt", default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     pub relays: Vec<ManifestRelay>,
     #[serde(default)]
@@ -321,7 +316,8 @@ impl ManifestState {
     /// its raw value for the cache.
     pub fn install(&mut self, now_ms: u64, body: &[u8]) -> Result<(Arc<Manifest>, Value), String> {
         let value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
-        let manifest = Arc::new(Manifest::from_value(value.clone()).map_err(|error| error.to_string())?);
+        let manifest =
+            Arc::new(Manifest::from_value(value.clone()).map_err(|error| error.to_string())?);
         self.manifest = Some(manifest.clone());
         self.fetched_at_ms = Some(now_ms);
         Ok((manifest, value))
@@ -689,7 +685,10 @@ mod tests {
             dir.join("traverse-manifest-official.json")
         );
         let base = ManifestSource::Custom(Url::parse("https://traverse.example/tcode").unwrap());
-        assert_eq!(base.url().as_str(), "https://traverse.example/tcode/relays.json");
+        assert_eq!(
+            base.url().as_str(),
+            "https://traverse.example/tcode/relays.json"
+        );
         assert_eq!(
             ManifestSource::Custom(Url::parse("https://traverse.example/").unwrap())
                 .url()
@@ -731,7 +730,11 @@ mod tests {
         assert_eq!(state.fetched_at_ms, None);
 
         // Same date or newer: adopted, together with its fetch time.
-        write_cache(&path, 42, &manifest_json(&bundle_date, "https://cached.example/"));
+        write_cache(
+            &path,
+            42,
+            &manifest_json(&bundle_date, "https://cached.example/"),
+        );
         let mut state = ManifestState::new(ManifestSource::Official);
         state.load_cache(&path);
         assert_eq!(first_relay(&state), "https://cached.example/");
@@ -866,10 +869,7 @@ mod tests {
         );
         // The next process starts from the cache.
         assert_eq!(
-            ManifestLoader::new(base, &dir)
-                .current()
-                .unwrap()
-                .relays[0]
+            ManifestLoader::new(base, &dir).current().unwrap().relays[0]
                 .url
                 .as_str(),
             "https://second.example/"

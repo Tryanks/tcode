@@ -95,8 +95,7 @@ fn attach(machine: &Machine) -> Device {
         .with_options(EndpointOptions { official: false });
     device.set_details("phone".into(), None);
     let minted = machine.host().new_invitation();
-    let paired: PairedHost =
-        tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();
+    let paired: PairedHost = tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();
     let transport = tcode_traverse::connect(&paired, &device);
     wait_state(&transport, ConnectionState::Syncing);
     let tunnels = transport.current_host.as_ref().unwrap().tunnels().unwrap();
