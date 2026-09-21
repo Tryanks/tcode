@@ -142,6 +142,10 @@ pub struct WindowState {
     /// [`Destination::Hosts`], the root the platform's Back gesture falls off.
     history: Vec<Destination>,
     pub palette_open: bool,
+    /// Whether the palette focuses its search input when it opens. A tap on
+    /// the search pill wants the keyboard; the mobile "+" button lists
+    /// projects to tap and must not raise it.
+    pub palette_focuses_query: bool,
     pub sidebar_collapsed: bool,
     pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
@@ -154,6 +158,7 @@ impl WindowState {
             compact: false,
             history: vec![Destination::Hosts],
             palette_open: false,
+            palette_focuses_query: true,
             sidebar_collapsed,
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
@@ -312,6 +317,15 @@ impl WindowState {
 
     pub fn open_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = true;
+        self.palette_focuses_query = true;
+        cx.notify();
+    }
+
+    /// Open the palette as a list to tap through, leaving the search input
+    /// unfocused so no software keyboard comes up.
+    pub fn open_palette_without_keyboard(&mut self, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        self.palette_focuses_query = false;
         cx.notify();
     }
 
