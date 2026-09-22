@@ -1,22 +1,20 @@
-//! Claude Code's model catalog, sourced from the t3code model manifest.
+//! Claude Code's model catalog, in the t3code model manifest format.
 //!
-//! `claude_model_manifest.json` is a verbatim copy of
+//! `claude_model_manifest.json` follows the shape of
 //! <https://raw.githubusercontent.com/pingdotgg/t3code/main/apps/server/src/provider/model-manifest.json>
 //! (t3code, MIT licensed) and ships with every release as the offline
-//! fallback. With the `process` feature, [`refresh`] re-fetches the same file
-//! and keeps the last good copy on disk in the tcode data dir. Preference
-//! order is remote, then disk cache, then bundle — except that a bundle whose
-//! `updatedAt` is newer than the cache outranks it, so a release can correct
-//! model data before the next fetch. Invalid data never replaces a usable
-//! catalog, and no failure here ever fails `list_models`.
+//! fallback. Two copies are maintained: t3code's and the one in this
+//! repository. With the `process` feature, [`refresh`] fetches both and keeps
+//! the last good copy on disk in the tcode data dir. Whichever manifest is
+//! newest by `updatedAt` wins, across the bundle, the disk cache and every
+//! remote source, so either side can ship a model first and a release can
+//! correct model data before the next fetch. Invalid data never replaces a
+//! usable catalog, and no failure here ever fails `list_models`.
 //!
-//! Upstream data is adopted as is: there is no local override table, and a
-//! model Tcode wants to describe differently is corrected upstream. Refresh the
-//! bundle by copying the upstream file over `claude_model_manifest.json`. A
-//! release that must ship a model before upstream lists it (Opus 5.5 at the
-//! time of writing) edits the bundle in the upstream shape and dates it; the
-//! `updatedAt` rule then keeps a stale remote copy from displacing it until
-//! upstream catches up.
+//! There is no local override table: an edit to this repository's copy is made
+//! in the upstream shape with a bumped `updatedAt`, and stays in effect until
+//! a newer manifest appears on either side. Bringing upstream changes in is a
+//! verbatim copy over `claude_model_manifest.json`.
 //!
 //! The catalog is process-shared state, as upstream: sessions resolve their
 //! launch flags and the UI resolves context windows against [`current`].
@@ -455,9 +453,6 @@ fn bundled() -> ClaudeCatalog {
 /// In-memory manifest plus the fetch bookkeeping that paces refreshes.
 pub(crate) struct ManifestState {
     catalog: Arc<ClaudeCatalog>,
-    /// `updatedAt` of the bundle this state started from: the floor a fetched
-    /// or cached manifest must reach to be adopted.
-    bundled_updated_at: Option<String>,
     /// Wall-clock millis of the fetch that produced `catalog`; `None` for the
     /// bundle. Persisted with the disk cache so a restart does not refetch.
     fetched_at_ms: Option<u64>,
@@ -482,7 +477,6 @@ pub(crate) fn current() -> Arc<ClaudeCatalog> {
 impl ManifestState {
     pub(crate) fn new(catalog: ClaudeCatalog) -> Self {
         Self {
-            bundled_updated_at: catalog.updated_at.clone(),
             catalog: Arc::new(catalog),
             fetched_at_ms: None,
             last_attempt_ms: None,
@@ -505,7 +499,17 @@ mod refresh {
 
     use super::{ClaudeCatalog, ManifestState, with_state};
 
-    const MANIFEST_URL: &str = "https://raw.githubusercontent.com/pingdotgg/t3code/main/apps/server/src/provider/model-manifest.json";
+    /// Every maintained copy of the manifest; the newest by `updatedAt` wins.
+    const MANIFEST_SOURCES: [(&str, &str); 2] = [
+        (
+            "t3code",
+            "https://raw.githubusercontent.com/pingdotgg/t3code/main/apps/server/src/provider/model-manifest.json",
+        ),
+        (
+            "tcode",
+            "https://raw.githubusercontent.com/Tryanks/tcode/main/crates/agent/src/claude_model_manifest.json",
+        ),
+    ];
     pub(super) const CACHE_FILE: &str = "claude-model-manifest.json";
     /// How long a fetched manifest stays fresh.
     pub(super) const TTL_MS: u64 = 60 * 60 * 1000;
@@ -568,25 +572,29 @@ mod refresh {
             true
         }
 
-        /// Replace the catalog with a fetched manifest; an undecodable or
-        /// invalid body leaves the current catalog in place. A valid manifest
-        /// older than the bundle by `updatedAt` is not adopted either, but it
-        /// still counts as a fetch so the TTL paces the next attempt.
-        pub(crate) fn install(&mut self, now_ms: u64, body: &[u8]) -> Result<Value, String> {
+        /// Adopt a fetched manifest when it is at least as new by `updatedAt`
+        /// as the catalog in effect; returns the adopted manifest. An
+        /// undecodable or invalid body leaves the catalog in place and is an
+        /// error. A valid but older manifest is `Ok(None)`: not adopted, but
+        /// it still counts as a fetch so the TTL paces the next attempt.
+        pub(crate) fn install(
+            &mut self,
+            now_ms: u64,
+            body: &[u8],
+        ) -> Result<Option<Value>, String> {
             let value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
             let catalog = ClaudeCatalog::from_value(value.clone())?;
-            if catalog.updated_at >= self.bundled_updated_at {
-                self.catalog = catalog.into();
-            } else {
-                log::info!("bundled Claude model manifest is newer than the remote copy");
-            }
             self.fetched_at_ms = Some(now_ms);
-            Ok(value)
+            if catalog.updated_at < self.catalog.updated_at {
+                return Ok(None);
+            }
+            self.catalog = catalog.into();
+            Ok(Some(value))
         }
     }
 
-    fn fetch() -> Result<Vec<u8>, String> {
-        let response = ureq::get(MANIFEST_URL)
+    fn fetch(url: &str) -> Result<Vec<u8>, String> {
+        let response = ureq::get(url)
             .set("User-Agent", "tcode")
             .timeout(FETCH_TIMEOUT)
             .call()
@@ -604,7 +612,8 @@ mod refresh {
     }
 
     /// Load the disk cache under `cache_dir` and, when the TTL allows and
-    /// `network` is on, fetch the remote manifest. Blocking; never fails.
+    /// `network` is on, fetch every remote manifest and keep the newest.
+    /// Blocking; never fails.
     pub(crate) fn refresh(cache_dir: Option<&Path>, network: bool) {
         let cache_path = cache_dir.map(|dir| dir.join(CACHE_FILE));
         let now = now_ms();
@@ -617,24 +626,32 @@ mod refresh {
         if !due {
             return;
         }
-        // The lock is not held across the fetch: `current()` must stay
-        // instant for the UI while a 10 s timeout plays out.
-        let installed = fetch().and_then(|body| with_state(|state| state.install(now, &body)));
-        match installed {
-            Ok(manifest) => {
-                let Some(path) = cache_path else { return };
-                let cache = CacheFile {
-                    fetched_at_ms: now,
-                    manifest,
-                };
-                if let Err(error) = serde_json::to_vec(&cache)
-                    .map_err(std::io::Error::other)
-                    .and_then(|bytes| std::fs::write(&path, bytes))
-                {
-                    log::warn!("failed to cache Claude model manifest: {error}");
+        // The lock is not held across a fetch: `current()` must stay
+        // instant for the UI while a 10 s timeout plays out. Sources are
+        // installed as they arrive; `install` only moves forward, so the
+        // last adoption is the newest manifest of the round.
+        let mut newest = None;
+        for (name, url) in MANIFEST_SOURCES {
+            match fetch(url).and_then(|body| with_state(|state| state.install(now, &body))) {
+                Ok(Some(manifest)) => newest = Some(manifest),
+                Ok(None) => {
+                    log::info!("{name} Claude model manifest is older than the current one")
                 }
+                Err(error) => log::warn!("{name} Claude model manifest refresh failed: {error}"),
             }
-            Err(error) => log::warn!("Claude model manifest refresh failed: {error}"),
+        }
+        let (Some(manifest), Some(path)) = (newest, cache_path) else {
+            return;
+        };
+        let cache = CacheFile {
+            fetched_at_ms: now,
+            manifest,
+        };
+        if let Err(error) = serde_json::to_vec(&cache)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| std::fs::write(&path, bytes))
+        {
+            log::warn!("failed to cache Claude model manifest: {error}");
         }
     }
 }
@@ -928,27 +945,66 @@ mod tests {
             assert_eq!(state.fetched_at_ms, None);
 
             let fresh = manifest_with("2031-01-01T00:00:00Z", "test-remote");
-            state.install(2_000, fresh.to_string().as_bytes()).unwrap();
+            let adopted = state.install(2_000, fresh.to_string().as_bytes()).unwrap();
+            assert_eq!(adopted, Some(fresh));
             assert_eq!(model_ids(&state)[0], "test-remote");
             assert_eq!(state.fetched_at_ms, Some(2_000));
         }
 
         #[test]
-        fn stale_fetch_keeps_the_newer_bundle() {
-            // The test catalog is dated 2030; a remote copy from 2029 is a
-            // valid manifest that predates the bundle.
+        fn the_newest_manifest_wins_whatever_its_source() {
+            // The test catalog (the bundle) is dated 2030; a remote copy from
+            // 2029 is a valid manifest that predates it.
             let mut state = fresh_state();
-            let stale = manifest_with("2029-12-31T23:59:59Z", "test-remote");
-            state.install(3_000, stale.to_string().as_bytes()).unwrap();
+            let stale = manifest_with("2029-12-31T23:59:59Z", "test-stale");
+            let adopted = state.install(3_000, stale.to_string().as_bytes()).unwrap();
+            assert_eq!(adopted, None);
             assert_eq!(model_ids(&state)[0], "test-wide");
             assert_eq!(state.fetched_at_ms, Some(3_000), "still paced by the TTL");
 
-            // Once the remote catches up it is adopted as before.
-            let current = manifest_with("2030-01-01T00:00:00Z", "test-remote");
-            state
-                .install(4_000, current.to_string().as_bytes())
-                .unwrap();
-            assert_eq!(model_ids(&state)[0], "test-remote");
+            // Same date as the current catalog: adopted.
+            let same = manifest_with("2030-01-01T00:00:00Z", "test-same");
+            assert!(
+                state
+                    .install(4_000, same.to_string().as_bytes())
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(model_ids(&state)[0], "test-same");
+
+            // Sources arrive in any order within a round: the newer one ends
+            // up in effect and the older is left alone, regardless of which
+            // repository served it.
+            let newer = manifest_with("2032-01-01T00:00:00Z", "test-newer");
+            let older = manifest_with("2031-01-01T00:00:00Z", "test-older");
+            assert!(
+                state
+                    .install(5_000, newer.to_string().as_bytes())
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                state
+                    .install(5_000, older.to_string().as_bytes())
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(model_ids(&state)[0], "test-newer");
+
+            let mut state = fresh_state();
+            assert!(
+                state
+                    .install(6_000, older.to_string().as_bytes())
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                state
+                    .install(6_000, newer.to_string().as_bytes())
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(model_ids(&state)[0], "test-newer");
         }
 
         #[test]
