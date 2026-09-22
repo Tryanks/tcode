@@ -383,10 +383,10 @@ pub struct ChatView {
 
 // ListState retains measured row heights, so variable-height turns use the same
 // pixel geometry as scrolling rather than treating a long turn as one short row.
-fn history_screens_covered(list: &ListState, placeholder: gpui::Pixels) -> Option<f32> {
+fn history_screens_covered(list: &ListState, leading: gpui::Pixels) -> Option<f32> {
     let height = list.viewport_bounds().size.height;
     (height > px(0.)).then(|| {
-        let above = -list.scroll_px_offset_for_scrollbar().y - placeholder;
+        let above = -list.scroll_px_offset_for_scrollbar().y - leading;
         f32::from(above.max(px(0.))) / f32::from(height)
     })
 }
@@ -720,26 +720,24 @@ impl ChatView {
                     capture.anchor.item_ix += count;
                     capture.origin.item_ix += count;
                 }
-                if self.history_placeholder_height > px(0.) {
-                    // The reservation moves to the new first turn. Remove it
-                    // from the former first turn without moving its content.
-                    self.list_state.remeasure_items(count..count + 1);
-                    if anchor.item_ix == 0 && !following {
-                        let into_reservation =
-                            self.history_placeholder_height - anchor.offset_in_item;
-                        let anchor = ListOffset {
-                            item_ix: count,
-                            offset_in_item: (-into_reservation).max(px(0.)),
-                        };
-                        self.list_state.scroll_to(anchor);
-                        // A reader inside the reservation keeps that pixel
-                        // position, which now belongs to the page above. A
-                        // list anchor cannot precede its row (rows above it
-                        // stay unpainted), so the next frame walks back over
-                        // the page once layout has measured it.
-                        if into_reservation > px(0.) {
-                            self.reservation_scroll_back = Some((anchor, into_reservation));
-                        }
+                // The edge padding and the reservation move to the new first
+                // turn. Remove them from the former first turn without moving
+                // its content.
+                self.list_state.remeasure_items(count..count + 1);
+                if anchor.item_ix == 0 && !following {
+                    let into_reservation = self.leading_space() - anchor.offset_in_item;
+                    let anchor = ListOffset {
+                        item_ix: count,
+                        offset_in_item: (-into_reservation).max(px(0.)),
+                    };
+                    self.list_state.scroll_to(anchor);
+                    // A reader inside the padding or the reservation keeps that
+                    // pixel position, which now belongs to the page above. A
+                    // list anchor cannot precede its row (rows above it stay
+                    // unpainted), so the next frame walks back over the page
+                    // once layout has measured it.
+                    if into_reservation > px(0.) {
+                        self.reservation_scroll_back = Some((anchor, into_reservation));
                     }
                 }
                 for index in remeasure {
@@ -757,6 +755,12 @@ impl ChatView {
             ListSync::Incremental { append, remeasure } => {
                 if let Some(range) = append {
                     let count = range.len();
+                    // The former last turn hands its edge padding to the new
+                    // one; its cached height must not keep it.
+                    if range.start > 0 {
+                        self.list_state
+                            .remeasure_items(range.start - 1..range.start);
+                    }
                     self.list_state.splice(range.start..range.start, count);
                 }
                 for index in remeasure {
@@ -2720,6 +2724,14 @@ fn markdown_entries_for_residency(
     }
 }
 
+impl ChatView {
+    /// Space above the first turn's content: the edge padding plus the history
+    /// reservation. Both move to the new first row when a page lands.
+    fn leading_space(&self) -> gpui::Pixels {
+        px(TIMELINE_EDGE_PADDING) + self.history_placeholder_height
+    }
+}
+
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.timeline_stale {
@@ -2752,7 +2764,7 @@ impl Render for ChatView {
             let _ = chat.update(cx, |chat, cx| {
                 if chat.capture.is_none()
                     && let Some(screens) =
-                        history_screens_covered(&chat.list_state, chat.history_placeholder_height)
+                        history_screens_covered(&chat.list_state, chat.leading_space())
                 {
                     chat.workspace_store.update(cx, |store, cx| {
                         store.update_history_window(screens, cx);
@@ -2891,7 +2903,12 @@ impl Render for ChatView {
                         item.rounded(crate::material::radius_card())
                             .bg(cx.theme().list_active)
                     })
-                    .when(index + 1 < item_count, |item| item.pb(px(TURN_GAP)))
+                    .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
+                    .pb(px(if index + 1 < item_count {
+                        TURN_GAP
+                    } else {
+                        TIMELINE_EDGE_PADDING
+                    }))
                     // `min_w_0`: a turn holds nowrap content (diff rows, command
                     // output). Without it this flex item grows to that content
                     // and the column runs past the page inset instead of
@@ -3213,6 +3230,14 @@ fn timeline_inset(cx: &App) -> gpui::Pixels {
 
 /// Desktop timeline inset above and below the list, in pixels.
 const TIMELINE_INSET: f32 = 8.;
+
+/// Padding inside the list on its first and last row, in pixels. Unlike
+/// `TIMELINE_INSET` it scrolls with the content: the header and composer still
+/// clip the timeline flush, but a reader at either end sees a little air
+/// between the edge turn and the chrome. It lives on the rows rather than on
+/// the List element, so the scrollbar, the wheel and tail-resume all measure
+/// the same extent.
+const TIMELINE_EDGE_PADDING: f32 = 8.;
 
 #[cfg(test)]
 mod tests {
@@ -4166,7 +4191,11 @@ mod tests {
                     let status = cx
                         .debug_bounds("working-status-29")
                         .expect("running status");
-                    assert_eq!(status.bottom(), last.bottom());
+                    // The row's own edge padding sits below the status.
+                    assert_eq!(
+                        status.bottom(),
+                        last.bottom() - px(super::TIMELINE_EDGE_PADDING)
+                    );
                 }
             }
         }
@@ -4783,14 +4812,18 @@ mod tests {
                 let _ = window.draw(cx);
             });
         }
-        let (list, placeholder) = view.read_with(cx, |chat, _| {
-            (chat.list_state.clone(), chat.history_placeholder_height)
+        let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
+            (
+                chat.list_state.clone(),
+                chat.history_placeholder_height,
+                chat.leading_space(),
+            )
         });
         assert!(placeholder > px(0.), "earlier history is still unloaded");
         list.set_follow_mode(FollowMode::Normal);
         list.scroll_to(ListOffset {
             item_ix: 0,
-            offset_in_item: placeholder + px(20.),
+            offset_in_item: leading + px(20.),
         });
         view.update(cx, |_, cx| cx.notify());
         cx.update(|window, cx| {
@@ -4837,21 +4870,25 @@ mod tests {
                 let _ = window.draw(cx);
             });
         }
-        let (list, placeholder) = view.read_with(cx, |chat, _| {
-            (chat.list_state.clone(), chat.history_placeholder_height)
+        let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
+            (
+                chat.list_state.clone(),
+                chat.history_placeholder_height,
+                chat.leading_space(),
+            )
         });
         assert!(placeholder > px(100.));
         list.set_follow_mode(FollowMode::Normal);
         // Scroll past the first content into the incoming page's reservation.
         list.scroll_to(ListOffset {
             item_ix: 0,
-            offset_in_item: placeholder - px(100.),
+            offset_in_item: leading - px(100.),
         });
         view.update(cx, |_, cx| cx.notify());
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        let content_top = list.bounds_for_item(0).unwrap().top() + placeholder;
+        let content_top = list.bounds_for_item(0).unwrap().top() + leading;
         assert!(
             content_top > list.viewport_bounds().top(),
             "scroll continues above loaded content"
