@@ -1026,7 +1026,7 @@ hosts:
     scan: "扫描二维码"
     paste: "粘贴邀请链接"
     bad_invite: "这不是有效的 Tcode 邀请链接。"
-    filled: "来自 %{name} 的邀请 · %{fingerprint}"
+    filled: "来自 %{name} 的邀请"
     connect_host: "连接到 %{name}"
     rejected: "机器拒绝了这个邀请。请确认已开启“接受新设备配对”，并使用新的邀请。"
     unconfirmed: "无法确认配对结果。请在机器上生成新的邀请后重试。"

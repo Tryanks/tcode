@@ -245,7 +245,7 @@ impl RemotePanel {
         let Some((request, generation)) = self.form.begin_pair(cx) else {
             return;
         };
-        let address = fingerprint(&request.host_id);
+        let address = request.name.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = client.pair(request).await;
@@ -600,11 +600,7 @@ impl RemotePanel {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!(
-                            "hosts.pair.filled",
-                            name = invite.name.clone(),
-                            fingerprint = fingerprint(&invite.host_id)
-                        )),
+                        .child(crate::tr!("hosts.pair.filled", name = invite.name.clone())),
                 )
             })
             .when(scannable, |column| {
@@ -746,12 +742,6 @@ pub(crate) fn device_label(name: &str, platform: Option<&str>) -> String {
         Some(platform) => format!("{name} · {platform}"),
         None => name.to_owned(),
     }
-}
-
-/// The leading characters of a machine id: enough to tell machines apart by
-/// eye, never the id itself.
-pub(crate) fn fingerprint(host_id: &str) -> String {
-    host_id.chars().take(8).collect()
 }
 
 /// A path's name, in a device's status column and under a machine's name:
