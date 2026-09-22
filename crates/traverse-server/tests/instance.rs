@@ -3,7 +3,8 @@
 //! pkarr store and talk through the relay. No external network.
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    time::{Duration, SystemTime},
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
 };
 
 use iroh::{
@@ -26,9 +27,14 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 async fn spawn(name: &str, configure: impl FnOnce(&mut Config)) -> Server {
     let mut config = Config::dev(temp_dir(name), SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
     configure(&mut config);
-    Server::spawn(
+    // The rate limiters see a frozen clock: buckets never refill, so the
+    // bursts below are consumed by request count alone, however long a
+    // slow CI disk takes between two requests.
+    let frozen = Instant::now();
+    Server::spawn_with_clock(
         config,
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+        Arc::new(move || frozen),
     )
     .await
     .expect("server binds ephemeral ports")
