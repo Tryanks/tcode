@@ -968,12 +968,15 @@ toast:
   hide_details: "Hide details"
   copy_error: "Copy error"
 remote:
-  allow_devices: "Allow other devices"
   apply: "Apply"
   host:
     section: "THIS MACHINE"
     title: "Let other devices connect to this machine"
     description: "Open this machine's projects and threads from other devices."
+  pairing:
+    title: "Accept new devices"
+    description: "New devices can pair with an invitation."
+    off: "Pairing is off; paired devices keep working."
   host_name:
     title: "Machine name"
     description: "Shown to other devices."
@@ -1050,9 +1053,9 @@ hosts:
     bad_invite: "That is not a Tcode invitation link."
     filled: "Invitation from %{name} · %{fingerprint}"
     connect_host: "Connect to %{name}"
-    rejected: "The machine rejected this invitation. Check that Allow other devices is enabled and use a new invitation."
+    rejected: "The machine rejected this invitation. Check that Accept new devices is on and use a new invitation."
     unconfirmed: "The pairing result could not be confirmed. Create a new invitation on the machine and try again."
-    disabled: "This machine is not accepting new device pairings. Turn on Allow other devices there and try again."
+    disabled: "This machine is not accepting new device pairings. Turn on Accept new devices there and try again."
     network_error: "Could not reach %{address}."
     failed: "Could not add the machine: %{reason}"
 

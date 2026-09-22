@@ -111,7 +111,7 @@ impl HostedPanel {
                         .flex_row_reverse()
                         .justify_between()
                         .checked(state.enabled)
-                        .label(crate::tr!("remote.allow_devices"))
+                        .label(crate::tr!("remote.pairing.title"))
                         .disabled(self.pending)
                         .on_click(cx.listener(|panel, enabled: &bool, _, cx| {
                             panel.request(HostingAction::SetEnabled(*enabled), cx)
@@ -180,6 +180,16 @@ impl HostedPanel {
                 row = row.children(super::qr::qr_element(link));
             }
             column = column.child(crate::material::group(cx).child(row));
+        } else {
+            column = column.child(
+                crate::material::group(cx).child(
+                    div()
+                        .p_3()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::tr!("remote.pairing.off")),
+                ),
+            );
         }
         column = column.child(
             div()
