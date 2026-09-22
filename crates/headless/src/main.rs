@@ -183,7 +183,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     if traverse_host.pairing_enabled() {
         print_invitation(&traverse_host.new_invitation())?;
     } else {
-        println!("Pairing disabled; enable Allow other devices from a paired client");
+        println!("Pairing disabled; enable Accept new devices from a paired client");
     }
     println!(
         "{}",
