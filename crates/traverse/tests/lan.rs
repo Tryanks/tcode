@@ -1,10 +1,9 @@
-//! Finding a paired machine again on the LAN: unicast probes over loopback
-//! with no multicast dependence, and, opted into with `TCODE_TEST_MDNS=1`,
+//! Finding a paired machine again on the LAN: the saved addresses over
+//! loopback with the browse off, and, opted into with `TCODE_TEST_MDNS=1`,
 //! a real DNS-SD advertise and browse on this host's interfaces.
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     path::PathBuf,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -13,7 +12,7 @@ use iroh::address_lookup::AddressLookup as _;
 use tcode_client::{ConnectionState, host::Transport, pairing::PairedHost};
 use tcode_traverse::{
     DeviceIdentity, HostConfig, HostMux, TraverseHost, TraverseMode,
-    lan::{self, Browse, DEFAULT_PORT, LanLookup, LanOptions, LocalNetwork},
+    lan::{self, Browse, LanLookup, LanOptions},
 };
 
 struct TestDir(PathBuf);
@@ -62,92 +61,152 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn wait_state(transport: &Transport, wanted: ConnectionState, budget: Duration) -> Duration {
+/// The states seen until `wanted` matches, and how long that took.
+fn wait_state(
+    transport: &Transport,
+    wanted: impl Fn(&ConnectionState) -> bool,
+    budget: Duration,
+) -> (Vec<ConnectionState>, Duration) {
     let started = Instant::now();
     let mut seen = Vec::new();
     while started.elapsed() < budget {
         if let Ok(state) = transport.state.try_recv() {
-            if state == wanted {
-                return started.elapsed();
+            if wanted(&state) {
+                return (seen, started.elapsed());
             }
             seen.push(state);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("did not observe state {wanted:?}; saw {seen:?}");
+    panic!("did not observe the wanted state; saw {seen:?}");
 }
 
-/// The saved addresses no longer work — the machine restarted on another
-/// port — multicast is unavailable, and the device is on the loopback /24:
-/// the first probe page carries the machine and the handshake completes
-/// against a page of 32 addresses at two ports. The device claims
-/// `127.0.0.2` so that `127.0.0.1`, the one loopback address macOS
-/// answers on, is probed rather than excluded as its own; on macOS one
-/// address of the 64 works, on Linux every one at the right port does.
-/// Needs UDP 47420 free: the probes only know the default port.
-#[test]
-fn a_moved_machine_is_reached_through_the_first_probe_page() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let host_dir = TestDir::new("probe-host");
-    let host = start_host(&host_dir, Some(DEFAULT_PORT));
-    let device_dir = TestDir::new("probe-device");
-    let pairing = DeviceIdentity::load_or_create(&device_dir.0).unwrap();
-    pairing.set_details("probe".into(), None);
+/// A device paired with `host` whose `hosts.json` lists `addrs` for it, as
+/// a fresh launch sees it: the endpoint that paired is gone, the browse is
+/// off, so the saved addresses are the whole lookup.
+fn relaunched_device(
+    host: &TraverseHost,
+    dir: &TestDir,
+    addrs: Vec<String>,
+) -> (DeviceIdentity, PairedHost) {
+    let pairing = DeviceIdentity::load_or_create(&dir.0).unwrap();
+    pairing.set_details("device".into(), None);
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &pairing).unwrap();
-    // The endpoint that paired remembers the path it used; the launch under
-    // test is a fresh one with the same key.
     drop(pairing);
-    let device = DeviceIdentity::load_or_create(&device_dir.0).unwrap();
+    let device = DeviceIdentity::load_or_create(&dir.0).unwrap();
     device.set_lan_options(LanOptions {
         browse: Browse::Off,
-        networks: Arc::new(|| {
-            vec![LocalNetwork {
-                name: "lo0".into(),
-                ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
-                prefix: 24,
-            }]
-        }),
         multicast_lock: None,
     });
-    let stale = PairedHost {
-        addrs: vec![format!("127.0.0.1:{}", free_port())],
-        ..paired
-    };
-    tcode_traverse::hosts::save_hosts(&device_dir.0, std::slice::from_ref(&stale)).unwrap();
+    let saved = PairedHost { addrs, ..paired };
+    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&saved)).unwrap();
+    (device, saved)
+}
 
-    let started = Instant::now();
-    let client = tcode_traverse::connect(&stale, &device);
-    let took = wait_state(&client, ConnectionState::Syncing, Duration::from_secs(15));
-    eprintln!("connected through a probe page in {took:?}");
+/// Every saved address is stale — the machine restarted on another port —
+/// and the browse is off: the device does not connect. There is no further
+/// source to fall back on, on loopback or anywhere else.
+#[test]
+fn stale_addresses_without_a_browse_do_not_reach_the_machine() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let host_dir = TestDir::new("stale-host");
+    let host = start_host(&host_dir, Some(free_port()));
+    let device_dir = TestDir::new("stale-device");
+    let (device, saved) = relaunched_device(
+        &host,
+        &device_dir,
+        vec![
+            format!("127.0.0.1:{}", free_port()),
+            format!("127.0.0.1:{}", free_port()),
+        ],
+    );
+
+    let client = tcode_traverse::connect(&saved, &device);
+    let (mut seen, took) = wait_state(
+        &client,
+        |state| matches!(state, ConnectionState::Reconnecting { .. }),
+        Duration::from_secs(40),
+    );
+    eprintln!("first attempt failed after {took:?}; saw {seen:?}");
+    // The retries that follow have nothing new to try either.
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        if let Ok(state) = client.state.try_recv() {
+            seen.push(state);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !seen
+            .iter()
+            .any(|state| matches!(state, ConnectionState::Syncing | ConnectionState::Connected)),
+        "the device connected without a working address: {seen:?}"
+    );
+    assert!(
+        host.devices().iter().all(|device| device.live.is_none()),
+        "the machine sees a device: {:?}",
+        host.devices()
+    );
+    client.to_host.close();
+    host.shutdown();
+}
+
+/// The address that last worked is stale, but the machine's current one is
+/// further down the saved list: the device connects through it, and the
+/// path that carried the connection — the machine's port, at whichever of
+/// its addresses answered — moves to the front for the next launch.
+#[test]
+fn a_saved_address_further_down_the_list_reaches_the_machine() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let host_dir = TestDir::new("saved-host");
+    let port = free_port();
+    let host = start_host(&host_dir, Some(port));
+    let device_dir = TestDir::new("saved-device");
+    let current = format!("127.0.0.1:{port}");
+    let (device, saved) = relaunched_device(
+        &host,
+        &device_dir,
+        vec![
+            format!("127.0.0.1:{}", free_port()),
+            format!("127.0.0.1:{}", free_port()),
+            current.clone(),
+        ],
+    );
+
+    let client = tcode_traverse::connect(&saved, &device);
+    let (_, took) = wait_state(
+        &client,
+        |state| *state == ConnectionState::Syncing,
+        Duration::from_secs(15),
+    );
+    eprintln!("connected through a saved address in {took:?}");
     assert!(
         took < Duration::from_secs(5),
-        "the probe page stalled the handshake: {took:?}"
+        "the stale addresses stalled the handshake: {took:?}"
     );
     let reached = host.devices();
     assert!(
         reached[0].live.as_ref().is_some_and(|path| path.direct),
         "the machine sees a direct path: {reached:?}"
     );
-    // The address that worked replaces the stale one for the next launch.
     let saved = tcode_traverse::hosts::load_hosts(&device_dir.0).unwrap();
     assert!(
         saved[0]
             .addrs
             .first()
-            .is_some_and(|addr| addr.ends_with(&format!(":{DEFAULT_PORT}"))),
+            .is_some_and(|addr| addr.ends_with(&format!(":{port}"))),
         "{:?}",
         saved[0].addrs
     );
-    assert!(started.elapsed() < Duration::from_secs(10));
     client.to_host.close();
     host.shutdown();
 }
 
-/// The saved addresses come first and at once; with the browse off and no
-/// private network attached, that is the whole resolve.
+/// The saved addresses come first and at once; with the browse off, that is
+/// the whole resolve.
 #[test]
-fn saved_addresses_are_yielded_first_and_probes_need_an_attached_network() {
+fn saved_addresses_are_the_whole_resolve_with_the_browse_off() {
     let id = iroh::SecretKey::from_bytes(&[3; 32]).public();
     let saved: Vec<SocketAddr> = vec!["10.0.0.9:47421".parse().unwrap()];
     let lookup = LanLookup::new(
@@ -163,7 +222,6 @@ fn saved_addresses_are_yielded_first_and_probes_need_an_attached_network() {
         },
         LanOptions {
             browse: Browse::Off,
-            networks: Arc::new(Vec::new),
             multicast_lock: None,
         },
     );
@@ -204,7 +262,6 @@ fn a_machine_advertises_dns_sd_that_a_device_browses() {
         |_| Vec::new(),
         LanOptions {
             browse: Browse::DnsSd,
-            networks: Arc::new(Vec::new),
             multicast_lock: None,
         },
     );

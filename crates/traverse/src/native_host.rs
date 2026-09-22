@@ -56,14 +56,12 @@ impl NativeClientHost {
                 let device = DeviceIdentity::load_or_create(&self.data_dir).map_err(|error| {
                     format!("could not open {}: {error}", crate::identity::DEVICE_FILE)
                 })?;
-                let defaults = LanOptions::default();
                 device.set_lan_options(LanOptions {
-                    browse: match (&self.system_browser, defaults.browse) {
-                        (Some(browser), Browse::DnsSd) => Browse::System(browser.clone()),
-                        (_, browse) => browse,
+                    browse: match &self.system_browser {
+                        Some(browser) => Browse::System(browser.clone()),
+                        None => Browse::DnsSd,
                     },
                     multicast_lock: self.multicast_lock.clone(),
-                    ..defaults
                 });
                 Ok(device)
             })
