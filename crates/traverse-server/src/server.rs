@@ -54,6 +54,17 @@ impl Server {
     /// Binds every listener. `updated_at` is the manifest's `updatedAt`:
     /// the config file's modification time, or the process start.
     pub async fn spawn(config: Config, updated_at: SystemTime) -> io::Result<Self> {
+        Self::spawn_with_clock(config, updated_at, pkarr::system_clock()).await
+    }
+
+    /// [`Self::spawn`] with the clock the pkarr rate limiters read. Tests
+    /// freeze it so their request sequence, not the host's disk speed,
+    /// decides which request is refused.
+    pub async fn spawn_with_clock(
+        config: Config,
+        updated_at: SystemTime,
+        clock: pkarr::Clock,
+    ) -> io::Result<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         std::fs::create_dir_all(&config.data_dir)?;
         let tls = Tls::load(&config).await?.map(Arc::new);
@@ -105,8 +116,16 @@ impl Server {
         let pkarr_metrics = Arc::new(PkarrMetrics::default());
         let pkarr = Arc::new(PkarrService {
             store: Store::open(&config.data_dir.join("pkarr.redb"))?,
-            put_limiter: RateLimiter::new(config.pkarr.put_per_second, config.pkarr.put_burst),
-            get_limiter: RateLimiter::new(config.pkarr.get_per_second, config.pkarr.get_burst),
+            put_limiter: RateLimiter::new(
+                config.pkarr.put_per_second,
+                config.pkarr.put_burst,
+                clock.clone(),
+            ),
+            get_limiter: RateLimiter::new(
+                config.pkarr.get_per_second,
+                config.pkarr.get_burst,
+                clock,
+            ),
             trust_forwarded_for: config.http.trust_forwarded_for,
             metrics: pkarr_metrics.clone(),
         });
