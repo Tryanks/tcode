@@ -789,23 +789,25 @@ Traverse mode, so a paired machine is found again after a new DHCP lease,
 after both moved to another network, or after a restart, on a LAN with no
 internet and no Traverse. There is still no list of nearby machines: the
 device only ever resolves the ids it is already paired with, and only the
-machine advertises. Each attempt to connect tries exactly three things, in
-this order, and nothing else:
+machine advertises. Each attempt to connect uses exactly two sources, and
+nothing else:
 
-1. The direct address that carried the last successful connection.
-2. Every other address saved for that machine, in the order `hosts.json`
-   keeps them: newest first, the invitation's hints last.
-3. A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) for about
-   2.5 seconds. A machine advertises one instance of that type while it
-   hosts — desktop and headless alike, in every Traverse mode — with its
-   bound UDP port and a TXT record `v=1`, `id=<machine id>`,
-   `name=<machine name>`; loopback is never advertised, and the record
-   follows the machine's interfaces as they change. The device keeps only the
-   instance whose `id` is the machine it wants. This is a standard
-   advertisement, so `dns-sd -B _tcode._udp` on macOS or Android's
-   `NsdManager` list it too; on iOS the app browses through the system's
-   Bonjour daemon (the `NSBonjourServices` entry in `Info.plist`), and on
-   Android it holds the Wi-Fi multicast lock for the browse.
+- The addresses saved for that machine, handed over at once and dialled
+  together, in the order `hosts.json` keeps them: the address that carried
+  the last successful connection first, older ones after it, the
+  invitation's hints last.
+- A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) that runs at
+  the same time for about 2.5 seconds and adds every address it finds for
+  the machine as it resolves. A machine advertises one instance of that
+  type while it hosts — desktop and headless alike, in every Traverse mode
+  — with its bound UDP port and a TXT record `v=1`, `id=<machine id>`,
+  `name=<machine name>`; loopback is never advertised, and the record
+  follows the machine's interfaces as they change. The device keeps only the
+  instance whose `id` is the machine it wants. This is a standard
+  advertisement, so `dns-sd -B _tcode._udp` on macOS or Android's
+  `NsdManager` list it too; on iOS the app browses through the system's
+  Bonjour daemon (the `NSBonjourServices` entry in `Info.plist`), and on
+  Android it holds the Wi-Fi multicast lock for the browse.
 
 A candidate address is never authorization: the QUIC handshake verifies the
 machine's key, so nothing but the machine can answer. The lookup ends as soon

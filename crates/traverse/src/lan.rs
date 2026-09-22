@@ -1,10 +1,11 @@
 //! Finding a paired machine on the local network without any service: the
 //! machine advertises standard DNS-SD, and the device resolves a paired id
-//! through iroh's [`AddressLookup`] extension point from exactly three
-//! sources in turn — the address that carried the last connection, every
-//! other address it saved for that machine, and a DNS-SD browse for its id.
-//! Nothing else is tried. A candidate address is never authorization: the
-//! QUIC handshake verifies the machine's key. The device publishes nothing.
+//! through iroh's [`AddressLookup`] extension point from exactly two
+//! sources — the addresses it saved for that machine, handed over at once
+//! with the one that carried the last connection first, and a DNS-SD browse
+//! for its id that runs meanwhile and adds what it finds. Nothing else is
+//! tried. A candidate address is never authorization: the QUIC handshake
+//! verifies the machine's key. The device publishes nothing.
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
