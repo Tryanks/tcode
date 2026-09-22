@@ -24,7 +24,6 @@ use crate::orchestrate_settings::OrchestrateSettingsPanel;
 use crate::provider_card::ProviderCard;
 use crate::provider_model_picker::ProviderModelPicker;
 use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode};
-use crate::sizing::fit_viewport;
 use crate::store::WorkspaceStore;
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
 use crate::time::{humanize_ago, now_secs};
@@ -702,19 +701,21 @@ impl SettingsPage {
         self.acp_panel
             .update(cx, |panel, cx| panel.prepare_to_open(cx));
         let panel = self.acp_panel.clone();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let panel = panel.clone();
-            // The catalog is a viewport of its own, so cap it against the window
-            // rather than a desktop-sized constant.
-            let body = fit_viewport(456., window.viewport_size().height - px(200.));
             dialog
                 .w(px(620.))
-                // Opaque T3 panel: the library default paints the translucent
-                // glass canvas, which lets the page bleed through.
                 .bg(cx.theme().popover)
                 .shadow_xl()
                 .title(crate::tr!("providers.acp.add_agent").into_owned())
-                .content(move |content, _, _| content.h(body).child(panel.clone()))
+                .content(move |content, _, _| {
+                    content.h(px(456.)).child(
+                        div()
+                            .debug_selector(|| "add-agent-body".into())
+                            .size_full()
+                            .child(panel.clone()),
+                    )
+                })
         });
     }
 
@@ -3009,6 +3010,59 @@ mod tests {
             self.page
                 .update(cx, |page, cx| page.render_compact_list(cx))
         }
+    }
+
+    #[gpui::test]
+    fn add_agent_dialog_keeps_catalog_and_custom_action_inside(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-agent-dialog-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                host.link(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let mut page_handle = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let page = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page_handle = Some(page.clone());
+            crate::overlay::OverlayHost::new(page, window, cx)
+        });
+        cx.update(|window, cx| {
+            page_handle
+                .unwrap()
+                .update(cx, |page, cx| page.open_acp_dialog(window, cx));
+        });
+        for (width, height) in [(1000., 780.), (393., 600.), (360., 480.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+            let body = cx.debug_bounds("add-agent-body").unwrap();
+            let custom = cx.debug_bounds("acp-custom-open").unwrap();
+            assert!(
+                custom.bottom() <= body.bottom(),
+                "custom action {custom:?} exceeds body {body:?}"
+            );
+            assert!(custom.right() <= body.right());
+            assert!(body.bottom() < px(height));
+        }
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
