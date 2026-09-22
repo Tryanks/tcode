@@ -995,6 +995,7 @@ remote:
     section: "CONNECTED DEVICES"
     empty: "No devices have connected yet."
     revoke: "Remove"
+    revoke_failed: "Could not remove the device; it is still paired: %{error}"
   path:
     lan: "LAN"
     tunnel: "Tunnel"

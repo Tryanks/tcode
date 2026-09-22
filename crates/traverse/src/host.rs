@@ -18,7 +18,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, encode_secret, pair_url};
-use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
+use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo, ProtocolError};
 use url::Url;
 
 use crate::{
@@ -302,13 +302,15 @@ impl TraverseHost {
     }
 
     /// Remove a device and close every connection it holds. A new
-    /// connection from it is refused from this call on.
-    pub fn revoke(&self, id: &str) {
-        self.shared.revoke(id);
+    /// connection from it is refused from this call on. When the allow list
+    /// cannot be written the device stays paired and connected, so a
+    /// revocation never appears to have happened without lasting.
+    pub fn revoke(&self, id: &str) -> io::Result<()> {
+        self.shared.revoke(id)
     }
 
     /// Answer a hosting query from a client of any transport.
-    pub fn hosting(&self, action: HostingAction) -> HostingState {
+    pub fn hosting(&self, action: HostingAction) -> Result<HostingState, ProtocolError> {
         self.shared.hosting(action)
     }
 
@@ -500,12 +502,16 @@ impl Shared {
             .collect()
     }
 
-    fn revoke(&self, id: &str) {
+    fn revoke(&self, id: &str) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
-        if state.identity.remove(id)
-            && let Err(error) = state.identity.save()
-        {
+        let previous = state.identity.clone();
+        if !state.identity.remove(id) {
+            return Ok(());
+        }
+        if let Err(error) = state.identity.save() {
             log::error!("could not persist the revocation: {error}");
+            state.identity = previous;
+            return Err(error);
         }
         let closed = id
             .parse::<EndpointId>()
@@ -515,9 +521,10 @@ impl Shared {
         for connection in closed {
             connection.close(3_u32.into(), b"revoked");
         }
+        Ok(())
     }
 
-    fn hosting(self: &Arc<Self>, action: HostingAction) -> HostingState {
+    fn hosting(self: &Arc<Self>, action: HostingAction) -> Result<HostingState, ProtocolError> {
         match action {
             HostingAction::State => {}
             HostingAction::SetEnabled(enabled) => {
@@ -531,7 +538,7 @@ impl Shared {
                     self.mint();
                 }
             }
-            HostingAction::RevokeDevice(id) => self.revoke(&id),
+            HostingAction::RevokeDevice(id) => self.revoke(&id).map_err(revoke_error)?,
         }
         let addr = self.snapshot();
         let state = self.state.lock().unwrap();
@@ -540,7 +547,7 @@ impl Shared {
             .current_invitation(&state, &addr)
             .map(|(invitation, remaining)| (Some(invitation.url()), remaining.as_secs()))
             .unwrap_or((None, 0));
-        HostingState {
+        Ok(HostingState {
             enabled,
             expires_in_secs,
             host_id: addr.id,
@@ -564,7 +571,7 @@ impl Shared {
                         .map(path_info),
                 })
                 .collect(),
-        }
+        })
     }
 
     /// Exchange an invitation's secret for a place on the allow list.
@@ -675,6 +682,17 @@ impl Shared {
 
     fn host_name(&self) -> String {
         self.state.lock().unwrap().identity.host_name.clone()
+    }
+}
+
+/// A revocation the machine could not record, as the hosting query reports
+/// it: the device is still paired.
+pub(crate) fn revoke_error(error: io::Error) -> ProtocolError {
+    ProtocolError {
+        code: "revoke_failed".into(),
+        message: format!(
+            "the machine could not record the revocation; the device is still paired: {error}"
+        ),
     }
 }
 
@@ -985,9 +1003,10 @@ impl StreamTask {
                     {
                         let reply = tcode_protocol::HostMessage::QueryResult {
                             id,
-                            result: Ok(tcode_protocol::QueryResponse::Hosting(
-                                self.shared.hosting(action),
-                            )),
+                            result: self
+                                .shared
+                                .hosting(action)
+                                .map(tcode_protocol::QueryResponse::Hosting),
                         };
                         let reply = tcode_protocol::encode_line(&reply)
                             .map_err(|error| io::Error::other(error.message))?;

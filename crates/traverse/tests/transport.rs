@@ -522,6 +522,10 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     host.shutdown();
 }
 
+/// A revocation is durable or it did not happen: while the allow list
+/// cannot be written, the device stays listed, its connection stays open and
+/// it is still admitted, and the caller is told. Once it is written, the
+/// live connection closes and a reconnect is refused.
 #[test]
 fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     let host_dir = TestDir::new("revoke-host");
@@ -537,7 +541,33 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     recv_type(&client, "ack", Some(1));
     assert!(host.devices()[0].live.is_some());
 
-    host.revoke(&phone.endpoint_id().to_string());
+    // The allow list is written through `traverse.tmp`; a directory in its
+    // place fails the write on every platform, root or not.
+    let blocker = host_dir.0.join("traverse.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let error = host
+        .revoke(&phone.endpoint_id().to_string())
+        .expect_err("the revocation cannot be recorded");
+    assert!(
+        matches!(
+            host.hosting(tcode_protocol::HostingAction::RevokeDevice(
+                phone.endpoint_id().to_string()
+            )),
+            Err(tcode_protocol::ProtocolError { code, message })
+                if code == "revoke_failed" && message.contains(&error.to_string())
+        ),
+        "a client's revoke is answered with the failure"
+    );
+    assert_eq!(host.devices().len(), 1, "still paired: {error}");
+    assert!(host.devices()[0].live.is_some(), "still connected");
+    client.to_host.send_blocking(subscribe(2)).unwrap();
+    recv_type(&client, "ack", Some(2));
+    let again = tcode_traverse::connect(&paired, &phone);
+    wait_state(&again, ConnectionState::Syncing);
+    again.to_host.close();
+    std::fs::remove_dir(&blocker).unwrap();
+
+    host.revoke(&phone.endpoint_id().to_string()).unwrap();
     wait_state(
         &client,
         ConnectionState::Offline {
