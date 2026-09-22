@@ -196,7 +196,7 @@ impl Composer {
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.interactive(cx) && !self.compact && !crate::window_seam::is_mobile(cx) {
+        if self.interactive(cx) && !crate::window_seam::is_mobile(cx) {
             self.input.update(cx, |input, cx| input.focus(window, cx));
         }
     }
@@ -204,6 +204,11 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn input_focus_handle(&self, cx: &App) -> gpui::FocusHandle {
         self.input.read(cx).focus_handle(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn model_search_focus_handle(&self, cx: &App) -> gpui::FocusHandle {
+        self.model_search.read(cx).focus_handle(cx)
     }
 
     #[cfg(test)]
@@ -468,7 +473,7 @@ impl Composer {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
-            if !self.compact && !crate::window_seam::is_mobile(cx) {
+            if !crate::window_seam::is_mobile(cx) {
                 state.focus(window, cx);
             }
         });
@@ -491,7 +496,7 @@ impl Composer {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(selection, cx);
-            if !self.compact && !crate::window_seam::is_mobile(cx) {
+            if !crate::window_seam::is_mobile(cx) {
                 state.focus(window, cx);
             }
         });
