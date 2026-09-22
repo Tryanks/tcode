@@ -43,6 +43,9 @@ cert = ""
 key = ""
 # ACME directory URL; unset means Let's Encrypt production.
 # acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+# Port in the advertised https://<hostname> URL; unset means the tls.bind
+# port. Set 443 when a reverse proxy on 443 forwards TLS to tls.bind.
+# public_port = 443
 
 [relay]
 # QUIC address discovery lets clients learn their public address. It needs
@@ -146,6 +149,10 @@ pub struct TlsConfig {
     /// ACME directory other than Let's Encrypt production (staging, pebble).
     #[serde(default)]
     pub acme_directory: Option<String>,
+    /// Port advertised in the manifest URLs when it differs from `bind`, for
+    /// a TLS listener behind a proxy that forwards a public port to it.
+    #[serde(default)]
+    pub public_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -275,6 +282,7 @@ impl Default for TlsConfig {
             cert: String::new(),
             key: String::new(),
             acme_directory: None,
+            public_port: None,
         }
     }
 }
