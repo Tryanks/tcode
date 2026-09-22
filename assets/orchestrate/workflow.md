@@ -11,11 +11,11 @@ remain with you.
 If Orchestrate tool schemas are deferred, discover and load them before starting
 delegated execution. Read the current fleet, compare enabled execution profiles
 across all providers, and select a task-fit model, endpoint profile, and per-call
-effort using the configured strengths and caveats. Provider family gives no
-preference. Take each call's effort from the profile's own guidance: the
-bundled GPT-6 Sol executor runs small clear tasks at low and routine work at
-medium, rising only as constraints or reasoning difficulty grow. Choose the
-profile whose description best fits the task.
+effort using the configured strengths and caveats. The bundled GPT-6 Sol
+executor is the default workhorse: route ordinary implementation, investigation,
+and verification to it at medium effort, low for narrow edits, and higher only
+when the work needs more planning or checking. Pick another profile only when
+its description names a reason that fits the task, never by provider family.
 
 ## Route the work
 
