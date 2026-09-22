@@ -89,14 +89,18 @@ the limits count the client, not the proxy.
 An instance can keep its relay for the clients that are close to it. With
 `[lock] enabled = true` a relay connection is admitted when its TCP RTT is at
 most `home_rtt_max_ms`, or its address is in `allow_cidrs`; every other client
-shares `far_connection_quota` concurrent connections and is refused, with a
-reason the client shows, once that is used up.
+shares `far_connection_quota` concurrent connections and is refused once that
+is used up.
 
 iroh-relay only hands the access hook the HTTP upgrade request, not the
-socket, so the lock reads headers a reverse proxy adds: `X-TCP-RTT` in
-microseconds and `X-Forwarded-For`. **It does nothing useful without such a
-proxy** — every client then counts as far — and it is off by default. With
-nginx in front of `tls.mode = "off"` and `[http] bind = "127.0.0.1:8080"`:
+socket, so RTT and address are read from headers a reverse proxy adds:
+`X-TCP-RTT` in microseconds and `X-Forwarded-For`. A client can send those
+headers itself, so they are read only with `trust_proxy_headers = true`,
+which is meaningful only behind a reverse proxy that overwrites both.
+Without it every client counts as far and only the quota applies; a config
+with the lock on, the headers untrusted and a quota of `0` is rejected at
+start. With nginx in front of `tls.mode = "off"` and
+`[http] bind = "127.0.0.1:8080"`:
 
 ```nginx
 location /relay {
