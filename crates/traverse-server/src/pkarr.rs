@@ -139,12 +139,22 @@ impl Store {
     }
 }
 
+/// The limiter's source of time. Production reads `Instant::now`; a test
+/// freezes it so a slow disk between two requests cannot refill a bucket
+/// the test expects to be empty.
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+pub fn system_clock() -> Clock {
+    Arc::new(Instant::now)
+}
+
 /// A token bucket per client address: `burst` tokens, refilled at
 /// `per_second`. Idle buckets are dropped once the table grows past
 /// `PRUNE_ABOVE` entries.
 pub struct RateLimiter {
     per_second: f64,
     burst: f64,
+    clock: Clock,
     buckets: Mutex<HashMap<IpAddr, Bucket>>,
 }
 
@@ -156,15 +166,20 @@ struct Bucket {
 const PRUNE_ABOVE: usize = 4096;
 
 impl RateLimiter {
-    pub fn new(per_second: u32, burst: u32) -> Self {
+    pub fn new(per_second: u32, burst: u32, clock: Clock) -> Self {
         Self {
             per_second: f64::from(per_second),
             burst: f64::from(burst),
+            clock,
             buckets: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn allow(&self, ip: IpAddr, now: Instant) -> bool {
+    pub fn allow(&self, ip: IpAddr) -> bool {
+        self.allow_at(ip, (self.clock)())
+    }
+
+    pub fn allow_at(&self, ip: IpAddr, now: Instant) -> bool {
         let mut buckets = self.buckets.lock().expect("rate limiter lock");
         if buckets.len() > PRUNE_ABOVE {
             let (per_second, burst) = (self.per_second, self.burst);
@@ -273,7 +288,7 @@ async fn get_packet(
     headers: HeaderMap,
 ) -> Response {
     let ip = client_ip(&headers, peer, service.trust_forwarded_for);
-    if !service.get_limiter.allow(ip, Instant::now()) {
+    if !service.get_limiter.allow(ip) {
         service.metrics.get_rate_limited.inc();
         return rate_limited("pkarr GET rate limit");
     }
@@ -317,7 +332,7 @@ async fn put_packet(
     body: Bytes,
 ) -> Response {
     let ip = client_ip(&headers, peer, service.trust_forwarded_for);
-    if !service.put_limiter.allow(ip, Instant::now()) {
+    if !service.put_limiter.allow(ip) {
         service.metrics.put_rate_limited.inc();
         return rate_limited("pkarr PUT rate limit");
     }
@@ -415,20 +430,20 @@ mod tests {
 
     #[test]
     fn rate_limit_is_a_per_ip_token_bucket() {
-        let limiter = RateLimiter::new(4, 8);
+        let limiter = RateLimiter::new(4, 8, system_clock());
         let start = Instant::now();
         let a: IpAddr = "10.0.0.1".parse().unwrap();
         let b: IpAddr = "10.0.0.2".parse().unwrap();
         for _ in 0..8 {
-            assert!(limiter.allow(a, start));
+            assert!(limiter.allow_at(a, start));
         }
-        assert!(!limiter.allow(a, start));
-        assert!(limiter.allow(b, start));
+        assert!(!limiter.allow_at(a, start));
+        assert!(limiter.allow_at(b, start));
         // Half a second refills two tokens.
         let later = start + Duration::from_millis(500);
-        assert!(limiter.allow(a, later));
-        assert!(limiter.allow(a, later));
-        assert!(!limiter.allow(a, later));
+        assert!(limiter.allow_at(a, later));
+        assert!(limiter.allow_at(a, later));
+        assert!(!limiter.allow_at(a, later));
     }
 
     #[test]
