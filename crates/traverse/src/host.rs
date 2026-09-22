@@ -678,26 +678,48 @@ impl Shared {
     }
 }
 
-/// How `connection` is carried right now, judged by its selected path.
+/// How `connection` is carried right now, judged by its selected path. A
+/// relay selected while a direct path is already open is a relay still
+/// waiting for that path to prove itself.
 pub(crate) fn path_info(connection: &Connection) -> PathInfo {
     let paths = connection.paths();
     let selected = paths
         .iter()
         .find(|path| path.is_selected())
         .or_else(|| paths.iter().next());
+    let direct_open = paths
+        .iter()
+        .any(|path| matches!(path.remote_addr(), TransportAddr::Ip(_)));
     match selected.map(|path| path.remote_addr().clone()) {
-        Some(TransportAddr::Ip(_)) => PathInfo {
+        Some(TransportAddr::Ip(addr)) => PathInfo {
             direct: true,
             relay: None,
+            lan: on_own_network(addr.ip()),
+            probing_direct: false,
         },
         Some(TransportAddr::Relay(url)) => PathInfo {
             direct: false,
             relay: Some(url.to_string()),
+            lan: false,
+            probing_direct: direct_open,
         },
         _ => PathInfo {
             direct: false,
             relay: None,
+            lan: false,
+            probing_direct: direct_open,
         },
+    }
+}
+
+/// Whether a peer at `ip` was reached without crossing the internet:
+/// private, link-local or loopback addresses.
+fn on_own_network(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_loopback()
+        }
     }
 }
 

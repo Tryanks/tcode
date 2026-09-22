@@ -304,4 +304,33 @@ pub struct PathInfo {
     /// The relay URL carrying the connection when it is not direct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
+    /// The direct path's remote address is on this machine's own network
+    /// (private, link-local or loopback) rather than punched across the
+    /// internet. A peer that predates the flag reads as punched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lan: bool,
+    /// A relay carries the connection while a direct path is open but not
+    /// yet the selected one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub probing_direct: bool,
+}
+
+/// The selected path, as the flags spell it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind<'a> {
+    Lan,
+    Tunnel,
+    Relay { url: Option<&'a str> },
+}
+
+impl PathInfo {
+    pub fn kind(&self) -> PathKind<'_> {
+        match (self.direct, self.lan) {
+            (true, true) => PathKind::Lan,
+            (true, false) => PathKind::Tunnel,
+            (false, _) => PathKind::Relay {
+                url: self.relay.as_deref(),
+            },
+        }
+    }
 }

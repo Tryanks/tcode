@@ -13,7 +13,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context,
     Entity, Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
+    Styled as _, Task, Window, div, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -31,7 +31,6 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::menu::DropdownMenu as _;
 use crate::widgets::switch::Switch;
-use crate::widgets::tooltip::Tooltip;
 
 /// How often the devices list re-reads which path each connection is on.
 const DEVICE_REFRESH: Duration = Duration::from_secs(2);
@@ -306,17 +305,6 @@ fn traverse_label(setting: &TraverseSetting) -> SharedString {
     .into()
 }
 
-/// One line on what the selected mode means for the devices connecting here.
-fn traverse_description(setting: &TraverseSetting) -> SharedString {
-    match setting {
-        TraverseSetting::Official => crate::tr!("remote.traverse.official_description"),
-        TraverseSetting::Custom { .. } => crate::tr!("remote.traverse.custom_description"),
-        TraverseSetting::Off => crate::tr!("remote.traverse.off_description"),
-    }
-    .into_owned()
-    .into()
-}
-
 /// Settings → Other devices: the editable hosting controls for *this machine*.
 /// Their live state lives in the process-wide [`RemoteController`]; only the
 /// in-progress edits belong here.
@@ -354,17 +342,23 @@ impl HostingPanel {
                 .placeholder(crate::tr!("remote.traverse.url_placeholder").into_owned())
                 .default_value(url)
         });
-        // Apply lights up as soon as an edit differs from what is saved.
-        let subscriptions = [&host_name_input, &traverse_url_input]
-            .into_iter()
-            .map(|input| {
-                cx.subscribe(input, |_, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        cx.notify();
-                    }
+        // A typed name or URL takes effect when the field is left or Enter
+        // is pressed; the URL field also repaints as it turns valid.
+        let subscriptions =
+            [&host_name_input, &traverse_url_input]
+                .into_iter()
+                .map(|input| {
+                    cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
+                        match event {
+                            InputEvent::Blur | InputEvent::PressEnter { .. } => {
+                                this.apply_edits(window, cx)
+                            }
+                            InputEvent::Change => cx.notify(),
+                            InputEvent::Focus => {}
+                        }
+                    })
                 })
-            })
-            .collect();
+                .collect();
         Self {
             host_name_input,
             traverse_choice,
@@ -423,7 +417,7 @@ impl HostingPanel {
     }
 
     /// Whether the edits differ from the saved settings and are complete.
-    fn has_pending_edits(&self, cx: &App) -> bool {
+    fn edits_pending(&self, cx: &App) -> bool {
         let Some(controller) = cx.try_global::<RemoteController>() else {
             return false;
         };
@@ -476,8 +470,13 @@ impl HostingPanel {
     }
 
     /// Re-bind the endpoint so an edited name or Traverse choice takes effect
-    /// at once; while not hosting, just save it for the next start.
+    /// at once; while not hosting, just save it for the next start. Nothing
+    /// happens while the edits match what is saved or are incomplete, so
+    /// leaving a field untouched never restarts the host.
     fn apply_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.edits_pending(cx) {
+            return;
+        }
         if cx
             .try_global::<RemoteController>()
             .is_some_and(RemoteController::is_hosting)
@@ -508,6 +507,8 @@ impl HostingPanel {
         cx.notify();
     }
 
+    /// A chosen mode applies at once; a self-hosted instance applies once
+    /// its URL is typed and the field is left.
     fn on_select_traverse(
         &mut self,
         choice: &SelectTraverse,
@@ -519,6 +520,7 @@ impl HostingPanel {
             self.traverse_url_input
                 .update(cx, |state, cx| state.focus(window, cx));
         }
+        self.apply_edits(window, cx);
         cx.notify();
     }
 
@@ -547,7 +549,7 @@ impl HostingPanel {
                 .debug_selector(|| "remote-pairing".into())
                 .child(labels(
                     crate::tr!("remote.pairing.title").into_owned().into(),
-                    Some(crate::tr!("remote.pairing.description").into_owned().into()),
+                    None,
                     cx,
                 ))
                 .child(
@@ -588,7 +590,7 @@ impl HostingPanel {
         let traverse_row = row(compact)
             .child(labels(
                 crate::tr!("remote.traverse.title").into_owned().into(),
-                Some(traverse_description(&selected)),
+                None,
                 cx,
             ))
             .child(
@@ -658,24 +660,6 @@ impl HostingPanel {
                 )
                 .into_any_element()
         });
-        let apply_row = h_flex()
-            .w_full()
-            .px_3()
-            .py_2p5()
-            .justify_end()
-            .child(
-                Button::new("remote-apply")
-                    .ghost()
-                    .outline()
-                    .compact()
-                    .disabled(!self.has_pending_edits(cx))
-                    .label(crate::tr!("remote.apply"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.apply_edits(window, cx);
-                    })),
-            )
-            .into_any_element();
-
         let mut column = v_flex().w_full().gap_3().child(
             v_flex()
                 .child(section_caption(
@@ -688,8 +672,7 @@ impl HostingPanel {
                         .children(pairing_row)
                         .child(name_row)
                         .child(traverse_row)
-                        .children(url_row)
-                        .child(apply_row),
+                        .children(url_row),
                 ),
         );
         if hosting {
@@ -704,15 +687,8 @@ impl HostingPanel {
             return div().into_any_element();
         };
         if !controller.pairing_enabled() {
-            return crate::material::group(cx)
-                .debug_selector(|| "remote-pairing-off".into())
-                .child(note(
-                    crate::tr!("remote.pairing.off").into_owned().into(),
-                    cx,
-                ))
-                .into_any_element();
+            return div().into_any_element();
         }
-        let machine_id = controller.endpoint_id().unwrap_or_default();
         let new_invitation = |id: &'static str, cx: &mut Context<Self>| {
             Button::new(id)
                 .compact()
@@ -732,7 +708,7 @@ impl HostingPanel {
                     row(compact)
                         .child(labels(
                             crate::tr!("remote.invite.expired").into_owned().into(),
-                            Some(crate::tr!("remote.invite.description").into_owned().into()),
+                            None,
                             cx,
                         ))
                         .child(new_invitation("remote-new-invitation", cx).primary()),
@@ -767,18 +743,12 @@ impl HostingPanel {
                             .child(
                                 div()
                                     .text_size(px(13.))
-                                    .child(crate::tr!("remote.invite.how")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(crate::tr!(
                                         "remote.invite.expires",
                                         time = countdown(remaining)
                                     )),
                             )
-                            .child(self.machine_fingerprint(machine_id, cx))
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -813,33 +783,6 @@ impl HostingPanel {
             .into_any_element()
     }
 
-    /// The machine id as its fingerprint; the whole id on hover and on the
-    /// clipboard when clicked, for checking against a device's Machines page.
-    fn machine_fingerprint(&self, machine_id: String, cx: &mut Context<Self>) -> AnyElement {
-        let full = machine_id.clone();
-        h_flex()
-            .id("remote-machine-id")
-            .gap_1()
-            .items_center()
-            .text_size(px(11.))
-            .text_color(cx.theme().muted_foreground)
-            .cursor_pointer()
-            .child(crate::tr!(
-                "remote.invite.machine",
-                fingerprint = super::fingerprint(&machine_id)
-            ))
-            .child(Icon::new(IconName::Copy).xsmall())
-            .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
-            .on_click(cx.listener(move |_, _, window, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(machine_id.clone()));
-                window.push_notification(
-                    Notification::info(crate::tr!("remote.invite.machine_copied").into_owned()),
-                    cx,
-                );
-            }))
-            .into_any_element()
-    }
-
     fn render_devices(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let devices = cx
             .try_global::<RemoteController>()
@@ -863,16 +806,7 @@ impl HostingPanel {
                 row(compact)
                     .child(labels(
                         super::device_label(&device.name, device.platform.as_deref()).into(),
-                        Some(
-                            crate::tr!(
-                                "remote.devices.paired_on",
-                                date = crate::time::humanize_ago(
-                                    crate::time::now_secs().saturating_sub(device.created_unix)
-                                )
-                            )
-                            .into_owned()
-                            .into(),
-                        ),
+                        None,
                         cx,
                     ))
                     .child(
@@ -941,10 +875,12 @@ mod tests {
         }
     }
 
-    /// The pairing switch exists only while hosting; flipping it reaches the
-    /// transport, which drops or mints the invitation, and the card follows.
+    /// Edits apply themselves: a Traverse choice when it is made, a typed
+    /// name when its field is left. The pairing switch exists only while
+    /// hosting; flipping it reaches the transport, which drops or mints the
+    /// invitation, and the card follows.
     #[gpui::test]
-    fn the_pairing_switch_follows_hosting_and_drives_the_transport(cx: &mut TestAppContext) {
+    fn edits_apply_themselves_and_the_pairing_switch_drives_the_transport(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let root = std::env::temp_dir().join(format!(
             "tcode-hosting-pairing-{}",
@@ -979,6 +915,19 @@ mod tests {
             cx.debug_bounds("remote-pairing").is_none(),
             "no pairing switch while not hosting"
         );
+        let panel = window.read_with(cx, |probe, _| probe.0.clone()).unwrap();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.on_select_traverse(&SelectTraverse::Off, window, cx);
+            panel
+                .host_name_input
+                .update(cx, |input, cx| input.set_value("Studio", window, cx));
+            panel.apply_edits(window, cx);
+        });
+        cx.read(|cx| {
+            let saved = cx.global::<RemoteController>().local_settings();
+            assert_eq!(saved.traverse, TraverseSetting::Off);
+            assert_eq!(saved.remote_host_name.as_deref(), Some("Studio"));
+        });
 
         // A random port: the desktop's fixed one may be taken on this machine.
         let host = TraverseHost::start(
@@ -999,8 +948,6 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("remote-pairing").is_some());
         assert!(cx.debug_bounds("remote-invitation").is_some());
-        assert!(cx.debug_bounds("remote-pairing-off").is_none());
-        let panel = window.read_with(cx, |probe, _| probe.0.clone()).unwrap();
 
         panel.update(cx, |panel, cx| panel.set_pairing_enabled(false, cx));
         cx.read(|cx| {
@@ -1009,7 +956,6 @@ mod tests {
             assert!(controller.invitation().is_none());
         });
         draw(cx);
-        assert!(cx.debug_bounds("remote-pairing-off").is_some());
         assert!(
             cx.debug_bounds("remote-invitation").is_none(),
             "no invitation is offered while pairing is off"
@@ -1025,7 +971,6 @@ mod tests {
             );
         });
         draw(cx);
-        assert!(cx.debug_bounds("remote-pairing-off").is_none());
         assert!(cx.debug_bounds("remote-invitation").is_some());
 
         cx.update(|_, cx| {

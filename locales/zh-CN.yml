@@ -100,7 +100,6 @@ markdown:
   link_copy_text: "复制链接文字"
   path_copy_relative: "复制相对路径"
 sidebar:
-  pending_write: "待发送"
   parent_unavailable: "（父对话不可用）"
   collapse: "折叠侧边栏"
   expand: "展开侧边栏"
@@ -962,14 +961,11 @@ toast:
   hide_details: "收起详情"
   copy_error: "复制错误"
 remote:
-  apply: "应用"
   host:
     section: "这台机器"
     title: "允许其他设备连接这台机器"
   pairing:
     title: "接受新设备配对"
-    description: "新设备可凭邀请配对。"
-    off: "配对已关闭；已配对的设备照常使用。"
   host_name:
     title: "机器名称"
     description: "显示给其他设备。"
@@ -978,33 +974,27 @@ remote:
     official: "官方 Traverse"
     custom: "自建 Traverse"
     off: "关闭"
-    official_description: "不在同一网络的设备通过官方中继和查找服务连接这台机器。"
-    custom_description: "不在同一网络的设备通过你自建的 Traverse 实例连接这台机器。"
-    off_description: "不使用中继和查找服务：设备只能通过邀请中的地址连接这台机器。"
     url: "Traverse 地址"
     url_description: "你的实例提供清单的基础 URL。"
     url_placeholder: "https://traverse.example"
     invalid_url: "请输入 http 或 https URL。"
   invite:
     title: "邀请"
-    how: "用 Tcode 应用扫描二维码，或复制邀请链接并粘贴到另一台设备的 Tcode 中。"
-    description: "生成新的一次性邀请，让其他设备添加这台机器。"
     expired: "邀请已过期"
     new: "新邀请"
     copy: "复制邀请链接"
     copied: "已复制邀请链接"
     expires: "%{time} 后过期"
-    machine: "机器 %{fingerprint}"
-    machine_copied: "已复制机器 ID"
   devices:
     section: "已连接过的设备"
     empty: "尚无设备连接过这台机器。"
-    paired_on: "连接于 %{date}"
     revoke: "移除"
   path:
-    direct: "直连"
+    lan: "局域网直连"
+    tunnel: "隧道"
     relay: "中继"
-    relay_via: "经 %{host} 中继"
+    relay_region: "中继（%{region}）"
+    probing_direct: "中继 · 尝试直连中"
     offline: "离线"
   failure:
     unreachable: "无法连接机器"
@@ -1015,7 +1005,7 @@ remote:
   state:
     connected: "已连接"
     syncing: "正在同步"
-    reconnecting: "正在重新连接（第 %{attempt} 次）"
+    reconnecting: "正在重新连接"
 
 
 hosts:
@@ -1026,8 +1016,6 @@ hosts:
   disconnect: "断开"
   forget: "移除"
   actions: "%{name} 的操作"
-  last_connected: "%{ago}连接过"
-  never_connected: "从未连接"
   pair_again: "重新配对"
   pair:
     title: "添加机器"
@@ -1036,9 +1024,7 @@ hosts:
     invitation: "邀请链接"
     invitation_placeholder: "tcode://pair?…"
     scan: "扫描二维码"
-    scan_description: "对准机器上显示的邀请二维码。"
     paste: "粘贴邀请链接"
-    paste_description: "机器二维码背后的 tcode://pair 链接。"
     bad_invite: "这不是有效的 Tcode 邀请链接。"
     filled: "来自 %{name} 的邀请 · %{fingerprint}"
     connect_host: "连接到 %{name}"

@@ -2278,17 +2278,6 @@ impl SessionsSidebar {
                     title.font_semibold()
                 })
                 .child(meta.title.clone())
-                .when(
-                    self.store.read(cx).session_has_pending_writes(&meta.id),
-                    |row| {
-                        row.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().warning)
-                                .child(crate::tr!("sidebar.pending_write")),
-                        )
-                    },
-                )
                 .into_any_element()
         };
         h_flex()
@@ -3136,12 +3125,6 @@ impl SessionsSidebar {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(preview),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().warning)
-                                    .child(crate::tr!("sidebar.pending_write")),
-                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.store.update(cx, |store, cx| {
                                     store.select_session(id.clone());
@@ -3515,10 +3498,6 @@ impl SessionsSidebar {
                             .text_size(px(13.))
                             .line_height(px(18.))
                             .text_color(cx.theme().muted_foreground)
-                            .when(
-                                self.store.read(cx).session_has_pending_writes(&session_id),
-                                |line| line.child(crate::tr!("sidebar.pending_write")),
-                            )
                             .when(unavailable, |line| {
                                 line.child(
                                     div()
