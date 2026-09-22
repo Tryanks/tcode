@@ -740,9 +740,11 @@ origin's `tcode.outbox.<machine id>` localStorage entry. Clearing client data
 clears these pending writes. An admission storage error is a real failure, not a
 successful send.
 
-After hello and subscription replay, the oldest write is sent first; the next
-waits for its Ack. The same key is used on every redelivery. The outbox is bounded
-at 256 entries and 8 MiB of serialized entries. The oldest surplus entry fails
+After hello and subscription replay, every unacknowledged write is sent in queue
+order without waiting for the previous Ack; the stream and the host preserve that
+order, and a rejected write fails only itself. The same key is used on every
+redelivery. The outbox is bounded at 256 entries and 8 MiB of serialized
+entries. The oldest surplus entry fails
 with `outbox_full`. A write already received by the host cannot be recalled by
 client-side eviction.
 
