@@ -395,6 +395,48 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     official_host.shutdown();
 }
 
+/// A self-hosted instance that cannot be reached is not a reason to stay
+/// off the LAN: the machine hosts with no relay and no lookup, the device
+/// fetches the same manifest and fails the same way, and pairing and
+/// connecting over loopback still work. The official service is never
+/// substituted on either side.
+#[test]
+fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
+    let host_dir = TestDir::new("dead-traverse-host");
+    let (mux, _, _) = fake_host();
+    let dead = url::Url::from_file_path(host_dir.0.join("missing").join("relays.json")).unwrap();
+    let host = TraverseHost::start(
+        mux,
+        HostConfig {
+            host_name: "Test Host".into(),
+            data_dir: host_dir.0.clone(),
+            traverse: TraverseMode::Custom(dead.clone()),
+            pairing_enabled: true,
+            bind_port: None,
+        },
+    )
+    .expect("hosting starts without the manifest");
+    assert_eq!(host.endpoint_id().len(), 64);
+    assert!(host.addr().relays.is_empty(), "no relay in hand");
+    let dir = TestDir::new("dead-traverse-phone");
+    let phone = device(&dir, "phone");
+    let minted = host.new_invitation();
+    assert_eq!(minted.invite.traverse.as_deref(), Some(dead.as_str()));
+    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    assert_eq!(paired.traverse.as_deref(), Some(dead.as_str()));
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, ConnectionState::Syncing);
+    client.to_host.send_blocking(subscribe(1)).unwrap();
+    recv_type(&client, "ack", Some(1));
+    wait_state(&client, connected_directly());
+    assert!(
+        phone.relays().is_empty(),
+        "the device took no relay from anywhere"
+    );
+    client.to_host.close();
+    host.shutdown();
+}
+
 /// The heartbeat is the transport's own line, never charged to the outbox.
 /// Crediting it on send underflowed the outbox count after `NATIVE_IDLE_MS`
 /// of silence and killed the writer, so a connection that went quiet for ten

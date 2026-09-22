@@ -156,10 +156,11 @@ impl Lookups {
 
     /// Make `source` resolvable: the manifest in hand is installed at once
     /// and refreshed in the background; with nothing in hand yet, one fetch
-    /// is awaited. A manifest that stays unavailable is logged and the
-    /// source dropped, so the next dial fetches again: the stored relay and
-    /// addresses may still reach the machine. `pin` marks a pairing in
-    /// flight, released with [`Self::unpin`].
+    /// is awaited. A manifest that is unavailable leaves the source with no
+    /// relay and no resolver until a background refresh brings it: the
+    /// stored relay, the saved addresses and the LAN lookup may still reach
+    /// the machine meanwhile. `pin` marks a pairing in flight, released
+    /// with [`Self::unpin`].
     async fn ensure(self: &Arc<Self>, source: &ManifestSource, pin: bool) {
         let loader = {
             let mut sources = self.sources.lock().unwrap();
@@ -183,10 +184,10 @@ impl Lookups {
             loader
         };
         match loader.startup().await {
-            Ok(manifest) => self.adopt(source, manifest).await,
+            Ok(manifest) => self.adopt(source, Some(manifest)).await,
             Err(error) => {
-                log::warn!("Traverse manifest unavailable: {error}");
-                self.sources.lock().unwrap().remove(source);
+                log::warn!("Traverse manifest unavailable: {error}; retrying in the background");
+                self.adopt(source, None).await;
             }
         }
     }
@@ -197,15 +198,16 @@ impl Lookups {
         }
     }
 
-    /// Install `manifest` for a claimed `source` now and each time a
-    /// refresh changes it.
-    async fn adopt(self: &Arc<Self>, source: &ManifestSource, manifest: Arc<Manifest>) {
+    /// Install `manifest` for a claimed `source` now — nothing yet when
+    /// there is none — and each manifest a later fetch produces.
+    async fn adopt(self: &Arc<Self>, source: &ManifestSource, manifest: Option<Arc<Manifest>>) {
         {
             let mut sources = self.sources.lock().unwrap();
             let Some(known) = sources.get_mut(source) else {
                 return;
             };
-            known.manifest = Some(manifest);
+            let in_hand = manifest.is_some();
+            known.manifest = manifest;
             let lookups = self.clone();
             let refreshed = source.clone();
             known.refresher = Some(known.loader.spawn_refresh(move |manifest| {
@@ -225,6 +227,9 @@ impl Lookups {
                     }
                 }
             }));
+            if !in_hand {
+                return;
+            }
         }
         self.apply().await;
     }
@@ -303,7 +308,7 @@ impl DeviceIdentity {
                             refresher: None,
                         },
                     );
-                    lookups.adopt(&source, manifest).await;
+                    lookups.adopt(&source, Some(manifest)).await;
                 }
                 for source in to_fetch {
                     let lookups = lookups.clone();
