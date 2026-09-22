@@ -234,8 +234,15 @@ impl Composer {
                     ),
             );
 
+        // A desktop window types into the search the moment the picker opens.
+        // A phone lists models to tap: focusing the search there would raise
+        // the software keyboard over the sheet, so the popover keeps its own
+        // focus (Escape and Back still close it) and a tap on the search
+        // field asks for the keyboard.
+        let search_focus = (!crate::window_seam::is_mobile(cx))
+            .then(|| self.model_search.read(cx).focus_handle(cx));
         crate::material::overlay_popover(("model-picker-popover", self.model_picker_token))
-            .track_focus(&self.model_search.read(cx).focus_handle(cx))
+            .when_some(search_focus, |popover, focus| popover.track_focus(&focus))
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))

@@ -4159,6 +4159,87 @@ mod tests {
         shell.read_with(cx, |shell, _| shell.store().expect("attached"))
     }
 
+    /// The model picker raises the keyboard only where it cannot cover the
+    /// list: a desktop window (even a narrow one) focuses the search as it
+    /// opens; a phone leaves it unfocused, with the picker still owning focus
+    /// so Escape closes it.
+    #[gpui::test]
+    fn model_picker_focuses_its_search_only_off_phone(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tmp")
+            .join(format!(
+                "model-picker-focus-{}",
+                tcode_services::store::now_millis()
+            ));
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        let project = tcode_core::project::Project::from_root(root.join("project"));
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            project.root.clone(),
+            None,
+        );
+        meta.id = "first".into();
+        meta.project_id = Some(project.id.clone());
+        let host =
+            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                .unwrap();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = vec![project];
+            state.sessions = vec![meta];
+            state.settings.auto_archive_disabled = true;
+        }))
+        .unwrap();
+        let (shell, _transport, cx) = mount(cx);
+        cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            *store = WorkspaceStore::new(host.link(), cx);
+            store.select_session("first".into());
+        });
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        let search = shell.read_with(cx, |shell, cx| {
+            let chat = shell.attachment.as_ref().unwrap().chat.read(cx);
+            chat.composer().read(cx).model_search_focus_handle(cx)
+        });
+
+        for (mobile, width) in [(false, 1200.), (false, 393.), (true, 393.)] {
+            cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, mobile));
+            resize(cx, width);
+            shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+            // Let the compact push animation settle so the picker is in place.
+            cx.executor().advance_clock(Duration::from_millis(400));
+            draw(cx);
+            let picker = cx.debug_bounds("model-picker").expect("model picker");
+            cx.simulate_click(picker.center(), gpui::Modifiers::default());
+            draw(cx);
+            draw(cx);
+            let compact = shell.read_with(cx, |shell, cx| shell.compact(cx));
+            assert_eq!(
+                cx.debug_bounds("touch-picker-sheet").is_some(),
+                compact,
+                "mobile={mobile} width={width}: a compact window opens a sheet"
+            );
+            cx.update(|window, _| {
+                assert_eq!(
+                    search.is_focused(window),
+                    !mobile,
+                    "mobile={mobile} width={width}: the search raises the keyboard only off-phone"
+                );
+            });
+            cx.simulate_keystrokes("escape");
+            draw(cx);
+            draw(cx);
+            assert!(
+                cx.debug_bounds("touch-picker-sheet").is_none(),
+                "mobile={mobile} width={width}: Escape reaches the picker through its focus"
+            );
+            cx.update(|window, _| assert!(!search.is_focused(window)));
+        }
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
+    }
+
     #[gpui::test]
     fn thread_shortcuts_follow_list_order_and_leave_model_picker_numbers_alone(
         cx: &mut TestAppContext,

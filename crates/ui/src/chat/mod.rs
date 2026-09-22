@@ -525,10 +525,9 @@ impl ChatView {
 }
 
 impl ChatView {
+    /// The composer itself declines on a mobile build, where focus would
+    /// raise the software keyboard; a desktop window of any width types.
     pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.window_state.read(cx).compact {
-            return;
-        }
         self.composer
             .update(cx, |composer, cx| composer.focus(window, cx));
     }
