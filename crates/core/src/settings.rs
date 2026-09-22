@@ -324,6 +324,7 @@ const OLD_DEFAULT_SOL_DEFINITION: &str = "Execution model for scoped implementat
 const OLD_DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review. Consider it alongside Sol across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
 const OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Baseline execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Default to low effort for a clear brief; raise effort only when a specific piece demonstrably needs more depth. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
 const DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, evidence gathering, and computer use. It is exceptionally strong at driving and reading real UIs (find_roots → observe_ui → search_ui / inspect_ui / read_text, and act_ui / wait_for when the brief allows), so route eyes-on-screen verification and UI-driving work here first. Always dispatch it at low effort: low outperforms the former Sol executor at xhigh on quality and at a fraction of the token cost, so medium or higher is never justified for this profile and only wastes money; a task that seems to need more depth needs a better brief, not more effort. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
+const DEFAULT_SOL_6_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, evidence gathering, and computer use, including driving and reading real UIs (find_roots → observe_ui → search_ui / inspect_ui / read_text, and act_ui / wait_for when the brief allows). Use low for small mechanical tasks with a clear brief, medium for routine bounded work, high or xhigh as interacting constraints or reasoning difficulty grow, and max only for the hardest well-defined problems or when a lower effort has demonstrably stalled. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
 const DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
 const DEFAULT_ASTRA_DEFINITION: &str = include_str!("../../../assets/orchestrate/astra.md");
 const DEFAULT_FABLE_DEFINITION: &str = include_str!("../../../assets/orchestrate/fable-5-1.md");
@@ -351,7 +352,7 @@ pub fn orchestrate_efforts(
             .unwrap_or_default()
     } else {
         let fallback: &[&str] = match (provider, model) {
-            (ProviderKind::Codex, "gpt-5.6-sol" | "gpt-6-astra") => {
+            (ProviderKind::Codex, "gpt-5.6-sol" | "gpt-6-sol" | "gpt-6-astra") => {
                 &["low", "medium", "high", "xhigh", "max", "ultra"]
             }
             (
@@ -427,11 +428,7 @@ impl Default for OrchestrateSettings {
                 ),
             ],
             child_models: vec![
-                builtin_model(
-                    ProviderKind::Codex,
-                    "gpt-6-astra",
-                    DEFAULT_GPT_6_EXECUTION_DEFINITION,
-                ),
+                builtin_model(ProviderKind::Codex, "gpt-6-sol", DEFAULT_SOL_6_DEFINITION),
                 builtin_model(
                     ProviderKind::ClaudeCode,
                     "claude-opus-5-5",
@@ -471,21 +468,26 @@ impl LegacyOrchestrateModel {
         replace_untouched_sol: bool,
         replace_untouched_opus: bool,
     ) -> Option<OrchestrateChildModel> {
-        if !collaboration
+        // An untouched bundled Codex executor (Sol 5.6, then Astra) follows
+        // the bundle to GPT-6 Sol unless the user already added it; rows with
+        // custom guidance, an endpoint profile, or changed switches stay.
+        let untouched_codex_executor = !collaboration
             && self.effort.is_none()
             && self.entry.provider == ProviderKind::Codex
-            && self.entry.model == "gpt-5.6-sol"
             && self.entry.profile_id.is_none()
-            && self.entry.description == OLD_DEFAULT_SOL_DEFINITION
             && self.entry.enabled
             && !self.entry.fast
-        {
+            && match self.entry.model.as_str() {
+                "gpt-5.6-sol" => self.entry.description == OLD_DEFAULT_SOL_DEFINITION,
+                "gpt-6-astra" => {
+                    self.entry.description == OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION
+                        || self.entry.description == DEFAULT_GPT_6_EXECUTION_DEFINITION
+                }
+                _ => false,
+            };
+        if untouched_codex_executor {
             return replace_untouched_sol.then(|| {
-                builtin_model(
-                    ProviderKind::Codex,
-                    "gpt-6-astra",
-                    DEFAULT_GPT_6_EXECUTION_DEFINITION,
-                )
+                builtin_model(ProviderKind::Codex, "gpt-6-sol", DEFAULT_SOL_6_DEFINITION)
             });
         }
         if !collaboration
@@ -593,7 +595,7 @@ impl From<OrchestrateSettingsData> for OrchestrateSettings {
                     .iter()
                     .any(|entry| entry.entry.provider == provider && entry.entry.model == model)
             };
-            let has_execution_astra = has_execution(ProviderKind::Codex, "gpt-6-astra");
+            let has_execution_sol_6 = has_execution(ProviderKind::Codex, "gpt-6-sol");
             let has_execution_opus_5_5 = has_execution(ProviderKind::ClaudeCode, "claude-opus-5-5");
             (
                 decisions
@@ -603,7 +605,7 @@ impl From<OrchestrateSettingsData> for OrchestrateSettings {
                 data.child_models
                     .into_iter()
                     .filter_map(|entry| {
-                        entry.migrate(false, !has_execution_astra, !has_execution_opus_5_5)
+                        entry.migrate(false, !has_execution_sol_6, !has_execution_opus_5_5)
                     })
                     .collect(),
             )
@@ -674,6 +676,7 @@ impl OrchestrateSettings {
 
     pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
         match (provider, model) {
+            (ProviderKind::Codex, "gpt-6-sol") => Some(DEFAULT_SOL_6_DEFINITION),
             (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_GPT_6_EXECUTION_DEFINITION),
             (ProviderKind::ClaudeCode, "claude-opus-5-5" | "claude-opus-5") => {
                 Some(DEFAULT_OPUS_DEFINITION)
@@ -1609,13 +1612,13 @@ mod tests {
             ["gpt-6-astra", "claude-fable-5-1"]
         );
         assert_eq!(defaults.child_models.len(), 2);
-        assert_eq!(defaults.child_models[0].model, "gpt-6-astra");
+        assert_eq!(defaults.child_models[0].model, "gpt-6-sol");
         assert_eq!(defaults.child_models[0].provider, ProviderKind::Codex);
         assert!(!defaults.child_models[0].fast);
         assert!(
             defaults.child_models[0]
                 .description
-                .contains("Always dispatch it at low effort")
+                .contains("Use low for small mechanical tasks")
         );
         assert_ne!(
             defaults.child_models[0].description,
@@ -1751,19 +1754,51 @@ mod tests {
     }
 
     #[test]
-    fn orchestrate_refreshes_untouched_previous_gpt_6_execution_text() {
-        let old_json = format!(
-            r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-6-astra","description":{},"enabled":true,"fast":false}}]}}"#,
-            serde_json::to_string(OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION).unwrap()
+    fn orchestrate_moves_untouched_astra_executors_to_sol_6() {
+        for text in [
+            OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION,
+            DEFAULT_GPT_6_EXECUTION_DEFINITION,
+        ] {
+            let old_json = format!(
+                r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-6-astra","description":{},"enabled":true,"fast":false}}]}}"#,
+                serde_json::to_string(text).unwrap()
+            );
+            let migrated: OrchestrateSettings = serde_json::from_str(&old_json).unwrap();
+            assert_eq!(
+                migrated.child_models,
+                [builtin_model(
+                    ProviderKind::Codex,
+                    "gpt-6-sol",
+                    DEFAULT_SOL_6_DEFINITION
+                )]
+            );
+            // Customised text, a profile, or a flipped switch keeps Astra.
+            for variant in [
+                old_json.replace(text, "mine"),
+                old_json.replace(r#""enabled":true"#, r#""enabled":false"#),
+                old_json.replace(r#""fast":false"#, r#""fast":true"#),
+                old_json.replace(
+                    r#""provider":"codex","#,
+                    r#""provider":"codex","profile_id":"corp","#,
+                ),
+            ] {
+                let kept: OrchestrateSettings = serde_json::from_str(&variant).unwrap();
+                assert_eq!(kept.child_models.len(), 1, "input: {variant}");
+                assert_eq!(
+                    kept.child_models[0].model, "gpt-6-astra",
+                    "input: {variant}"
+                );
+            }
+        }
+        // An untouched Astra row next to a user-added Sol 6 row is dropped
+        // rather than duplicating Sol 6.
+        let both = format!(
+            r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-6-sol","description":"Mine."}},{{"provider":"codex","model":"gpt-6-astra","description":{},"enabled":true,"fast":false}}]}}"#,
+            serde_json::to_string(DEFAULT_GPT_6_EXECUTION_DEFINITION).unwrap()
         );
-        let migrated: OrchestrateSettings = serde_json::from_str(&old_json).unwrap();
-        assert_eq!(
-            migrated.child_models[0].description,
-            DEFAULT_GPT_6_EXECUTION_DEFINITION
-        );
-        let customized = old_json.replace(OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION, "mine");
-        let kept: OrchestrateSettings = serde_json::from_str(&customized).unwrap();
-        assert_eq!(kept.child_models[0].description, "mine");
+        let migrated: OrchestrateSettings = serde_json::from_str(&both).unwrap();
+        assert_eq!(migrated.child_models.len(), 1);
+        assert_eq!(migrated.child_models[0].description, "Mine.");
     }
 
     #[test]
@@ -1808,7 +1843,7 @@ mod tests {
     }
 
     #[test]
-    fn orchestrate_migration_does_not_duplicate_existing_execution_astra() {
+    fn orchestrate_migration_does_not_duplicate_existing_execution_sol_6() {
         let old_json = r#"{
             "decision_models": [],
             "child_models": [
@@ -1821,7 +1856,7 @@ mod tests {
                 },
                 {
                     "provider": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6-sol",
                     "profile_id": "custom-codex",
                     "enabled": false,
                     "fast": true,
@@ -1832,7 +1867,7 @@ mod tests {
         let migrated: OrchestrateSettings = serde_json::from_str(old_json).unwrap();
 
         assert_eq!(migrated.child_models.len(), 1);
-        assert_eq!(migrated.child_models[0].model, "gpt-6-astra");
+        assert_eq!(migrated.child_models[0].model, "gpt-6-sol");
         assert_eq!(
             migrated.child_models[0].profile_id.as_deref(),
             Some("custom-codex")
@@ -1921,11 +1956,15 @@ mod tests {
     #[test]
     fn orchestrate_settings_patches_deduplicate_within_each_role() {
         let mut settings = Settings::default();
-        let executor = settings.orchestrate.child_models[0].clone();
         let peer = settings.orchestrate.decision_models[0].clone();
-        assert_eq!(executor.provider, peer.provider);
-        assert_eq!(executor.model, peer.model);
+        // The same model serves both roles with role-specific guidance.
+        let executor = builtin_model(
+            peer.provider,
+            &peer.model,
+            DEFAULT_GPT_6_EXECUTION_DEFINITION,
+        );
         assert_ne!(executor.description, peer.description);
+        settings.orchestrate.child_models[0] = executor.clone();
 
         let mut duplicate = executor.clone();
         duplicate.profile_id = Some("another-endpoint".into());
