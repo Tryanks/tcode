@@ -125,6 +125,13 @@ fn connected_directly() -> ConnectionState {
     }
 }
 
+fn syncing_directly() -> ConnectionState {
+    let ConnectionState::Connected { path } = connected_directly() else {
+        unreachable!()
+    };
+    ConnectionState::Syncing { path }
+}
+
 fn wait_state(transport: &Transport, wanted: ConnectionState) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
@@ -425,7 +432,7 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     assert_eq!(paired.traverse.as_deref(), Some(dead.as_str()));
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, ConnectionState::Syncing);
+    wait_state(&client, syncing_directly());
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "ack", Some(1));
     wait_state(&client, connected_directly());
@@ -452,7 +459,7 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, ConnectionState::Syncing);
+    wait_state(&client, syncing_directly());
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "ack", Some(1));
     wait_state(&client, connected_directly());
@@ -483,8 +490,8 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     let host_b = tcode_traverse::pair_blocking(&minted.invite, &device_b).unwrap();
     let client_a = tcode_traverse::connect(&host_a, &device_a);
     let client_b = tcode_traverse::connect(&host_b, &device_b);
-    wait_state(&client_a, ConnectionState::Syncing);
-    wait_state(&client_b, ConnectionState::Syncing);
+    wait_state(&client_a, syncing_directly());
+    wait_state(&client_b, syncing_directly());
     client_a.to_host.send_blocking(subscribe(10)).unwrap();
     client_b.to_host.send_blocking(subscribe(20)).unwrap();
     recv_type(&client_a, "event", None);
@@ -578,7 +585,7 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, ConnectionState::Syncing);
+    wait_state(&client, syncing_directly());
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "ack", Some(1));
     assert!(host.devices()[0].live.is_some());
@@ -605,7 +612,7 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     client.to_host.send_blocking(subscribe(2)).unwrap();
     recv_type(&client, "ack", Some(2));
     let again = tcode_traverse::connect(&paired, &phone);
-    wait_state(&again, ConnectionState::Syncing);
+    wait_state(&again, syncing_directly());
     again.to_host.close();
     std::fs::remove_dir(&blocker).unwrap();
 
@@ -643,7 +650,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, ConnectionState::Syncing);
+    wait_state(&client, syncing_directly());
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "event", None);
     wait_state(&client, connected_directly());

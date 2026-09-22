@@ -140,7 +140,7 @@ fn stale_addresses_without_a_browse_do_not_reach_the_machine() {
     assert!(
         !seen.iter().any(|state| matches!(
             state,
-            ConnectionState::Syncing | ConnectionState::Connected { .. }
+            ConnectionState::Syncing { .. } | ConnectionState::Connected { .. }
         )),
         "the device connected without a working address: {seen:?}"
     );
@@ -178,7 +178,7 @@ fn a_saved_address_further_down_the_list_reaches_the_machine() {
     let client = tcode_traverse::connect(&saved, &device);
     let (_, took) = wait_state(
         &client,
-        |state| *state == ConnectionState::Syncing,
+        |state| matches!(state, ConnectionState::Syncing { .. }),
         Duration::from_secs(15),
     );
     eprintln!("connected through a saved address in {took:?}");

@@ -566,27 +566,34 @@ impl WorkspaceStore {
 
     /// Connected only once the baseline is in: the transport's `Connected`
     /// says the host answers, the replayed snapshots say the screen is current.
+    /// Either way the path is the transport's.
     pub fn connection_state(&self) -> ConnectionState {
         match &self.connection_state {
-            ConnectionState::Connected { .. } if !self.baseline_ready() => ConnectionState::Syncing,
-            ConnectionState::Syncing if self.baseline_ready() => {
-                ConnectionState::Connected { path: None }
+            ConnectionState::Connected { path } if !self.baseline_ready() => {
+                ConnectionState::Syncing { path: path.clone() }
+            }
+            ConnectionState::Syncing { path } if self.baseline_ready() => {
+                ConnectionState::Connected { path: path.clone() }
             }
             state => state.clone(),
         }
     }
 
+    /// A `Syncing` that only renames the path of a sync already under way
+    /// keeps the baseline collected so far.
     fn apply_connection_state(&mut self, state: ConnectionState) {
-        if matches!(
-            state,
-            ConnectionState::Syncing
-                | ConnectionState::Reconnecting { .. }
-                | ConnectionState::Offline { .. }
-        ) {
+        let restarts = match &state {
+            ConnectionState::Syncing { .. } => {
+                !matches!(self.connection_state, ConnectionState::Syncing { .. })
+            }
+            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. } => true,
+            ConnectionState::Connected { .. } => false,
+        };
+        if restarts {
             self.baseline_topics.clear();
         }
         self.connection_state = state;
-        if self.connection_state == ConnectionState::Syncing {
+        if restarts && matches!(self.connection_state, ConnectionState::Syncing { .. }) {
             // State and domain events arrive on separate queues. Request a fresh
             // baseline after invalidation, so a late event from the old socket
             // cannot satisfy readiness for the new one. HostLink correlates the
@@ -3532,12 +3539,15 @@ mod tests {
                 );
             }
             assert!(store.baseline_ready());
-            store.apply_connection_state(ConnectionState::Syncing);
+            store.apply_connection_state(ConnectionState::Syncing { path: None });
             assert!(!store.threads_loading(), "cached list remains visible");
             assert!(!store.chat_loading(), "cached thread remains visible");
             assert_eq!(store.active_session_id().as_deref(), Some("one"));
             for (topic, event) in snapshots {
-                assert_eq!(store.connection_state(), ConnectionState::Syncing);
+                assert_eq!(
+                    store.connection_state(),
+                    ConnectionState::Syncing { path: None }
+                );
                 store.apply_domain_event(
                     &EventEnvelope {
                         request_id: None,

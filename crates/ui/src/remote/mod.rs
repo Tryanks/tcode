@@ -774,11 +774,13 @@ fn relay_region(relay: &str) -> Option<String> {
 /// How this window's link to its machine is doing, one line under the
 /// machine's name: the path while the link is up, and once it is lost the
 /// failure, which says what to do about it. A transport that cannot tell
-/// how it is carried (a browser) says only that it is connected.
+/// how it is carried (a browser) says only that it is connected. Loading
+/// the baseline over an up link is not a link state: the content area's
+/// skeletons show it, the line says the link is connected.
 pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String {
     use tcode_client::ConnectionState;
     match state {
-        ConnectionState::Connected { path } => match path {
+        ConnectionState::Connected { path } | ConnectionState::Syncing { path } => match path {
             Some(path) if path.probing_direct => {
                 crate::tr!("remote.path.probing_direct").into_owned()
             }
@@ -789,7 +791,6 @@ pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String 
             ),
             None => crate::tr!("remote.state.connected").into_owned(),
         },
-        ConnectionState::Syncing => crate::tr!("remote.state.syncing").into_owned(),
         ConnectionState::Reconnecting { .. } => {
             crate::tr!("remote.state.reconnecting").into_owned()
         }
@@ -870,7 +871,17 @@ mod tests {
             connection_label(&ConnectionState::Connected { path: None }),
             "Connected"
         );
-        assert_eq!(connection_label(&ConnectionState::Syncing), "Syncing");
+        assert_eq!(
+            connection_label(&ConnectionState::Syncing {
+                path: Some(lan.clone())
+            }),
+            "LAN · Connected",
+            "loading the baseline is not a link state"
+        );
+        assert_eq!(
+            connection_label(&ConnectionState::Syncing { path: None }),
+            "Connected"
+        );
         assert_eq!(
             connection_label(&ConnectionState::Reconnecting {
                 attempt: 3,

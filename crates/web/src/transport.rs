@@ -288,7 +288,7 @@ async fn connection_loop(
                         if hello["type"].as_str() != Some("hello_ok") {
                             break;
                         }
-                        let _ = state.try_send(ConnectionState::Syncing);
+                        let _ = state.try_send(ConnectionState::Syncing { path: None });
                         timer.take();
                         if subscriptions
                             .values()

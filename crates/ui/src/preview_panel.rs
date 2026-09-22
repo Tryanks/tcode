@@ -225,7 +225,7 @@ impl PreviewPanel {
                 |this, _, state: &tcode_client::ConnectionState, cx| {
                     if matches!(
                         state,
-                        tcode_client::ConnectionState::Syncing
+                        tcode_client::ConnectionState::Syncing { .. }
                             | tcode_client::ConnectionState::Connected { .. }
                     ) {
                         this.refresh_preview_endpoint(cx);
