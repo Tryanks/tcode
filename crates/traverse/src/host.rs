@@ -13,18 +13,18 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, EndpointId, RelayMode, TransportAddr,
+    Endpoint, EndpointId, RelayMap, RelayMode, TransportAddr,
     endpoint::{Connection, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, encode_secret, pair_url};
-use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
+use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo, ProtocolError};
 use url::Url;
 
 use crate::{
     identity::HostIdentity,
     lan,
-    manifest::{ManifestLoader, ManifestSource, live},
+    manifest::{Manifest, ManifestLoader, ManifestSource, live},
     mux::HostMux,
     runtime::block_on,
     wire::{self, ClientLine, DeviceClaim, HelloRejection, HostLine, LineReader, PairRejection},
@@ -116,6 +116,10 @@ struct Shared {
     endpoint: Endpoint,
     mux: HostMux,
     state: Mutex<State>,
+    /// The relay map the endpoint was bound with. iroh shares it with the
+    /// endpoint, so it always reads as what the endpoint dials; empty until
+    /// a self-hosted instance answers, and always for Off.
+    relays: RelayMap,
     /// Told the invitation in effect after every change; see
     /// [`TraverseHost::invitation_events`].
     listeners: Mutex<Vec<async_channel::Sender<Option<Invitation>>>>,
@@ -132,6 +136,8 @@ pub struct TraverseHost {
     router: Router,
     /// The manifest refresh loop, ended with the host.
     refresh: Option<tokio::task::AbortHandle>,
+    #[cfg(test)]
+    loader: Option<ManifestLoader>,
     /// This machine's DNS-SD record, withdrawn with the host.
     advertisement: Option<lan::Advertisement>,
 }
@@ -159,17 +165,35 @@ impl TraverseHost {
                 TraverseMode::Off => None,
             };
             // The copy in hand starts the endpoint; only a self-hosted
-            // instance with nothing cached waits for one fetch.
+            // instance with nothing cached waits for one fetch, and when
+            // that fails the machine starts with no relay and no lookup
+            // rather than not at all: the LAN still works, and the refresh
+            // loop applies the manifest once the instance answers. The
+            // official manifest is never substituted.
             let manifest = match &loader {
-                Some(loader) => Some(loader.startup().await?),
+                Some(loader) => match loader.startup().await {
+                    Ok(manifest) => Some(manifest),
+                    Err(error) => {
+                        log::warn!(
+                            "starting without a Traverse manifest: {error}; retrying in the background"
+                        );
+                        None
+                    }
+                },
                 None => None,
             };
+            let relays = manifest
+                .as_ref()
+                .map_or_else(RelayMap::empty, |manifest| manifest.relay_map());
+            // An empty custom map keeps the relay transport, so relays can
+            // be inserted live; `Disabled` would have none to insert into.
+            let relay_mode = match loader {
+                Some(_) => RelayMode::Custom(relays.clone()),
+                None => RelayMode::Disabled,
+            };
             let build = |ipv6: bool| -> io::Result<iroh::endpoint::Builder> {
-                let mut builder = match &manifest {
-                    Some(manifest) => Endpoint::builder(presets::Minimal)
-                        .relay_mode(RelayMode::Custom(manifest.relay_map())),
-                    None => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
-                };
+                let mut builder =
+                    Endpoint::builder(presets::Minimal).relay_mode(relay_mode.clone());
                 builder = builder
                     .secret_key(secret_key.clone())
                     .transport_config(wire::transport_config());
@@ -200,24 +224,6 @@ impl TraverseHost {
                 live::install_lookups(&endpoint, [manifest.as_ref()], true, None);
             }
             let advertisement = advertise(&endpoint, &identity.host_name);
-            // A refreshed manifest is applied to the running endpoint:
-            // relays through `insert_relay`/`remove_relay`, publishers and
-            // resolvers rebuilt on the endpoint's lookup services.
-            let refresh = loader.zip(manifest.clone()).map(|(loader, applied)| {
-                let endpoint = endpoint.clone();
-                let applied = Mutex::new(applied);
-                loader.spawn_refresh(move |manifest| {
-                    let endpoint = endpoint.clone();
-                    let previous =
-                        std::mem::replace(&mut *applied.lock().unwrap(), manifest.clone());
-                    async move {
-                        log::info!("applying the refreshed Traverse manifest");
-                        live::sync_relays(&endpoint, &previous.relay_map(), &manifest.relay_map())
-                            .await;
-                        live::install_lookups(&endpoint, [manifest.as_ref()], true, None);
-                    }
-                })
-            });
             let shared = Arc::new(Shared {
                 endpoint: endpoint.clone(),
                 mux,
@@ -226,10 +232,25 @@ impl TraverseHost {
                     invitation: None,
                     live: HashMap::new(),
                 }),
+                relays,
                 listeners: Mutex::new(Vec::new()),
                 expiry: Mutex::new(None),
                 traverse,
                 allow_pairing: config.pairing_enabled,
+            });
+            // A fetched manifest is applied to the running endpoint, whether
+            // it refreshes the one in hand or is the first to arrive. The
+            // loop holds no reference that would keep a stopped host alive.
+            let refresh = loader.as_ref().map(|loader| {
+                let shared = Arc::downgrade(&shared);
+                loader.spawn_refresh(move |manifest| {
+                    let shared = shared.upgrade();
+                    async move {
+                        if let Some(shared) = shared {
+                            shared.apply_manifest(manifest).await;
+                        }
+                    }
+                })
             });
             let router = Router::builder(endpoint)
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
@@ -239,6 +260,8 @@ impl TraverseHost {
                 shared,
                 router,
                 refresh,
+                #[cfg(test)]
+                loader,
                 advertisement,
             })
         })
@@ -302,13 +325,15 @@ impl TraverseHost {
     }
 
     /// Remove a device and close every connection it holds. A new
-    /// connection from it is refused from this call on.
-    pub fn revoke(&self, id: &str) {
-        self.shared.revoke(id);
+    /// connection from it is refused from this call on. When the allow list
+    /// cannot be written the device stays paired and connected, so a
+    /// revocation never appears to have happened without lasting.
+    pub fn revoke(&self, id: &str) -> io::Result<()> {
+        self.shared.revoke(id)
     }
 
     /// Answer a hosting query from a client of any transport.
-    pub fn hosting(&self, action: HostingAction) -> HostingState {
+    pub fn hosting(&self, action: HostingAction) -> Result<HostingState, ProtocolError> {
         self.shared.hosting(action)
     }
 
@@ -352,6 +377,15 @@ fn advertise(endpoint: &Endpoint, host_name: &str) -> Option<lan::Advertisement>
 }
 
 impl Shared {
+    /// Move the endpoint from the manifest in effect to `manifest`: relays
+    /// through `insert_relay`/`remove_relay`, publishers and resolvers
+    /// rebuilt on the endpoint's lookup services.
+    async fn apply_manifest(&self, manifest: Arc<Manifest>) {
+        log::info!("applying the Traverse manifest");
+        live::sync_relays(&self.endpoint, &self.relays, &manifest.relay_map()).await;
+        live::install_lookups(&self.endpoint, [manifest.as_ref()], true, None);
+    }
+
     fn mint(self: &Arc<Self>) -> Invitation {
         let mut random = [0_u8; tcode_client::pairing::SECRET_BYTES];
         getrandom::fill(&mut random).expect("the OS random source is available");
@@ -500,12 +534,16 @@ impl Shared {
             .collect()
     }
 
-    fn revoke(&self, id: &str) {
+    fn revoke(&self, id: &str) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
-        if state.identity.remove(id)
-            && let Err(error) = state.identity.save()
-        {
+        let previous = state.identity.clone();
+        if !state.identity.remove(id) {
+            return Ok(());
+        }
+        if let Err(error) = state.identity.save() {
             log::error!("could not persist the revocation: {error}");
+            state.identity = previous;
+            return Err(error);
         }
         let closed = id
             .parse::<EndpointId>()
@@ -515,9 +553,10 @@ impl Shared {
         for connection in closed {
             connection.close(3_u32.into(), b"revoked");
         }
+        Ok(())
     }
 
-    fn hosting(self: &Arc<Self>, action: HostingAction) -> HostingState {
+    fn hosting(self: &Arc<Self>, action: HostingAction) -> Result<HostingState, ProtocolError> {
         match action {
             HostingAction::State => {}
             HostingAction::SetEnabled(enabled) => {
@@ -531,7 +570,7 @@ impl Shared {
                     self.mint();
                 }
             }
-            HostingAction::RevokeDevice(id) => self.revoke(&id),
+            HostingAction::RevokeDevice(id) => self.revoke(&id).map_err(revoke_error)?,
         }
         let addr = self.snapshot();
         let state = self.state.lock().unwrap();
@@ -540,7 +579,7 @@ impl Shared {
             .current_invitation(&state, &addr)
             .map(|(invitation, remaining)| (Some(invitation.url()), remaining.as_secs()))
             .unwrap_or((None, 0));
-        HostingState {
+        Ok(HostingState {
             enabled,
             expires_in_secs,
             host_id: addr.id,
@@ -564,7 +603,7 @@ impl Shared {
                         .map(path_info),
                 })
                 .collect(),
-        }
+        })
     }
 
     /// Exchange an invitation's secret for a place on the allow list.
@@ -675,6 +714,17 @@ impl Shared {
 
     fn host_name(&self) -> String {
         self.state.lock().unwrap().identity.host_name.clone()
+    }
+}
+
+/// A revocation the machine could not record, as the hosting query reports
+/// it: the device is still paired.
+pub(crate) fn revoke_error(error: io::Error) -> ProtocolError {
+    ProtocolError {
+        code: "revoke_failed".into(),
+        message: format!(
+            "the machine could not record the revocation; the device is still paired: {error}"
+        ),
     }
 }
 
@@ -985,9 +1035,10 @@ impl StreamTask {
                     {
                         let reply = tcode_protocol::HostMessage::QueryResult {
                             id,
-                            result: Ok(tcode_protocol::QueryResponse::Hosting(
-                                self.shared.hosting(action),
-                            )),
+                            result: self
+                                .shared
+                                .hosting(action)
+                                .map(tcode_protocol::QueryResponse::Hosting),
                         };
                         let reply = tcode_protocol::encode_line(&reply)
                             .map_err(|error| io::Error::other(error.message))?;
@@ -1049,4 +1100,72 @@ pub(crate) fn valid_key(key: &str) -> bool {
 
 fn timed_out(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, format!("{what} timed out"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A self-hosted instance that does not answer at start: the machine
+    /// runs with no relay and no lookup, and the manifest is applied to the
+    /// running endpoint by the refresh that first reaches it. The loop
+    /// itself is paced in minutes, so the test runs one refresh by hand
+    /// through the same apply path.
+    #[test]
+    fn a_self_hosted_machine_starts_without_its_manifest_and_applies_it_when_it_arrives() {
+        let dir = std::env::temp_dir().join(format!(
+            "tcode-host-late-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest_path = dir.join("relays.json");
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let host = TraverseHost::start(
+            HostMux::new(to_host, from_host),
+            HostConfig {
+                host_name: "Late".into(),
+                data_dir: dir.clone(),
+                traverse: TraverseMode::Custom(Url::from_file_path(&manifest_path).unwrap()),
+                pairing_enabled: true,
+                bind_port: None,
+            },
+        )
+        .expect("the machine starts without its manifest");
+        let endpoint = host.shared.endpoint.clone();
+        assert!(host.shared.relays.is_empty(), "no relay to dial yet");
+        assert_eq!(endpoint.address_lookup().unwrap().len(), 0, "no lookup yet");
+        assert_eq!(
+            host.new_invitation().invite.traverse.as_deref(),
+            Some(Url::from_file_path(&manifest_path).unwrap().as_str())
+        );
+
+        std::fs::write(
+            &manifest_path,
+            r#"{"version":1,"relays":[{"url":"https://relay.self-hosted.test/"}],"pkarr":["https://relay.self-hosted.test/pkarr"]}"#,
+        )
+        .unwrap();
+        let loader = host.loader.clone().unwrap();
+        // The failed startup fetch paces the next attempt; the loop would wait it out.
+        loader.state().last_attempt_ms = None;
+        let manifest = block_on(loader.refresh()).expect("the manifest arrived");
+        block_on(host.shared.apply_manifest(manifest));
+        assert_eq!(
+            host.shared.relays.urls::<Vec<_>>(),
+            [iroh::RelayUrl::from(
+                Url::parse("https://relay.self-hosted.test/").unwrap()
+            )]
+        );
+        assert_eq!(
+            endpoint.address_lookup().unwrap().len(),
+            2,
+            "a pkarr publisher and resolver"
+        );
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

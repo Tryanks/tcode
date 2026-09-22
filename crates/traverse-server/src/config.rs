@@ -27,7 +27,7 @@ region = "eu-central"
 # Plain HTTP listener: captive-portal probes and, with tls.mode = "off", every
 # route including the relay.
 bind = "[::]:80"
-# Trust X-Forwarded-For for the per-IP pkarr PUT limit. Enable only behind a
+# Trust X-Forwarded-For for the per-IP pkarr limits. Enable only behind a
 # reverse proxy that overwrites the header.
 trust_forwarded_for = false
 
@@ -50,22 +50,28 @@ key = ""
 quic_addr_discovery = true
 quic_bind = "[::]:7842"
 # Per-connection limit on bytes received from a relay client; 0 disables.
-rx_bytes_per_second = 0
-rx_max_burst_bytes = 0
+rx_bytes_per_second = 2_000_000
+rx_max_burst_bytes = 4_000_000
 
 [pkarr]
-# Per-IP token bucket for PUT /pkarr/<key>.
+# Per-IP token buckets for PUT and GET /pkarr/<key>.
 put_per_second = 4
 put_burst = 8
+get_per_second = 20
+get_burst = 40
 # Records not refreshed for this long are removed (s, m, h or d).
 eviction = "7d"
 
 [lock]
-# Region lock: only works behind a reverse proxy that sets X-Forwarded-For and
-# X-TCP-RTT (microseconds, nginx: $tcpinfo_rtt) on the relay upgrade request.
-# Clients with RTT <= home_rtt_max_ms or an address in allow_cidrs are always
-# admitted; everyone else shares far_connection_quota concurrent connections.
+# Region lock: clients with RTT <= home_rtt_max_ms or an address in
+# allow_cidrs are always admitted; everyone else shares far_connection_quota
+# concurrent connections. RTT and address come from X-TCP-RTT (microseconds,
+# nginx: $tcpinfo_rtt) and X-Forwarded-For on the relay upgrade request, read
+# only with trust_proxy_headers = true: enable it only behind a reverse proxy
+# that overwrites both. Without it every client counts as far, so the lock
+# needs a positive far_connection_quota.
 enabled = false
+trust_proxy_headers = false
 home_rtt_max_ms = 80
 far_connection_quota = 64
 allow_cidrs = []
@@ -149,9 +155,9 @@ pub struct RelayConfig {
     pub quic_addr_discovery: bool,
     #[serde(default = "default_quic_bind")]
     pub quic_bind: SocketAddr,
-    #[serde(default)]
+    #[serde(default = "default_rx_bytes_per_second")]
     pub rx_bytes_per_second: u32,
-    #[serde(default)]
+    #[serde(default = "default_rx_max_burst_bytes")]
     pub rx_max_burst_bytes: u32,
 }
 
@@ -162,6 +168,10 @@ pub struct PkarrConfig {
     pub put_per_second: u32,
     #[serde(default = "default_put_burst")]
     pub put_burst: u32,
+    #[serde(default = "default_get_per_second")]
+    pub get_per_second: u32,
+    #[serde(default = "default_get_burst")]
+    pub get_burst: u32,
     #[serde(
         default = "default_eviction",
         deserialize_with = "deserialize_duration"
@@ -174,6 +184,8 @@ pub struct PkarrConfig {
 pub struct LockConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub trust_proxy_headers: bool,
     #[serde(default = "default_home_rtt_max_ms")]
     pub home_rtt_max_ms: u32,
     #[serde(default = "default_far_connection_quota")]
@@ -198,8 +210,6 @@ pub struct Peer {
     pub quic_port: Option<u16>,
     #[serde(default)]
     pub region: Option<String>,
-    #[serde(default)]
-    pub home_rtt_max_ms: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -225,6 +235,18 @@ fn default_put_per_second() -> u32 {
 }
 fn default_put_burst() -> u32 {
     8
+}
+fn default_get_per_second() -> u32 {
+    20
+}
+fn default_get_burst() -> u32 {
+    40
+}
+fn default_rx_bytes_per_second() -> u32 {
+    2_000_000
+}
+fn default_rx_max_burst_bytes() -> u32 {
+    4_000_000
 }
 fn default_eviction() -> Duration {
     Duration::from_secs(7 * 24 * 60 * 60)
@@ -262,8 +284,8 @@ impl Default for RelayConfig {
         Self {
             quic_addr_discovery: true,
             quic_bind: default_quic_bind(),
-            rx_bytes_per_second: 0,
-            rx_max_burst_bytes: 0,
+            rx_bytes_per_second: default_rx_bytes_per_second(),
+            rx_max_burst_bytes: default_rx_max_burst_bytes(),
         }
     }
 }
@@ -273,6 +295,8 @@ impl Default for PkarrConfig {
         Self {
             put_per_second: default_put_per_second(),
             put_burst: default_put_burst(),
+            get_per_second: default_get_per_second(),
+            get_burst: default_get_burst(),
             eviction: default_eviction(),
         }
     }
@@ -282,6 +306,7 @@ impl Default for LockConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            trust_proxy_headers: false,
             home_rtt_max_ms: default_home_rtt_max_ms(),
             far_connection_quota: default_far_connection_quota(),
             allow_cidrs: Vec::new(),
@@ -364,11 +389,20 @@ impl Config {
         if self.pkarr.put_per_second == 0 || self.pkarr.put_burst == 0 {
             return Err("pkarr.put_per_second and pkarr.put_burst must be positive".into());
         }
+        if self.pkarr.get_per_second == 0 || self.pkarr.get_burst == 0 {
+            return Err("pkarr.get_per_second and pkarr.get_burst must be positive".into());
+        }
         if self.pkarr.eviction.is_zero() {
             return Err("pkarr.eviction must be positive".into());
         }
         if self.relay.rx_bytes_per_second == 0 && self.relay.rx_max_burst_bytes != 0 {
             return Err("relay.rx_max_burst_bytes needs relay.rx_bytes_per_second".into());
+        }
+        if self.lock.enabled
+            && !self.lock.trust_proxy_headers
+            && self.lock.far_connection_quota == 0
+        {
+            return Err("lock.enabled without lock.trust_proxy_headers treats every client as far, so lock.far_connection_quota must be positive or nothing can connect".into());
         }
         Ok(())
     }
@@ -433,6 +467,17 @@ mod tests {
         let error = Config::parse("[pkarr]\nput_burst = 0\n[tls]\nmode = \"off\"").unwrap_err();
         assert!(error.contains("put_burst"), "{error}");
         assert!(Config::parse("unknown = 1\n[tls]\nmode = \"off\"").is_err());
+        let error = Config::parse(
+            "[tls]\nmode = \"off\"\n[lock]\nenabled = true\nfar_connection_quota = 0",
+        )
+        .unwrap_err();
+        assert!(error.contains("trust_proxy_headers"), "{error}");
+        assert!(
+            Config::parse(
+                "[tls]\nmode = \"off\"\n[lock]\nenabled = true\ntrust_proxy_headers = true\nfar_connection_quota = 0",
+            )
+            .is_ok()
+        );
 
         let config = Config::parse(
             "[tls]\nmode = \"off\"\n[lock]\nenabled = true\nallow_cidrs = [\"10.0.0.0/8\"]\n[metrics]\n[[peers]]\nurl = \"https://relay-2.example.org/\"\nquic_port = 0",

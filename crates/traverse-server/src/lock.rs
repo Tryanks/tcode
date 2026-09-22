@@ -2,7 +2,9 @@
 //! is close to. iroh-relay hands the hook only the upgrade request, not the
 //! socket, so the lock reads what a reverse proxy in front of it adds:
 //! `X-TCP-RTT` (microseconds, nginx `$tcpinfo_rtt`) and `X-Forwarded-For`.
-//! Without such a proxy every client looks far away and shares the quota.
+//! Those headers are read only when the config trusts the proxy; a client
+//! can send them itself. Otherwise every client looks far away and shares
+//! the quota.
 use std::{collections::HashSet, net::IpAddr, sync::Mutex, time::Duration};
 
 use http::HeaderMap;
@@ -14,6 +16,7 @@ use crate::config::LockConfig;
 
 #[derive(Debug)]
 pub struct RegionLock {
+    trust_proxy_headers: bool,
     home_rtt_max: Duration,
     far_connection_quota: usize,
     allow_cidrs: Vec<IpNet>,
@@ -23,6 +26,7 @@ pub struct RegionLock {
 impl RegionLock {
     pub fn new(config: &LockConfig) -> Self {
         Self {
+            trust_proxy_headers: config.trust_proxy_headers,
             home_rtt_max: Duration::from_millis(u64::from(config.home_rtt_max_ms)),
             far_connection_quota: config.far_connection_quota,
             allow_cidrs: config.allow_cidrs.clone(),
@@ -60,14 +64,16 @@ fn forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
 
 impl AccessControl for RegionLock {
     async fn on_connect(&self, request: &ClientRequest) -> Access {
-        let headers = request.headers();
-        if rtt(headers).is_some_and(|rtt| rtt <= self.home_rtt_max) {
-            return Access::Allow;
-        }
-        if let Some(ip) = forwarded_ip(headers)
-            && self.allow_cidrs.iter().any(|net| net.contains(&ip))
-        {
-            return Access::Allow;
+        if self.trust_proxy_headers {
+            let headers = request.headers();
+            if rtt(headers).is_some_and(|rtt| rtt <= self.home_rtt_max) {
+                return Access::Allow;
+            }
+            if let Some(ip) = forwarded_ip(headers)
+                && self.allow_cidrs.iter().any(|net| net.contains(&ip))
+            {
+                return Access::Allow;
+            }
         }
         let mut far = self.far.lock().expect("lock");
         if far.len() < self.far_connection_quota {
@@ -106,6 +112,7 @@ mod tests {
     fn lock(quota: usize) -> RegionLock {
         RegionLock::new(&LockConfig {
             enabled: true,
+            trust_proxy_headers: true,
             home_rtt_max_ms: 80,
             far_connection_quota: quota,
             allow_cidrs: vec!["10.0.0.0/8".parse().unwrap()],
@@ -139,6 +146,28 @@ mod tests {
             Access::Deny { .. }
         ));
         assert_eq!(lock.far_connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn untrusted_headers_never_bypass_the_quota() {
+        let lock = RegionLock::new(&LockConfig {
+            enabled: true,
+            trust_proxy_headers: false,
+            home_rtt_max_ms: 80,
+            far_connection_quota: 1,
+            allow_cidrs: vec!["10.0.0.0/8".parse().unwrap()],
+        });
+        let near = request(&[("x-tcp-rtt", "1000"), ("x-forwarded-for", "10.1.2.3")]);
+        assert_eq!(lock.on_connect(&near).await, Access::Allow);
+        assert_eq!(
+            lock.far_connections(),
+            1,
+            "a self-declared near client is far"
+        );
+        assert!(matches!(
+            lock.on_connect(&request(&[("x-tcp-rtt", "1000")])).await,
+            Access::Deny { .. }
+        ));
     }
 
     #[tokio::test]

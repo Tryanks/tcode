@@ -395,6 +395,48 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     official_host.shutdown();
 }
 
+/// A self-hosted instance that cannot be reached is not a reason to stay
+/// off the LAN: the machine hosts with no relay and no lookup, the device
+/// fetches the same manifest and fails the same way, and pairing and
+/// connecting over loopback still work. The official service is never
+/// substituted on either side.
+#[test]
+fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
+    let host_dir = TestDir::new("dead-traverse-host");
+    let (mux, _, _) = fake_host();
+    let dead = url::Url::from_file_path(host_dir.0.join("missing").join("relays.json")).unwrap();
+    let host = TraverseHost::start(
+        mux,
+        HostConfig {
+            host_name: "Test Host".into(),
+            data_dir: host_dir.0.clone(),
+            traverse: TraverseMode::Custom(dead.clone()),
+            pairing_enabled: true,
+            bind_port: None,
+        },
+    )
+    .expect("hosting starts without the manifest");
+    assert_eq!(host.endpoint_id().len(), 64);
+    assert!(host.addr().relays.is_empty(), "no relay in hand");
+    let dir = TestDir::new("dead-traverse-phone");
+    let phone = device(&dir, "phone");
+    let minted = host.new_invitation();
+    assert_eq!(minted.invite.traverse.as_deref(), Some(dead.as_str()));
+    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    assert_eq!(paired.traverse.as_deref(), Some(dead.as_str()));
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, ConnectionState::Syncing);
+    client.to_host.send_blocking(subscribe(1)).unwrap();
+    recv_type(&client, "ack", Some(1));
+    wait_state(&client, connected_directly());
+    assert!(
+        phone.relays().is_empty(),
+        "the device took no relay from anywhere"
+    );
+    client.to_host.close();
+    host.shutdown();
+}
+
 /// The heartbeat is the transport's own line, never charged to the outbox.
 /// Crediting it on send underflowed the outbox count after `NATIVE_IDLE_MS`
 /// of silence and killed the writer, so a connection that went quiet for ten
@@ -522,6 +564,10 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     host.shutdown();
 }
 
+/// A revocation is durable or it did not happen: while the allow list
+/// cannot be written, the device stays listed, its connection stays open and
+/// it is still admitted, and the caller is told. Once it is written, the
+/// live connection closes and a reconnect is refused.
 #[test]
 fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     let host_dir = TestDir::new("revoke-host");
@@ -537,7 +583,33 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     recv_type(&client, "ack", Some(1));
     assert!(host.devices()[0].live.is_some());
 
-    host.revoke(&phone.endpoint_id().to_string());
+    // The allow list is written through `traverse.tmp`; a directory in its
+    // place fails the write on every platform, root or not.
+    let blocker = host_dir.0.join("traverse.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let error = host
+        .revoke(&phone.endpoint_id().to_string())
+        .expect_err("the revocation cannot be recorded");
+    assert!(
+        matches!(
+            host.hosting(tcode_protocol::HostingAction::RevokeDevice(
+                phone.endpoint_id().to_string()
+            )),
+            Err(tcode_protocol::ProtocolError { code, message })
+                if code == "revoke_failed" && message.contains(&error.to_string())
+        ),
+        "a client's revoke is answered with the failure"
+    );
+    assert_eq!(host.devices().len(), 1, "still paired: {error}");
+    assert!(host.devices()[0].live.is_some(), "still connected");
+    client.to_host.send_blocking(subscribe(2)).unwrap();
+    recv_type(&client, "ack", Some(2));
+    let again = tcode_traverse::connect(&paired, &phone);
+    wait_state(&again, ConnectionState::Syncing);
+    again.to_host.close();
+    std::fs::remove_dir(&blocker).unwrap();
+
+    host.revoke(&phone.endpoint_id().to_string()).unwrap();
     wait_state(
         &client,
         ConnectionState::Offline {

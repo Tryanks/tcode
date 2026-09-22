@@ -371,18 +371,18 @@ the official manifest is loaded only while some machine uses the official
 service. Adding or removing a machine applies this to the running endpoint.
 
 A Traverse instance describes itself with a JSON manifest: a list of relays
-(`url`, optional `quic_port`, `region`, `home_rtt_max_ms`), a list of pkarr
-lookup URLs and, optionally, DNS lookup origins. Relay and pkarr URLs must be
-`https`. The machine builds its relay list from the manifest and publishes a
-signed record of where it can be reached to every pkarr URL in it; a device
-resolves the machine id through the same pkarr URLs. A refreshed manifest is
-applied to the running endpoint: relays that disappeared are removed, new ones
-added, lookup services rebuilt.
+(`url`, optional `quic_port` and `region`) and a list of pkarr lookup URLs.
+Relay and pkarr URLs must be `https`. The machine builds its relay list from
+the manifest and publishes a signed record of where it can be reached to
+every pkarr URL in it; a device resolves the machine id through the same
+pkarr URLs. Lookup is pkarr over HTTPS only; there is no DNS lookup. A
+refreshed manifest is applied to the running endpoint: relays that
+disappeared are removed, new ones added, lookup services rebuilt.
 
 | Mode | Machine | Devices | The service sees |
 | --- | --- | --- | --- |
-| **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's lookup service (`https://dns.iroh.link/pkarr`, DNS origin `dns.iroh.link.`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device with a machine on the official service uses the same relay list for its own home relay and the same lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
-| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch and fails to start if the instance is unreachable; it never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
+| **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's pkarr relay (`https://dns.iroh.link/pkarr`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device with a machine on the official service uses the same relay list for its own home relay and the same lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
+| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch; if the instance is unreachable it starts anyway with no relay and no lookup — the LAN still works, the invitation carries direct addresses only — and applies the manifest to the running endpoint once a background refresh (every five minutes) fetches it. It never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Until that manifest loads the device has no relay and no resolver for that instance, only the saved addresses and the LAN lookup. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
 | **Off** | No relay and no lookup service: the endpoint publishes nothing beyond its LAN advertisement and dials nothing but direct addresses. The invitation carries only the machine's current addresses (`Relay: none (LAN only)`). | The device dials the addresses from the invitation and the ones it learned on later connections, and finds the machine again on the same network through the LAN lookup. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
 
 A device that connected successfully saves how it reached the machine —
@@ -398,7 +398,8 @@ without any service; see [Finding the machine again](#finding-the-machine-again)
   a fetched manifest stays fresh for one hour, and after a failure the next
   attempt waits five minutes, so an offline machine does not pay a network
   timeout on every check. A bundled manifest newer than the cache wins. A
-  self-hosted machine keeps its cached copy; with no cache, see the table.
+  self-hosted machine keeps its cached copy; with no cache it hosts without
+  a relay until the manifest arrives, see the table.
 - **No route to a relay.** The machine still hosts; the invitation carries
   direct addresses only, and devices on the same network connect directly.
 - **A relay is rate-limited or refuses a connection.** Connections fall back
@@ -618,7 +619,7 @@ list in memory and writes it back.
 | **Protocol mismatch · Update the app** | The machine and the device run different protocol versions. Update both. |
 | **Connected … · Relay** when both are on the same LAN | Hole punching has not found a direct path yet, or the LAN blocks UDP between the two. The path can switch to **Direct** while connected; the machine's fixed UDP port (`47420`) allowed through its firewall helps. |
 | `tcode-headless pair` says there is no valid invitation | The last one was used or expired, or `serve` is not running. Create a new invitation from a paired device's **Settings → Other devices**, or restart `serve`. |
-| `could not start Traverse` on a self-hosted URL | The instance's `relays.json` could not be fetched and nothing is cached. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
+| A self-hosted machine hosts with `Relay: none (LAN only)` | The instance's `relays.json` could not be fetched and nothing is cached; the machine is reachable on the LAN only until a background refresh (every five minutes) gets the manifest. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
 | Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if logged-in browsers should lose access. |
 | Browser page unreachable from another device | The listener binds `127.0.0.1:47420` by default. Start `serve --browser-listen 0.0.0.0:47420` and open the machine's LAN address; `serve` refuses that bind until a password is set. |
 | Browser shows **Protocol mismatch** | The page in the tab is from another build than the running `tcode-headless`. Reload the page. |
@@ -788,23 +789,25 @@ Traverse mode, so a paired machine is found again after a new DHCP lease,
 after both moved to another network, or after a restart, on a LAN with no
 internet and no Traverse. There is still no list of nearby machines: the
 device only ever resolves the ids it is already paired with, and only the
-machine advertises. Each attempt to connect tries exactly three things, in
-this order, and nothing else:
+machine advertises. Each attempt to connect uses exactly two sources, and
+nothing else:
 
-1. The direct address that carried the last successful connection.
-2. Every other address saved for that machine, in the order `hosts.json`
-   keeps them: newest first, the invitation's hints last.
-3. A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) for about
-   2.5 seconds. A machine advertises one instance of that type while it
-   hosts — desktop and headless alike, in every Traverse mode — with its
-   bound UDP port and a TXT record `v=1`, `id=<machine id>`,
-   `name=<machine name>`; loopback is never advertised, and the record
-   follows the machine's interfaces as they change. The device keeps only the
-   instance whose `id` is the machine it wants. This is a standard
-   advertisement, so `dns-sd -B _tcode._udp` on macOS or Android's
-   `NsdManager` list it too; on iOS the app browses through the system's
-   Bonjour daemon (the `NSBonjourServices` entry in `Info.plist`), and on
-   Android it holds the Wi-Fi multicast lock for the browse.
+- The addresses saved for that machine, handed over at once and dialled
+  together, in the order `hosts.json` keeps them: the address that carried
+  the last successful connection first, older ones after it, the
+  invitation's hints last.
+- A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) that runs at
+  the same time for about 2.5 seconds and adds every address it finds for
+  the machine as it resolves. A machine advertises one instance of that
+  type while it hosts — desktop and headless alike, in every Traverse mode
+  — with its bound UDP port and a TXT record `v=1`, `id=<machine id>`,
+  `name=<machine name>`; loopback is never advertised, and the record
+  follows the machine's interfaces as they change. The device keeps only the
+  instance whose `id` is the machine it wants. This is a standard
+  advertisement, so `dns-sd -B _tcode._udp` on macOS or Android's
+  `NsdManager` list it too; on iOS the app browses through the system's
+  Bonjour daemon (the `NSBonjourServices` entry in `Info.plist`), and on
+  Android it holds the Wi-Fi multicast lock for the browse.
 
 A candidate address is never authorization: the QUIC handshake verifies the
 machine's key, so nothing but the machine can answer. The lookup ends as soon

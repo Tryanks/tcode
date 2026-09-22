@@ -105,7 +105,8 @@ impl Server {
         let pkarr_metrics = Arc::new(PkarrMetrics::default());
         let pkarr = Arc::new(PkarrService {
             store: Store::open(&config.data_dir.join("pkarr.redb"))?,
-            limiter: RateLimiter::new(config.pkarr.put_per_second, config.pkarr.put_burst),
+            put_limiter: RateLimiter::new(config.pkarr.put_per_second, config.pkarr.put_burst),
+            get_limiter: RateLimiter::new(config.pkarr.get_per_second, config.pkarr.get_burst),
             trust_forwarded_for: config.http.trust_forwarded_for,
             metrics: pkarr_metrics.clone(),
         });
