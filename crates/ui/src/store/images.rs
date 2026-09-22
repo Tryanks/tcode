@@ -192,7 +192,9 @@ mod tests {
                     ServerEvent::IndexUpsertProject(project.clone())
                 } else {
                     if reconnect == Some(true) {
-                        store.apply_connection_state(tcode_client::ConnectionState::Syncing);
+                        store.apply_connection_state(tcode_client::ConnectionState::Syncing {
+                            path: None,
+                        });
                     }
                     // Seed a baseline before caching the error, then replace it on reconnect.
                     ServerEvent::IndexSnapshot(IndexSnapshot {
