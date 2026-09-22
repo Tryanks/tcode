@@ -966,7 +966,6 @@ remote:
   host:
     section: "这台机器"
     title: "允许其他设备连接这台机器"
-    description: "让其他设备打开这台机器上的项目和对话。"
   pairing:
     title: "接受新设备配对"
     description: "新设备可凭邀请配对。"
@@ -1013,19 +1012,15 @@ remote:
     authentication_rejected: "访问被拒绝 · 重新配对"
     protocol_mismatch: "协议版本不匹配 · 更新应用"
     host_closed: "机器已关闭连接"
-  banner:
-    pending_writes: "%{count} 条消息等待发送"
-    pending_write: "1 条消息等待发送"
-    connected: "已连接 %{host} · %{path}"
-    syncing: "正在与 %{host} 同步…"
-    reconnecting: "正在重新连接 %{host}…（第 %{attempt} 次）"
-    offline: "离线 —— %{host}"
+  state:
+    connected: "已连接"
+    syncing: "正在同步"
+    reconnecting: "正在重新连接（第 %{attempt} 次）"
 
 
 hosts:
   title: "机器"
   this_computer: "这台机器"
-  this_computer_description: "项目和对话就在这台机器上。"
   saved: "已添加的机器"
   empty: "尚未添加任何机器。"
   disconnect: "断开"

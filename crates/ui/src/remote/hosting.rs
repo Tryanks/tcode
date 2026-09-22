@@ -275,18 +275,20 @@ fn switch_row() -> gpui::Div {
         .items_center()
 }
 
-fn labels(title: SharedString, description: SharedString, cx: &App) -> gpui::Div {
+/// A row's title, with a description only where it says something the
+/// title and the control do not.
+fn labels(title: SharedString, description: Option<SharedString>, cx: &App) -> gpui::Div {
     v_flex()
         .flex_1()
         .min_w_0()
         .gap_0p5()
         .child(div().text_size(px(15.)).font_medium().child(title))
-        .child(
+        .children(description.map(|description| {
             div()
                 .text_size(px(13.))
                 .text_color(cx.theme().muted_foreground)
-                .child(description),
-        )
+                .child(description)
+        }))
 }
 
 fn countdown(seconds: u64) -> String {
@@ -529,7 +531,7 @@ impl HostingPanel {
         let toggle = switch_row()
             .child(labels(
                 crate::tr!("remote.host.title").into_owned().into(),
-                crate::tr!("remote.host.description").into_owned().into(),
+                None,
                 cx,
             ))
             .child(
@@ -545,7 +547,7 @@ impl HostingPanel {
                 .debug_selector(|| "remote-pairing".into())
                 .child(labels(
                     crate::tr!("remote.pairing.title").into_owned().into(),
-                    crate::tr!("remote.pairing.description").into_owned().into(),
+                    Some(crate::tr!("remote.pairing.description").into_owned().into()),
                     cx,
                 ))
                 .child(
@@ -560,9 +562,11 @@ impl HostingPanel {
         let name_row = row(compact)
             .child(labels(
                 crate::tr!("remote.host_name.title").into_owned().into(),
-                crate::tr!("remote.host_name.description")
-                    .into_owned()
-                    .into(),
+                Some(
+                    crate::tr!("remote.host_name.description")
+                        .into_owned()
+                        .into(),
+                ),
                 cx,
             ))
             .child(
@@ -584,7 +588,7 @@ impl HostingPanel {
         let traverse_row = row(compact)
             .child(labels(
                 crate::tr!("remote.traverse.title").into_owned().into(),
-                traverse_description(&selected),
+                Some(traverse_description(&selected)),
                 cx,
             ))
             .child(
@@ -631,13 +635,15 @@ impl HostingPanel {
             row(compact)
                 .child(labels(
                     crate::tr!("remote.traverse.url").into_owned().into(),
-                    if url_valid {
-                        crate::tr!("remote.traverse.url_description")
-                    } else {
-                        crate::tr!("remote.traverse.invalid_url")
-                    }
-                    .into_owned()
-                    .into(),
+                    Some(
+                        if url_valid {
+                            crate::tr!("remote.traverse.url_description")
+                        } else {
+                            crate::tr!("remote.traverse.invalid_url")
+                        }
+                        .into_owned()
+                        .into(),
+                    ),
                     cx,
                 ))
                 .child(
@@ -726,7 +732,7 @@ impl HostingPanel {
                     row(compact)
                         .child(labels(
                             crate::tr!("remote.invite.expired").into_owned().into(),
-                            crate::tr!("remote.invite.description").into_owned().into(),
+                            Some(crate::tr!("remote.invite.description").into_owned().into()),
                             cx,
                         ))
                         .child(new_invitation("remote-new-invitation", cx).primary()),
@@ -857,14 +863,16 @@ impl HostingPanel {
                 row(compact)
                     .child(labels(
                         super::device_label(&device.name, device.platform.as_deref()).into(),
-                        crate::tr!(
-                            "remote.devices.paired_on",
-                            date = crate::time::humanize_ago(
-                                crate::time::now_secs().saturating_sub(device.created_unix)
+                        Some(
+                            crate::tr!(
+                                "remote.devices.paired_on",
+                                date = crate::time::humanize_ago(
+                                    crate::time::now_secs().saturating_sub(device.created_unix)
+                                )
                             )
-                        )
-                        .into_owned()
-                        .into(),
+                            .into_owned()
+                            .into(),
+                        ),
                         cx,
                     ))
                     .child(

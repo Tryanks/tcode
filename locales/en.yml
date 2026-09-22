@@ -972,7 +972,6 @@ remote:
   host:
     section: "THIS MACHINE"
     title: "Let other devices connect to this machine"
-    description: "Open this machine's projects and threads from other devices."
   pairing:
     title: "Accept new devices"
     description: "New devices can pair with an invitation."
@@ -1019,19 +1018,15 @@ remote:
     authentication_rejected: "Access rejected · Pair again"
     protocol_mismatch: "Protocol mismatch · Update the app"
     host_closed: "Host closed the connection"
-  banner:
-    pending_writes: "%{count} messages waiting to send"
-    pending_write: "1 message waiting to send"
-    connected: "Connected to %{host} · %{path}"
-    syncing: "Syncing with %{host}…"
-    reconnecting: "Reconnecting to %{host}… (attempt %{attempt})"
-    offline: "Offline — %{host}"
+  state:
+    connected: "Connected"
+    syncing: "Syncing"
+    reconnecting: "Reconnecting (attempt %{attempt})"
 
 
 hosts:
   title: "Machines"
   this_computer: "This machine"
-  this_computer_description: "Projects stored on this machine."
   saved: "YOUR MACHINES"
   empty: "No machines added yet."
   disconnect: "Disconnect"
