@@ -354,7 +354,10 @@ pub fn orchestrate_efforts(
             (ProviderKind::Codex, "gpt-5.6-sol" | "gpt-6-astra") => {
                 &["low", "medium", "high", "xhigh", "max", "ultra"]
             }
-            (ProviderKind::ClaudeCode, "claude-opus-5" | "claude-fable-5-1") => &[
+            (
+                ProviderKind::ClaudeCode,
+                "claude-opus-5-5" | "claude-opus-5" | "claude-fable-5-1",
+            ) => &[
                 "low",
                 "medium",
                 "high",
@@ -431,7 +434,7 @@ impl Default for OrchestrateSettings {
                 ),
                 builtin_model(
                     ProviderKind::ClaudeCode,
-                    "claude-opus-5",
+                    "claude-opus-5-5",
                     DEFAULT_OPUS_DEFINITION,
                 ),
             ],
@@ -466,6 +469,7 @@ impl LegacyOrchestrateModel {
         mut self,
         collaboration: bool,
         replace_untouched_sol: bool,
+        replace_untouched_opus: bool,
     ) -> Option<OrchestrateChildModel> {
         if !collaboration
             && self.effort.is_none()
@@ -487,8 +491,16 @@ impl LegacyOrchestrateModel {
         if !collaboration
             && self.entry.provider == ProviderKind::ClaudeCode
             && self.entry.model == "claude-opus-5"
-            && self.entry.description == OLD_DEFAULT_OPUS_DEFINITION
+            && self.entry.profile_id.is_none()
+            && (self.entry.description == OLD_DEFAULT_OPUS_DEFINITION
+                || self.entry.description == DEFAULT_OPUS_DEFINITION)
         {
+            // An untouched bundled Opus 5 row follows the release to Opus 5.5
+            // unless the user already added Opus 5.5 themselves; rows with
+            // custom guidance or an endpoint profile stay where they are.
+            if replace_untouched_opus {
+                self.entry.model = "claude-opus-5-5".into();
+            }
             self.entry.description = DEFAULT_OPUS_DEFINITION.into();
         }
         if !collaboration
@@ -506,7 +518,7 @@ impl LegacyOrchestrateModel {
                     "claude-sonnet-5" if entry.description == LEGACY_SONNET_CHILD_DEFINITION => {
                         return None;
                     }
-                    "claude-opus-4-8" => entry.model = "claude-opus-5".into(),
+                    "claude-opus-4-8" | "claude-opus-5" => entry.model = "claude-opus-5-5".into(),
                     "claude-fable-5" => entry.model = "claude-fable-5-1".into(),
                     _ => {}
                 }
@@ -529,7 +541,7 @@ impl LegacyOrchestrateModel {
                 if let Some(description) = match (entry.provider, entry.model.as_str()) {
                     (ProviderKind::Codex, "gpt-5.6-sol") => Some(OLD_DEFAULT_SOL_DEFINITION),
                     (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_ASTRA_DEFINITION),
-                    (ProviderKind::ClaudeCode, "claude-opus-5") => Some(DEFAULT_OPUS_DEFINITION),
+                    (ProviderKind::ClaudeCode, "claude-opus-5-5") => Some(DEFAULT_OPUS_DEFINITION),
                     (ProviderKind::ClaudeCode, "claude-fable-5-1") => {
                         Some(DEFAULT_FABLE_DEFINITION)
                     }
@@ -576,17 +588,23 @@ impl Default for OrchestrateSettingsData {
 impl From<OrchestrateSettingsData> for OrchestrateSettings {
     fn from(data: OrchestrateSettingsData) -> Self {
         let (decisions, children) = if let Some(decisions) = data.decision_models {
-            let has_execution_astra = data.child_models.iter().any(|entry| {
-                entry.entry.provider == ProviderKind::Codex && entry.entry.model == "gpt-6-astra"
-            });
+            let has_execution = |provider: ProviderKind, model: &str| {
+                data.child_models
+                    .iter()
+                    .any(|entry| entry.entry.provider == provider && entry.entry.model == model)
+            };
+            let has_execution_astra = has_execution(ProviderKind::Codex, "gpt-6-astra");
+            let has_execution_opus_5_5 = has_execution(ProviderKind::ClaudeCode, "claude-opus-5-5");
             (
                 decisions
                     .into_iter()
-                    .filter_map(|entry| entry.migrate(true, false))
+                    .filter_map(|entry| entry.migrate(true, false, false))
                     .collect(),
                 data.child_models
                     .into_iter()
-                    .filter_map(|entry| entry.migrate(false, !has_execution_astra))
+                    .filter_map(|entry| {
+                        entry.migrate(false, !has_execution_astra, !has_execution_opus_5_5)
+                    })
                     .collect(),
             )
         } else {
@@ -610,7 +628,7 @@ impl From<OrchestrateSettingsData> for OrchestrateSettings {
             }
             let mut migrated: Vec<_> = legacy_decisions
                 .into_iter()
-                .filter_map(|entry| entry.migrate(true, false))
+                .filter_map(|entry| entry.migrate(true, false, false))
                 .collect();
             for builtin in &mut decisions {
                 if let Some(index) = migrated.iter().position(|entry| {
@@ -622,7 +640,7 @@ impl From<OrchestrateSettingsData> for OrchestrateSettings {
             decisions.extend(migrated);
             let children = legacy_children
                 .into_iter()
-                .filter_map(|entry| entry.migrate(false, true))
+                .filter_map(|entry| entry.migrate(false, true, true))
                 .collect();
             (decisions, children)
         };
@@ -657,7 +675,9 @@ impl OrchestrateSettings {
     pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
         match (provider, model) {
             (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_GPT_6_EXECUTION_DEFINITION),
-            (ProviderKind::ClaudeCode, "claude-opus-5") => Some(DEFAULT_OPUS_DEFINITION),
+            (ProviderKind::ClaudeCode, "claude-opus-5-5" | "claude-opus-5") => {
+                Some(DEFAULT_OPUS_DEFINITION)
+            }
             _ => None,
         }
     }
@@ -1688,6 +1708,49 @@ mod tests {
     }
 
     #[test]
+    fn orchestrate_keeps_customised_opus_5_rows() {
+        let old_json = r#"{
+            "decision_models": [],
+            "child_models": [
+                {"provider": "claude_code", "model": "claude-opus-5", "profile_id": "corp", "description": "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely."},
+                {"provider": "claude_code", "model": "claude-opus-5", "description": "Reviewer only."}
+            ]
+        }"#;
+        let migrated: OrchestrateSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(
+            migrated.child_models.len(),
+            1,
+            "same model merges into one row"
+        );
+        let opus = &migrated.child_models[0];
+        assert_eq!(opus.model, "claude-opus-5");
+        assert_eq!(opus.profile_id.as_deref(), Some("corp"));
+        assert!(opus.description.contains("Reviewer only."));
+
+        // A user who already added Opus 5.5 keeps the untouched Opus 5 row as is.
+        let old_json = format!(
+            r#"{{"decision_models":[],"child_models":[
+                {{"provider":"claude_code","model":"claude-opus-5-5","description":"Mine."}},
+                {{"provider":"claude_code","model":"claude-opus-5","description":{}}}
+            ]}}"#,
+            serde_json::to_string(OLD_DEFAULT_OPUS_DEFINITION).unwrap()
+        );
+        let migrated: OrchestrateSettings = serde_json::from_str(&old_json).unwrap();
+        let models: Vec<_> = migrated
+            .child_models
+            .iter()
+            .map(|entry| (entry.model.as_str(), entry.description.as_str()))
+            .collect();
+        assert_eq!(
+            models,
+            [
+                ("claude-opus-5-5", "Mine."),
+                ("claude-opus-5", DEFAULT_OPUS_DEFINITION)
+            ]
+        );
+    }
+
+    #[test]
     fn orchestrate_refreshes_untouched_previous_gpt_6_execution_text() {
         let old_json = format!(
             r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-6-astra","description":{},"enabled":true,"fast":false}}]}}"#,
@@ -1800,7 +1863,7 @@ mod tests {
         assert!(!sol.enabled);
         assert!(sol.fast);
         assert_eq!(sol.profile_id.as_deref(), Some("custom"));
-        assert_eq!(settings.child_models[1].model, "claude-opus-5");
+        assert_eq!(settings.child_models[1].model, "claude-opus-5-5");
         assert_eq!(
             settings.child_models[1].description,
             DEFAULT_OPUS_DEFINITION
