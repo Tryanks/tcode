@@ -89,7 +89,7 @@ impl Theme {
     /// Connection severity shared by the sidebar and attached machine row.
     pub(crate) fn connection_color(&self, state: &tcode_client::ConnectionState) -> Hsla {
         match state {
-            tcode_client::ConnectionState::Connected => self.success,
+            tcode_client::ConnectionState::Connected { .. } => self.success,
             tcode_client::ConnectionState::Syncing
             | tcode_client::ConnectionState::Reconnecting { .. } => self.warning,
             tcode_client::ConnectionState::Offline { .. } => self.danger,

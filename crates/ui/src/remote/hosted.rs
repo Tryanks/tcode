@@ -128,21 +128,17 @@ impl HostedPanel {
                     .child(crate::tr!("remote.invite.title"))
                     .child(div().text_size(px(15.)).line_height(px(20.)).child(
                         match &state.invite {
-                            Some(_) => crate::tr!("remote.invite.how"),
+                            Some(_) => crate::tr!(
+                                "remote.invite.expires",
+                                time = format!(
+                                    "{}:{:02}",
+                                    state.expires_in_secs / 60,
+                                    state.expires_in_secs % 60
+                                )
+                            ),
                             None => crate::tr!("remote.invite.expired"),
                         },
-                    ))
-                    .children(state.invite.as_ref().map(|_| {
-                        crate::tr!(
-                            "remote.invite.expires",
-                            time = format!(
-                                "{}:{:02}",
-                                state.expires_in_secs / 60,
-                                state.expires_in_secs % 60
-                            )
-                        )
-                        .into_owned()
-                    }));
+                    ));
             let mut actions = h_flex().gap_2();
             if let Some(link) = state.invite.clone() {
                 actions = actions.child(
@@ -180,16 +176,6 @@ impl HostedPanel {
                 row = row.children(super::qr::qr_element(link));
             }
             column = column.child(crate::material::group(cx).child(row));
-        } else {
-            column = column.child(
-                crate::material::group(cx).child(
-                    div()
-                        .p_3()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("remote.pairing.off")),
-                ),
-            );
         }
         column = column.child(
             div()

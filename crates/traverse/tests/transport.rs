@@ -113,6 +113,18 @@ fn device(dir: &TestDir, name: &str) -> DeviceIdentity {
     device
 }
 
+/// Loopback links are carried directly, and the state says so.
+fn connected_directly() -> ConnectionState {
+    ConnectionState::Connected {
+        path: Some(tcode_protocol::PathInfo {
+            direct: true,
+            relay: None,
+            lan: true,
+            probing_direct: false,
+        }),
+    }
+}
+
 fn wait_state(transport: &Transport, wanted: ConnectionState) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
@@ -401,11 +413,11 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     wait_state(&client, ConnectionState::Syncing);
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "ack", Some(1));
-    wait_state(&client, ConnectionState::Connected);
+    wait_state(&client, connected_directly());
 
     std::thread::sleep(Duration::from_millis(NATIVE_IDLE_MS + 2_000));
     while let Ok(state) = client.state.try_recv() {
-        assert_eq!(state, ConnectionState::Connected, "the idle link stayed up");
+        assert_eq!(state, connected_directly(), "the idle link stayed up");
     }
     let ping = json!({"id": 2, "payload": {"type": "query", "content": {"type": "ping"}}});
     client.to_host.send_blocking(ping.to_string()).unwrap();
@@ -437,8 +449,8 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     recv_type(&client_b, "event", None);
     recv_type(&client_a, "ack", Some(10));
     recv_type(&client_b, "ack", Some(20));
-    wait_state(&client_a, ConnectionState::Connected);
-    wait_state(&client_b, ConnectionState::Connected);
+    wait_state(&client_a, connected_directly());
+    wait_state(&client_b, connected_directly());
     let live = host.devices();
     assert!(
         live.iter()
@@ -562,7 +574,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     wait_state(&client, ConnectionState::Syncing);
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "event", None);
-    wait_state(&client, ConnectionState::Connected);
+    wait_state(&client, connected_directly());
     let endpoint_id = host.endpoint_id();
 
     host.shutdown();
@@ -587,7 +599,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
         endpoint_id,
         "same key, same identity"
     );
-    wait_state(&client, ConnectionState::Connected);
+    wait_state(&client, connected_directly());
     let deadline = Instant::now() + Duration::from_secs(5);
     while subscribe_count.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));

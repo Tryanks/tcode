@@ -104,8 +104,11 @@ impl Composer {
             .shadow_sm()
             .when(pending, |card| {
                 card.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
-                    if *self.workspace_store.read(cx).connection_state()
-                        == tcode_client::ConnectionState::Connected
+                    if self
+                        .workspace_store
+                        .read(cx)
+                        .connection_state()
+                        .is_connected()
                     {
                         "chat.sending"
                     } else {
