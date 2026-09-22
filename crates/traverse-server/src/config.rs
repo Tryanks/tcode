@@ -210,8 +210,6 @@ pub struct Peer {
     pub quic_port: Option<u16>,
     #[serde(default)]
     pub region: Option<String>,
-    #[serde(default)]
-    pub home_rtt_max_ms: Option<u32>,
 }
 
 fn default_true() -> bool {

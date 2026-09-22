@@ -71,8 +71,7 @@ async fn manifest_and_pkarr_store_over_http() {
             "version": 1,
             "updatedAt": "2027-01-15T08:00:00Z",
             "relays": [{ "url": base.as_str(), "quic_port": 0, "region": "test" }],
-            "pkarr": [base.join("pkarr").unwrap().as_str()],
-            "dns": []
+            "pkarr": [base.join("pkarr").unwrap().as_str()]
         })
     );
     let health = http
