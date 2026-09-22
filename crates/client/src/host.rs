@@ -89,40 +89,14 @@ pub trait TunnelOpener: Send + Sync {
     fn open(&self, host: &str, port: u16) -> TunnelFuture;
 }
 
-/// What a client says about itself when pairing and connecting. Serializes to
-/// the `device_id`, `device_name` and `platform` fields shared by the browser
-/// login and the hello line; the host keeps one device record per `device_id`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// What a client says about itself when pairing and connecting; the host
+/// keeps one device record per `id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceIdentity {
-    #[serde(rename = "device_id")]
     pub id: String,
-    #[serde(rename = "device_name")]
     pub name: String,
     /// Operating system name and version, such as `Android 15` or `macOS 26.0`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-}
-
-impl DeviceIdentity {
-    /// The first line of a main stream: the current protocol version and this
-    /// identity. The transport already authenticated the device, so the line
-    /// carries no credential.
-    pub fn hello_line(&self) -> String {
-        #[derive(Serialize)]
-        struct Hello<'a> {
-            #[serde(rename = "type")]
-            kind: &'static str,
-            protocol_version: u32,
-            #[serde(flatten)]
-            device: &'a DeviceIdentity,
-        }
-        serde_json::to_string(&Hello {
-            kind: "hello",
-            protocol_version: tcode_protocol::PROTOCOL_VERSION,
-            device: self,
-        })
-        .expect("string fields serialize")
-    }
 }
 
 /// Hosts accept a device id of at most this many bytes; longer or
@@ -265,24 +239,6 @@ pub trait ClientHost: 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hello_carries_the_version_and_device_fields_hosts_read() {
-        let device = DeviceIdentity {
-            id: "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b".into(),
-            name: "Xiaomi 15".into(),
-            platform: None,
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&device.hello_line()).unwrap(),
-            serde_json::json!({
-                "type": "hello",
-                "protocol_version": 5,
-                "device_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
-                "device_name": "Xiaomi 15",
-            })
-        );
-    }
 
     #[test]
     fn device_id_is_reused_when_valid_and_minted_and_stored_otherwise() {
