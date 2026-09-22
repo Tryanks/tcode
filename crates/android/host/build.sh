@@ -33,6 +33,9 @@ cd "$CRATE_DIR"
 rm -f host/app/src/main/jniLibs/arm64-v8a/libtcode_android.so
 cargo ndk -t arm64-v8a -o host/app/src/main/jniLibs build -p tcode-android \
     "${CARGO_BUILD_ARGS[@]}"
+# Dependencies that also declare a cdylib target (iroh and iroh-relay do, for
+# wasm) get copied by cargo-ndk as well; only the app library belongs in the APK.
+find host/app/src/main/jniLibs/arm64-v8a -name '*.so' ! -name libtcode_android.so -delete
 
 if $RELEASE; then
     # Preserve the exact build before stripping only the copy delivered to Gradle.
