@@ -2969,8 +2969,11 @@ impl Render for ChatView {
 
         let composer = self.composer.clone().into_any_element();
         let deliveries = self.workspace_store.read(cx).delivery_messages();
-        let waiting = *self.workspace_store.read(cx).connection_state()
-            != tcode_client::ConnectionState::Connected;
+        let waiting = !self
+            .workspace_store
+            .read(cx)
+            .connection_state()
+            .is_connected();
         let delivery_rows = deliveries
             .into_iter()
             .map(|(key, text, failure, acknowledged)| {

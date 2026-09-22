@@ -20,9 +20,9 @@ pub struct RawWebView {
 impl RawWebView {
     pub(super) fn new(
         initial_url: &str,
-        proxy: Option<&tcode_client::pairing::PairedHost>,
+        proxy: Option<&tcode_traverse::preview::ProxyEntry>,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<Event>), String> {
-        let (browser, events) = Browser::new(&serde_json::json!({"url": initial_url, "proxy": proxy.map(|host| serde_json::json!({"origin": host.origin, "token": host.token}))}).to_string())?;
+        let (browser, events) = Browser::new(&serde_json::json!({"url": initial_url, "proxy": proxy.map(|host| serde_json::json!({"origin": host.origin}))}).to_string())?;
         Ok((
             Self {
                 browser,

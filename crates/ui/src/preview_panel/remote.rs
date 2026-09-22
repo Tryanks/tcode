@@ -18,7 +18,7 @@ use objc2_foundation::{
 use objc2_web_kit::{
     WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKWebView,
 };
-use tcode_remote::preview::PreviewRoutes;
+use tcode_traverse::preview::PreviewRoutes;
 use wry::WebViewExtMacOS as _;
 
 use super::lifecycle::BrowserLifecycle;
@@ -107,7 +107,7 @@ define_class!(
 impl RemoteBrowser {
     pub(super) fn install(
         view: &Entity<WebView>,
-        endpoint: tcode_remote::preview::PreviewEndpoint,
+        endpoint: tcode_traverse::preview::PreviewEndpoint,
         cx: &mut Context<BrowserLifecycle>,
     ) -> Self {
         let routes = Rc::new(RefCell::new(PreviewRoutes::new(endpoint)));

@@ -3,11 +3,15 @@
 //! This contract deliberately contains no UI-runtime types. Adapters await the
 //! returned local futures and marshal their results onto their own UI thread.
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, io, pin::Pin};
 
+use futures_lite::{AsyncRead, AsyncWrite};
 use serde::{Deserialize, Serialize};
 
-use crate::{ConnectionState, pairing::PairedHost};
+use crate::{
+    ConnectionState,
+    pairing::{PairInvite, PairedHost},
+};
 
 /// A future which may remain on the thread that created it.
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -23,92 +27,76 @@ pub struct Transport {
 }
 
 /// The transport publishes its current pairing before emitting Syncing.
-/// Consumers take an atomic snapshot; saved hosts are only restart storage.
+/// Consumers take an atomic snapshot; saved hosts are only restart storage. A
+/// transport that can carry raw tunnels to the machine attaches its
+/// [`TunnelOpener`] here, so Preview reaches the machine over the same
+/// authenticated link as the protocol.
 #[derive(Clone)]
-pub struct LiveHost(std::sync::Arc<std::sync::Mutex<PairedHost>>);
+pub struct LiveHost {
+    host: std::sync::Arc<std::sync::Mutex<PairedHost>>,
+    tunnels: Option<std::sync::Arc<dyn TunnelOpener>>,
+}
 
 impl LiveHost {
     pub fn new(host: PairedHost) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(host)))
+        Self {
+            host: std::sync::Arc::new(std::sync::Mutex::new(host)),
+            tunnels: None,
+        }
+    }
+
+    pub fn with_tunnels(host: PairedHost, tunnels: std::sync::Arc<dyn TunnelOpener>) -> Self {
+        Self {
+            tunnels: Some(tunnels),
+            ..Self::new(host)
+        }
     }
 
     pub fn snapshot(&self) -> PairedHost {
-        self.0.lock().unwrap().clone()
+        self.host.lock().unwrap().clone()
     }
 
     /// Called by the owning transport only after authenticating the endpoint.
     pub fn authenticated(&self, host: &PairedHost) {
-        *self.0.lock().unwrap() = host.clone();
+        *self.host.lock().unwrap() = host.clone();
+    }
+
+    pub fn tunnels(&self) -> Option<std::sync::Arc<dyn TunnelOpener>> {
+        self.tunnels.clone()
     }
 }
 
-/// What the pairing form submits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PairRequest {
-    pub origin: String,
-    pub code: String,
-    pub host_id: Option<String>,
-    pub identity_key: Option<String>,
-    pub candidates: Vec<String>,
+/// One raw byte tunnel to a TCP service on the paired machine. Closing the
+/// write half tells the machine to shut down its write side to the service;
+/// end of stream on the read half means the service closed its side.
+pub struct Tunnel {
+    pub read: Box<dyn AsyncRead + Send + Unpin>,
+    pub write: Box<dyn AsyncWrite + Send + Unpin>,
 }
 
-/// A host advertised on the client's local network.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveredHost {
-    pub host_id: String,
-    pub name: String,
-    pub origin: String,
+impl std::fmt::Debug for Tunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Tunnel")
+    }
 }
 
-/// What a client says about itself when pairing and connecting. Serializes to
-/// the `device_id`, `device_name` and `platform` fields shared by `/pair`,
-/// `/auth/login` and the websocket hello; the host keeps one device record per
-/// `device_id` across repeated pairings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub type TunnelFuture = Pin<Box<dyn Future<Output = io::Result<Tunnel>> + Send>>;
+
+/// Opens tunnels to `host:port` as dialled from the paired machine, over the
+/// attachment's current connection. Fails at once while the attachment is
+/// reconnecting; tunnels opened on an earlier connection end with it.
+pub trait TunnelOpener: Send + Sync {
+    fn open(&self, host: &str, port: u16) -> TunnelFuture;
+}
+
+/// What a client says about itself when pairing and connecting; the host
+/// keeps one device record per `id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceIdentity {
-    #[serde(rename = "device_id")]
     pub id: String,
-    #[serde(rename = "device_name")]
     pub name: String,
     /// Operating system name and version, such as `Android 15` or `macOS 26.0`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-}
-
-impl DeviceIdentity {
-    /// The `/pair` request body for `code`.
-    pub fn pair_body(&self, code: &str) -> String {
-        #[derive(Serialize)]
-        struct PairBody<'a> {
-            code: &'a str,
-            #[serde(flatten)]
-            device: &'a DeviceIdentity,
-        }
-        serde_json::to_string(&PairBody { code, device: self }).expect("string fields serialize")
-    }
-
-    /// The first websocket line: the version-3 hello as the baseline with
-    /// version 4 advertised, the device token, and this identity.
-    pub fn hello_line(&self, token: &str) -> String {
-        #[derive(Serialize)]
-        struct Hello<'a> {
-            #[serde(rename = "type")]
-            kind: &'static str,
-            protocol_version: u32,
-            supported_versions: [u32; 2],
-            token: &'a str,
-            #[serde(flatten)]
-            device: &'a DeviceIdentity,
-        }
-        serde_json::to_string(&Hello {
-            kind: "hello",
-            protocol_version: 3,
-            supported_versions: [3, tcode_protocol::PROTOCOL_VERSION],
-            token,
-            device: self,
-        })
-        .expect("string fields serialize")
-    }
 }
 
 /// Hosts accept a device id of at most this many bytes; longer or
@@ -140,54 +128,6 @@ pub struct ClientPreferences {
     /// Opaque, client-local UI restoration state. The shell owns its schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub navigation: Option<serde_json::Value>,
-}
-
-/// Parse bounded JSON supplied by platform discovery bridges.
-pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
-    if json.len() > 65_536 {
-        return Vec::new();
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    let Some(hosts) = value.as_array() else {
-        return Vec::new();
-    };
-    let mut found: Vec<_> = hosts
-        .iter()
-        .take(128)
-        .filter_map(|value| {
-            let field = |name| {
-                value
-                    .get(name)?
-                    .as_str()
-                    .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
-                    .map(str::to_owned)
-            };
-            let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;
-            if port == 0 {
-                return None;
-            }
-            Some(DiscoveredHost {
-                host_id: field("host_id")?,
-                name: field("name")?,
-                origin: crate::pairing::parse_origin(&crate::pairing::lan_origin(
-                    &field("addr")?,
-                    port,
-                ))
-                .ok()?,
-            })
-        })
-        .collect();
-    // A machine may advertise Wi-Fi, virtual bridge and IPv6 addresses. Keep
-    // every distinct origin so an unreachable first choice cannot hide it.
-    found.retain(|host| {
-        !host.origin.starts_with("http://127.") && !host.origin.starts_with("http://[::1]")
-    });
-    found.sort_by_key(|host| (host.host_id.clone(), host.origin.contains('[')));
-    let mut seen = std::collections::HashSet::new();
-    found.retain(|host| seen.insert((host.host_id.clone(), host.origin.clone())));
-    found
 }
 
 /// Persistence, pairing, transport, and platform facilities for a tcode client.
@@ -249,26 +189,22 @@ pub trait ClientHost: 'static {
     fn last_host_id(&self) -> Option<String>;
     fn set_last_host_id(&self, host_id: Option<&str>);
 
-    /// Browsers can only pair with the origin that served the application.
-    fn fixed_pairing_endpoint(&self) -> Option<String> {
-        None
+    /// A browser is signed in with the machine that served it and can reach
+    /// no other: the shell offers it no way to add or re-pair a machine, and
+    /// [`ClientHost::pair`] is never called on it.
+    fn fixed_machine(&self) -> bool {
+        false
     }
 
-    fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>>;
+    /// Exchange the invitation's secret for a pairing with exactly the
+    /// machine the invitation names.
+    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
+        let _ = invite;
+        Box::pin(async { Err("this client cannot add machines".into()) })
+    }
 
     /// Open a reconnecting link. Dropping the returned channels ends it.
     fn connect(&self, host: &PairedHost) -> Transport;
-
-    fn browse_hosts(&self) -> HostFuture<'_, Vec<DiscoveredHost>> {
-        Box::pin(async { Vec::new() })
-    }
-
-    /// LAN origins where the machine `host_id` currently advertises itself,
-    /// for the transport to verify and race after an unreachable reconnect
-    /// cycle. Browser adapters have a fixed page origin and report none.
-    fn discover_origins(&self, _host_id: &str) -> HostFuture<'_, Vec<String>> {
-        Box::pin(async { Vec::new() })
-    }
 
     fn supports_qr(&self) -> bool {
         false
@@ -305,40 +241,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_and_hello_carry_the_device_fields_hosts_read() {
-        let device = DeviceIdentity {
-            id: "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b".into(),
-            name: "Xiaomi 15".into(),
-            platform: Some("Android 15".into()),
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&device.pair_body("123456")).unwrap(),
-            serde_json::json!({
-                "code": "123456",
-                "device_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
-                "device_name": "Xiaomi 15",
-                "platform": "Android 15",
-            })
-        );
-        let unknown_platform = DeviceIdentity {
-            platform: None,
-            ..device
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&unknown_platform.hello_line("token"))
-                .unwrap(),
-            serde_json::json!({
-                "type": "hello",
-                "protocol_version": 3,
-                "supported_versions": [3, 4],
-                "token": "token",
-                "device_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
-                "device_name": "Xiaomi 15",
-            })
-        );
-    }
-
-    #[test]
     fn device_id_is_reused_when_valid_and_minted_and_stored_otherwise() {
         let stored = std::cell::Cell::new(None);
         let keep = "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b".to_owned();
@@ -357,69 +259,5 @@ mod tests {
             assert!(valid_device_id(&minted));
             assert_eq!(stored.take().as_deref(), Some(minted.as_str()));
         }
-    }
-
-    #[test]
-    fn discovered_hosts_are_bounded_validated_and_deduplicated() {
-        let json = serde_json::json!([
-            {"host_id":"b","name":"IPv6","addr":"fd00::2","port":47420},
-            {"host_id":"a","name":"Loopback","addr":"127.0.0.1","port":47420},
-            {"host_id":"b","name":"IPv4","addr":"192.168.1.2","port":47420},
-            {"host_id":"b","name":"IPv4 duplicate","addr":"192.168.1.2","port":47420},
-            {"host_id":"b","name":"Virtual bridge","addr":"192.168.139.3","port":47420},
-            {"host_id":"d","name":"Bad port","addr":"192.168.1.4","port":0}
-        ]);
-
-        assert_eq!(
-            parse_discovered_hosts(&json.to_string()),
-            vec![
-                DiscoveredHost {
-                    host_id: "b".into(),
-                    name: "IPv4".into(),
-                    origin: "http://192.168.1.2:47420".into(),
-                },
-                DiscoveredHost {
-                    host_id: "b".into(),
-                    name: "Virtual bridge".into(),
-                    origin: "http://192.168.139.3:47420".into(),
-                },
-                DiscoveredHost {
-                    host_id: "b".into(),
-                    name: "IPv6".into(),
-                    origin: "http://[fd00::2]:47420".into(),
-                },
-            ]
-        );
-        assert!(parse_discovered_hosts("not json").is_empty());
-        assert!(parse_discovered_hosts("{}").is_empty());
-        assert!(parse_discovered_hosts(&" ".repeat(65_537)).is_empty());
-        let valid =
-            serde_json::json!({"host_id":"h","name":"Desk","addr":"192.168.1.2","port":47420});
-        for (field, invalid) in [
-            ("host_id", serde_json::json!("")),
-            ("name", serde_json::json!("line\nbreak")),
-            ("name", serde_json::json!("x".repeat(257))),
-            ("addr", serde_json::json!("::1")),
-            ("addr", serde_json::json!("user@desk")),
-            ("port", serde_json::json!(65536)),
-            ("port", serde_json::json!(-1)),
-        ] {
-            let mut invalid_host = valid.clone();
-            invalid_host[field] = invalid;
-            assert!(
-                parse_discovered_hosts(&serde_json::json!([invalid_host]).to_string()).is_empty(),
-                "{field}"
-            );
-        }
-        let many: Vec<_> = (0..129)
-            .map(|index| {
-                let mut host = valid.clone();
-                host["host_id"] = serde_json::json!(format!("host-{index:03}"));
-                host
-            })
-            .collect();
-        let bounded = parse_discovered_hosts(&serde_json::to_string(&many).unwrap());
-        assert_eq!(bounded.len(), 128);
-        assert_eq!(bounded.last().unwrap().host_id, "host-127");
     }
 }

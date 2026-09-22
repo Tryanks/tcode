@@ -40,9 +40,6 @@ impl Backoff {
 pub enum Wake {
     Reconnect,
     Probe,
-    /// Origins where the paired machine may answer now, found by LAN
-    /// discovery. The transport verifies the machine identity before using one.
-    Candidates(Vec<String>),
 }
 
 #[derive(Default)]

@@ -853,3 +853,111 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
     );
     assert_eq!(keyed.payload, legacy.payload);
 }
+
+/// The hosting reply is read by browsers and phones that may be older or
+/// newer than the machine: a machine from the six-digit-code era (its
+/// `code` field is ignored) or without device paths must still be
+/// understood, and a machine that has the link sends it whole so a scanner
+/// needs nothing else to reach it off the LAN.
+#[test]
+fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
+    let older: HostingState = serde_json::from_value(json!({
+        "enabled": true,
+        "code": "123456",
+        "expires_in_secs": 280,
+        "host_id": "ab".repeat(32),
+        "host_name": "Studio",
+        "devices": [{"id": "cd".repeat(32), "name": "Phone", "created_unix": 1}]
+    }))
+    .unwrap();
+    assert_eq!(older.invite, None);
+    assert_eq!(older.devices[0].path, None);
+    assert_eq!(
+        serde_json::from_value::<HostingAction>(json!({"type": "new_code"})).unwrap(),
+        HostingAction::NewInvitation
+    );
+    assert_eq!(
+        serde_json::to_value(HostingAction::NewInvitation).unwrap(),
+        json!({"type": "new_invitation"})
+    );
+
+    let state = HostingState {
+        enabled: true,
+        expires_in_secs: 280,
+        host_id: "ab".repeat(32),
+        host_name: "Studio".into(),
+        invite: Some("tcode://pair?v=2&id=abab".into()),
+        devices: vec![
+            HostedDevice {
+                id: "cd".repeat(32),
+                name: "Phone".into(),
+                created_unix: 1,
+                platform: Some("iOS 26".into()),
+                path: Some(PathInfo {
+                    direct: false,
+                    relay: Some("https://relay.example/".into()),
+                    lan: false,
+                    probing_direct: true,
+                }),
+            },
+            HostedDevice {
+                id: "ef".repeat(32),
+                name: "Laptop".into(),
+                created_unix: 2,
+                platform: None,
+                path: None,
+            },
+        ],
+    };
+    assert_eq!(
+        serde_json::to_value(&state).unwrap(),
+        json!({
+            "enabled": true,
+            "expires_in_secs": 280,
+            "host_id": "ab".repeat(32),
+            "host_name": "Studio",
+            "invite": "tcode://pair?v=2&id=abab",
+            "devices": [
+                {
+                    "id": "cd".repeat(32),
+                    "name": "Phone",
+                    "created_unix": 1,
+                    "platform": "iOS 26",
+                    "path": {"direct": false, "relay": "https://relay.example/", "probing_direct": true}
+                },
+                {"id": "ef".repeat(32), "name": "Laptop", "created_unix": 2}
+            ]
+        })
+    );
+}
+
+/// A path is direct or relayed on every peer; whether a direct path stays
+/// on the LAN, and whether a relay is still waiting for one, are newer
+/// flags that a machine from before them never sends. Such a machine's
+/// direct path reads as punched, since that is what it could not tell.
+#[test]
+fn path_info_kinds_read_older_peers_and_spell_the_flags() {
+    let older: PathInfo = serde_json::from_value(json!({"direct": true})).unwrap();
+    assert_eq!(older.kind(), PathKind::Tunnel);
+    let lan = PathInfo {
+        direct: true,
+        relay: None,
+        lan: true,
+        probing_direct: false,
+    };
+    assert_eq!(lan.kind(), PathKind::Lan);
+    assert_eq!(
+        serde_json::to_value(&lan).unwrap(),
+        json!({"direct": true, "lan": true})
+    );
+    let relayed: PathInfo =
+        serde_json::from_value(json!({"direct": false, "relay": "https://relay.example/"}))
+            .unwrap();
+    assert_eq!(
+        relayed.kind(),
+        PathKind::Relay {
+            url: Some("https://relay.example/")
+        }
+    );
+    assert!(!relayed.probing_direct);
+}

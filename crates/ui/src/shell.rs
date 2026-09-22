@@ -241,7 +241,7 @@ pub struct AppShell {
     window_state: Entity<WindowState>,
     setup: ShellSetup,
     attachment: Option<ShellAttachment>,
-    /// Saved hosts, discovery, pairing and authentication repair: the hosts
+    /// Saved hosts, pairing by invitation and authentication repair: the hosts
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
     nav: Entity<NavStackState>,
@@ -779,10 +779,12 @@ impl AppShell {
             return;
         };
         if attachment.stamped
-            || !matches!(
-                attachment.link.store.read(cx).connection_state(),
-                tcode_client::ConnectionState::Connected
-            )
+            || !attachment
+                .link
+                .store
+                .read(cx)
+                .connection_state()
+                .is_connected()
         {
             return;
         }
@@ -1362,8 +1364,8 @@ fn nav_icon_button(
         .child(Icon::new(icon).size(px(20.)))
 }
 
-/// The muted second line under a nav-bar title: the machine a thread list
-/// belongs to, the project a thread lives in.
+/// The muted second line under a nav-bar title: how the machine a thread
+/// list belongs to is reached, the project a thread lives in.
 fn nav_subtitle(text: impl Into<SharedString>, cx: &App) -> AnyElement {
     div()
         .max_w_full()
@@ -1381,15 +1383,6 @@ fn compact_label(key: &str) -> String {
 }
 
 impl AppShell {
-    /// The machine this window is attached to, as the Threads page's subtitle.
-    fn attached_machine(&self, cx: &App) -> SharedString {
-        self.attachment
-            .as_ref()
-            .and_then(|attachment| attachment.link.store.read(cx).remote_host_name())
-            .map(SharedString::from)
-            .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into())
-    }
-
     /// Back to whatever is under this page, labelled with that destination's
     /// short fixed label. `None` at the root, where the platform owns Back.
     fn back_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1508,15 +1501,22 @@ impl AppShell {
     }
 
     fn render_threads_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // The page is the thread list; which machine's list it is belongs in
-        // the subtitle, where every other page puts its context.
-        let title: SharedString = crate::tr!("mobile.threads").into_owned().into();
-        let machine = self.attached_machine(cx);
         let back = self.back_control(cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
         let store = attachment.link.store.read(cx);
+        // A remote machine's list is headed by the machine, with the link's
+        // state where every other page puts its context. The local list is
+        // just Threads: the Hosts row below already names this machine.
+        let (title, subtitle): (SharedString, Option<SharedString>) = match store.remote_host_name()
+        {
+            Some(host) => (
+                host.to_owned().into(),
+                Some(crate::remote::connection_label(&store.connection_state()).into()),
+            ),
+            None => (crate::tr!("mobile.threads").into_owned().into(), None),
+        };
         let projects = store.projects();
         let sidebar = attachment.sidebar.clone();
         let actions = vec![
@@ -1552,12 +1552,11 @@ impl AppShell {
             .child(nav_bar(
                 back,
                 title,
-                Some(nav_subtitle(machine, cx)),
+                subtitle.map(|subtitle| nav_subtitle(subtitle, cx)),
                 actions,
                 window,
                 cx,
             ))
-            .children(self.render_connection_banner(cx))
             .child(div().flex_1().min_h_0().child(sidebar))
             .into_any_element()
     }
@@ -1603,8 +1602,16 @@ impl AppShell {
                     .into_iter()
                     .find(|project| project.root == *cwd)
             })
-            .map(|project| project.name)
-            .unwrap_or_default();
+            .map(|project| project.name);
+        // Over a remote link the project shares its line with the link's state.
+        let subtitle = match (project, store.remote_host_name()) {
+            (Some(project), Some(_)) => Some(format!(
+                "{project} · {}",
+                crate::remote::connection_label(&store.connection_state())
+            )),
+            (None, Some(_)) => Some(crate::remote::connection_label(&store.connection_state())),
+            (project, None) => project,
+        };
         let title = active
             .map(|(title, _, draft)| {
                 if draft {
@@ -1632,7 +1639,7 @@ impl AppShell {
             .child(nav_bar(
                 back,
                 title.into(),
-                (!project.is_empty()).then(|| nav_subtitle(project, cx)),
+                subtitle.map(|subtitle| nav_subtitle(subtitle, cx)),
                 vec![
                     self.palette_action(cx),
                     nav_icon_button(
@@ -1650,7 +1657,6 @@ impl AppShell {
                 window,
                 cx,
             ))
-            .children(self.render_connection_banner(cx))
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }
@@ -1967,80 +1973,6 @@ impl AppShell {
         .into_any_element()
     }
 
-    /// A slim status bar above the chat column, shown only over a remote link
-    /// that is not currently connected.
-    fn render_connection_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let store = self.attachment.as_ref()?.link.store.read(cx);
-        let host = store.remote_host_name()?;
-        let (text, accent) = match store.connection_state() {
-            tcode_client::ConnectionState::Connected => return None,
-            tcode_client::ConnectionState::Syncing => (
-                crate::tr!("remote.banner.syncing", host = host).into_owned(),
-                cx.theme().warning,
-            ),
-            tcode_client::ConnectionState::Reconnecting { attempt, .. } => (
-                crate::tr!("remote.banner.reconnecting", host = host, attempt = attempt)
-                    .into_owned(),
-                cx.theme().warning,
-            ),
-            tcode_client::ConnectionState::Offline { .. } => (
-                crate::tr!("remote.banner.offline", host = host).into_owned(),
-                cx.theme().danger,
-            ),
-        };
-        let text = match store.connection_state() {
-            tcode_client::ConnectionState::Offline { reason }
-            | tcode_client::ConnectionState::Reconnecting {
-                reason: Some(reason),
-                ..
-            } => format!("{text} · {}", crate::remote::failure_label(*reason)),
-            _ => text,
-        };
-        let count = store.pending_write_count();
-        let text = if count > 0 {
-            format!(
-                "{text} · {}",
-                crate::tr!(
-                    if count == 1 {
-                        "remote.banner.pending_write"
-                    } else {
-                        "remote.banner.pending_writes"
-                    },
-                    count = count
-                )
-            )
-        } else {
-            text
-        };
-        let reconnecting = matches!(
-            store.connection_state(),
-            tcode_client::ConnectionState::Reconnecting { .. }
-        );
-        Some(
-            h_flex()
-                .flex_none()
-                .w_full()
-                .min_h(px(28.))
-                .py_1()
-                .px_3()
-                .gap_2()
-                .items_center()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .bg(accent.opacity(0.12))
-                .text_size(px(12.))
-                .text_color(cx.theme().foreground)
-                .when(reconnecting, |bar| {
-                    bar.child({
-                        use crate::sizing::Sizable as _;
-                        crate::widgets::spinner::Spinner::new().xsmall()
-                    })
-                })
-                .child(div().flex_1().min_w_0().child(text))
-                .into_any_element(),
-        )
-    }
-
     fn render_wide(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let route = self.window_state.read(cx).route();
         let palette_open = self.window_state.read(cx).palette_open;
@@ -2236,7 +2168,6 @@ impl AppShell {
                 .size_full()
                 .bg(crate::material::content_surface(cx))
                 .shadow_sm()
-                .children(self.render_connection_banner(cx))
                 .child(
                     div().flex_1().min_h_0().child(
                         self.attachment
@@ -2479,10 +2410,12 @@ mod tests {
     use super::*;
 
     /// One shell over a transport the test holds both ends of, so what the
-    /// client says to its host is observable.
+    /// client says to its host is observable and what the transport says
+    /// about the link can be dictated.
     struct MountedShell {
         outgoing: async_channel::Receiver<String>,
         incoming: async_channel::Sender<String>,
+        states: async_channel::Sender<tcode_client::ConnectionState>,
     }
 
     struct ReturningClient {
@@ -2542,7 +2475,7 @@ mod tests {
 
         fn pair(
             &self,
-            _: tcode_client::host::PairRequest,
+            _: tcode_client::pairing::PairInvite,
         ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
         {
             panic!("a cold start must reuse the saved pairing")
@@ -2585,15 +2518,14 @@ mod tests {
         cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
-        let (_, state) = async_channel::unbounded();
+        let (states, state) = async_channel::unbounded();
         let client = Rc::new(ReturningClient {
             saved: tcode_client::pairing::PairedHost {
                 host_id: "last-host".into(),
                 name: "Last machine".into(),
-                origin: "http://127.0.0.1:47503".into(),
-                candidates: Vec::new(),
-                token: "test-token".into(),
-                identity_key: None,
+                traverse: None,
+                relay: None,
+                addrs: vec!["127.0.0.1:47503".into()],
                 last_connected_unix: Some(1),
             },
             transport: RefCell::new(Some(Transport {
@@ -2633,7 +2565,16 @@ mod tests {
         let shell = window.root(cx).unwrap();
         let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
         draw(cx);
-        (shell, MountedShell { outgoing, incoming }, client, cx)
+        (
+            shell,
+            MountedShell {
+                outgoing,
+                incoming,
+                states,
+            },
+            client,
+            cx,
+        )
     }
 
     #[gpui::test]
@@ -2670,10 +2611,9 @@ mod tests {
             saved: tcode_client::pairing::PairedHost {
                 host_id: "pending-host".into(),
                 name: "Pending host".into(),
-                origin: "http://127.0.0.1:48442".into(),
-                candidates: Vec::new(),
-                token: "fixture".into(),
-                identity_key: None,
+                traverse: None,
+                relay: None,
+                addrs: vec!["127.0.0.1:48442".into()],
                 last_connected_unix: None,
             },
             transport: RefCell::new(Some(Transport {
@@ -2707,7 +2647,6 @@ mod tests {
         store.read_with(cx, |store, _| {
             assert_eq!(store.remote_host_name(), Some("Pending host"));
             assert_eq!(store.active_session_id().as_deref(), Some("pending-thread"));
-            assert_eq!(store.pending_write_count(), 1);
             assert!(!store.chat_loading());
             assert_eq!(store.delivery_messages()[0].1, "survives relaunch");
             assert!(store.sidebar_sessions().is_empty());
@@ -2794,6 +2733,94 @@ mod tests {
             )
             .unwrap();
         await_restore_update(shell, cx, |store| store.chat_active_session().is_some());
+    }
+
+    /// The rest of the baseline a restored thread waits for, after
+    /// [`restore_index`] and [`restore_status`].
+    fn restore_settings_and_events(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        cx: &mut VisualTestContext,
+    ) {
+        // The host's language is applied with its settings; the assertions
+        // read English.
+        let settings = tcode_core::settings::Settings {
+            language: Some(crate::LANGUAGE_ENGLISH.into()),
+            ..Default::default()
+        };
+        for (topic, event) in [
+            (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
+            (
+                Topic::SessionEvents {
+                    session_id: "thread-a".into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    from: 0,
+                    records: Vec::new(),
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        await_restore_update(shell, cx, WorkspaceStore::baseline_ready);
+    }
+
+    /// The phone's direct path dying is reported by the transport as a new
+    /// `Connected` naming the relay; that alone, with no host line and no
+    /// touch, changes what the nav bar says about the link.
+    #[gpui::test]
+    fn a_path_change_alone_updates_the_connection_subtitle(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads"], true);
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        restore_settings_and_events(&shell, &host, cx);
+        let store = store_of(&shell, cx);
+        let subtitle = |cx: &mut VisualTestContext| {
+            draw(cx);
+            store.read_with(cx, |store, _| {
+                crate::remote::connection_label(&store.connection_state())
+            })
+        };
+        assert_eq!(subtitle(cx), "Connected", "the baseline is in");
+        host.states
+            .try_send(tcode_client::ConnectionState::Connected {
+                path: Some(tcode_protocol::PathInfo {
+                    direct: true,
+                    relay: None,
+                    lan: true,
+                    probing_direct: false,
+                }),
+            })
+            .unwrap();
+        assert_eq!(subtitle(cx), "LAN · Connected");
+        host.states
+            .try_send(tcode_client::ConnectionState::Connected {
+                path: Some(tcode_protocol::PathInfo {
+                    direct: false,
+                    relay: Some("https://aps1-1.relay.n0.iroh.link/".into()),
+                    lan: false,
+                    probing_direct: false,
+                }),
+            })
+            .unwrap();
+        assert_eq!(subtitle(cx), "Relay (aps1-1) · Connected");
+        assert!(
+            cx.debug_bounds("compact-threads-page").is_some(),
+            "the Threads page is what shows it"
+        );
     }
 
     #[gpui::test]
@@ -2980,11 +3007,14 @@ mod tests {
             cx.debug_bounds("baseline-loading").is_some(),
             "status alone is not the conversation baseline"
         );
+        // The host's language is applied with its settings; the assertions
+        // read English.
+        let settings = tcode_core::settings::Settings {
+            language: Some(crate::LANGUAGE_ENGLISH.into()),
+            ..Default::default()
+        };
         for (topic, event) in [
-            (
-                Topic::Settings,
-                ServerEvent::SettingsSnapshot(Default::default()),
-            ),
+            (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
             (
                 Topic::SessionEvents {
                     session_id: "thread-a".into(),
@@ -3903,7 +3933,7 @@ mod tests {
         cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
-        let (_, state) = async_channel::unbounded();
+        let (states, state) = async_channel::unbounded();
         let transport = RefCell::new(Some(Transport {
             to_host: to_host.into(),
             from_host,
@@ -3925,7 +3955,15 @@ mod tests {
                 cx,
             )
         });
-        (shell, MountedShell { outgoing, incoming }, cx)
+        (
+            shell,
+            MountedShell {
+                outgoing,
+                incoming,
+                states,
+            },
+            cx,
+        )
     }
 
     #[gpui::test]

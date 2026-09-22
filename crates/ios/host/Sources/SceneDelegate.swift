@@ -34,6 +34,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func sceneWillEnterForeground(_ scene: UIScene) {
         gpui_ios_lifecycle_foreground()
+        // The network may have changed while suspended; the Traverse
+        // endpoint rebinds and probes before the shell's own foreground wake.
+        tcode_ios_network_changed()
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
