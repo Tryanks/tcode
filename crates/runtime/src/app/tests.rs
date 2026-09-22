@@ -1853,7 +1853,7 @@ fn orchestrate_guidance_and_current_configuration_are_composed() {
     );
     assert!(first.contains("### Execution models — `dispatch`"));
     assert!(first.contains(
-        "#### `codex` / `gpt-6-astra` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
+        "#### `codex` / `gpt-6-sol` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
     ));
     assert!(first.ends_with("\n\nShip it"));
     settings.decision_models[0].enabled = false;
@@ -1905,8 +1905,8 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
     let catalogs = HashMap::from([(
         ProviderKind::Codex,
         vec![ModelSpec {
-            id: "gpt-6-astra".into(),
-            display_name: "GPT-6 Astra".into(),
+            id: "gpt-6-sol".into(),
+            display_name: "GPT-6 Sol".into(),
             is_default: false,
             options: vec![OptionDescriptor::Select {
                 id: "reasoningEffort".into(),
@@ -1936,7 +1936,7 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
             .contains("unsupported effort max")
     );
     let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
-    assert!(configuration.contains("`gpt-6-astra` — available `effort`: `medium`, `high`, `deep`"));
+    assert!(configuration.contains("`gpt-6-sol` — available `effort`: `medium`, `high`, `deep`"));
 }
 
 #[test]
@@ -1957,13 +1957,13 @@ fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-astra"),
+            Some("gpt-6-sol"),
             Some("low"),
             None,
             &catalogs
         )
         .unwrap_err(),
-        expected
+        expected.replace("gpt-6-astra", "gpt-6-sol")
     );
     assert_eq!(
         resolve_orchestrate_collaboration(
@@ -1979,9 +1979,15 @@ fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
     );
     let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
     assert!(configuration.contains("#### `codex` / `gpt-6-astra` — unavailable"));
+    assert!(configuration.contains("#### `codex` / `gpt-6-sol` — unavailable"));
     assert!(configuration.contains(
         "Unavailable: model `gpt-6-astra` is not present in the loaded `codex` catalog."
     ));
+    assert!(
+        configuration.contains(
+            "Unavailable: model `gpt-6-sol` is not present in the loaded `codex` catalog."
+        )
+    );
 }
 
 #[test]
@@ -2014,7 +2020,7 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-astra"),
+            Some("gpt-6-sol"),
             Some("low"),
             None,
             &HashMap::new()
@@ -2045,14 +2051,14 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-astra"),
+            Some("gpt-6-sol"),
             Some("low"),
             None,
             &HashMap::new()
         )
         .unwrap()
         .1,
-        "gpt-6-astra"
+        "gpt-6-sol"
     );
     settings.decision_models[0].enabled = true;
     settings.child_models[0].enabled = false;
@@ -2402,7 +2408,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-astra"),
+            Some("gpt-6-sol"),
             Some("low"),
             None,
             &HashMap::new()
@@ -2410,7 +2416,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         .unwrap(),
         (
             ProviderKind::Codex,
-            "gpt-6-astra".into(),
+            "gpt-6-sol".into(),
             Some("low".into()),
             false,
             None
@@ -2421,7 +2427,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-astra"),
+            Some("gpt-6-sol"),
             Some("medium"),
             Some("KIMI"),
             &HashMap::new()
@@ -2429,7 +2435,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         .unwrap(),
         (
             ProviderKind::Codex,
-            "gpt-6-astra".into(),
+            "gpt-6-sol".into(),
             Some("medium".into()),
             false,
             Some("kimi".into()),
@@ -2438,7 +2444,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let unknown_profile = resolve_orchestrate_dispatch(
         &settings,
         "codex",
-        Some("gpt-6-astra"),
+        Some("gpt-6-sol"),
         Some("medium"),
         Some("missing"),
         &HashMap::new(),
@@ -2469,7 +2475,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             resolve_orchestrate_dispatch(
                 &settings,
                 "codex",
-                Some("gpt-6-astra"),
+                Some("gpt-6-sol"),
                 Some(effort),
                 None,
                 &HashMap::new()
@@ -2483,7 +2489,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let wrong_effort = resolve_orchestrate_dispatch(
         &settings,
         "codex",
-        Some("gpt-6-astra"),
+        Some("gpt-6-sol"),
         Some("imaginary"),
         None,
         &HashMap::new(),
@@ -6550,7 +6556,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
             .orchestrate
             .child_models
             .iter_mut()
-            .find(|child| child.model == "gpt-6-astra")
+            .find(|child| child.model == "gpt-6-sol")
             .unwrap();
         max.fast = true;
     });
@@ -6562,7 +6568,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id: parent_id.clone(),
                 provider: "codex".into(),
-                model: Some("gpt-6-astra".into()),
+                model: Some("gpt-6-sol".into()),
                 effort: Some(effort.into()),
                 profile: None,
                 access: None,
@@ -6617,7 +6623,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
-                model: Some("gpt-6-astra".into()),
+                model: Some("gpt-6-sol".into()),
                 effort: None,
                 profile: None,
                 access: None,
@@ -6704,7 +6710,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
-                model: Some("gpt-6-astra".into()),
+                model: Some("gpt-6-sol".into()),
                 effort: None,
                 profile: None,
                 access: None,

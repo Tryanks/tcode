@@ -395,7 +395,7 @@ orchestrate:
     effort_unavailable: "尚无 medium/high 能力信息，暂不可协作"
   children:
     title: "执行模型"
-    description: "内置执行模型为 GPT-6 Astra 和 Opus 5.5。同一提供方的同一模型在每个列表中仅保留一条，因此同一模型可分别配置协作与执行角色。GPT-6 执行模型仅使用 low；它是电脑操作任务的首选，更高档位只会增加成本而不会提升效果。"
+    description: "内置执行模型为 GPT-6 Sol（主力执行者：指令跟随强、可靠达成目标、擅长电脑操作、成本较低）和 Opus 5.5（UI 设计、文案、创意与调研类工作）。同一提供方的同一模型在每个列表中仅保留一条，因此同一模型可分别配置协作与执行角色。Sol 默认从 medium 起步；窄范围修改用 low，仅在需要更多规划或核查时再提高。"
     add: "添加执行模型"
     empty: "目前没有配置任何子模型。/orchestrate 仍然可用，但在添加子模型前，派发调用会被拒绝。"
     none_enabled: "所有子模型配置都已关闭。/orchestrate 仍可进行规划，但所有派发调用都会被拒绝。"
