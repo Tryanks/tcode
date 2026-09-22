@@ -33,10 +33,6 @@ use crate::widgets::menu::DropdownMenu as _;
 use crate::widgets::switch::Switch;
 use crate::widgets::tooltip::Tooltip;
 
-/// UDP port a hosting desktop binds its Traverse endpoint to. Fixed so invite
-/// addresses and firewall rules survive restarts.
-const BIND_PORT: u16 = 47_420;
-
 /// How often the devices list re-reads which path each connection is on.
 const DEVICE_REFRESH: Duration = Duration::from_secs(2);
 
@@ -156,7 +152,9 @@ impl RemoteController {
                 data_dir: self.data_dir.clone(),
                 traverse: traverse_mode(traverse)?,
                 pairing_enabled: true,
-                bind_port: Some(BIND_PORT),
+                // Fixed, so invite addresses, firewall rules and LAN probes
+                // survive restarts.
+                bind_port: Some(tcode_traverse::lan::DEFAULT_PORT),
             },
         )
         .map_err(|error| error.to_string())?;

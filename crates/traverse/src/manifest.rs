@@ -527,16 +527,21 @@ pub(crate) mod live {
 
     /// Replace every address-lookup service with those of `manifests`: a
     /// pkarr publisher (machines only) and resolver per pkarr URL, and a DNS
-    /// lookup per origin.
+    /// lookup per origin. A device keeps its `lan` lookup through the
+    /// replacement.
     pub(crate) fn install_lookups<'a>(
         endpoint: &Endpoint,
         manifests: impl IntoIterator<Item = &'a Manifest>,
         publish: bool,
+        lan: Option<crate::lan::LanLookup>,
     ) {
         let Ok(services) = endpoint.address_lookup() else {
             return;
         };
         services.clear();
+        if let Some(lan) = lan {
+            services.add(lan);
+        }
         for manifest in manifests {
             for pkarr in manifest.pkarr_urls() {
                 if publish {

@@ -33,9 +33,12 @@ data they need to show and operate that work.
    apply changes while hosting is already on.
 3. Turn on **Let other devices connect to this machine**. The desktop binds its
    Traverse endpoint to UDP port `47420` on all IPv4 and IPv6 interfaces (IPv4
-   only where IPv6 is unavailable), so invitation addresses and firewall rules
-   survive restarts. Allow that UDP port through the machine's firewall for
-   direct LAN connections; a relayed connection needs only outbound access.
+   only where IPv6 is unavailable), so invitation addresses, firewall rules
+   and the LAN lookup of paired devices survive restarts, and advertises the
+   port on the local network as `_tcode._udp` (see
+   [Finding the machine again](#finding-the-machine-again)). Allow that UDP
+   port through the machine's firewall for direct LAN connections; a relayed
+   connection needs only outbound access.
 4. Under **Invitation**, scan the QR code with the phone, or use **Copy
    invitation link** and paste the link into Tcode on the other device. The QR
    is redrawn with the machine's current relay and addresses while the
@@ -99,11 +102,15 @@ devices only; it does not serve the browser app.
    or set `TCODE_PASSWORD` in the service environment; the CLI option takes
    precedence. A preset updates the password on startup and keeps existing
    browser tokens.
-5. The headless machine binds its Traverse endpoint to a UDP port the operating
-   system picks; the invitation and each device's saved record carry the
-   current port, and a device learns a changed port from Traverse or from the
-   next connection. For direct LAN connections allow inbound UDP to the
-   process; a relayed connection needs only outbound access.
+5. The headless machine binds its Traverse endpoint to UDP port `47420`
+   (`serve --port PORT` binds another; `serve` fails at startup when the port
+   is taken, for example by the desktop app hosting on the same machine) and
+   prints it as `UDP port:`. The port is fixed so that invitation addresses,
+   firewall rules and the LAN lookup of paired devices survive restarts, and
+   the machine advertises it on the local network as `_tcode._udp` (see
+   [Finding the machine again](#finding-the-machine-again)). For direct LAN
+   connections allow inbound UDP to that port; a relayed connection needs
+   only outbound access.
 6. To see the invitation again while it is still valid, run in another shell
    on the same machine:
 
@@ -376,13 +383,13 @@ added, lookup services rebuilt.
 | --- | --- | --- | --- |
 | **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's lookup service (`https://dns.iroh.link/pkarr`, DNS origin `dns.iroh.link.`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device with a machine on the official service uses the same relay list for its own home relay and the same lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
 | **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch and fails to start if the instance is unreachable; it never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
-| **Off** | No relay and no lookup: the endpoint publishes nothing and dials nothing but direct addresses. The invitation carries only the machine's current addresses (`Relay: none (LAN only)`). | The device dials the addresses from the invitation and the ones it learned on later connections. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
+| **Off** | No relay and no lookup service: the endpoint publishes nothing beyond its LAN advertisement and dials nothing but direct addresses. The invitation carries only the machine's current addresses (`Relay: none (LAN only)`). | The device dials the addresses from the invitation and the ones it learned on later connections, and finds the machine again on the same network through the LAN lookup. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
 
 A device that connected successfully saves how it reached the machine —
 the direct addresses that worked, newest first, up to 16, and the relay —
 ahead of what the invitation said, so the next launch starts from what worked
-last. With Traverse off, a machine whose address changes cannot be found again
-until you pair with a new invitation.
+last. On the same network a machine whose address changed is found again
+without any service; see [Finding the machine again](#finding-the-machine-again).
 
 ### Offline, unreachable or rate-limited
 
@@ -536,7 +543,9 @@ answers anything else with `unpaired` and closes it.
 The lookup service holds a public, signed record per machine: the machine's
 relay URL, never its IP addresses. It tells anyone who knows the machine id
 which relay reaches it; it does not let them connect, because the machine
-refuses unpaired devices.
+refuses unpaired devices. On the local network the machine's DNS-SD
+advertisement likewise tells anyone on the LAN its machine id, name and UDP
+port, and nothing more: a connection still needs a paired device key.
 
 The browser client is different: it is plain HTTP on the machine's own
 listener, protected by the password and a bearer token. Keep it on loopback or
@@ -603,11 +612,11 @@ list in memory and writes it back.
 | **That is not a Tcode invitation link** | The pasted text is not a complete `tcode://pair?v=2&…` link with a valid machine id and secret. Copy the link again from the machine or scan the QR. |
 | **The machine rejected this invitation** | The invitation expired (five minutes), was already used, was replaced by a newer one, or five wrong secrets invalidated it. Create **New invitation** on the machine or restart `serve`; get a separate invitation for each device. |
 | **This machine is not accepting new device pairings** | Turn on **Allow other devices** on the machine (desktop **Settings → Other devices**, or from a paired device or the logged-in browser). |
-| **Could not reach ‹machine›** while pairing | The device reached none of the invitation's addresses or its relay within 20 seconds. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN. With Traverse off, only the printed addresses work. |
-| **Reconnecting to ‹machine›… (attempt N)** stays up | The device keeps trying the saved relay and addresses with growing delays. If the machine moved network with Traverse off, pair again with a new invitation. Direct paths need UDP between the two ends; a relayed connection reaches the relay over HTTPS (TCP), so it still works where UDP is blocked, as long as the machine publishes to a relay. |
+| **Could not reach ‹machine›** while pairing | The device reached none of the invitation's addresses or its relay within 20 seconds. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN. With Traverse off, only the printed addresses and the LAN lookup work. |
+| **Reconnecting to ‹machine›… (attempt N)** stays up | The device keeps trying the saved relay and addresses with growing delays, and on every attempt looks for the machine on its own network (see [Finding the machine again](#finding-the-machine-again)). If the machine moved to another network with Traverse off and the device did not move with it, pair again with a new invitation. Direct paths need UDP between the two ends; a relayed connection reaches the relay over HTTPS (TCP), so it still works where UDP is blocked, as long as the machine publishes to a relay. |
 | **Access rejected · Pair again** | The machine no longer lists this device (removed, or the machine's data directory was replaced). Pair again with a new invitation if access is intended. |
 | **Protocol mismatch · Update the app** | The machine and the device run different protocol versions. Update both. |
-| **Connected … · Relay** when both are on the same LAN | Hole punching has not found a direct path yet, or the LAN blocks UDP between the two. The path can switch to **Direct** while connected; a fixed desktop UDP port (`47420`) that is allowed through the firewall helps. |
+| **Connected … · Relay** when both are on the same LAN | Hole punching has not found a direct path yet, or the LAN blocks UDP between the two. The path can switch to **Direct** while connected; the machine's fixed UDP port (`47420`) allowed through its firewall helps. |
 | `tcode-headless pair` says there is no valid invitation | The last one was used or expired, or `serve` is not running. Create a new invitation from a paired device's **Settings → Other devices**, or restart `serve`. |
 | `could not start Traverse` on a self-hosted URL | The instance's `relays.json` could not be fetched and nothing is cached. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
 | Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if logged-in browsers should lose access. |
@@ -763,16 +772,48 @@ Transient reconnects belong in the connection banner, not failure toasts.
 
 A pairing identifies the machine by its key, independently of its address.
 After every successful connection the device saves the relay and the direct
-addresses that actually carried it, so the next attempt starts from what
-worked last, and the invitation's hints come after. Between attempts the
-lookup service (when the machine publishes to one) supplies the machine's
-current relay and addresses; a home relay lets the two ends learn each other's
-direct addresses and try hole punching, and the connection can move from
-**Relay** to **Direct** — or back — without reconnecting. The path shown in
-the banner and the machine's device list follows that change.
+addresses that actually carried it — including a direct path found later by
+hole punching — so the next attempt starts from what worked last, and the
+invitation's hints come after. Between attempts the lookup service (when the
+machine publishes to one) supplies the machine's current relay and addresses;
+a home relay lets the two ends learn each other's direct addresses and try
+hole punching, and the connection can move from **Relay** to **Direct** — or
+back — without reconnecting. The path shown in the banner and the machine's
+device list follows that change.
 
-With Traverse off there is no lookup and no relay: the device has only the
-addresses it saved, and a machine whose address changed needs a new
-invitation. On the same network, iroh's own discovery of direct addresses is
-limited to what the two ends can observe about each other; Tcode does no LAN
-broadcast or subnet scanning of its own.
+On the same network the device also looks the machine up itself, whatever the
+Traverse mode, so a paired machine is found again after a new DHCP lease,
+after both moved to another network, or after a restart, on a LAN with no
+internet and no Traverse. There is still no list of nearby machines: the
+device only ever resolves the ids it is already paired with, and only the
+machine advertises. Each attempt to connect tries, in this order:
+
+1. The addresses saved from the last connection, at once.
+2. A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) for about
+   2.5 seconds. A machine advertises one instance of that type while it
+   hosts — desktop and headless alike, in every Traverse mode — with its
+   bound UDP port and a TXT record `v=1`, `id=<machine id>`,
+   `name=<machine name>`; loopback is never advertised, and the record
+   follows the machine's interfaces as they change. The device keeps only the
+   instance whose `id` is the machine it wants. This is a standard
+   advertisement, so `dns-sd -B _tcode._udp` on macOS or Android's
+   `NsdManager` list it too; on iOS the app browses through the system's
+   Bonjour daemon (the `NSBonjourServices` entry in `Info.plist`), and on
+   Android it holds the Wi-Fi multicast lock for the browse.
+3. Where multicast is blocked, unicast probes: for each attached private IPv4
+   network (RFC 1918; an interface mask broader than the block is clipped to
+   it, so no public address is ever probed) the device's own /24 in pages of
+   32 addresses, 250 ms apart, then two more pages from the neighbouring
+   /24s, walking further out on each later attempt. Every address is tried at
+   the ports of the saved addresses and at `47420`. The network, broadcast and
+   the device's own addresses are skipped. A wrong guess costs one datagram:
+   the QUIC handshake verifies the machine's key, so nothing but the machine
+   can answer.
+
+The lookup ends as soon as the connection is up. This is why both the desktop
+app and `tcode-headless` bind UDP `47420` unless told otherwise: a machine on
+its default port is found by the probes even where multicast is unavailable.
+
+With Traverse off there is no relay and no lookup service: the device has the
+addresses it saved and the LAN lookup. A machine that moved to a network the
+device is not on needs a new invitation.
