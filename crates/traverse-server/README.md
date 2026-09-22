@@ -49,6 +49,11 @@ relay. `tls.mode = "off"` also turns address discovery off.
   public `https://` URL), or for development. QUIC address discovery is
   unavailable in this mode.
 
+The manifest URL carries the `tls.bind` port unless it is 443. With `manual`
+or `reloading` behind a proxy that owns 443 and forwards TLS to `tls.bind`
+(so the instance still holds the certificate, and QUIC address discovery
+works), set `tls.public_port = 443`.
+
 ## Manifest
 
 `GET /relays.json` describes the instance to clients:

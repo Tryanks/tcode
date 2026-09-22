@@ -2778,15 +2778,15 @@ mod tests {
     }
 
     /// The phone's direct path dying is reported by the transport as a new
-    /// `Connected` naming the relay; that alone, with no host line and no
-    /// touch, changes what the nav bar says about the link.
+    /// value of the state it is in naming the relay; that alone, with no
+    /// host line and no touch, changes what the nav bar says about the
+    /// link. A path known while the baseline still loads is already shown
+    /// as the connected path: syncing is what the skeletons say, not the
+    /// subtitle.
     #[gpui::test]
     fn a_path_change_alone_updates_the_connection_subtitle(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads"], true);
-        restore_index(&shell, &host, true, cx);
-        restore_status(&shell, &host, cx);
-        restore_settings_and_events(&shell, &host, cx);
         let store = store_of(&shell, cx);
         let subtitle = |cx: &mut VisualTestContext| {
             draw(cx);
@@ -2794,16 +2794,25 @@ mod tests {
                 crate::remote::connection_label(&store.connection_state())
             })
         };
-        assert_eq!(subtitle(cx), "Connected", "the baseline is in");
+        let lan = tcode_protocol::PathInfo {
+            direct: true,
+            relay: None,
+            lan: true,
+            probing_direct: false,
+        };
+        assert_eq!(subtitle(cx), "Connected", "the baseline is not in yet");
         host.states
-            .try_send(tcode_client::ConnectionState::Connected {
-                path: Some(tcode_protocol::PathInfo {
-                    direct: true,
-                    relay: None,
-                    lan: true,
-                    probing_direct: false,
-                }),
+            .try_send(tcode_client::ConnectionState::Syncing {
+                path: Some(lan.clone()),
             })
+            .unwrap();
+        assert_eq!(subtitle(cx), "LAN · Connected");
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        restore_settings_and_events(&shell, &host, cx);
+        assert_eq!(subtitle(cx), "LAN · Connected", "the baseline is in");
+        host.states
+            .try_send(tcode_client::ConnectionState::Connected { path: Some(lan) })
             .unwrap();
         assert_eq!(subtitle(cx), "LAN · Connected");
         host.states

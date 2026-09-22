@@ -95,7 +95,7 @@ fn attach(machine: &Machine) -> Device {
     let minted = machine.host().new_invitation();
     let paired: PairedHost = tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();
     let transport = tcode_traverse::connect(&paired, &device);
-    wait_state(&transport, ConnectionState::Syncing);
+    wait_syncing(&transport);
     let tunnels = transport.current_host.as_ref().unwrap().tunnels().unwrap();
     Device {
         transport,
@@ -104,19 +104,19 @@ fn attach(machine: &Machine) -> Device {
     }
 }
 
-fn wait_state(transport: &Transport, wanted: ConnectionState) {
+fn wait_syncing(transport: &Transport) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
     while Instant::now() < deadline {
         if let Ok(state) = transport.state.try_recv() {
-            if state == wanted {
+            if matches!(state, ConnectionState::Syncing { .. }) {
                 return;
             }
             seen.push(state);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("did not observe state {wanted:?}; saw {seen:?}");
+    panic!("the attachment never connected; saw {seen:?}");
 }
 
 fn wait_reconnecting(transport: &Transport) {

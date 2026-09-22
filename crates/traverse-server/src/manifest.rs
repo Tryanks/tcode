@@ -14,7 +14,7 @@ pub fn public_base(config: &Config, http_addr: SocketAddr) -> Url {
     match config.hostname.as_deref().filter(|host| !host.is_empty()) {
         Some(hostname) => {
             let port = if config.tls_enabled() {
-                config.tls.bind.port()
+                config.tls.public_port.unwrap_or(config.tls.bind.port())
             } else {
                 443
             };
@@ -122,5 +122,10 @@ mod tests {
             compose(&config, &base, "x".into()).relays[0].quic_port,
             Some(7842)
         );
+
+        // A proxy on 443 forwarding to tls.bind: the manifest names the public port.
+        config.tls.public_port = Some(443);
+        let base = public_base(&config, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(base.as_str(), "https://h.example/");
     }
 }

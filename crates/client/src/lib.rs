@@ -26,7 +26,12 @@ pub enum ConnectionState {
     Connected {
         path: Option<tcode_protocol::PathInfo>,
     },
-    Syncing,
+    /// The link is up and the baseline is being loaded over it. The path is
+    /// the same as `Connected` carries and a path change is a new `Syncing`
+    /// value; only entering `Syncing` from another state restarts a sync.
+    Syncing {
+        path: Option<tcode_protocol::PathInfo>,
+    },
     Reconnecting {
         attempt: u32,
         reason: Option<ConnectionFailure>,
@@ -427,7 +432,7 @@ impl HostLink {
     fn flush_outbox(&self) {
         if !matches!(
             self.connection_state(),
-            ConnectionState::Connected { .. } | ConnectionState::Syncing
+            ConnectionState::Connected { .. } | ConnectionState::Syncing { .. }
         ) {
             return;
         }
@@ -456,7 +461,7 @@ impl HostLink {
     fn check_deadlines(&self, now: web_time::Instant) {
         if !matches!(
             self.connection_state(),
-            ConnectionState::Connected { .. } | ConnectionState::Syncing
+            ConnectionState::Connected { .. } | ConnectionState::Syncing { .. }
         ) {
             return;
         }
@@ -548,7 +553,7 @@ impl HostLink {
         if state_guard.as_ref().is_some_and(|state| {
             !matches!(
                 **state,
-                ConnectionState::Connected { .. } | ConnectionState::Syncing
+                ConnectionState::Connected { .. } | ConnectionState::Syncing { .. }
             )
         }) {
             return Err(error("disconnected", "Read requires a connection"));
@@ -806,14 +811,16 @@ impl HostLink {
                 let _ = self.send_subscription(subscription);
             }
         }
-        if state == ConnectionState::Syncing {
+        if matches!(state, ConnectionState::Syncing { .. })
+            && !matches!(previous, ConnectionState::Syncing { .. })
+        {
             for subscription in self.subscriptions() {
                 let _ = self.send_subscription(subscription);
             }
         }
         if matches!(
             state,
-            ConnectionState::Syncing | ConnectionState::Connected { .. }
+            ConnectionState::Syncing { .. } | ConnectionState::Connected { .. }
         ) {
             self.flush_outbox();
         }
@@ -1037,7 +1044,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let recreated = HostLink::new(to_host, from_host);
         recreated.restore_outbox(storage.clone()).unwrap();
-        recreated.set_connection_state(ConnectionState::Syncing);
+        recreated.set_connection_state(ConnectionState::Syncing { path: None });
         let mut pump = std::pin::pin!(recreated.pump_with_timer(std::future::pending::<()>));
         // Every restored write is on the wire before the first Ack arrives.
         let requests: Vec<_> = entries
@@ -1190,7 +1197,7 @@ mod tests {
                 .iter()
                 .all(|write| write.sent.is_none())
         );
-        link.set_connection_state(ConnectionState::Syncing);
+        link.set_connection_state(ConnectionState::Syncing { path: None });
         let resent: Vec<_> = (0..2).map(|_| request(&outgoing)).collect();
         assert!(outgoing.try_recv().is_err());
         for (original, again) in first[1..].iter().zip(&resent) {
@@ -1283,6 +1290,53 @@ mod tests {
         assert_eq!(error.code, "queue_full");
         assert_eq!(link.queued_outgoing(), 256);
         assert!(link.inner.pending.lock().unwrap().is_empty());
+    }
+
+    /// A path change while the baseline loads is a new `Syncing` value for
+    /// the screen, not a lost link: nothing is resubscribed, so the reply
+    /// already in flight stays current.
+    #[test]
+    fn a_path_change_while_syncing_does_not_restart_the_sync() {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let subscription = Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "one".into(),
+            },
+            after: None,
+        };
+        link.subscribe(subscription.clone()).unwrap();
+        outgoing.try_recv().unwrap();
+        link.set_connection_state(ConnectionState::Syncing { path: None });
+        let request = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        assert!(outgoing.try_recv().is_err());
+        let lan = tcode_protocol::PathInfo {
+            direct: true,
+            relay: None,
+            lan: true,
+            probing_direct: false,
+        };
+        link.set_connection_state(ConnectionState::Syncing {
+            path: Some(lan.clone()),
+        });
+        assert!(outgoing.try_recv().is_err(), "the path alone resubscribed");
+        assert_eq!(
+            link.connection_state(),
+            ConnectionState::Syncing { path: Some(lan) }
+        );
+        let reply = EventEnvelope {
+            request_id: Some(request.id),
+            topic: subscription.topic,
+            event: ServerEvent::SessionSnapshot {
+                total: 0,
+                total_turns: 0,
+                truncated: false,
+                from: 0,
+                records: vec![],
+            },
+        };
+        assert!(link.subscription_reply_is_current(&reply));
     }
 
     #[test]

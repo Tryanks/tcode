@@ -70,7 +70,7 @@ impl Machine {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             assert!(Instant::now() < deadline, "attachment never connected");
-            if let Ok(ConnectionState::Syncing) = transport.state.try_recv() {
+            if let Ok(ConnectionState::Syncing { .. }) = transport.state.try_recv() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));

@@ -1005,7 +1005,6 @@ remote:
     host_closed: "机器已关闭连接"
   state:
     connected: "已连接"
-    syncing: "正在同步"
     reconnecting: "正在重新连接"
 
 
