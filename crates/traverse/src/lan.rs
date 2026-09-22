@@ -288,17 +288,38 @@ impl SystemBrowser {
         }
     }
 
-    fn begin(&self) -> (u64, async_channel::Receiver<Found>) {
+    /// Start a browse; the request ends when the returned guard drops.
+    fn begin(self: &Arc<Self>) -> (BrowseRequest, async_channel::Receiver<Found>) {
         let request = self.next.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = async_channel::bounded(64);
         self.pending.lock().unwrap().insert(request, sender);
         (self.start)(request);
-        (request, receiver)
+        (
+            BrowseRequest {
+                browser: self.clone(),
+                request,
+            },
+            receiver,
+        )
     }
 
     fn end(&self, request: u64) {
         self.pending.lock().unwrap().remove(&request);
         (self.stop)(request);
+    }
+}
+
+/// One platform browse in flight. The resolve task that holds it is aborted
+/// when its stream drops, so the platform is told to stop from here, not
+/// from the task's own tail.
+struct BrowseRequest {
+    browser: Arc<SystemBrowser>,
+    request: u64,
+}
+
+impl Drop for BrowseRequest {
+    fn drop(&mut self) {
+        self.browser.end(self.request);
     }
 }
 
@@ -460,18 +481,21 @@ impl Inner {
                     .multicast_lock
                     .clone()
                     .map(MulticastLock::acquire);
-                let (request, results) = browser.begin();
+                let (_request, results) = browser.begin();
                 let deadline = tokio::time::Instant::now() + BROWSE_TIME;
                 let mut seen: Vec<SocketAddr> = Vec::new();
-                loop {
+                while !cancel.load(Ordering::Relaxed) {
+                    // Poll the flag the way the blocking browse does, so a
+                    // connection coming up ends the browse within 100 ms.
                     let result = tokio::select! {
                         result = results.recv() => result,
                         _ = tokio::time::sleep_until(deadline) => break,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => continue,
                     };
                     let Ok((claimed, addrs)) = result else {
                         break;
                     };
-                    if claimed != id || cancel.load(Ordering::Relaxed) {
+                    if claimed != id {
                         continue;
                     }
                     let fresh: Vec<_> = addrs
@@ -486,7 +510,6 @@ impl Inner {
                         break;
                     }
                 }
-                browser.end(request);
             }
         }
     }

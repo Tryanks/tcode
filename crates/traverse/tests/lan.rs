@@ -246,6 +246,63 @@ fn saved_addresses_are_the_whole_resolve_with_the_browse_off() {
     );
 }
 
+/// A platform browse delivers what it finds while the resolve is polled, and
+/// is told to stop the moment the resolve is dropped: iroh drops a resolve
+/// as soon as it has a path, which aborts the task behind it, so the stop
+/// must not wait for the task's deadline.
+#[test]
+fn a_dropped_resolve_stops_the_platform_browse_at_once() {
+    let id = iroh::SecretKey::from_bytes(&[5; 32]).public();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new((Vec::new(), Vec::new())));
+    let browser = std::sync::Arc::new(lan::SystemBrowser::new(
+        {
+            let requests = requests.clone();
+            move |request| requests.lock().unwrap().0.push(request)
+        },
+        {
+            let requests = requests.clone();
+            move |request| requests.lock().unwrap().1.push(request)
+        },
+    ));
+    let lookup = LanLookup::new(
+        |_| Vec::new(),
+        LanOptions {
+            browse: Browse::System(browser.clone()),
+            multicast_lock: None,
+        },
+    );
+    let found: SocketAddr = "10.0.0.12:47420".parse().unwrap();
+    let dropped_at = tcode_traverse::block_on(async {
+        let mut stream = lookup.resolve(id).unwrap();
+        let request = loop {
+            if let Some(request) = requests.lock().unwrap().0.first().copied() {
+                break request;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        browser.found(request, &id.to_string(), [found]);
+        let item = stream.next().await.unwrap().unwrap();
+        assert_eq!(item.provenance(), "lan-dns-sd");
+        assert_eq!(
+            item.endpoint_info().ip_addrs().copied().collect::<Vec<_>>(),
+            [found]
+        );
+        assert!(requests.lock().unwrap().1.is_empty(), "the browse runs on");
+        drop(stream);
+        Instant::now()
+    });
+    let deadline = dropped_at + Duration::from_secs(1);
+    while requests.lock().unwrap().1.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (started, stopped) = requests.lock().unwrap().clone();
+    assert_eq!(stopped, started, "the platform browse was stopped");
+    assert!(
+        dropped_at.elapsed() < lan::BROWSE_TIME,
+        "stopped before the deadline"
+    );
+}
+
 /// Real multicast on this host's interfaces: the machine's DNS-SD record is
 /// browsed back with its bound port. Opt in with `TCODE_TEST_MDNS=1`; a CI
 /// runner without multicast cannot run it.
