@@ -70,10 +70,19 @@ appended to `relays`; `home_rtt_max_ms` appears when the region lock is on.
 at most 1072 bytes, `409` when a newer packet is stored, `400` when invalid,
 `413` when oversized, `429` above `pkarr.put_per_second`/`put_burst` per IP).
 `GET` returns it with `Cache-Control: public, max-age=300`, `404` when
-unknown. `/<key>` at the root is accepted too. Records not refreshed within
-`pkarr.eviction` are removed. Behind a reverse proxy set
-`[http] trust_forwarded_for = true` so the limit counts the client, not the
-proxy.
+unknown, `429` above `pkarr.get_per_second`/`get_burst` per IP. `/<key>` at
+the root is accepted too. Records not refreshed within `pkarr.eviction` are
+removed. Behind a reverse proxy set `[http] trust_forwarded_for = true` so
+the limits count the client, not the proxy.
+
+## Limits
+
+| Setting | Default | Scope |
+| --- | --- | --- |
+| `pkarr.put_per_second` / `put_burst` | 4 / 8 | `PUT /pkarr/<key>`, per client IP |
+| `pkarr.get_per_second` / `get_burst` | 20 / 40 | `GET /pkarr/<key>` and `GET /<key>`, per client IP |
+| `relay.rx_bytes_per_second` / `rx_max_burst_bytes` | 2 000 000 / 4 000 000 | bytes received per relay connection; `0` disables |
+| `lock.far_connection_quota` | 64 | concurrent far connections with the region lock on |
 
 ## Region lock
 
