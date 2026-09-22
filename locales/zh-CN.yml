@@ -989,6 +989,7 @@ remote:
     section: "已连接过的设备"
     empty: "尚无设备连接过这台机器。"
     revoke: "移除"
+    revoke_failed: "无法移除设备，它仍处于已配对状态：%{error}"
   path:
     lan: "局域网直连"
     tunnel: "隧道"

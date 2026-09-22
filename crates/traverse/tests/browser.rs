@@ -312,7 +312,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
     let seen = hosting_calls.clone();
     config.hosting = Some(Arc::new(move |action| {
         seen.lock().unwrap().push(format!("{action:?}"));
-        tcode_protocol::HostingState {
+        Ok(tcode_protocol::HostingState {
             enabled: true,
             invite: Some(
                 "tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host".into(),
@@ -327,7 +327,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
                 platform: None,
                 path: None,
             }],
-        }
+        })
     }));
     let server = serve(mux, config).unwrap();
     let addr = server.local_addr();
