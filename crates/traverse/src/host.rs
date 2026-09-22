@@ -23,6 +23,7 @@ use url::Url;
 
 use crate::{
     identity::HostIdentity,
+    lan,
     manifest::{ManifestLoader, ManifestSource, live},
     mux::HostMux,
     runtime::block_on,
@@ -44,8 +45,8 @@ pub enum TraverseMode {
     /// A self-hosted instance described by its manifest; see
     /// [`crate::manifest`] for how the manifest is obtained.
     Custom(Url),
-    /// No relay and no wide-area lookup: invite addresses and the direct
-    /// addresses iroh learns afterwards only.
+    /// No relay and no wide-area lookup: the addresses in hand and the LAN
+    /// lookup only.
     Off,
 }
 
@@ -131,6 +132,8 @@ pub struct TraverseHost {
     router: Router,
     /// The manifest refresh loop, ended with the host.
     refresh: Option<tokio::task::AbortHandle>,
+    /// This machine's DNS-SD record, withdrawn with the host.
+    advertisement: Option<lan::Advertisement>,
 }
 
 impl TraverseHost {
@@ -194,8 +197,9 @@ impl TraverseHost {
                 Err(error) => return Err(io::Error::other(error)),
             };
             if let Some(manifest) = &manifest {
-                live::install_lookups(&endpoint, [manifest.as_ref()], true);
+                live::install_lookups(&endpoint, [manifest.as_ref()], true, None);
             }
+            let advertisement = advertise(&endpoint, &identity.host_name);
             // A refreshed manifest is applied to the running endpoint:
             // relays through `insert_relay`/`remove_relay`, publishers and
             // resolvers rebuilt on the endpoint's lookup services.
@@ -210,7 +214,7 @@ impl TraverseHost {
                         log::info!("applying the refreshed Traverse manifest");
                         live::sync_relays(&endpoint, &previous.relay_map(), &manifest.relay_map())
                             .await;
-                        live::install_lookups(&endpoint, [manifest.as_ref()], true);
+                        live::install_lookups(&endpoint, [manifest.as_ref()], true, None);
                     }
                 })
             });
@@ -235,6 +239,7 @@ impl TraverseHost {
                 shared,
                 router,
                 refresh,
+                advertisement,
             })
         })
     }
@@ -308,6 +313,7 @@ impl TraverseHost {
     }
 
     pub fn shutdown(self) {
+        drop(self.advertisement);
         if let Some(refresh) = self.refresh {
             refresh.abort();
         }
@@ -318,6 +324,30 @@ impl TraverseHost {
         block_on(async move {
             let _ = router.shutdown().await;
         });
+    }
+}
+
+/// Advertise the endpoint's UDP port on the LAN; see [`lan`]. Without a
+/// port shared by both address families only IPv4 is advertised, since one
+/// SRV record carries one port. Unavailable mDNS is logged, not fatal.
+fn advertise(endpoint: &Endpoint, host_name: &str) -> Option<lan::Advertisement> {
+    let bound = endpoint.bound_sockets();
+    let v4 = bound
+        .iter()
+        .find(|addr| addr.is_ipv4())
+        .map(|addr| addr.port());
+    let v6 = bound
+        .iter()
+        .find(|addr| addr.is_ipv6())
+        .map(|addr| addr.port());
+    let port = v4.or(v6)?;
+    let ipv6 = v6 == Some(port);
+    match lan::Advertisement::start(&endpoint.id(), host_name, port, ipv6) {
+        Ok(advertisement) => advertisement,
+        Err(error) => {
+            log::warn!("not advertising this machine on the LAN: {error}");
+            None
+        }
     }
 }
 
