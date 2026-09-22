@@ -103,8 +103,8 @@ machine and device ids, and is never part of authentication — the machine
 itself decides which devices may connect. It is on by default, can point at a
 self-hosted `tcode-traverse` instance, or can be turned off, in which case
 devices reach the machine only on its own network: at the addresses its
-invitation carries, and, once paired, by finding it again on the LAN through
-its DNS-SD advertisement or a probe of the local subnet. The default instance
+invitation carries, and, once paired, at the addresses that worked before or
+through its DNS-SD advertisement on the LAN. The default instance
 uses n0's public iroh relays and lookup service, which n0 describes as
 rate-limited with no uptime guarantee.
 

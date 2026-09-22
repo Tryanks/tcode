@@ -12,35 +12,12 @@
 //! With `TRAVERSE_RELAY_ONLY=1` the device drops the invite's direct
 //! addresses and reaches the machine through its Traverse instance's relay
 //! and lookup, which exercises the same path a phone on another network
-//! takes. `RUST_LOG=tcode_traverse=debug` shows the LAN lookup at work;
-//! `TRAVERSE_LAN_NETWORKS=ip/prefix[,ip/prefix]` replaces the device's own
-//! networks for the unicast probes, and `TCODE_DISABLE_MDNS=1` turns the
-//! DNS-SD browse off, so the probes can be watched on one machine:
-//! `TRAVERSE_LAN_NETWORKS=127.0.0.2/24` probes `127.0.0.1`.
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+//! takes. `RUST_LOG=tcode_traverse=debug` shows the LAN lookup at work.
+use std::time::{Duration, Instant};
 
 use tcode_client::ConnectionState;
 use tcode_client::pairing::{parse_pair_url, remember_host};
-use tcode_traverse::{
-    DeviceIdentity,
-    lan::{LanOptions, LocalNetwork},
-};
-
-fn lan_networks(spec: &str) -> Vec<LocalNetwork> {
-    spec.split(',')
-        .filter_map(|entry| {
-            let (ip, prefix) = entry.trim().split_once('/')?;
-            Some(LocalNetwork {
-                name: "env".into(),
-                ip: ip.parse().ok()?,
-                prefix: prefix.parse().ok()?,
-            })
-        })
-        .collect()
-}
+use tcode_traverse::DeviceIdentity;
 
 fn main() {
     env_logger::init();
@@ -51,14 +28,6 @@ fn main() {
     let data_dir = std::env::temp_dir().join("tcode-traverse-example-device");
     let device = DeviceIdentity::load_or_create(&data_dir).expect("device identity");
     device.set_details("example device".into(), None);
-    if let Ok(spec) = std::env::var("TRAVERSE_LAN_NETWORKS") {
-        let networks = lan_networks(&spec);
-        println!("probing as if attached to {networks:?}");
-        device.set_lan_options(LanOptions {
-            networks: Arc::new(move || networks.clone()),
-            ..LanOptions::default()
-        });
-    }
     println!("device id {}", device.endpoint_id());
     let started = Instant::now();
     let paired = if argument == "--connect" {

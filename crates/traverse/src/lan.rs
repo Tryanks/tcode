@@ -1,14 +1,13 @@
 //! Finding a paired machine on the local network without any service: the
 //! machine advertises standard DNS-SD, and the device resolves a paired id
-//! through iroh's [`AddressLookup`] extension point from three sources in
-//! turn — the addresses it saved from the last connection, a DNS-SD browse,
-//! and, for networks that block multicast, unicast probes of its attached
-//! private IPv4 networks. A candidate address is never authorization: the
-//! QUIC handshake verifies the machine's key, so a wrong guess costs one
-//! datagram. The device publishes nothing.
+//! through iroh's [`AddressLookup`] extension point from exactly three
+//! sources in turn — the address that carried the last connection, every
+//! other address it saved for that machine, and a DNS-SD browse for its id.
+//! Nothing else is tried. A candidate address is never authorization: the
+//! QUIC handshake verifies the machine's key. The device publishes nothing.
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -28,34 +27,17 @@ use mdns_sd::{IfKind, RecvTimeoutError, ServiceDaemon, ServiceEvent, ServiceInfo
 use crate::runtime::runtime;
 
 pub const SERVICE_TYPE: &str = "_tcode._udp.local.";
-/// The UDP port a machine binds unless told otherwise; probes fall back to it.
+/// The UDP port a machine binds unless told otherwise, so firewall rules
+/// and invitation addresses survive restarts.
 pub const DEFAULT_PORT: u16 = 47_420;
 /// The longest machine name a TXT record carries.
 pub(crate) const MAX_NAME_BYTES: usize = 64;
 const TXT_VERSION: &str = "1";
-/// How long one resolve browses DNS-SD before it starts probing.
+/// How long one resolve browses DNS-SD.
 pub const BROWSE_TIME: Duration = Duration::from_millis(2_500);
-/// Addresses per probe page and the pause between pages. iroh sends every
-/// handshake packet to every address it knows for the machine, so pages
-/// stay small and arrive spaced out.
-pub(crate) const PROBE_PAGE: usize = 32;
-pub(crate) const PROBE_PAGE_INTERVAL: Duration = Duration::from_millis(250);
-/// Pages beyond the device's own /24 in one resolve; the next resolve
-/// continues outward from where this one stopped.
-pub(crate) const PROBE_NEIGHBOUR_PAGES: usize = 2;
-/// Attached networks probed per resolve, so a machine with many virtual
-/// interfaces still probes the ones people actually plug into.
-const MAX_PROBE_NETWORKS: usize = 4;
-const MAX_PROBE_PORTS: usize = 3;
 /// How often the device compares its interface addresses with the last
 /// snapshot; see [`InterfaceWatch`].
 pub(crate) const INTERFACE_POLL: Duration = Duration::from_secs(5);
-
-/// `TCODE_DISABLE_MDNS=1` turns DNS-SD off on both sides of a debug build,
-/// to exercise the probes.
-fn mdns_disabled() -> bool {
-    cfg!(debug_assertions) && std::env::var_os("TCODE_DISABLE_MDNS").is_some_and(|v| v == "1")
-}
 
 /// One usable interface address of this device with its real prefix.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -105,45 +87,6 @@ fn usable_address(address: IpAddr) -> bool {
             IpAddr::V4(ip) => !ip.is_link_local() && !ip.is_broadcast(),
             IpAddr::V6(ip) => !ip.is_unicast_link_local(),
         }
-}
-
-/// Interface names are a preference, never an exclusion: Internet Sharing
-/// uses a bridge, and a VPN can be the only route to a machine.
-fn interface_preference(name: &str) -> u8 {
-    let name = name.to_ascii_lowercase();
-    if [
-        "utun",
-        "tun",
-        "tap",
-        "ppp",
-        "ipsec",
-        "wg",
-        "tailscale",
-        "zerotier",
-    ]
-    .iter()
-    .any(|prefix| name.starts_with(prefix))
-    {
-        2
-    } else if [
-        "bridge",
-        "vmnet",
-        "vbox",
-        "vmenet",
-        "docker",
-        "vethernet",
-        "vmware",
-        "parallels",
-    ]
-    .iter()
-    .any(|marker| name.contains(marker))
-        || name.starts_with("virbr")
-        || name.starts_with("br-")
-    {
-        1
-    } else {
-        0
-    }
 }
 
 /// Detects when this device's address set changes — another Wi-Fi network,
@@ -220,10 +163,7 @@ impl Advertisement {
         name: &str,
         port: u16,
         ipv6: bool,
-    ) -> Result<Option<Self>, mdns_sd::Error> {
-        if mdns_disabled() {
-            return Ok(None);
-        }
+    ) -> Result<Self, mdns_sd::Error> {
         let label = instance_label(id);
         let info = ServiceInfo::new(
             SERVICE_TYPE,
@@ -248,7 +188,7 @@ impl Advertisement {
             let _ = daemon.shutdown();
             return Err(error);
         }
-        Ok(Some(Self { daemon, fullname }))
+        Ok(Self { daemon, fullname })
     }
 }
 
@@ -277,8 +217,6 @@ pub enum Browse {
 #[derive(Clone)]
 pub struct LanOptions {
     pub browse: Browse,
-    /// The device's attached networks, sampled at each resolve.
-    pub networks: Arc<dyn Fn() -> Vec<LocalNetwork> + Send + Sync>,
     /// Held around each browse; Android drops multicast without it.
     pub multicast_lock: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 }
@@ -286,12 +224,7 @@ pub struct LanOptions {
 impl Default for LanOptions {
     fn default() -> Self {
         Self {
-            browse: if mdns_disabled() {
-                Browse::Off
-            } else {
-                Browse::DnsSd
-            },
-            networks: Arc::new(local_networks),
+            browse: Browse::DnsSd,
             multicast_lock: None,
         }
     }
@@ -380,8 +313,6 @@ type SavedAddrs = dyn Fn(EndpointId) -> Vec<SocketAddr> + Send + Sync;
 struct Inner {
     saved: Box<SavedAddrs>,
     options: LanOptions,
-    /// How many resolves have probed beyond each id's own /24.
-    rounds: Mutex<HashMap<EndpointId, u32>>,
     /// Resolves in flight, ended early by [`LanLookup::connected`].
     active: Mutex<HashMap<EndpointId, Vec<Arc<AtomicBool>>>>,
 }
@@ -405,7 +336,6 @@ impl LanLookup {
             inner: Arc::new(Inner {
                 saved: Box::new(saved),
                 options,
-                rounds: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashMap::new()),
             }),
         }
@@ -497,53 +427,22 @@ impl Inner {
         cancel: Arc<AtomicBool>,
     ) {
         let saved = (self.saved)(id);
-        if !saved.is_empty()
-            && sender
-                .send(item(id, "lan-saved", saved.clone()))
-                .await
-                .is_err()
-        {
+        if !saved.is_empty() && sender.send(item(id, "lan-saved", saved)).await.is_err() {
             return;
         }
-        let found = self.browse(id, &sender, &cancel).await;
-        if found || cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let round = {
-            let mut rounds = self.rounds.lock().unwrap();
-            let round = rounds.entry(id).or_default();
-            let this = *round;
-            *round = round.wrapping_add(1);
-            this
-        };
-        let pages = probe_pages(&(self.options.networks)(), &probe_ports(&saved), round);
-        log::debug!(
-            "probing {} pages for {} (round {round})",
-            pages.len(),
-            id.fmt_short()
-        );
-        for (index, page) in pages.into_iter().enumerate() {
-            if index > 0 {
-                tokio::time::sleep(PROBE_PAGE_INTERVAL).await;
-            }
-            if cancel.load(Ordering::Relaxed)
-                || sender.send(item(id, "lan-probe", page)).await.is_err()
-            {
-                return;
-            }
-        }
+        self.browse(id, &sender, &cancel).await;
     }
 
     /// Browse for [`BROWSE_TIME`], yielding every instance that claims `id`
-    /// as it resolves. True if any did.
+    /// as it resolves.
     async fn browse(
         &self,
         id: EndpointId,
         sender: &async_channel::Sender<Item>,
         cancel: &Arc<AtomicBool>,
-    ) -> bool {
+    ) {
         match &self.options.browse {
-            Browse::Off => false,
+            Browse::Off => {}
             Browse::DnsSd => {
                 let _lock = self
                     .options
@@ -552,9 +451,8 @@ impl Inner {
                     .map(MulticastLock::acquire);
                 let sender = sender.clone();
                 let cancel = cancel.clone();
-                tokio::task::spawn_blocking(move || browse_dns_sd(id, &sender, &cancel))
-                    .await
-                    .unwrap_or(false)
+                let _ =
+                    tokio::task::spawn_blocking(move || browse_dns_sd(id, &sender, &cancel)).await;
             }
             Browse::System(browser) => {
                 let _lock = self
@@ -564,7 +462,6 @@ impl Inner {
                     .map(MulticastLock::acquire);
                 let (request, results) = browser.begin();
                 let deadline = tokio::time::Instant::now() + BROWSE_TIME;
-                let mut found = false;
                 let mut seen: Vec<SocketAddr> = Vec::new();
                 loop {
                     let result = tokio::select! {
@@ -585,13 +482,11 @@ impl Inner {
                         continue;
                     }
                     seen.extend(fresh.iter().copied());
-                    found = true;
                     if sender.send(item(id, "lan-dns-sd", fresh)).await.is_err() {
                         break;
                     }
                 }
                 browser.end(request);
-                found
             }
         }
     }
@@ -615,16 +510,12 @@ impl Drop for MulticastLock {
 
 /// One mdns-sd browse of [`BROWSE_TIME`] on a blocking thread; mdns-sd
 /// answers through a synchronous channel.
-fn browse_dns_sd(
-    id: EndpointId,
-    sender: &async_channel::Sender<Item>,
-    cancel: &AtomicBool,
-) -> bool {
+fn browse_dns_sd(id: EndpointId, sender: &async_channel::Sender<Item>, cancel: &AtomicBool) {
     let daemon = match ServiceDaemon::new() {
         Ok(daemon) => daemon,
         Err(error) => {
             log::debug!("DNS-SD unavailable: {error}");
-            return false;
+            return;
         }
     };
     let events = match daemon.browse(SERVICE_TYPE) {
@@ -632,11 +523,10 @@ fn browse_dns_sd(
         Err(error) => {
             log::debug!("DNS-SD browse failed: {error}");
             let _ = daemon.shutdown();
-            return false;
+            return;
         }
     };
     let deadline = Instant::now() + BROWSE_TIME;
-    let mut found = false;
     let mut seen: Vec<SocketAddr> = Vec::new();
     while !cancel.load(Ordering::Relaxed) {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
@@ -663,7 +553,6 @@ fn browse_dns_sd(
             continue;
         }
         seen.extend(fresh.iter().copied());
-        found = true;
         log::debug!("DNS-SD found {} at {fresh:?}", id.fmt_short());
         if sender.send_blocking(item(id, "lan-dns-sd", fresh)).is_err() {
             break;
@@ -671,144 +560,6 @@ fn browse_dns_sd(
     }
     let _ = daemon.stop_browse(SERVICE_TYPE);
     let _ = daemon.shutdown();
-    found
-}
-
-/// The ports probes try: those of the saved addresses, newest first, and
-/// [`DEFAULT_PORT`].
-fn probe_ports(saved: &[SocketAddr]) -> Vec<u16> {
-    let mut ports = Vec::new();
-    for port in saved.iter().map(SocketAddr::port).chain([DEFAULT_PORT]) {
-        if port != 0 && !ports.contains(&port) && ports.len() < MAX_PROBE_PORTS {
-            ports.push(port);
-        }
-    }
-    ports
-}
-
-/// The probe pages of one resolve, in order: each attached private IPv4
-/// network's own /24 in pages of [`PROBE_PAGE`] addresses, then
-/// [`PROBE_NEIGHBOUR_PAGES`] pages of the neighbouring /24s, alternating
-/// above and below and continuing across `round`s. A broad interface mask
-/// is clipped to its RFC 1918 block, so a wrong mask never probes public
-/// space; the network, broadcast and this device's own addresses are left
-/// out. Every address is tried at every port.
-fn probe_pages(networks: &[LocalNetwork], ports: &[u16], round: u32) -> Vec<Vec<SocketAddr>> {
-    let mut eligible: Vec<(&LocalNetwork, Ipv4Addr, u8, u8)> = networks
-        .iter()
-        .filter_map(|network| {
-            let IpAddr::V4(ip) = network.ip else {
-                return None;
-            };
-            // Loopback never comes from `local_networks`; it lets a test
-            // probe without touching a real network.
-            if !(ip.is_private() || ip.is_loopback()) || !(8..=30).contains(&network.prefix) {
-                return None;
-            }
-            let block = match ip.octets()[0] {
-                10 | 127 => 8,
-                172 => 12,
-                _ => 16,
-            };
-            Some((network, ip, network.prefix, network.prefix.max(block)))
-        })
-        .collect();
-    eligible.sort_by_key(|(network, ip, _, _)| (interface_preference(&network.name), *ip));
-    let mut subnets = Vec::new();
-    eligible.retain(|(_, ip, prefix, _)| {
-        let subnet = (ipv4_network(*ip, *prefix), *prefix);
-        if subnets.contains(&subnet) {
-            false
-        } else {
-            subnets.push(subnet);
-            true
-        }
-    });
-    eligible.truncate(MAX_PROBE_NETWORKS);
-    let own: Vec<IpAddr> = networks.iter().map(|network| network.ip).collect();
-    let mut pages = Vec::new();
-    // Every network's own /24 — or its smaller real subnet — comes before
-    // any neighbour.
-    for (_, ip, prefix, scan) in &eligible {
-        let (first, count) = if *scan >= 24 {
-            (
-                u32::from(ipv4_network(*ip, *scan)),
-                1 << (32 - u32::from(*scan)),
-            )
-        } else {
-            (u32::from(*ip) & !0xff, 256)
-        };
-        pages.extend(slab_pages(first, count, *ip, *prefix, &own, ports));
-    }
-    for (_, ip, prefix, scan) in &eligible {
-        let slabs = 1_u32 << (24_u8.saturating_sub(*scan));
-        if slabs < 2 {
-            continue;
-        }
-        let base = u32::from(ipv4_network(*ip, *scan));
-        let local = (u32::from(*ip) - base) >> 8;
-        // Neighbour slabs in the order +1, -1, +2, -2, …; each yields
-        // several pages, and the walk resumes where the last resolve ended.
-        let per_slab = 256_usize.div_ceil(PROBE_PAGE);
-        let total = (slabs as usize - 1) * per_slab;
-        let start = (round as usize * PROBE_NEIGHBOUR_PAGES) % total;
-        let mut taken = Vec::new();
-        let mut cursor = start;
-        while taken.len() < PROBE_NEIGHBOUR_PAGES && taken.len() < total {
-            let step = (cursor / per_slab) as u32 + 1;
-            let offset = if step % 2 == 1 {
-                step.div_ceil(2)
-            } else {
-                slabs - step / 2
-            };
-            let slab = (local + offset) % slabs;
-            let slab_pages = slab_pages(base + (slab << 8), 256, *ip, *prefix, &own, ports);
-            if let Some(page) = slab_pages.into_iter().nth(cursor % per_slab) {
-                taken.push(page);
-            }
-            cursor = (cursor + 1) % total;
-        }
-        pages.extend(taken);
-    }
-    pages
-}
-
-/// The pages of the `count` addresses from `first`, for the interface
-/// `ip`/`prefix`.
-fn slab_pages(
-    first: u32,
-    count: u32,
-    ip: Ipv4Addr,
-    prefix: u8,
-    own: &[IpAddr],
-    ports: &[u16],
-) -> Vec<Vec<SocketAddr>> {
-    let network = u32::from(ipv4_network(ip, prefix));
-    let broadcast = network + (1_u32 << (32 - u32::from(prefix))) - 1;
-    let hosts = (first..first + count).filter(|address| {
-        let host = Ipv4Addr::from(*address);
-        *address != network && *address != broadcast && !own.contains(&IpAddr::V4(host))
-    });
-    let mut pages: Vec<Vec<SocketAddr>> = Vec::new();
-    for (index, address) in hosts.enumerate() {
-        if index % PROBE_PAGE == 0 {
-            pages.push(Vec::with_capacity(PROBE_PAGE * ports.len()));
-        }
-        let page = pages.last_mut().expect("a page was opened");
-        for port in ports {
-            page.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(address)), *port));
-        }
-    }
-    pages
-}
-
-fn ipv4_network(ip: Ipv4Addr, prefix: u8) -> Ipv4Addr {
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - u32::from(prefix.min(32)))
-    };
-    Ipv4Addr::from(u32::from(ip) & mask)
 }
 
 #[cfg(test)]
@@ -821,15 +572,6 @@ mod tests {
             ip: ip.parse().unwrap(),
             prefix,
         }
-    }
-
-    fn ips(page: &[SocketAddr]) -> Vec<Ipv4Addr> {
-        page.iter()
-            .filter_map(|addr| match addr.ip() {
-                IpAddr::V4(ip) => Some(ip),
-                IpAddr::V6(_) => None,
-            })
-            .collect()
     }
 
     #[test]
@@ -861,141 +603,6 @@ mod tests {
         assert_eq!(advertised_id(&txt(&[("id", &hex)])), None);
         assert_eq!(advertised_id(&txt(&[("v", "1"), ("id", &hex[1..])])), None);
         assert_eq!(advertised_id(&txt(&[("v", "1"), ("id", "not hex")])), None);
-    }
-
-    #[test]
-    fn probe_ports_follow_the_saved_addresses_and_always_include_the_default() {
-        assert_eq!(probe_ports(&[]), [DEFAULT_PORT]);
-        let saved = ["10.0.0.2:47421", "10.0.0.2:47420", "10.0.0.3:47421"]
-            .map(|addr| addr.parse().unwrap());
-        assert_eq!(probe_ports(&saved), [47421, 47420]);
-        let many = ["10.0.0.2:1", "10.0.0.2:2", "10.0.0.2:3", "10.0.0.2:4"]
-            .map(|addr| addr.parse().unwrap());
-        assert_eq!(probe_ports(&many), [1, 2, 3]);
-    }
-
-    #[test]
-    fn the_own_slash_24_comes_first_in_pages_of_32_without_self_network_or_broadcast() {
-        let pages = probe_pages(&[network("wlan0", "192.168.1.22", 24)], &[47420], 0);
-        assert_eq!(pages.len(), 8, "a /24 has no neighbour to walk into");
-        assert!(pages.iter().all(|page| page.len() <= PROBE_PAGE));
-        let all: Vec<Ipv4Addr> = pages.iter().flat_map(|page| ips(page)).collect();
-        assert_eq!(all.len(), 253);
-        assert_eq!(all[0], Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(all[all.len() - 1], Ipv4Addr::new(192, 168, 1, 254));
-        assert!(!all.contains(&Ipv4Addr::new(192, 168, 1, 22)));
-        assert!(!all.contains(&Ipv4Addr::new(192, 168, 1, 0)));
-        assert!(!all.contains(&Ipv4Addr::new(192, 168, 1, 255)));
-        assert!(pages[0].iter().all(|addr| addr.port() == 47420));
-
-        // Each address is tried at every port, in the page it belongs to.
-        let pages = probe_pages(&[network("wlan0", "172.20.10.1", 28)], &[47421, 47420], 0);
-        let first = &pages[0];
-        assert_eq!(
-            first.len(),
-            26,
-            "a /28 has 14 hosts minus this device, at two ports"
-        );
-        assert!(first.contains(&"172.20.10.14:47421".parse().unwrap()));
-        assert!(first.contains(&"172.20.10.14:47420".parse().unwrap()));
-        assert!(
-            !first
-                .iter()
-                .any(|addr| addr.ip() == "172.20.10.15".parse::<IpAddr>().unwrap())
-        );
-        assert_eq!(pages.len(), 1);
-    }
-
-    #[test]
-    fn neighbours_alternate_above_and_below_and_advance_across_resolves() {
-        let corporate = [network("en0", "10.20.30.40", 16)];
-        let pages = probe_pages(&corporate, &[47420], 0);
-        assert_eq!(pages.len(), 8 + PROBE_NEIGHBOUR_PAGES);
-        assert_eq!(ips(&pages[8])[0], Ipv4Addr::new(10, 20, 31, 0));
-        assert_eq!(ips(&pages[9])[0], Ipv4Addr::new(10, 20, 31, 32));
-        let pages = probe_pages(&corporate, &[47420], 4);
-        assert_eq!(ips(&pages[8])[0], Ipv4Addr::new(10, 20, 29, 0));
-        let pages = probe_pages(&corporate, &[47420], 8);
-        assert_eq!(ips(&pages[8])[0], Ipv4Addr::new(10, 20, 32, 0));
-        // The walk wraps within the /16 instead of leaving it.
-        let edge = [network("en0", "10.20.255.40", 16)];
-        let pages = probe_pages(&edge, &[47420], 0);
-        assert_eq!(
-            ips(&pages[8])[0],
-            Ipv4Addr::new(10, 20, 0, 1),
-            "10.20.0.0 is the network"
-        );
-        assert_eq!(ips(&pages[8]).last(), Some(&Ipv4Addr::new(10, 20, 0, 32)));
-    }
-
-    #[test]
-    fn broad_masks_stay_private_and_keep_hosts_at_block_edges() {
-        for (ip, prefix, kept, actual_network, actual_broadcast) in [
-            (
-                "172.31.255.42",
-                8,
-                "172.31.255.255",
-                "172.0.0.0",
-                "172.255.255.255",
-            ),
-            (
-                "192.168.255.42",
-                8,
-                "192.168.255.255",
-                "192.0.0.0",
-                "192.255.255.255",
-            ),
-            (
-                "10.255.255.42",
-                8,
-                "10.255.255.254",
-                "10.0.0.0",
-                "10.255.255.255",
-            ),
-        ] {
-            let networks = [network("en0", ip, prefix)];
-            let all: Vec<Ipv4Addr> = (0..3)
-                .flat_map(|round| probe_pages(&networks, &[47420], round))
-                .flat_map(|page| ips(&page))
-                .collect();
-            assert!(all.contains(&kept.parse().unwrap()), "lost {kept}/{prefix}");
-            for candidate in &all {
-                assert!(
-                    candidate.is_private(),
-                    "public probe {candidate} from {ip}/{prefix}"
-                );
-                assert_ne!(candidate.to_string(), actual_network);
-                assert_ne!(candidate.to_string(), actual_broadcast);
-                assert_ne!(candidate.to_string(), ip);
-            }
-        }
-        for ip in ["203.0.113.5", "100.64.0.10", "169.254.3.4"] {
-            assert!(probe_pages(&[network("en0", ip, 24)], &[47420], 0).is_empty());
-        }
-        assert!(probe_pages(&[network("en0", "fd00::2", 64)], &[47420], 0).is_empty());
-        assert!(probe_pages(&[], &[47420], 0).is_empty());
-    }
-
-    #[test]
-    fn every_attached_network_is_probed_before_any_neighbour_with_the_lan_first() {
-        let networks = [
-            network("bridge100", "192.168.139.3", 24),
-            network("en0", "192.168.1.22", 24),
-            network("utun4", "10.0.0.1", 32),
-            network("en0", "192.168.1.22", 24),
-        ];
-        let pages = probe_pages(&networks, &[47420], 0);
-        assert_eq!(pages.len(), 16, "two /24s, the /32 has no hosts");
-        assert_eq!(ips(&pages[0])[0], Ipv4Addr::new(192, 168, 1, 1));
-        assert_eq!(ips(&pages[8])[0], Ipv4Addr::new(192, 168, 139, 1));
-        let many: Vec<_> = (1..=9)
-            .map(|n| network(&format!("en{n}"), &format!("10.{n}.7.42"), 16))
-            .collect();
-        let pages = probe_pages(&many, &[47420], 0);
-        assert_eq!(
-            pages.len(),
-            MAX_PROBE_NETWORKS * (8 + PROBE_NEIGHBOUR_PAGES)
-        );
     }
 
     #[test]
