@@ -962,12 +962,15 @@ toast:
   hide_details: "收起详情"
   copy_error: "复制错误"
 remote:
-  allow_devices: "允许其他设备连接"
   apply: "应用"
   host:
     section: "这台机器"
     title: "允许其他设备连接这台机器"
     description: "让其他设备打开这台机器上的项目和对话。"
+  pairing:
+    title: "接受新设备配对"
+    description: "新设备可凭邀请配对。"
+    off: "配对已关闭；已配对的设备照常使用。"
   host_name:
     title: "机器名称"
     description: "显示给其他设备。"
@@ -1044,9 +1047,9 @@ hosts:
     bad_invite: "这不是有效的 Tcode 邀请链接。"
     filled: "来自 %{name} 的邀请 · %{fingerprint}"
     connect_host: "连接到 %{name}"
-    rejected: "机器拒绝了这个邀请。请确认已开启“允许其他设备连接”，并使用新的邀请。"
+    rejected: "机器拒绝了这个邀请。请确认已开启“接受新设备配对”，并使用新的邀请。"
     unconfirmed: "无法确认配对结果。请在机器上生成新的邀请后重试。"
-    disabled: "这台机器已关闭新设备配对。请在机器上开启“允许其他设备连接”后重试。"
+    disabled: "这台机器已关闭新设备配对。请在机器上开启“接受新设备配对”后重试。"
     network_error: "无法连接 %{address}。"
     failed: "添加失败：%{reason}"
 
