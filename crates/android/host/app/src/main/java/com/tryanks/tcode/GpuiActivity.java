@@ -54,6 +54,7 @@ public final class GpuiActivity extends NativeActivity {
     private boolean keyboardShowPending;
     private long cameraRequest;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
     /**
      * Tells the Traverse endpoint to rebind and probe when the default network
@@ -111,6 +112,25 @@ public final class GpuiActivity extends NativeActivity {
             getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
         if (connectivity != null) connectivity.unregisterNetworkCallback(networkCallback);
         networkCallback = null;
+    }
+
+    /**
+     * Held by the Traverse LAN lookup around each DNS-SD browse, from its own
+     * threads; reference counting allows overlapping browses.
+     */
+    public synchronized void gpuiMulticastLock(boolean acquire) {
+        if (acquire) {
+            if (multicastLock == null) {
+                android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager)
+                    getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wifi == null) return;
+                multicastLock = wifi.createMulticastLock("tcode-lan-lookup");
+                multicastLock.setReferenceCounted(true);
+            }
+            multicastLock.acquire();
+        } else if (multicastLock != null && multicastLock.isHeld()) {
+            multicastLock.release();
+        }
     }
 
 

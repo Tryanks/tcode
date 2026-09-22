@@ -179,9 +179,23 @@ pub(crate) fn native_host(
         async_channel::Sender<Result<String, String>>,
     >::new()));
     let pending = callbacks.clone();
+    let multicast = bridge.object.clone();
     let camera = bridge.clone();
     let host = NativeClientHost::new(data_dir, device_name)
         .with_platform(platform)
+        .with_multicast_lock(move |acquire| {
+            if let Err(error) = multicast.with_env(|env, activity| {
+                env.call_method(
+                    activity,
+                    jni_str!("gpuiMulticastLock"),
+                    jni_sig!("(Z)V"),
+                    &[JValue::Bool(acquire)],
+                )?;
+                Ok(())
+            }) {
+                log::warn!("Android multicast lock unavailable: {error}");
+            }
+        })
         .with_qr_scanner(move || -> HostFuture<'static, Result<String, String>> {
             let (sender, receiver) = async_channel::bounded(1);
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);

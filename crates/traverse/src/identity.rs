@@ -152,6 +152,7 @@ pub(crate) struct DeviceInner {
     pub(crate) secret_key: SecretKey,
     pub(crate) data_dir: PathBuf,
     details: Mutex<Details>,
+    pub(crate) lan: Mutex<crate::lan::LanOptions>,
     pub(crate) endpoint: tokio::sync::OnceCell<crate::client::ClientEndpoint>,
 }
 
@@ -205,6 +206,7 @@ impl DeviceIdentity {
                 secret_key,
                 data_dir: data_dir.to_owned(),
                 details: Mutex::new(details),
+                lan: Mutex::new(crate::lan::LanOptions::default()),
                 endpoint: tokio::sync::OnceCell::new(),
             }),
         })
@@ -251,8 +253,22 @@ impl DeviceIdentity {
         }
     }
 
+    /// How the LAN lookup observes the network; read when the endpoint
+    /// binds on first use, so a platform sets it before connecting.
+    pub fn set_lan_options(&self, options: crate::lan::LanOptions) {
+        *self.inner.lan.lock().unwrap() = options;
+    }
+
     pub(crate) fn inner(&self) -> &DeviceInner {
         &self.inner
+    }
+
+    pub(crate) fn from_inner(inner: Arc<DeviceInner>) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) fn downgrade(&self) -> std::sync::Weak<DeviceInner> {
+        Arc::downgrade(&self.inner)
     }
 }
 
