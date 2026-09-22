@@ -427,7 +427,7 @@ impl AcpPanel {
             .into_any_element()
     }
 
-    fn render_marketplace(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_marketplace(&self, cx: &mut Context<Self>) -> AnyElement {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let market: Vec<AcpMarketplaceItem> = self
             .store
@@ -474,15 +474,15 @@ impl AcpPanel {
         }
         v_flex()
             .w_full()
+            .flex_1()
+            .min_h_0()
             .gap_3()
             .child(Input::new(&self.search).small())
             .child(
                 div()
                     .w_full()
-                    .h(crate::sizing::fit_viewport(
-                        360.,
-                        window.viewport_size().height,
-                    ))
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scrollbar()
                     .rounded(material::radius_card())
                     .bg(cx.theme().muted)
@@ -491,6 +491,7 @@ impl AcpPanel {
             .child(
                 h_flex()
                     .id("acp-custom-open")
+                    .debug_selector(|| "acp-custom-open".into())
                     .w_full()
                     .pt_3()
                     .gap_2()
@@ -819,13 +820,14 @@ impl AcpPanel {
 }
 
 impl Render for AcpPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().w_full().child(match self.view {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex().size_full().min_h_0().child(match self.view {
             PanelView::Home => v_flex()
-                .w_full()
+                .size_full()
+                .min_h_0()
                 .gap_3()
                 .child(self.render_provider_entries(cx))
-                .child(self.render_marketplace(window, cx))
+                .child(self.render_marketplace(cx))
                 .into_any_element(),
             PanelView::ThirdParty => self.render_third_party(cx),
             PanelView::CustomAcp => self.render_custom(cx),
