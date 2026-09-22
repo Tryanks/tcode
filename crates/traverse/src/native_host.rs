@@ -10,10 +10,14 @@ use std::{
 use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
 
-use crate::identity::DeviceIdentity;
+use crate::{
+    identity::DeviceIdentity,
+    lan::{Browse, LanOptions, SystemBrowser},
+};
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
+type MulticastLock = dyn Fn(bool) + Send + Sync;
 
 /// Native clients share hosts.json, mobile.json, device.json, pairing, and
 /// transport policy.
@@ -23,6 +27,8 @@ pub struct NativeClientHost {
     platform: Option<String>,
     qr_scanner: Option<Box<QrScanner>>,
     editor: Option<Box<EditorOpener>>,
+    multicast_lock: Option<Arc<MulticastLock>>,
+    system_browser: Option<Arc<SystemBrowser>>,
     device: OnceLock<Result<DeviceIdentity, String>>,
 }
 
@@ -36,6 +42,8 @@ impl NativeClientHost {
             platform: default_device_platform(),
             qr_scanner: None,
             editor: None,
+            multicast_lock: None,
+            system_browser: None,
             device: OnceLock::new(),
         }
     }
@@ -45,9 +53,19 @@ impl NativeClientHost {
         let device = self
             .device
             .get_or_init(|| {
-                DeviceIdentity::load_or_create(&self.data_dir).map_err(|error| {
+                let device = DeviceIdentity::load_or_create(&self.data_dir).map_err(|error| {
                     format!("could not open {}: {error}", crate::identity::DEVICE_FILE)
-                })
+                })?;
+                let defaults = LanOptions::default();
+                device.set_lan_options(LanOptions {
+                    browse: match (&self.system_browser, defaults.browse) {
+                        (Some(browser), Browse::DnsSd) => Browse::System(browser.clone()),
+                        (_, browse) => browse,
+                    },
+                    multicast_lock: self.multicast_lock.clone(),
+                    ..defaults
+                });
+                Ok(device)
             })
             .clone()?;
         device.set_details(self.device_name(), self.device_platform());
@@ -99,6 +117,21 @@ impl NativeClientHost {
         scanner: impl Fn() -> HostFuture<'static, Result<String, String>> + 'static,
     ) -> Self {
         self.qr_scanner = Some(Box::new(scanner));
+        self
+    }
+
+    /// Held around every DNS-SD browse: Android delivers multicast to an
+    /// app only while it holds the Wi-Fi multicast lock. Called from the
+    /// transport's threads.
+    pub fn with_multicast_lock(mut self, lock: impl Fn(bool) + Send + Sync + 'static) -> Self {
+        self.multicast_lock = Some(Arc::new(lock));
+        self
+    }
+
+    /// Browse DNS-SD through the platform instead of a socket of our own;
+    /// iOS reserves raw multicast for entitled apps.
+    pub fn with_system_browser(mut self, browser: Arc<SystemBrowser>) -> Self {
+        self.system_browser = Some(browser);
         self
     }
 

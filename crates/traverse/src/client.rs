@@ -4,12 +4,13 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 
 use crate::{
     identity::DeviceIdentity,
+    lan::{InterfaceWatch, LanLookup},
     manifest::{Manifest, ManifestLoader, ManifestSource, live},
     runtime::{block_on, runtime},
     wire::{self, ClientLine, HelloRejection, HostLine, LineReader, PairRejection},
@@ -47,10 +48,12 @@ pub(crate) struct ClientEndpoint {
 /// an invitation being paired right now. The relay map is the union of their
 /// manifests, so a device whose machines are all Off carries no relay and a
 /// device with no machine on the official service never loads its manifest.
-/// The device only resolves; it never publishes.
+/// The LAN lookup is installed whatever the instances are. The device only
+/// resolves; it never publishes.
 struct Lookups {
     endpoint: Endpoint,
     data_dir: PathBuf,
+    lan: LanLookup,
     sources: Mutex<HashMap<ManifestSource, Source>>,
     /// The relay map the endpoint was bound with. iroh shares it with the
     /// endpoint, so it always reads as what the endpoint dials from; the
@@ -72,6 +75,35 @@ impl Drop for Source {
     fn drop(&mut self) {
         if let Some(refresher) = &self.refresher {
             refresher.abort();
+        }
+    }
+}
+
+/// The direct addresses `hosts.json` last knew for `id`, newest first.
+fn saved_addrs(data_dir: &Path, id: EndpointId) -> Vec<std::net::SocketAddr> {
+    let id = id.to_string();
+    crate::hosts::load_hosts(data_dir)
+        .unwrap_or_default()
+        .iter()
+        .filter(|host| host.host_id == id)
+        .flat_map(|host| host.addrs.iter().filter_map(|addr| addr.parse().ok()))
+        .collect()
+}
+
+/// Rebind and probe whenever the device's own addresses change — another
+/// Wi-Fi network, a hotspot, a new lease — so a machine that moved with it
+/// is looked up at once instead of at the next backoff. Ends with the
+/// identity.
+async fn watch_interfaces(inner: Weak<crate::identity::DeviceInner>) {
+    let mut watch = InterfaceWatch::new(crate::lan::local_networks());
+    loop {
+        tokio::time::sleep(crate::lan::INTERFACE_POLL).await;
+        let Some(inner) = inner.upgrade() else {
+            return;
+        };
+        if watch.observe(crate::lan::local_networks()) {
+            log::info!("local network addresses changed");
+            DeviceIdentity::from_inner(inner).network_changed();
         }
     }
 }
@@ -112,7 +144,12 @@ impl Lookups {
         for manifest in &manifests {
             wanted.extend(&manifest.relay_map());
         }
-        live::install_lookups(&self.endpoint, manifests.iter().map(Arc::as_ref), false);
+        live::install_lookups(
+            &self.endpoint,
+            manifests.iter().map(Arc::as_ref),
+            false,
+            Some(self.lan.clone()),
+        );
         live::sync_relays(&self.endpoint, &relays, &wanted).await;
     }
 
@@ -234,19 +271,27 @@ impl DeviceIdentity {
                         Err(_) => to_fetch.push(source),
                     }
                 }
+                let saved_dir = inner.data_dir.clone();
+                let lan = LanLookup::new(
+                    move |id| saved_addrs(&saved_dir, id),
+                    inner.lan.lock().unwrap().clone(),
+                );
                 let endpoint = Endpoint::builder(presets::Minimal)
                     .relay_mode(iroh::RelayMode::Custom(relays.clone()))
                     .secret_key(secret_key)
                     .transport_config(wire::transport_config())
+                    .address_lookup(lan.clone())
                     .bind()
                     .await
                     .map_err(io::Error::other)?;
                 let lookups = Arc::new(Lookups {
                     endpoint: endpoint.clone(),
                     data_dir: inner.data_dir.clone(),
+                    lan,
                     sources: Mutex::new(HashMap::new()),
                     relays: tokio::sync::Mutex::new(relays),
                 });
+                runtime().spawn(watch_interfaces(self.downgrade()));
                 for (source, loader, manifest) in in_hand {
                     lookups.sources.lock().unwrap().insert(
                         source.clone(),
@@ -403,6 +448,7 @@ async fn pair_exchange(
     .await
     .map_err(|_| PairError::Unreachable("connection timed out".into()))?
     .map_err(|error| PairError::Unreachable(error.to_string()))?;
+    client.lookups.lan.connected(connection.remote_id());
     let exchange = async {
         let (mut send, recv) = connection
             .open_bi()
@@ -565,14 +611,25 @@ impl StateSender {
 
 /// Keep `live` telling the truth about how the connection is carried: the
 /// selected path at connect time, then every change until the connection
-/// closes.
-async fn watch_paths(connection: Connection, live: LiveHost, state: Arc<StateSender>) {
+/// closes. A direct path found after connecting — hole punching succeeded
+/// behind a relay — is saved like the ones the handshake used.
+async fn watch_paths(
+    device: DeviceIdentity,
+    connection: Connection,
+    live: LiveHost,
+    state: Arc<StateSender>,
+) {
     use futures_lite::StreamExt as _;
     let mut events = connection.path_events();
     live.set_path(Some(crate::host::path_info(&connection)));
     while events.next().await.is_some() {
         if live.set_path(Some(crate::host::path_info(&connection))) {
             state.republish_connected().await;
+        }
+        let mut host = live.snapshot();
+        if learn_addresses(&mut host, &connection) {
+            live.authenticated(&host);
+            persist_addresses(&device, &host);
         }
     }
 }
@@ -633,6 +690,7 @@ async fn connection_loop(
                 tunnels.set(Some(established.connection.clone()));
                 let _ = state.send(ConnectionState::Syncing).await;
                 let paths = tokio::spawn(watch_paths(
+                    device.clone(),
                     established.connection.clone(),
                     live.clone(),
                     state.clone(),
@@ -714,6 +772,7 @@ async fn establish(
         }
         Err(_) => return Err(ConnectionFailure::Timeout),
     };
+    client.lookups.lan.connected(connection.remote_id());
     let handshake = async {
         let (mut send, recv) = connection
             .open_bi()
@@ -788,9 +847,10 @@ fn close_failure(reason: &ConnectionError) -> ConnectionFailure {
     }
 }
 
-/// Remember how this connection actually reached the machine, ahead of the
-/// hints the invite carried.
-fn learn_addresses(host: &mut PairedHost, connection: &Connection) {
+/// Remember how this connection actually reaches the machine, ahead of the
+/// hints the invite carried. Returns whether anything changed.
+fn learn_addresses(host: &mut PairedHost, connection: &Connection) -> bool {
+    let before = (host.addrs.clone(), host.relay.clone());
     let paths = connection.paths();
     for path in paths.iter() {
         match path.remote_addr() {
@@ -804,6 +864,7 @@ fn learn_addresses(host: &mut PairedHost, connection: &Connection) {
         }
     }
     host.addrs.truncate(MAX_ADDRS);
+    (host.addrs.clone(), host.relay.clone()) != before
 }
 
 fn persist_addresses(device: &DeviceIdentity, host: &PairedHost) {

@@ -10,6 +10,7 @@ use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::SessionStore;
 use tcode_traverse::browser::{BrowserConfig, StaticBundle, check_bind, serve, set_password};
 use tcode_traverse::identity::write_private;
+use tcode_traverse::lan::DEFAULT_PORT;
 use tcode_traverse::native_host::default_device_name;
 use tcode_traverse::{HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
 
@@ -58,7 +59,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse selects the relay and\ndiscovery service: official (default), off (invite addresses only),\nor the base URL of a self-hosted instance.\n\npair prints the current invitation link and QR: serve keeps {INVITATION_FILE}\ncurrent, whether the invitation was minted at startup or from a paired\ndevice, and removes it once it is used or expires. Scanning or pasting the\nlink is the whole pairing; an invitation lasts five minutes and admits one\ndevice. A new one comes from a paired device's Settings → Other devices or a\nrestart.\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--port PORT] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse selects the relay and\ndiscovery service: official (default), off (LAN and invite addresses only),\nor the base URL of a self-hosted instance. The machine binds UDP port\n{DEFAULT_PORT} for devices (--port binds another) and advertises it on the\nLAN as _tcode._udp, so paired devices on the same network find it again\nwithout Traverse.\n\npair prints the current invitation link and QR: serve keeps {INVITATION_FILE}\ncurrent, whether the invitation was minted at startup or from a paired\ndevice, and removes it once it is used or expires. Scanning or pasting the\nlink is the whole pairing; an invitation lasts five minutes and admits one\ndevice. A new one comes from a paired device's Settings → Other devices or a\nrestart.\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
@@ -81,6 +82,14 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     let name = option_value(args, "--name").unwrap_or_else(default_device_name);
     let data_dir = option_value(args, "--data-dir").map(PathBuf::from);
     let traverse = parse_traverse(option_value(args, "--traverse"))?;
+    let port = match option_value(args, "--port") {
+        Some(port) => port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| format!("invalid --port value {port:?}: expected 1-65535"))?,
+        None => DEFAULT_PORT,
+    };
     reject_unknown_options(
         args,
         &[
@@ -90,6 +99,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             "--data-dir",
             "--password",
             "--traverse",
+            "--port",
         ],
     )?;
     let store = match data_dir {
@@ -133,10 +143,10 @@ fn serve_command(args: &[String]) -> Result<(), String> {
                 data_dir: remote_data_dir.clone(),
                 traverse,
                 pairing_enabled: true,
-                bind_port: None,
+                bind_port: Some(port),
             },
         )
-        .map_err(|error| format!("could not start Traverse: {error}"))?,
+        .map_err(|error| format!("could not start Traverse on UDP port {port}: {error}"))?,
     );
     // The file follows every change for as long as the host runs; the
     // thread ends with the host's event stream. A copy left by a serve that
@@ -164,6 +174,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     )
     .map_err(|error| format!("could not listen for browsers: {error}"))?;
     println!("Machine id: {}", traverse_host.endpoint_id());
+    println!("UDP port: {port}");
     if relayed {
         // An invite minted before the relay is known would only carry LAN
         // addresses; wait briefly, never indefinitely.

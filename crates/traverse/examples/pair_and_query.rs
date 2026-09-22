@@ -1,57 +1,107 @@
 //! Pair with a running machine from its invite link and exchange one
-//! `Query`/`QueryResult` over the main stream:
+//! `Query`/`QueryResult` over the main stream, or connect again to a
+//! machine paired earlier — after it restarted on another address, say —
+//! and show how it was found:
 //!
 //! ```sh
 //! cargo run -p tcode-headless -- serve --name test --data-dir /tmp/tcode-traverse-test
 //! cargo run -p tcode-traverse --example pair_and_query -- 'tcode://pair?v=2&...'
+//! cargo run -p tcode-traverse --example pair_and_query -- --connect
 //! ```
 //!
 //! With `TRAVERSE_RELAY_ONLY=1` the device drops the invite's direct
 //! addresses and reaches the machine through its Traverse instance's relay
 //! and lookup, which exercises the same path a phone on another network
-//! takes.
-use std::time::{Duration, Instant};
+//! takes. `RUST_LOG=tcode_traverse=debug` shows the LAN lookup at work;
+//! `TRAVERSE_LAN_NETWORKS=ip/prefix[,ip/prefix]` replaces the device's own
+//! networks for the unicast probes, and `TCODE_DISABLE_MDNS=1` turns the
+//! DNS-SD browse off, so the probes can be watched on one machine:
+//! `TRAVERSE_LAN_NETWORKS=127.0.0.2/24` probes `127.0.0.1`.
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tcode_client::ConnectionState;
-use tcode_client::pairing::parse_pair_url;
-use tcode_traverse::DeviceIdentity;
+use tcode_client::pairing::{parse_pair_url, remember_host};
+use tcode_traverse::{
+    DeviceIdentity,
+    lan::{LanOptions, LocalNetwork},
+};
+
+fn lan_networks(spec: &str) -> Vec<LocalNetwork> {
+    spec.split(',')
+        .filter_map(|entry| {
+            let (ip, prefix) = entry.trim().split_once('/')?;
+            Some(LocalNetwork {
+                name: "env".into(),
+                ip: ip.parse().ok()?,
+                prefix: prefix.parse().ok()?,
+            })
+        })
+        .collect()
+}
 
 fn main() {
     env_logger::init();
-    let Some(link) = std::env::args().nth(1) else {
-        eprintln!("usage: pair_and_query <tcode://pair?...>");
+    let Some(argument) = std::env::args().nth(1) else {
+        eprintln!("usage: pair_and_query <tcode://pair?...> | --connect");
         std::process::exit(2);
     };
-    let mut invite = parse_pair_url(&link).expect("a v2 invite link");
-    let relay_only = std::env::var_os("TRAVERSE_RELAY_ONLY").is_some();
-    if relay_only {
-        invite.addrs.clear();
-    }
     let data_dir = std::env::temp_dir().join("tcode-traverse-example-device");
     let device = DeviceIdentity::load_or_create(&data_dir).expect("device identity");
     device.set_details("example device".into(), None);
+    if let Ok(spec) = std::env::var("TRAVERSE_LAN_NETWORKS") {
+        let networks = lan_networks(&spec);
+        println!("probing as if attached to {networks:?}");
+        device.set_lan_options(LanOptions {
+            networks: Arc::new(move || networks.clone()),
+            ..LanOptions::default()
+        });
+    }
     println!("device id {}", device.endpoint_id());
     let started = Instant::now();
-    let paired = match tcode_traverse::pair_blocking(&invite, &device) {
-        Ok(paired) => paired,
-        Err(error) => {
-            eprintln!("pairing failed: {error}");
+    let paired = if argument == "--connect" {
+        let hosts = tcode_traverse::hosts::load_hosts(&data_dir).expect("hosts.json");
+        let Some(saved) = hosts.into_iter().last() else {
+            eprintln!("no machine paired yet; pair with an invite link first");
             std::process::exit(1);
+        };
+        println!(
+            "connecting to {} ({}) last seen at {:?}",
+            saved.name, saved.host_id, saved.addrs
+        );
+        saved
+    } else {
+        let mut invite = parse_pair_url(&argument).expect("a v2 invite link");
+        if std::env::var_os("TRAVERSE_RELAY_ONLY").is_some() {
+            invite.addrs.clear();
         }
+        let paired = match tcode_traverse::pair_blocking(&invite, &device) {
+            Ok(paired) => paired,
+            Err(error) => {
+                eprintln!("pairing failed: {error}");
+                std::process::exit(1);
+            }
+        };
+        println!(
+            "paired with {} ({}) in {:?}",
+            paired.name,
+            paired.host_id,
+            started.elapsed()
+        );
+        let remembered = paired.clone();
+        tcode_traverse::hosts::update_hosts(&data_dir, |hosts| remember_host(hosts, remembered))
+            .expect("hosts.json");
+        paired
     };
-    println!(
-        "paired with {} ({}) in {:?}",
-        paired.name,
-        paired.host_id,
-        started.elapsed()
-    );
     let transport = tcode_traverse::connect(&paired, &device);
     let query = r#"{"id":1,"payload":{"type":"query","content":{"type":"ping"}}}"#;
     transport.to_host.try_send(query.into()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if let Ok(state) = transport.state.try_recv() {
-            println!("state {state:?}");
+            println!("state {state:?} at {:?}", started.elapsed());
             if matches!(state, ConnectionState::Offline { .. }) {
                 std::process::exit(1);
             }
@@ -59,12 +109,18 @@ fn main() {
         if let Ok(line) = transport.from_host.try_recv() {
             print!("host: {line}");
             if line.contains("query_result") {
-                println!("round trip complete in {:?}", started.elapsed());
+                let live = transport.current_host.as_ref().expect("a live host");
+                println!(
+                    "round trip complete in {:?}; path {:?}; now saved at {:?}",
+                    started.elapsed(),
+                    live.path(),
+                    live.snapshot().addrs
+                );
                 return;
             }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    eprintln!("no reply within 20 s");
+    eprintln!("no reply within 30 s");
     std::process::exit(1);
 }

@@ -59,6 +59,8 @@ targets:
           - IOSurface
           - "-framework"
           - Security
+          - "-framework"
+          - Network
           - "-lc++"
 
 schemes:

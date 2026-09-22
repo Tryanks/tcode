@@ -27,8 +27,10 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
-    <!-- Direct QUIC to a machine on the same network triggers the local
-         network prompt; there is no Bonjour browse. -->
+    <!-- Paired machines advertise this type; the app browses it through the
+         system daemon to find them again (crates/ios/host/Sources/MachineBrowse.swift). -->
+    <key>NSBonjourServices</key>
+    <array><string>_tcode._udp</string></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>直接连接同一网络中已配对的 Tcode 执行端。</string>
     <key>NSCameraUsageDescription</key>
