@@ -710,9 +710,12 @@ impl Shared {
                 name: device.name.clone(),
                 created_unix: device.created_unix,
                 platform: device.platform.clone(),
+                // A browser reaches the listener at the machine's own address.
                 path: live.contains_key(&device.id).then_some(PathInfo {
                     direct: true,
                     relay: None,
+                    lan: true,
+                    probing_direct: false,
                 }),
             }));
         state

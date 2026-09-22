@@ -374,8 +374,8 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
         assert_eq!(devices[1]["platform"], "macOS");
         assert_eq!(
             devices[1]["path"],
-            json!({"direct": true}),
-            "a connected browser is shown as a direct device"
+            json!({"direct": true, "lan": true}),
+            "a connected browser is shown as a device on the machine's own network"
         );
         let browser_id = devices[1]["id"].as_str().unwrap().to_owned();
         assert_eq!(hosting_calls.lock().unwrap().as_slice(), ["State"]);

@@ -100,7 +100,6 @@ markdown:
   link_copy_text: "Copy link text"
   path_copy_relative: "Copy relative path"
 sidebar:
-  pending_write: "Pending"
   parent_unavailable: "(parent unavailable)"
   collapse: "Collapse sidebar"
   expand: "Expand sidebar"
@@ -968,14 +967,11 @@ toast:
   hide_details: "Hide details"
   copy_error: "Copy error"
 remote:
-  apply: "Apply"
   host:
     section: "THIS MACHINE"
     title: "Let other devices connect to this machine"
   pairing:
     title: "Accept new devices"
-    description: "New devices can pair with an invitation."
-    off: "Pairing is off; paired devices keep working."
   host_name:
     title: "Machine name"
     description: "Shown to other devices."
@@ -984,33 +980,27 @@ remote:
     official: "Official Traverse"
     custom: "Self-hosted Traverse"
     off: "Off"
-    official_description: "Devices off your network reach this machine through the official relay and lookup service."
-    custom_description: "Devices off your network reach this machine through your own Traverse instance."
-    off_description: "No relay or lookup service: devices reach this machine only at the addresses in its invitation."
     url: "Traverse URL"
     url_description: "The base URL your instance serves its manifest from."
     url_placeholder: "https://traverse.example"
     invalid_url: "Enter an http or https URL."
   invite:
     title: "INVITATION"
-    how: "Scan the QR code with the Tcode app, or copy the link and paste it into Tcode on the other device."
-    description: "Create a fresh single-use invitation for another device."
     expired: "Invitation expired"
     new: "New invitation"
     copy: "Copy invitation link"
     copied: "Invitation link copied"
     expires: "Expires in %{time}"
-    machine: "Machine %{fingerprint}"
-    machine_copied: "Machine id copied"
   devices:
     section: "CONNECTED DEVICES"
     empty: "No devices have connected yet."
-    paired_on: "First connected %{date}"
     revoke: "Remove"
   path:
-    direct: "Direct"
+    lan: "LAN"
+    tunnel: "Tunnel"
     relay: "Relay"
-    relay_via: "Relay via %{host}"
+    relay_region: "Relay (%{region})"
+    probing_direct: "Relay · trying direct"
     offline: "Offline"
   failure:
     unreachable: "Host unreachable"
@@ -1021,7 +1011,7 @@ remote:
   state:
     connected: "Connected"
     syncing: "Syncing"
-    reconnecting: "Reconnecting (attempt %{attempt})"
+    reconnecting: "Reconnecting"
 
 
 hosts:
@@ -1032,8 +1022,6 @@ hosts:
   disconnect: "Disconnect"
   forget: "Remove"
   actions: "Actions for %{name}"
-  last_connected: "Connected %{ago}"
-  never_connected: "Never connected"
   pair_again: "Pair again"
   pair:
     title: "ADD A MACHINE"
@@ -1042,9 +1030,7 @@ hosts:
     invitation: "Invitation link"
     invitation_placeholder: "tcode://pair?…"
     scan: "Scan a QR code"
-    scan_description: "Point the camera at the invitation on the machine."
     paste: "Paste an invitation link"
-    paste_description: "The tcode://pair link behind the machine's QR code."
     bad_invite: "That is not a Tcode invitation link."
     filled: "Invitation from %{name} · %{fingerprint}"
     connect_host: "Connect to %{name}"

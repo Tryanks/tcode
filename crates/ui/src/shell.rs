@@ -2647,7 +2647,6 @@ mod tests {
         store.read_with(cx, |store, _| {
             assert_eq!(store.remote_host_name(), Some("Pending host"));
             assert_eq!(store.active_session_id().as_deref(), Some("pending-thread"));
-            assert!(store.session_has_pending_writes("pending-thread"));
             assert!(!store.chat_loading());
             assert_eq!(store.delivery_messages()[0].1, "survives relaunch");
             assert!(store.sidebar_sessions().is_empty());
@@ -2801,19 +2800,23 @@ mod tests {
                 path: Some(tcode_protocol::PathInfo {
                     direct: true,
                     relay: None,
+                    lan: true,
+                    probing_direct: false,
                 }),
             })
             .unwrap();
-        assert_eq!(subtitle(cx), "Direct · Connected");
+        assert_eq!(subtitle(cx), "LAN · Connected");
         host.states
             .try_send(tcode_client::ConnectionState::Connected {
                 path: Some(tcode_protocol::PathInfo {
                     direct: false,
-                    relay: Some("https://relay.example/".into()),
+                    relay: Some("https://aps1-1.relay.n0.iroh.link/".into()),
+                    lan: false,
+                    probing_direct: false,
                 }),
             })
             .unwrap();
-        assert_eq!(subtitle(cx), "Relay · Connected");
+        assert_eq!(subtitle(cx), "Relay (aps1-1) · Connected");
         assert!(
             cx.debug_bounds("compact-threads-page").is_some(),
             "the Threads page is what shows it"

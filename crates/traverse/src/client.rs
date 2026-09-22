@@ -1109,6 +1109,8 @@ mod tests {
         PathInfo {
             direct: false,
             relay: Some("https://relay.example/".into()),
+            lan: false,
+            probing_direct: false,
         }
     }
 
@@ -1116,6 +1118,8 @@ mod tests {
         PathInfo {
             direct: true,
             relay: None,
+            lan: true,
+            probing_direct: false,
         }
     }
 

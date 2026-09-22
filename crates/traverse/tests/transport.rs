@@ -119,6 +119,8 @@ fn connected_directly() -> ConnectionState {
         path: Some(tcode_protocol::PathInfo {
             direct: true,
             relay: None,
+            lan: true,
+            probing_direct: false,
         }),
     }
 }

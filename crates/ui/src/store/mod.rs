@@ -612,12 +612,6 @@ impl WorkspaceStore {
         sessions
     }
 
-    pub(crate) fn session_has_pending_writes(&self, id: &str) -> bool {
-        self.pending_sessions()
-            .iter()
-            .any(|(session, _)| session == id)
-    }
-
     pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
         let active = self.active_session_id().unwrap_or_default();
         let message = |command: &Command| match command {
