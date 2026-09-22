@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
-use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
+use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo, ProtocolError};
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpListener;
 use tokio_tungstenite::WebSocketStream;
@@ -41,7 +41,8 @@ pub type StaticBundle = &'static [(&'static str, &'static [u8])];
 /// Answers a browser's hosting query for native devices; the Traverse host
 /// owns that state, so the listener is only handed a way to reach it. The
 /// listener adds the devices it holds tokens for itself.
-pub type HostingHandler = Arc<dyn Fn(HostingAction) -> HostingState + Send + Sync>;
+pub type HostingHandler =
+    Arc<dyn Fn(HostingAction) -> Result<HostingState, ProtocolError> + Send + Sync>;
 
 pub struct BrowserConfig {
     pub listen: SocketAddr,
@@ -590,9 +591,9 @@ where
                 {
                     let reply = tcode_protocol::HostMessage::QueryResult {
                         id,
-                        result: Ok(tcode_protocol::QueryResponse::Hosting(
-                            shared.hosting(action),
-                        )),
+                        result: shared
+                            .hosting(action)
+                            .map(tcode_protocol::QueryResponse::Hosting),
                     };
                     websocket
                         .send(Message::Text(
@@ -669,7 +670,7 @@ impl Shared {
     /// Native devices from the Traverse host, then the browsers this
     /// listener holds tokens for. Revoking a browser device is the
     /// listener's to do; every other action is the host's.
-    fn hosting(&self, action: HostingAction) -> HostingState {
+    fn hosting(&self, action: HostingAction) -> Result<HostingState, ProtocolError> {
         let action = match action {
             HostingAction::RevokeDevice(id) => match id.parse::<uuid::Uuid>() {
                 Ok(device) => {
@@ -679,7 +680,7 @@ impl Shared {
                         Ok(false) => HostingAction::RevokeDevice(id),
                         Err(error) => {
                             log::error!("could not persist the revocation: {error}");
-                            HostingAction::State
+                            return Err(crate::host::revoke_error(error));
                         }
                     }
                 }
@@ -688,7 +689,7 @@ impl Shared {
             action => action,
         };
         let mut state = match &self.hosting {
-            Some(hosting) => hosting(action),
+            Some(hosting) => hosting(action)?,
             None => {
                 let auth = self.auth.lock().unwrap();
                 HostingState {
@@ -718,6 +719,6 @@ impl Shared {
                     probing_direct: false,
                 }),
             }));
-        state
+        Ok(state)
     }
 }

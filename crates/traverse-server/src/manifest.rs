@@ -1,36 +1,11 @@
 //! `GET /relays.json`: this instance and its configured peers, in the shape
-//! the client parses. `Manifest` and `ManifestRelay` duplicate the serde
-//! structs in `crates/traverse/src/manifest.rs`; the server does not depend
-//! on the client crate, so keep the two in step.
+//! the client parses.
 use std::net::SocketAddr;
 
-use serde::Serialize;
+use tcode_traverse::manifest::{Manifest, ManifestRelay};
 use url::Url;
 
 use crate::config::Config;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Manifest {
-    pub version: u32,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: String,
-    pub relays: Vec<ManifestRelay>,
-    pub pkarr: Vec<Url>,
-    pub dns: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ManifestRelay {
-    pub url: Url,
-    /// `0` marks a relay without QUIC address discovery; absent means the
-    /// client's default port, so a relay-only instance must send `0`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quic_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub home_rtt_max_ms: Option<u32>,
-}
 
 /// Where clients reach this instance: `https://<hostname>[:port]/` when a
 /// hostname is configured (a TLS-terminating proxy in front of `tls.mode =
@@ -60,24 +35,23 @@ pub fn compose(config: &Config, base: &Url, updated_at: String) -> Manifest {
     } else {
         0
     };
+    // `0` marks a relay without QUIC address discovery; absent means the
+    // client's default port, so a relay-only instance must send `0`.
     let mut relays = vec![ManifestRelay {
         url: base.clone(),
         quic_port: Some(quic_port),
         region: config.region.clone(),
-        home_rtt_max_ms: config.lock.enabled.then_some(config.lock.home_rtt_max_ms),
     }];
     relays.extend(config.peers.iter().map(|peer| ManifestRelay {
         url: peer.url.clone(),
         quic_port: peer.quic_port,
         region: peer.region.clone(),
-        home_rtt_max_ms: peer.home_rtt_max_ms,
     }));
     Manifest {
         version: 1,
-        updated_at,
+        updated_at: Some(updated_at),
         relays,
         pkarr: vec![base.join("pkarr").expect("relative path")],
-        dns: Vec::new(),
     }
 }
 
@@ -92,12 +66,14 @@ mod tests {
 
     #[test]
     fn a_tls_instance_advertises_itself_qad_and_peers() {
-        let mut config = Config::parse("hostname = \"traverse.example.org\"\ncontact = \"admin@example.org\"\nregion = \"eu\"\n[lock]\nenabled = true\nhome_rtt_max_ms = 60").unwrap();
+        let mut config = Config::parse(
+            "hostname = \"traverse.example.org\"\ncontact = \"admin@example.org\"\nregion = \"eu\"",
+        )
+        .unwrap();
         config.peers.push(Peer {
             url: Url::parse("https://relay-2.example.org/").unwrap(),
             quic_port: Some(7842),
             region: Some("us".into()),
-            home_rtt_max_ms: None,
         });
         let base = public_base(&config, "127.0.0.1:1".parse().unwrap());
         let manifest = compose(&config, &base, "2026-09-21T00:00:00Z".into());
@@ -107,12 +83,16 @@ mod tests {
                 "version": 1,
                 "updatedAt": "2026-09-21T00:00:00Z",
                 "relays": [
-                    { "url": "https://traverse.example.org/", "quic_port": 7842, "region": "eu", "home_rtt_max_ms": 60 },
+                    { "url": "https://traverse.example.org/", "quic_port": 7842, "region": "eu" },
                     { "url": "https://relay-2.example.org/", "quic_port": 7842, "region": "us" }
                 ],
-                "pkarr": ["https://traverse.example.org/pkarr"],
-                "dns": []
+                "pkarr": ["https://traverse.example.org/pkarr"]
             })
+        );
+        // What the server sends, the client accepts as is.
+        assert_eq!(
+            Manifest::parse(&serde_json::to_string(&manifest).unwrap()).unwrap(),
+            manifest
         );
     }
 
@@ -124,11 +104,6 @@ mod tests {
         assert_eq!(base.as_str(), "https://traverse.example.org/");
         let manifest = compose(&config, &base, "x".into());
         assert_eq!(json(&manifest)["relays"][0]["quic_port"], 0);
-        assert!(
-            json(&manifest)["relays"][0]
-                .get("home_rtt_max_ms")
-                .is_none()
-        );
 
         config.hostname = None;
         let base = public_base(&config, "127.0.0.1:8080".parse().unwrap());

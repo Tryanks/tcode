@@ -23,8 +23,12 @@ Ports, with the defaults:
 | 9090 | TCP, loopback | Prometheus metrics (`[metrics] bind`; absent means off) |
 
 A Tcode machine needs public TCP 443 and UDP 7842 on the instance plus a
-domain and certificate. Without UDP 7842 the manifest marks the relay as
-relay-only (`"quic_port": 0`) and devices skip hole punching through it.
+domain and certificate. The manifest advertises the QUIC port whenever
+`relay.quic_addr_discovery` is on and TLS is terminated here, and the
+server does not probe whether that port is reachable: either expose the
+advertised UDP port or set `relay.quic_addr_discovery = false`, which
+advertises `"quic_port": 0` so devices skip address discovery through this
+relay. `tls.mode = "off"` also turns address discovery off.
 
 `tcode-traverse --dev` serves plain HTTP on `127.0.0.1:8080` with the store in
 `./tcode-traverse-dev`: no TLS, no QUIC address discovery, no metrics.
@@ -56,13 +60,12 @@ relay-only (`"quic_port": 0`) and devices skip hole punching through it.
   "relays": [
     { "url": "https://traverse.example.org/", "quic_port": 7842, "region": "eu-central" }
   ],
-  "pkarr": ["https://traverse.example.org/pkarr"],
-  "dns": []
+  "pkarr": ["https://traverse.example.org/pkarr"]
 }
 ```
 
 `updatedAt` is the config file's modification time. `[[peers]]` entries are
-appended to `relays`; `home_rtt_max_ms` appears when the region lock is on.
+appended to `relays`.
 
 ## pkarr store
 
@@ -70,24 +73,37 @@ appended to `relays`; `home_rtt_max_ms` appears when the region lock is on.
 at most 1072 bytes, `409` when a newer packet is stored, `400` when invalid,
 `413` when oversized, `429` above `pkarr.put_per_second`/`put_burst` per IP).
 `GET` returns it with `Cache-Control: public, max-age=300`, `404` when
-unknown. `/<key>` at the root is accepted too. Records not refreshed within
-`pkarr.eviction` are removed. Behind a reverse proxy set
-`[http] trust_forwarded_for = true` so the limit counts the client, not the
-proxy.
+unknown, `429` above `pkarr.get_per_second`/`get_burst` per IP. `/<key>` at
+the root is accepted too. Records not refreshed within `pkarr.eviction` are
+removed. Behind a reverse proxy set `[http] trust_forwarded_for = true` so
+the limits count the client, not the proxy.
+
+## Limits
+
+| Setting | Default | Scope |
+| --- | --- | --- |
+| `pkarr.put_per_second` / `put_burst` | 4 / 8 | `PUT /pkarr/<key>`, per client IP |
+| `pkarr.get_per_second` / `get_burst` | 20 / 40 | `GET /pkarr/<key>` and `GET /<key>`, per client IP |
+| `relay.rx_bytes_per_second` / `rx_max_burst_bytes` | 2 000 000 / 4 000 000 | bytes received per relay connection; `0` disables |
+| `lock.far_connection_quota` | 64 | concurrent far connections with the region lock on |
 
 ## Region lock
 
 An instance can keep its relay for the clients that are close to it. With
 `[lock] enabled = true` a relay connection is admitted when its TCP RTT is at
 most `home_rtt_max_ms`, or its address is in `allow_cidrs`; every other client
-shares `far_connection_quota` concurrent connections and is refused, with a
-reason the client shows, once that is used up.
+shares `far_connection_quota` concurrent connections and is refused once that
+is used up.
 
 iroh-relay only hands the access hook the HTTP upgrade request, not the
-socket, so the lock reads headers a reverse proxy adds: `X-TCP-RTT` in
-microseconds and `X-Forwarded-For`. **It does nothing useful without such a
-proxy** — every client then counts as far — and it is off by default. With
-nginx in front of `tls.mode = "off"` and `[http] bind = "127.0.0.1:8080"`:
+socket, so RTT and address are read from headers a reverse proxy adds:
+`X-TCP-RTT` in microseconds and `X-Forwarded-For`. A client can send those
+headers itself, so they are read only with `trust_proxy_headers = true`,
+which is meaningful only behind a reverse proxy that overwrites both.
+Without it every client counts as far and only the quota applies; a config
+with the lock on, the headers untrusted and a quota of `0` is rejected at
+start. With nginx in front of `tls.mode = "off"` and
+`[http] bind = "127.0.0.1:8080"`:
 
 ```nginx
 location /relay {

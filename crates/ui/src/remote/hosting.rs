@@ -213,9 +213,12 @@ impl RemoteController {
             .unwrap_or_default()
     }
 
-    pub fn revoke_device(&self, id: &str) {
-        if let Some(host) = self.host.as_ref() {
-            host.revoke(id);
+    /// Remove a device. When the allow list cannot be written the device
+    /// stays paired and connected, and the error says so.
+    pub fn revoke_device(&self, id: &str) -> Result<(), String> {
+        match self.host.as_ref() {
+            Some(host) => host.revoke(id).map_err(|error| error.to_string()),
+            None => Ok(()),
         }
     }
 }
@@ -826,11 +829,23 @@ impl HostingPanel {
                                     .compact()
                                     .danger()
                                     .label(crate::tr!("remote.devices.revoke"))
-                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                    .on_click(cx.listener(move |_, _, window, cx| {
                                         let id = id.clone();
-                                        cx.update_global::<RemoteController, _>(|controller, _| {
-                                            controller.revoke_device(&id);
-                                        });
+                                        let revoked = cx.update_global::<RemoteController, _>(
+                                            |controller, _| controller.revoke_device(&id),
+                                        );
+                                        if let Err(error) = revoked {
+                                            window.push_notification(
+                                                Notification::error(
+                                                    crate::tr!(
+                                                        "remote.devices.revoke_failed",
+                                                        error = error
+                                                    )
+                                                    .into_owned(),
+                                                ),
+                                                cx,
+                                            );
+                                        }
                                         cx.notify();
                                     })),
                             ),

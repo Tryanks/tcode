@@ -3,15 +3,14 @@
 //! ```json
 //! { "version": 1,
 //!   "updatedAt": "2026-09-21T00:00:00Z",
-//!   "relays": [ { "url": "https://relay.example/", "quic_port": 7842, "region": "eu", "home_rtt_max_ms": 80 } ],
-//!   "pkarr":  [ "https://traverse.example/pkarr/" ],
-//!   "dns":    [] }
+//!   "relays": [ { "url": "https://relay.example/", "quic_port": 7842, "region": "eu" } ],
+//!   "pkarr":  [ "https://traverse.example/pkarr/" ] }
 //! ```
 //!
 //! A relay without `quic_port` uses iroh's default QUIC address-discovery
-//! port; `"quic_port": 0` marks a relay that only forwards (no UDP). `dns`
-//! lists origins for iroh's DNS address lookup; self-hosted manifests usually
-//! leave it empty, because it needs an authoritative zone.
+//! port; `"quic_port": 0` marks a relay that only forwards (no UDP). Lookup
+//! is pkarr over HTTPS only: a machine publishes to and a device resolves
+//! through every `pkarr` URL.
 //!
 //! The official manifest is `traverse_manifest.json` next to this file,
 //! bundled into every build and re-fetched from [`OFFICIAL_MANIFEST_URL`]; a
@@ -19,8 +18,9 @@
 //! [`ManifestLoader`]: preference is remote, then the disk cache, then the
 //! bundle — except that a bundle whose `updatedAt` is newer than the cache
 //! outranks it — and invalid data never replaces a usable copy. A self-hosted
-//! instance has no bundle: with no cache and no fetch it is an error, never
-//! the official service.
+//! instance has no bundle: with no cache and no fetch there is no manifest,
+//! never the official one, and its endpoint runs without relay or lookup
+//! until a refresh brings it.
 use std::{
     fs,
     io::{self, Read as _},
@@ -59,8 +59,6 @@ pub struct Manifest {
     pub relays: Vec<ManifestRelay>,
     #[serde(default)]
     pub pkarr: Vec<Url>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,8 +68,6 @@ pub struct ManifestRelay {
     pub quic_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home_rtt_max_ms: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,8 +77,6 @@ pub enum ManifestError {
     /// A relay or pkarr URL is not `https`, or the relay URL is malformed.
     Url(String),
     NoRelays,
-    /// A DNS origin is empty or contains whitespace or control characters.
-    Dns(String),
 }
 
 impl std::fmt::Display for ManifestError {
@@ -92,7 +86,6 @@ impl std::fmt::Display for ManifestError {
             Self::Version(version) => write!(f, "unsupported manifest version {version}"),
             Self::Url(url) => write!(f, "manifest URL must be https: {url}"),
             Self::NoRelays => f.write_str("manifest lists no relays"),
-            Self::Dns(origin) => write!(f, "invalid DNS origin {origin:?}"),
         }
     }
 }
@@ -125,15 +118,6 @@ impl Manifest {
                 return Err(ManifestError::Url(url.to_string()));
             }
         }
-        for origin in &manifest.dns {
-            if origin.is_empty()
-                || origin
-                    .chars()
-                    .any(|c| c.is_whitespace() || c.is_control() || c == '/')
-            {
-                return Err(ManifestError::Dns(origin.clone()));
-            }
-        }
         Ok(manifest)
     }
 
@@ -161,10 +145,6 @@ impl Manifest {
 
     pub fn pkarr_urls(&self) -> &[Url] {
         &self.pkarr
-    }
-
-    pub fn dns_origins(&self) -> &[String] {
-        &self.dns
     }
 }
 
@@ -252,7 +232,7 @@ pub struct ManifestState {
     /// the bundle. Persisted with the disk cache so a restart does not
     /// refetch.
     fetched_at_ms: Option<u64>,
-    last_attempt_ms: Option<u64>,
+    pub(crate) last_attempt_ms: Option<u64>,
     disk_loaded: bool,
 }
 
@@ -395,7 +375,7 @@ impl ManifestLoader {
         &self.inner.source
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, ManifestState> {
+    pub(crate) fn state(&self) -> std::sync::MutexGuard<'_, ManifestState> {
         self.inner
             .state
             .lock()
@@ -503,9 +483,7 @@ pub(crate) mod live {
 
     use iroh::{
         Endpoint, RelayMap,
-        address_lookup::{
-            AddressLookupBuilder as _, DnsAddressLookup, PkarrPublisher, PkarrResolver,
-        },
+        address_lookup::{AddressLookupBuilder as _, PkarrPublisher, PkarrResolver},
     };
 
     use super::Manifest;
@@ -526,9 +504,8 @@ pub(crate) mod live {
     }
 
     /// Replace every address-lookup service with those of `manifests`: a
-    /// pkarr publisher (machines only) and resolver per pkarr URL, and a DNS
-    /// lookup per origin. A device keeps its `lan` lookup through the
-    /// replacement.
+    /// pkarr publisher (machines only) and resolver per pkarr URL. A device
+    /// keeps its `lan` lookup through the replacement.
     pub(crate) fn install_lookups<'a>(
         endpoint: &Endpoint,
         manifests: impl IntoIterator<Item = &'a Manifest>,
@@ -553,12 +530,6 @@ pub(crate) mod live {
                 match PkarrResolver::builder(pkarr.clone()).into_address_lookup(endpoint) {
                     Ok(resolver) => services.add(resolver),
                     Err(error) => log::warn!("could not add pkarr resolver {pkarr}: {error}"),
-                }
-            }
-            for origin in manifest.dns_origins() {
-                match DnsAddressLookup::builder(origin.clone()).into_address_lookup(endpoint) {
-                    Ok(lookup) => services.add(lookup),
-                    Err(error) => log::warn!("could not add DNS lookup {origin}: {error}"),
                 }
             }
         }
@@ -599,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_lists_iroh_default_relays_and_the_n0_lookup_services() {
+    fn bundle_lists_iroh_default_relays_and_the_n0_pkarr_relay() {
         let bundle = bundled();
         assert_eq!(
             bundle.relay_map(),
@@ -614,17 +585,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             [iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD]
         );
-        assert_eq!(
-            bundle.dns_origins(),
-            [iroh::address_lookup::N0_DNS_ENDPOINT_ORIGIN_PROD]
-        );
         assert!(bundle.updated_at.is_some());
     }
 
     #[test]
     fn manifest_becomes_relay_map_and_pkarr_urls() {
         let manifest = Manifest::parse(
-            r#"{"version":1,"relays":[{"url":"https://relay.example/","quic_port":7842,"region":"eu"},{"url":"https://tcp-only.example/","quic_port":0},{"url":"https://default.example/"}],"pkarr":["https://traverse.example/pkarr/"],"dns":["dns.example."]}"#,
+            r#"{"version":1,"relays":[{"url":"https://relay.example/","quic_port":7842,"region":"eu"},{"url":"https://tcp-only.example/","quic_port":0},{"url":"https://default.example/"}],"pkarr":["https://traverse.example/pkarr/"]}"#,
         )
         .unwrap();
         let map = manifest.relay_map();
@@ -647,7 +614,6 @@ mod tests {
             manifest.pkarr_urls(),
             [Url::parse("https://traverse.example/pkarr/").unwrap()]
         );
-        assert_eq!(manifest.dns_origins(), ["dns.example."]);
     }
 
     #[test]
@@ -673,12 +639,6 @@ mod tests {
                 r#"{"version":1,"relays":[{"url":"https://relay.example/"}],"pkarr":["ftp://x/"]}"#
             ),
             Err(ManifestError::Url("ftp://x/".into()))
-        );
-        assert_eq!(
-            Manifest::parse(
-                r#"{"version":1,"relays":[{"url":"https://relay.example/"}],"dns":["bad origin"]}"#
-            ),
-            Err(ManifestError::Dns("bad origin".into()))
         );
         assert!(matches!(
             Manifest::parse(r#"{"version":1,"relays":[{"url":"relay"}]}"#),
