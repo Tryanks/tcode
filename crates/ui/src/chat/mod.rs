@@ -345,9 +345,13 @@ pub struct ChatView {
     /// rows are only spliced during a frame, never between two frames.
     timeline_stale: bool,
     history_placeholder_height: gpui::Pixels,
-    /// Anchor and distance to scroll back once a page has filled the
-    /// reservation the reader had scrolled into.
-    reservation_scroll_back: Option<(ListOffset, gpui::Pixels)>,
+    /// Distance to scroll back once a page has filled the reservation the
+    /// reader had scrolled into. Applied by the render after the frame that
+    /// measured the page, never between frames: GPUI resolves the wheel and
+    /// pan packets of a moving finger against the anchor it painted, so a
+    /// scroll applied between two frames is either overwritten by the next
+    /// packet or would have to give up when one arrived first.
+    reservation_scroll_back: Option<ReservationScrollBack>,
     turn_items: Vec<TurnListItem>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
@@ -466,6 +470,7 @@ impl ChatView {
                 following,
                 origin: list.logical_scroll_top(),
             });
+            self.reservation_scroll_back = None;
             cx.notify();
         }
         true
@@ -734,10 +739,17 @@ impl ChatView {
                     // A reader inside the padding or the reservation keeps that
                     // pixel position, which now belongs to the page above. A
                     // list anchor cannot precede its row (rows above it stay
-                    // unpainted), so the next frame walks back over the page
-                    // once layout has measured it.
+                    // unpainted), so the render after the next frame walks
+                    // back over the page once layout has measured it.
                     if into_reservation > px(0.) {
-                        self.reservation_scroll_back = Some((anchor, into_reservation));
+                        let distance = self
+                            .reservation_scroll_back
+                            .take()
+                            .map_or(px(0.), |back| back.distance);
+                        self.reservation_scroll_back = Some(ReservationScrollBack {
+                            distance: distance + into_reservation,
+                            measured: false,
+                        });
                     }
                 }
                 for index in remeasure {
@@ -745,6 +757,7 @@ impl ChatView {
                 }
             }
             ListSync::Reset { count } => {
+                self.reservation_scroll_back = None;
                 self.list_state.reset(count);
                 if session_changed {
                     // Reset also clears stale item focus handles. A newly opened
@@ -775,6 +788,7 @@ impl ChatView {
         }
 
         if let Some(turn) = requested_turn.filter(|turn| *turn < self.turn_items.len()) {
+            self.reservation_scroll_back = None;
             self.list_state.pause_following_tail();
             self.list_state.scroll_to(ListOffset {
                 item_ix: turn,
@@ -2724,11 +2738,50 @@ fn markdown_entries_for_residency(
     }
 }
 
+/// The walk back into a page that replaced the reservation the reader had
+/// scrolled into. See [`ChatView::apply_reservation_scroll_back`].
+#[derive(Debug, Clone, Copy)]
+struct ReservationScrollBack {
+    distance: gpui::Pixels,
+    /// A frame has laid the page out since the walk back was requested, so
+    /// `scroll_by` can count its rows.
+    measured: bool,
+}
+
 impl ChatView {
     /// Space above the first turn's content: the edge padding plus the history
     /// reservation. Both move to the new first row when a page lands.
     fn leading_space(&self) -> gpui::Pixels {
         px(TIMELINE_EDGE_PADDING) + self.history_placeholder_height
+    }
+
+    /// Walk back over a landed page inside the render that follows the frame
+    /// which measured it. The walk is a relative scroll, so packets that moved
+    /// the reader in between (a finger still panning, or a fling ticking on
+    /// the frame) stay applied: those resolved against the painted anchor,
+    /// and the anchor painted after this render carries the walk back.
+    fn apply_reservation_scroll_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(back) = self.reservation_scroll_back.as_mut() else {
+            return;
+        };
+        if !back.measured {
+            back.measured = true;
+            // The next frame may be idle otherwise; make it render.
+            let chat = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = chat.update(cx, |_, cx| cx.notify());
+            });
+            return;
+        }
+        let back = self.reservation_scroll_back.take().expect("checked above");
+        let list = &self.list_state;
+        let anchor = list.logical_scroll_top();
+        // Following the tail or resting past the end means the reader left
+        // for the bottom in between; the walk back would pull them off it.
+        if self.capture.is_none() && !list.is_following_tail() && anchor.item_ix < list.item_count()
+        {
+            list.scroll_by(-back.distance);
+        }
     }
 }
 
@@ -2739,24 +2792,7 @@ impl Render for ChatView {
         }
         let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
         self.sync_markdown_scroll_position(cx);
-        if self.capture.is_none()
-            && let Some((expected, distance)) = self.reservation_scroll_back.take()
-        {
-            let chat = cx.entity().downgrade();
-            window.on_next_frame(move |_, cx| {
-                let _ = chat.update(cx, |chat, cx| {
-                    let list = &chat.list_state;
-                    let anchor = list.logical_scroll_top();
-                    if anchor.item_ix == expected.item_ix
-                        && anchor.offset_in_item == expected.offset_in_item
-                        && !list.is_following_tail()
-                    {
-                        list.scroll_by(-distance);
-                        cx.notify();
-                    }
-                });
-            });
-        }
+        self.apply_reservation_scroll_back(window, cx);
         // Measure after this frame's list layout, including the initial tail
         // frame and frames caused by prepends. No scroll event is required.
         let chat = cx.entity().downgrade();
@@ -4917,6 +4953,71 @@ mod tests {
         assert!(
             (after - content_top).abs() < px(1.),
             "incoming content replaces reserved space at the same pixel anchor: {content_top:?} -> {after:?}"
+        );
+        assert!(!list.is_following_tail());
+    }
+
+    #[gpui::test]
+    fn pan_packet_after_a_page_lands_keeps_the_walk_back_into_it(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, point, px};
+        let full = synthetic_markdown_timeline(60);
+        let mut tail = synthetic_markdown_timeline(60);
+        tail.turns.drain(..20);
+        tail.entries.retain(|entry| entry.turn >= 20);
+        for entry in &mut tail.entries {
+            std::sync::Arc::make_mut(entry).turn -= 20;
+        }
+        let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        for _ in 0..2 {
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let (list, leading) = view.read_with(cx, |chat, _| {
+            (chat.list_state.clone(), chat.leading_space())
+        });
+        list.set_follow_mode(FollowMode::Normal);
+        list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: leading - px(100.),
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let content_top = list.bounds_for_item(0).unwrap().top() + leading;
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, full, cx);
+            store.suppress_history_prefetch_for_test();
+            cx.notify();
+        });
+        // The frame that lands the page measures it.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        // The finger is still moving: a pan packet resolves against that
+        // frame's anchor before the next frame walks back into the page.
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: list.viewport_bounds().center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(40.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
+        });
+        let after = list
+            .bounds_for_item(20)
+            .expect("previous first turn remains on screen")
+            .top();
+        assert!(
+            (after - (content_top + px(40.))).abs() < px(1.),
+            "the walk-back and the pan both apply: {content_top:?} + 40 -> {after:?}"
         );
         assert!(!list.is_following_tail());
     }
