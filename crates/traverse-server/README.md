@@ -23,8 +23,12 @@ Ports, with the defaults:
 | 9090 | TCP, loopback | Prometheus metrics (`[metrics] bind`; absent means off) |
 
 A Tcode machine needs public TCP 443 and UDP 7842 on the instance plus a
-domain and certificate. Without UDP 7842 the manifest marks the relay as
-relay-only (`"quic_port": 0`) and devices skip hole punching through it.
+domain and certificate. The manifest advertises the QUIC port whenever
+`relay.quic_addr_discovery` is on and TLS is terminated here, and the
+server does not probe whether that port is reachable: either expose the
+advertised UDP port or set `relay.quic_addr_discovery = false`, which
+advertises `"quic_port": 0` so devices skip address discovery through this
+relay. `tls.mode = "off"` also turns address discovery off.
 
 `tcode-traverse --dev` serves plain HTTP on `127.0.0.1:8080` with the store in
 `./tcode-traverse-dev`: no TLS, no QUIC address discovery, no metrics.
