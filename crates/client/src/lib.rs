@@ -407,6 +407,12 @@ impl HostLink {
         }
     }
 
+    /// Send every unsent retained write in queue order without waiting for
+    /// Acks: the transport stream and the host both preserve line order, so
+    /// a write costs a one-way trip instead of a round trip. Sent writes form
+    /// a prefix of the queue; a full outgoing channel ends the pass and the
+    /// rest go out on a later flush. A reconnect clears `sent` on every entry
+    /// and the whole queue is redelivered under its original keys.
     fn flush_outbox(&self) {
         if !matches!(
             self.connection_state(),
@@ -415,21 +421,24 @@ impl HostLink {
             return;
         }
         let mut delivery = self.inner.delivery.lock().unwrap();
-        let Some(write) = delivery.writes.front_mut() else {
-            return;
-        };
-        if write.sent.is_some() {
-            return;
-        }
-        let message = ClientMessage {
-            id: write.id,
-            key: Some(write.entry.key.clone()),
-            payload: ClientPayload::Command(write.entry.command.clone()),
-        };
-        if let Ok(line) = encode_line(&message)
-            && self.inner.to_host.try_send(line).is_ok()
+        let now = web_time::Instant::now();
+        for write in delivery
+            .writes
+            .iter_mut()
+            .skip_while(|write| write.sent.is_some())
         {
-            write.sent = Some(web_time::Instant::now());
+            let message = ClientMessage {
+                id: write.id,
+                key: Some(write.entry.key.clone()),
+                payload: ClientPayload::Command(write.entry.command.clone()),
+            };
+            let Ok(line) = encode_line(&message) else {
+                break;
+            };
+            if self.inner.to_host.try_send(line).is_err() {
+                break;
+            }
+            write.sent = Some(now);
         }
     }
 
@@ -457,18 +466,17 @@ impl HostLink {
                 true
             }
         });
+        // The oldest sent write bounds the stall: later writes were sent after it.
         let stalled = self
             .inner
             .delivery
             .lock()
             .unwrap()
             .writes
-            .front()
-            .is_some_and(|write| {
-                write.sent.is_some_and(|sent| {
-                    now.duration_since(sent).as_millis()
-                        >= u128::from(heartbeat::COMMAND_TIMEOUT_MS)
-                })
+            .iter()
+            .find_map(|write| write.sent)
+            .is_some_and(|sent| {
+                now.duration_since(sent).as_millis() >= u128::from(heartbeat::COMMAND_TIMEOUT_MS)
             });
         let stalled = stalled
             || self.inner.pending.lock().unwrap().values().any(|waiter| {
@@ -1017,17 +1025,22 @@ mod tests {
         recreated.restore_outbox(storage.clone()).unwrap();
         recreated.set_connection_state(ConnectionState::Syncing);
         let mut pump = std::pin::pin!(recreated.pump_with_timer(std::future::pending::<()>));
-        for (index, entry) in entries.iter().enumerate() {
-            let line = outgoing.try_recv().unwrap();
-            let request = tcode_protocol::decode_client_line(&line).unwrap();
-            assert_eq!(request.key.as_deref(), Some(entry.key.as_str()));
-            assert!(
-                matches!(request.payload, ClientPayload::Command(Command::RenameSession { title, .. }) if title == (index + 1).to_string())
-            );
-            assert!(
-                outgoing.try_recv().is_err(),
-                "later write must wait for this Ack"
-            );
+        // Every restored write is on the wire before the first Ack arrives.
+        let requests: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let line = outgoing.try_recv().unwrap();
+                let request = tcode_protocol::decode_client_line(&line).unwrap();
+                assert_eq!(request.key.as_deref(), Some(entry.key.as_str()));
+                assert!(
+                    matches!(&request.payload, ClientPayload::Command(Command::RenameSession { title, .. }) if *title == (index + 1).to_string())
+                );
+                request
+            })
+            .collect();
+        assert!(outgoing.try_recv().is_err());
+        for (index, request) in requests.iter().enumerate() {
             incoming
                 .try_send(
                     encode_line(&HostMessage::Ack {
@@ -1042,6 +1055,185 @@ mod tests {
         }
         assert!(recreated.pending_commands().is_empty());
         recreated.close();
+        assert!(pump.as_mut().poll(&mut cx).is_ready());
+    }
+
+    fn rename(title: usize) -> Command {
+        Command::RenameSession {
+            session_id: "one".into(),
+            title: title.to_string(),
+        }
+    }
+
+    fn request(outgoing: &async_channel::Receiver<String>) -> ClientMessage {
+        tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap()
+    }
+
+    fn ack(id: u64, result: Result<CommandResponse, ProtocolError>) -> String {
+        encode_line(&HostMessage::Ack { id, result }).unwrap()
+    }
+
+    fn pending_titles(link: &HostLink) -> Vec<String> {
+        link.pending_commands()
+            .into_iter()
+            .map(|(_, command)| match command {
+                Command::RenameSession { title, .. } => title,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retained_writes_are_pipelined_and_acks_clear_them_wherever_they_sit() {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut pump = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
+        let (ids, mut futures): (Vec<_>, Vec<_>) = (0..3)
+            .map(|title| link.command_with_id(rename(title)))
+            .unzip();
+        // The request is admitted on first poll.
+        for future in &mut futures {
+            assert!(future.as_mut().poll(&mut cx).is_pending());
+        }
+        let requests: Vec<_> = (0..3).map(|_| request(&outgoing)).collect();
+        assert!(outgoing.try_recv().is_err(), "all three were sent unacked");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        let keys: Vec<_> = link
+            .pending_commands()
+            .into_iter()
+            .map(|(key, _)| Some(key))
+            .collect();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.key.clone())
+                .collect::<Vec<_>>(),
+            keys
+        );
+        assert_eq!(pending_titles(&link), ["0", "1", "2"]);
+        // A rejection of the middle write, arriving before the first Ack, fails only itself.
+        incoming
+            .try_send(ack(ids[1], Err(error("rejected", "no"))))
+            .unwrap();
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(pending_titles(&link), ["0", "2"]);
+        assert!(matches!(
+            futures[1].as_mut().poll(&mut cx),
+            std::task::Poll::Ready(Err(error)) if error.code == "rejected"
+        ));
+        assert_eq!(link.failed_commands().len(), 1);
+        for (index, id) in [(0, ids[0]), (2, ids[2])] {
+            incoming
+                .try_send(ack(id, Ok(CommandResponse::Unit)))
+                .unwrap();
+            assert!(pump.as_mut().poll(&mut cx).is_pending());
+            assert!(matches!(
+                futures[index].as_mut().poll(&mut cx),
+                std::task::Poll::Ready(Ok(CommandResponse::Unit))
+            ));
+        }
+        assert!(link.pending_commands().is_empty());
+        assert!(outgoing.try_recv().is_err(), "nothing was resent");
+        link.close();
+        assert!(pump.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn reconnect_resends_every_unacked_write_in_order_under_its_original_key() {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut pump = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
+        for title in 0..3 {
+            link.dispatch(rename(title)).unwrap();
+        }
+        let first: Vec<_> = (0..3).map(|_| request(&outgoing)).collect();
+        incoming
+            .try_send(ack(first[0].id, Ok(CommandResponse::Unit)))
+            .unwrap();
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(pending_titles(&link), ["1", "2"]);
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
+        assert!(outgoing.try_recv().is_err(), "nothing goes out while down");
+        assert!(
+            link.inner
+                .delivery
+                .lock()
+                .unwrap()
+                .writes
+                .iter()
+                .all(|write| write.sent.is_none())
+        );
+        link.set_connection_state(ConnectionState::Syncing);
+        let resent: Vec<_> = (0..2).map(|_| request(&outgoing)).collect();
+        assert!(outgoing.try_recv().is_err());
+        for (original, again) in first[1..].iter().zip(&resent) {
+            assert_eq!(original.key, again.key);
+            assert_eq!(original.payload, again.payload);
+        }
+        link.close();
+        assert!(pump.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn a_full_outgoing_channel_pauses_the_flush_and_a_later_one_resumes_in_order() {
+        let (to_host, outgoing) = async_channel::bounded(2);
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut pump = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
+        for title in 0..4 {
+            link.dispatch(rename(title)).unwrap();
+        }
+        assert_eq!(pending_titles(&link), ["0", "1", "2", "3"]);
+        let sent_flags = |link: &HostLink| {
+            link.inner
+                .delivery
+                .lock()
+                .unwrap()
+                .writes
+                .iter()
+                .map(|write| write.sent.is_some())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sent_flags(&link), [true, true, false, false]);
+        let first = request(&outgoing);
+        // The Ack frees one slot; the flush it triggers sends exactly the next write.
+        incoming
+            .try_send(ack(first.id, Ok(CommandResponse::Unit)))
+            .unwrap();
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(sent_flags(&link), [true, true, false]);
+        let second = request(&outgoing);
+        let third = request(&outgoing);
+        assert!(outgoing.try_recv().is_err());
+        incoming
+            .try_send(ack(second.id, Ok(CommandResponse::Unit)))
+            .unwrap();
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(sent_flags(&link), [true, true]);
+        let fourth = request(&outgoing);
+        let titles: Vec<_> = [first, second, third, fourth]
+            .iter()
+            .map(|request| match &request.payload {
+                ClientPayload::Command(Command::RenameSession { title, .. }) => title.clone(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(titles, ["0", "1", "2", "3"]);
+        link.close();
         assert!(pump.as_mut().poll(&mut cx).is_ready());
     }
 
