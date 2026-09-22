@@ -2450,7 +2450,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(
             &settings,
             "claude_code",
-            Some("claude-opus-5"),
+            Some("claude-opus-5-5"),
             Some(" HIGH "),
             None,
             &HashMap::new()
@@ -2458,7 +2458,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         .unwrap(),
         (
             ProviderKind::ClaudeCode,
-            "claude-opus-5".into(),
+            "claude-opus-5-5".into(),
             Some("high".into()),
             false,
             None

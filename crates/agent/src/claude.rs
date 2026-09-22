@@ -468,7 +468,7 @@ impl ClaudeLaunchOptions {
             format!("{base}{suffix}")
         });
         // Anything below the model's largest window is enforced through
-        // `autoCompactWindow`: some bare slugs (e.g. Opus 5) already run at
+        // `autoCompactWindow`: some bare slugs (e.g. Opus 5.5) already run at
         // 1M, so a smaller selection must be told to compact early.
         let largest = entry
             .and_then(CatalogModel::largest_context_window)
