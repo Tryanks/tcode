@@ -56,13 +56,12 @@ relay-only (`"quic_port": 0`) and devices skip hole punching through it.
   "relays": [
     { "url": "https://traverse.example.org/", "quic_port": 7842, "region": "eu-central" }
   ],
-  "pkarr": ["https://traverse.example.org/pkarr"],
-  "dns": []
+  "pkarr": ["https://traverse.example.org/pkarr"]
 }
 ```
 
 `updatedAt` is the config file's modification time. `[[peers]]` entries are
-appended to `relays`; `home_rtt_max_ms` appears when the region lock is on.
+appended to `relays`.
 
 ## pkarr store
 
