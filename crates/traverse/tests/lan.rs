@@ -138,9 +138,10 @@ fn stale_addresses_without_a_browse_do_not_reach_the_machine() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        !seen
-            .iter()
-            .any(|state| matches!(state, ConnectionState::Syncing | ConnectionState::Connected)),
+        !seen.iter().any(|state| matches!(
+            state,
+            ConnectionState::Syncing | ConnectionState::Connected { .. }
+        )),
         "the device connected without a working address: {seen:?}"
     );
     assert!(

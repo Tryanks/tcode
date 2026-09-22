@@ -318,7 +318,7 @@ async fn connection_loop(
                         timer = Some(Timer::new(15000, tx.clone()));
                         if !connected {
                             connected = true;
-                            let _ = state.try_send(ConnectionState::Connected);
+                            let _ = state.try_send(ConnectionState::Connected { path: None });
                         }
                         if incoming.try_send(format!("{}\n", line.trim_end())).is_err() {
                             return;

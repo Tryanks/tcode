@@ -318,7 +318,7 @@ impl WorkspaceStore {
             connection_state: if remote {
                 host.connection_state()
             } else {
-                ConnectionState::Connected
+                ConnectionState::Connected { path: None }
             },
             index_replica: (Vec::new(), Vec::new()),
             title_generating: HashSet::new(),
@@ -543,12 +543,6 @@ impl WorkspaceStore {
         matches!(self.attachment, WorkspaceAttachment::Remote { .. })
     }
 
-    /// How the transport currently reaches the attached machine, when it
-    /// can tell.
-    pub fn connection_path(&self) -> Option<tcode_protocol::PathInfo> {
-        self.current_host.as_ref().and_then(LiveHost::path)
-    }
-
     pub fn remote_host_name(&self) -> Option<&str> {
         match &self.attachment {
             WorkspaceAttachment::Local => None,
@@ -563,18 +557,15 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn connection_state(&self) -> &ConnectionState {
-        if matches!(
-            self.connection_state,
-            ConnectionState::Connected | ConnectionState::Syncing
-        ) {
-            if self.baseline_ready() {
-                &ConnectionState::Connected
-            } else {
-                &ConnectionState::Syncing
+    /// Connected only once the baseline is in: the transport's `Connected`
+    /// says the host answers, the replayed snapshots say the screen is current.
+    pub fn connection_state(&self) -> ConnectionState {
+        match &self.connection_state {
+            ConnectionState::Connected { .. } if !self.baseline_ready() => ConnectionState::Syncing,
+            ConnectionState::Syncing if self.baseline_ready() => {
+                ConnectionState::Connected { path: None }
             }
-        } else {
-            &self.connection_state
+            state => state.clone(),
         }
     }
 
@@ -619,10 +610,6 @@ impl WorkspaceStore {
             }
         }
         sessions
-    }
-
-    pub(crate) fn pending_write_count(&self) -> usize {
-        self.host.pending_commands().len()
     }
 
     pub(crate) fn session_has_pending_writes(&self, id: &str) -> bool {
@@ -716,7 +703,7 @@ impl WorkspaceStore {
     pub fn threads_loading(&self) -> bool {
         !self.index_hydrated
             || !self.settings_hydrated
-            || (!matches!(self.connection_state(), ConnectionState::Connected)
+            || (!self.connection_state().is_connected()
                 && self.index_replica.0.is_empty()
                 && self.index_replica.1.is_empty())
     }
@@ -3051,7 +3038,7 @@ mod tests {
             workspace.read_with(cx, |store, _| store.active_session_id()),
             Some("deleted".into())
         );
-        link.set_connection_state(tcode_client::ConnectionState::Connected);
+        link.set_connection_state(tcode_client::ConnectionState::Connected { path: None });
         wait_until(cx, &workspace, "rejected send", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -3549,7 +3536,7 @@ mod tests {
             assert!(!store.chat_loading(), "cached thread remains visible");
             assert_eq!(store.active_session_id().as_deref(), Some("one"));
             for (topic, event) in snapshots {
-                assert_eq!(store.connection_state(), &ConnectionState::Syncing);
+                assert_eq!(store.connection_state(), ConnectionState::Syncing);
                 store.apply_domain_event(
                     &EventEnvelope {
                         request_id: None,
@@ -3559,7 +3546,7 @@ mod tests {
                     cx,
                 );
             }
-            assert_eq!(store.connection_state(), &ConnectionState::Connected);
+            assert!(store.connection_state().is_connected());
         });
         host.shutdown_blocking().unwrap();
         let _ = std::fs::remove_dir_all(root);
@@ -3886,7 +3873,7 @@ mod tests {
                 reason: None,
             });
         host.link()
-            .set_connection_state(tcode_client::ConnectionState::Connected);
+            .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
         command(&host, Command::ClearRelaunchMarker);
         workspace.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);

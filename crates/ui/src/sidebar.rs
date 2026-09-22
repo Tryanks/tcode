@@ -1600,7 +1600,13 @@ impl SessionsSidebar {
             .remote_host_name()
             .map(SharedString::from)
             .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into());
-        let connection_color = cx.theme().connection_color(store.connection_state());
+        let connection_state = store.connection_state();
+        let connection_color = cx.theme().connection_color(&connection_state);
+        // The dot says whether the link is up; hovering says how it is
+        // carried, which only a remote link has to tell.
+        let connection = store
+            .remote_host_name()
+            .map(|_| SharedString::from(crate::remote::connection_label(&connection_state)));
         div()
             .flex_none()
             .px(px(if compact { COMPACT_PAGE_PADDING } else { 8. }))
@@ -1628,6 +1634,11 @@ impl SessionsSidebar {
                     this.window_state
                         .update(cx, |state, cx| state.go(Destination::Hosts, cx));
                 }))
+                .when_some(connection, |row, connection| {
+                    row.tooltip(move |window, cx| {
+                        Tooltip::new(connection.clone()).build(window, cx)
+                    })
+                })
                 .child(
                     Icon::new(IconName::Network)
                         .small()

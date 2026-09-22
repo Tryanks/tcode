@@ -300,7 +300,7 @@ impl RemotePanel {
             .as_ref()
             .map(|store| {
                 cx.theme()
-                    .connection_color(store.read(cx).connection_state())
+                    .connection_color(&store.read(cx).connection_state())
             })
             .unwrap_or(cx.theme().success);
         div()
@@ -323,27 +323,16 @@ impl RemotePanel {
                     crate::tr!("hosts.this_computer").into_owned().into(),
                     cx,
                 )
-                // Same anatomy as a saved machine's row: title over one muted
-                // subtitle, no leading icon, the status glyph in the same slot.
+                // Same anatomy as a saved machine's row: no leading icon, the
+                // status glyph in the same slot.
                 .child(
-                    v_flex()
+                    div()
                         .flex_1()
                         .min_w_0()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .text_size(px(15.))
-                                .font_medium()
-                                .truncate()
-                                .child(crate::tr!("hosts.this_computer")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
-                                .truncate()
-                                .child(crate::tr!("hosts.this_computer_description")),
-                        ),
+                        .text_size(px(15.))
+                        .font_medium()
+                        .truncate()
+                        .child(crate::tr!("hosts.this_computer")),
                 )
                 .when(current, |row| row.child(self.status_glyph(cx)))
                 .on_click(|_, window, cx| {
@@ -359,8 +348,8 @@ impl RemotePanel {
             self.store
                 .as_ref()
                 .and_then(|store| match store.read(cx).connection_state() {
-                    tcode_client::ConnectionState::Offline { reason } => Some(*reason),
-                    tcode_client::ConnectionState::Reconnecting { reason, .. } => *reason,
+                    tcode_client::ConnectionState::Offline { reason } => Some(reason),
+                    tcode_client::ConnectionState::Reconnecting { reason, .. } => reason,
                     _ => None,
                 })
         } else {
@@ -818,6 +807,39 @@ fn relay_host(relay: &str) -> Option<String> {
     url::Url::parse(relay).ok()?.host_str().map(str::to_owned)
 }
 
+/// How this window's link to its machine is doing, one line under the
+/// machine's name: the path while the link is up, the failure while it is
+/// not. A transport that cannot tell how it is carried (a browser) says only
+/// that it is connected.
+pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String {
+    use tcode_client::ConnectionState;
+    match state {
+        ConnectionState::Connected { path } => {
+            let connected = crate::tr!("remote.state.connected");
+            match path {
+                Some(path) if path.direct => {
+                    format!("{} · {connected}", crate::tr!("remote.path.direct"))
+                }
+                Some(_) => format!("{} · {connected}", crate::tr!("remote.path.relay")),
+                None => connected.into_owned(),
+            }
+        }
+        ConnectionState::Syncing => crate::tr!("remote.state.syncing").into_owned(),
+        ConnectionState::Reconnecting { attempt, reason } => {
+            let text = crate::tr!("remote.state.reconnecting", attempt = attempt);
+            match reason {
+                Some(reason) => format!("{text} · {}", failure_label(*reason)),
+                None => text.into_owned(),
+            }
+        }
+        ConnectionState::Offline { reason } => format!(
+            "{} · {}",
+            crate::tr!("remote.path.offline"),
+            failure_label(*reason)
+        ),
+    }
+}
+
 /// The same recovery wording is used in the shell and the machine row.
 pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
     use tcode_client::ConnectionFailure::*;
@@ -835,6 +857,59 @@ pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
 mod tests {
     use super::*;
     use gpui::{AppContext as _, Render, TestAppContext};
+
+    /// The line names the path while the link is up, the attempt while it
+    /// is being restored and the failure once it is lost; a transport that
+    /// cannot tell how it is carried names no path.
+    #[test]
+    fn the_connection_label_names_the_path_or_the_failure() {
+        use tcode_client::{ConnectionFailure, ConnectionState};
+        use tcode_protocol::PathInfo;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let direct = PathInfo {
+            direct: true,
+            relay: None,
+        };
+        let relayed = PathInfo {
+            direct: false,
+            relay: Some("https://relay.example/".into()),
+        };
+        assert_eq!(
+            connection_label(&ConnectionState::Connected { path: Some(direct) }),
+            "Direct · Connected"
+        );
+        assert_eq!(
+            connection_label(&ConnectionState::Connected {
+                path: Some(relayed)
+            }),
+            "Relay · Connected"
+        );
+        assert_eq!(
+            connection_label(&ConnectionState::Connected { path: None }),
+            "Connected"
+        );
+        assert_eq!(connection_label(&ConnectionState::Syncing), "Syncing");
+        assert_eq!(
+            connection_label(&ConnectionState::Reconnecting {
+                attempt: 3,
+                reason: None
+            }),
+            "Reconnecting (attempt 3)"
+        );
+        assert_eq!(
+            connection_label(&ConnectionState::Reconnecting {
+                attempt: 3,
+                reason: Some(ConnectionFailure::Timeout)
+            }),
+            "Reconnecting (attempt 3) · Connection timed out"
+        );
+        assert_eq!(
+            connection_label(&ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected
+            }),
+            "Offline · Access rejected · Pair again"
+        );
+    }
 
     struct PairingProbe(Entity<RemotePanel>);
 
