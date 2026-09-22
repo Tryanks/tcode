@@ -786,10 +786,13 @@ Traverse mode, so a paired machine is found again after a new DHCP lease,
 after both moved to another network, or after a restart, on a LAN with no
 internet and no Traverse. There is still no list of nearby machines: the
 device only ever resolves the ids it is already paired with, and only the
-machine advertises. Each attempt to connect tries, in this order:
+machine advertises. Each attempt to connect tries exactly three things, in
+this order, and nothing else:
 
-1. The addresses saved from the last connection, at once.
-2. A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) for about
+1. The direct address that carried the last successful connection.
+2. Every other address saved for that machine, in the order `hosts.json`
+   keeps them: newest first, the invitation's hints last.
+3. A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) for about
    2.5 seconds. A machine advertises one instance of that type while it
    hosts — desktop and headless alike, in every Traverse mode — with its
    bound UDP port and a TXT record `v=1`, `id=<machine id>`,
@@ -800,19 +803,14 @@ machine advertises. Each attempt to connect tries, in this order:
    `NsdManager` list it too; on iOS the app browses through the system's
    Bonjour daemon (the `NSBonjourServices` entry in `Info.plist`), and on
    Android it holds the Wi-Fi multicast lock for the browse.
-3. Where multicast is blocked, unicast probes: for each attached private IPv4
-   network (RFC 1918; an interface mask broader than the block is clipped to
-   it, so no public address is ever probed) the device's own /24 in pages of
-   32 addresses, 250 ms apart, then two more pages from the neighbouring
-   /24s, walking further out on each later attempt. Every address is tried at
-   the ports of the saved addresses and at `47420`. The network, broadcast and
-   the device's own addresses are skipped. A wrong guess costs one datagram:
-   the QUIC handshake verifies the machine's key, so nothing but the machine
-   can answer.
 
-The lookup ends as soon as the connection is up. This is why both the desktop
-app and `tcode-headless` bind UDP `47420` unless told otherwise: a machine on
-its default port is found by the probes even where multicast is unavailable.
+A candidate address is never authorization: the QUIC handshake verifies the
+machine's key, so nothing but the machine can answer. The lookup ends as soon
+as the connection is up, and a change of the device's own interface addresses
+starts it again at once. There is no subnet scan and no other fallback: where
+the saved addresses are stale and multicast is blocked, the machine is not
+found. Both the desktop app and `tcode-headless` bind UDP `47420` unless told
+otherwise so that firewall rules and invitation addresses survive restarts.
 
 With Traverse off there is no relay and no lookup service: the device has the
 addresses it saved and the LAN lookup. A machine that moved to a network the

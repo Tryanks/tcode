@@ -343,7 +343,7 @@ fn advertise(endpoint: &Endpoint, host_name: &str) -> Option<lan::Advertisement>
     let port = v4.or(v6)?;
     let ipv6 = v6 == Some(port);
     match lan::Advertisement::start(&endpoint.id(), host_name, port, ipv6) {
-        Ok(advertisement) => advertisement,
+        Ok(advertisement) => Some(advertisement),
         Err(error) => {
             log::warn!("not advertising this machine on the LAN: {error}");
             None
