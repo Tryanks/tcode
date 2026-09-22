@@ -80,9 +80,8 @@ fn main() {
             if line.contains("query_result") {
                 let live = transport.current_host.as_ref().expect("a live host");
                 println!(
-                    "round trip complete in {:?}; path {:?}; now saved at {:?}",
+                    "round trip complete in {:?}; now saved at {:?}",
                     started.elapsed(),
-                    live.path(),
                     live.snapshot().addrs
                 );
                 return;

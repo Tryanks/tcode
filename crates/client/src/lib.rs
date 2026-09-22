@@ -20,7 +20,12 @@ use tcode_protocol::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
-    Connected,
+    /// Up, and how the link is carried when the transport can tell. A path
+    /// change is a new `Connected` value, so it reaches every consumer
+    /// through the state channel like any other change.
+    Connected {
+        path: Option<tcode_protocol::PathInfo>,
+    },
     Syncing,
     Reconnecting {
         attempt: u32,
@@ -29,6 +34,12 @@ pub enum ConnectionState {
     Offline {
         reason: ConnectionFailure,
     },
+}
+
+impl ConnectionState {
+    pub fn is_connected(&self) -> bool {
+        matches!(self, Self::Connected { .. })
+    }
 }
 
 /// Transport-neutral cause of a connection failure.
@@ -135,7 +146,7 @@ impl HostLink {
                 subscribed_topics: Mutex::new(HashMap::new()),
                 retired_topics: Mutex::new(HashSet::new()),
                 subscription_requests: Mutex::new(HashMap::new()),
-                connection_state: Mutex::new(ConnectionState::Connected),
+                connection_state: Mutex::new(ConnectionState::Connected { path: None }),
                 connection_state_tx,
                 connection_state_rx,
             }),
@@ -416,7 +427,7 @@ impl HostLink {
     fn flush_outbox(&self) {
         if !matches!(
             self.connection_state(),
-            ConnectionState::Connected | ConnectionState::Syncing
+            ConnectionState::Connected { .. } | ConnectionState::Syncing
         ) {
             return;
         }
@@ -445,7 +456,7 @@ impl HostLink {
     fn check_deadlines(&self, now: web_time::Instant) {
         if !matches!(
             self.connection_state(),
-            ConnectionState::Connected | ConnectionState::Syncing
+            ConnectionState::Connected { .. } | ConnectionState::Syncing
         ) {
             return;
         }
@@ -537,7 +548,7 @@ impl HostLink {
         if state_guard.as_ref().is_some_and(|state| {
             !matches!(
                 **state,
-                ConnectionState::Connected | ConnectionState::Syncing
+                ConnectionState::Connected { .. } | ConnectionState::Syncing
             )
         }) {
             return Err(error("disconnected", "Read requires a connection"));
@@ -779,7 +790,7 @@ impl HostLink {
             }
         }
         drop(current);
-        if state == ConnectionState::Connected && previous != ConnectionState::Connected {
+        if state.is_connected() && !previous.is_connected() {
             // The store's acknowledged cursor is authoritative even when a transport
             // has already replayed an older line during its own handshake.
             for topic in self.inner.retired_topics.lock().unwrap().iter() {
@@ -800,7 +811,10 @@ impl HostLink {
                 let _ = self.send_subscription(subscription);
             }
         }
-        if matches!(state, ConnectionState::Syncing | ConnectionState::Connected) {
+        if matches!(
+            state,
+            ConnectionState::Syncing | ConnectionState::Connected { .. }
+        ) {
             self.flush_outbox();
         }
         let _ = self.inner.connection_state_tx.try_send(state);
@@ -1358,7 +1372,7 @@ mod tests {
             attempt: 1,
             reason: None,
         });
-        link.set_connection_state(ConnectionState::Connected);
+        link.set_connection_state(ConnectionState::Connected { path: None });
         let replay = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
         assert_eq!(updated.payload, replay.payload);
         link.unsubscribe(Subscription { topic, after: None })
@@ -1368,7 +1382,7 @@ mod tests {
             attempt: 2,
             reason: None,
         });
-        link.set_connection_state(ConnectionState::Connected);
+        link.set_connection_state(ConnectionState::Connected { path: None });
         assert!(matches!(
             tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap())
                 .unwrap()

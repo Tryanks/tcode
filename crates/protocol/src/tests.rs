@@ -896,6 +896,8 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                 path: Some(PathInfo {
                     direct: false,
                     relay: Some("https://relay.example/".into()),
+                    lan: false,
+                    probing_direct: true,
                 }),
             },
             HostedDevice {
@@ -921,10 +923,41 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                     "name": "Phone",
                     "created_unix": 1,
                     "platform": "iOS 26",
-                    "path": {"direct": false, "relay": "https://relay.example/"}
+                    "path": {"direct": false, "relay": "https://relay.example/", "probing_direct": true}
                 },
                 {"id": "ef".repeat(32), "name": "Laptop", "created_unix": 2}
             ]
         })
     );
+}
+
+/// A path is direct or relayed on every peer; whether a direct path stays
+/// on the LAN, and whether a relay is still waiting for one, are newer
+/// flags that a machine from before them never sends. Such a machine's
+/// direct path reads as punched, since that is what it could not tell.
+#[test]
+fn path_info_kinds_read_older_peers_and_spell_the_flags() {
+    let older: PathInfo = serde_json::from_value(json!({"direct": true})).unwrap();
+    assert_eq!(older.kind(), PathKind::Tunnel);
+    let lan = PathInfo {
+        direct: true,
+        relay: None,
+        lan: true,
+        probing_direct: false,
+    };
+    assert_eq!(lan.kind(), PathKind::Lan);
+    assert_eq!(
+        serde_json::to_value(&lan).unwrap(),
+        json!({"direct": true, "lan": true})
+    );
+    let relayed: PathInfo =
+        serde_json::from_value(json!({"direct": false, "relay": "https://relay.example/"}))
+            .unwrap();
+    assert_eq!(
+        relayed.kind(),
+        PathKind::Relay {
+            url: Some("https://relay.example/")
+        }
+    );
+    assert!(!relayed.probing_direct);
 }

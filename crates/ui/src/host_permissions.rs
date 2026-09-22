@@ -4,7 +4,6 @@ use gpui::{
     Window, div, px,
 };
 use gpui_base::{h_flex, v_flex};
-use tcode_client::ConnectionState;
 use tcode_core::permissions::ComputerUsePermissions;
 
 use crate::{
@@ -21,9 +20,9 @@ pub(crate) struct HostPermissions {
 
 impl HostPermissions {
     pub(crate) fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
-        let connected = *store.read(cx).connection_state() == ConnectionState::Connected;
+        let connected = store.read(cx).connection_state().is_connected();
         let connection = cx.observe(&store, |this, store, cx| {
-            let connected = *store.read(cx).connection_state() == ConnectionState::Connected;
+            let connected = store.read(cx).connection_state().is_connected();
             if this.connected != connected {
                 this.connected = connected;
                 // A disconnected snapshot is no longer evidence of current grants.
@@ -159,7 +158,7 @@ impl Render for HostPermissions {
 mod tests {
     use super::*;
     use gpui::{AppContext as _, TestAppContext};
-    use tcode_client::HostLink;
+    use tcode_client::{ConnectionState, HostLink};
     use tcode_protocol::{
         ClientPayload, EventEnvelope, HostMessage, IndexSnapshot, Query, ServerEvent, Topic,
         decode_client_line, encode_line,
@@ -279,7 +278,7 @@ mod tests {
             );
             assert!(panel.request.is_none());
         });
-        link.set_connection_state(ConnectionState::Connected);
+        link.set_connection_state(ConnectionState::Connected { path: None });
         cx.run_until_parked();
         baseline();
         cx.run_until_parked();

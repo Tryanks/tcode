@@ -28,6 +28,7 @@ use tcode_client::{
     pairing::{MAX_ADDRS, PairInvite, PairedHost},
     recovery::{Backoff, Wake},
 };
+use tcode_protocol::PathInfo;
 
 /// Budget for dialing and completing the QUIC handshake.
 const CONNECT_BUDGET: Duration = Duration::from_secs(20);
@@ -574,12 +575,12 @@ struct Established {
     reader: LineReader,
 }
 
-/// The state channel, remembering whether the last state it carried was
-/// `Connected`. A path change is published by repeating `Connected`, which
-/// is the only wake the UI has and is idempotent for it; repeating any other
-/// state would restart a sync, so before the first host line it stays quiet.
+/// The state channel. `Connected` carries the selected path, so a path change
+/// is published as a new `Connected` value; before the first host line the
+/// path is only remembered, since repeating `Syncing` would restart a sync.
 struct StateSender {
     tx: Sender<ConnectionState>,
+    path: Mutex<Option<PathInfo>>,
     connected: std::sync::atomic::AtomicBool,
 }
 
@@ -587,32 +588,52 @@ impl StateSender {
     fn new(tx: Sender<ConnectionState>) -> Self {
         Self {
             tx,
+            path: Mutex::new(None),
             connected: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
+    /// Any state but `Connected`: the path belongs to the connection that
+    /// was up, and the next one reports its own.
     async fn send(
         &self,
         state: ConnectionState,
     ) -> Result<(), async_channel::SendError<ConnectionState>> {
-        self.connected.store(
-            state == ConnectionState::Connected,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        debug_assert!(!state.is_connected(), "connected() carries the path");
+        self.connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        *self.path.lock().unwrap() = None;
         self.tx.send(state).await
     }
 
-    async fn republish_connected(&self) {
+    async fn connected(&self) {
+        self.connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let path = self.path.lock().unwrap().clone();
+        let _ = self.tx.send(ConnectionState::Connected { path }).await;
+    }
+
+    async fn set_path(&self, path: PathInfo) {
+        {
+            let mut current = self.path.lock().unwrap();
+            if current.as_ref() == Some(&path) {
+                return;
+            }
+            *current = Some(path);
+        }
         if self.connected.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = self.tx.send(ConnectionState::Connected).await;
+            self.connected().await;
         }
     }
 }
 
-/// Keep `live` telling the truth about how the connection is carried: the
-/// selected path at connect time, then every change until the connection
-/// closes. A direct path found after connecting — hole punching succeeded
-/// behind a relay — is saved like the ones the handshake used.
+/// Keep the state telling the truth about how the connection is carried: the
+/// selected path at connect time, then after every path event until the
+/// connection closes. The selection is re-read rather than taken from the
+/// event: `Closed` on the selected path leaves nothing selected until
+/// `Selected` names the fallback, and `Lagged` names nothing at all. A direct
+/// path found after connecting — hole punching succeeded behind a relay — is
+/// saved like the ones the handshake used.
 async fn watch_paths(
     device: DeviceIdentity,
     connection: Connection,
@@ -621,11 +642,9 @@ async fn watch_paths(
 ) {
     use futures_lite::StreamExt as _;
     let mut events = connection.path_events();
-    live.set_path(Some(crate::host::path_info(&connection)));
+    state.set_path(crate::host::path_info(&connection)).await;
     while events.next().await.is_some() {
-        if live.set_path(Some(crate::host::path_info(&connection))) {
-            state.republish_connected().await;
-        }
+        state.set_path(crate::host::path_info(&connection)).await;
         let mut host = live.snapshot();
         if learn_addresses(&mut host, &connection) {
             live.authenticated(&host);
@@ -706,7 +725,6 @@ async fn connection_loop(
                 )
                 .await;
                 paths.abort();
-                live.set_path(None);
                 tunnels.set(None);
                 if lost.healthy {
                     stable_ms = started.elapsed().as_millis() as u64;
@@ -1003,7 +1021,7 @@ async fn relay_connected(
                     healthy = true;
                     if !connected {
                         connected = true;
-                        let _ = state.send(ConnectionState::Connected).await;
+                        state.connected().await;
                     }
                     if incoming.send(format!("{line}\n")).await.is_err() {
                         break Lost { failure: ConnectionFailure::HostClosed, healthy, wake: None };
@@ -1081,4 +1099,70 @@ fn jitter_sample() -> f64 {
         .unwrap_or_default()
         .subsec_nanos();
     f64::from(nanos % 1_000_001) / 1_000_000.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relay() -> PathInfo {
+        PathInfo {
+            direct: false,
+            relay: Some("https://relay.example/".into()),
+            lan: false,
+            probing_direct: false,
+        }
+    }
+
+    fn direct() -> PathInfo {
+        PathInfo {
+            direct: true,
+            relay: None,
+            lan: true,
+            probing_direct: false,
+        }
+    }
+
+    /// The phone's direct path dying is a state change, not a side channel:
+    /// the link publishes a fresh `Connected` naming the relay, and only
+    /// while it is up — before the first host line the path waits for it.
+    #[tokio::test]
+    async fn a_path_change_is_published_as_a_new_connected_state() {
+        let (tx, rx) = async_channel::unbounded();
+        let state = StateSender::new(tx);
+        state.send(ConnectionState::Syncing).await.unwrap();
+        state.set_path(direct()).await;
+        assert_eq!(rx.try_recv(), Ok(ConnectionState::Syncing));
+        assert!(rx.try_recv().is_err(), "syncing is not repeated");
+        state.connected().await;
+        assert_eq!(
+            rx.try_recv(),
+            Ok(ConnectionState::Connected {
+                path: Some(direct())
+            })
+        );
+        state.set_path(direct()).await;
+        assert!(rx.try_recv().is_err(), "an unchanged path is not repeated");
+        state.set_path(relay()).await;
+        assert_eq!(
+            rx.try_recv(),
+            Ok(ConnectionState::Connected {
+                path: Some(relay())
+            })
+        );
+        state
+            .send(ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            })
+            .await
+            .unwrap();
+        rx.try_recv().unwrap();
+        state.connected().await;
+        assert_eq!(
+            rx.try_recv(),
+            Ok(ConnectionState::Connected { path: None }),
+            "the next connection reports its own path"
+        );
+    }
 }
