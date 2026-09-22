@@ -129,7 +129,7 @@ devices only; it does not serve the browser app.
    invitation, lists connected devices with their path, and removes devices.
    A native device sees the native devices; the browser also sees the
    browsers logged in to this machine, listed after them.
-   **Allow other devices** controls whether the machine accepts pairings; it
+   **Accept new devices** controls whether the machine accepts pairings; it
    defaults to on and is saved in `traverse.json`. Turning it off discards the
    current invitation and does not disconnect already paired devices.
 8. Open this machine from another device using the instructions below. To
@@ -611,7 +611,7 @@ list in memory and writes it back.
 | --- | --- |
 | **That is not a Tcode invitation link** | The pasted text is not a complete `tcode://pair?v=2&…` link with a valid machine id and secret. Copy the link again from the machine or scan the QR. |
 | **The machine rejected this invitation** | The invitation expired (five minutes), was already used, was replaced by a newer one, or five wrong secrets invalidated it. Create **New invitation** on the machine or restart `serve`; get a separate invitation for each device. |
-| **This machine is not accepting new device pairings** | Turn on **Allow other devices** on the machine (desktop **Settings → Other devices**, or from a paired device or the logged-in browser). |
+| **This machine is not accepting new device pairings** | Turn on **Accept new devices** on the machine (desktop **Settings → Other devices**, or from a paired device or the logged-in browser). |
 | **Could not reach ‹machine›** while pairing | The device reached none of the invitation's addresses or its relay within 20 seconds. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN. With Traverse off, only the printed addresses and the LAN lookup work. |
 | **Reconnecting to ‹machine›… (attempt N)** stays up | The device keeps trying the saved relay and addresses with growing delays, and on every attempt looks for the machine on its own network (see [Finding the machine again](#finding-the-machine-again)). If the machine moved to another network with Traverse off and the device did not move with it, pair again with a new invitation. Direct paths need UDP between the two ends; a relayed connection reaches the relay over HTTPS (TCP), so it still works where UDP is blocked, as long as the machine publishes to a relay. |
 | **Access rejected · Pair again** | The machine no longer lists this device (removed, or the machine's data directory was replaced). Pair again with a new invitation if access is intended. |
