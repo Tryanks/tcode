@@ -125,6 +125,13 @@ pub struct WorkspaceStore {
     /// The transport's live view of the attached machine: its authenticated
     /// pairing and how the connection is carried. `None` locally and in a
     /// browser.
+    #[cfg_attr(
+        not(all(
+            feature = "native-preview",
+            any(target_os = "macos", target_os = "windows", target_os = "android")
+        )),
+        allow(dead_code)
+    )]
     current_host: Option<LiveHost>,
     client_preferences: ClientPreferences,
     image_namespace: u64,
