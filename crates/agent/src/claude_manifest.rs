@@ -12,7 +12,11 @@
 //!
 //! Upstream data is adopted as is: there is no local override table, and a
 //! model Tcode wants to describe differently is corrected upstream. Refresh the
-//! bundle by copying the upstream file over `claude_model_manifest.json`.
+//! bundle by copying the upstream file over `claude_model_manifest.json`. A
+//! release that must ship a model before upstream lists it (Opus 5.5 at the
+//! time of writing) edits the bundle in the upstream shape and dates it; the
+//! `updatedAt` rule then keeps a stale remote copy from displacing it until
+//! upstream catches up.
 //!
 //! The catalog is process-shared state, as upstream: sessions resolve their
 //! launch flags and the UI resolves context windows against [`current`].
@@ -451,6 +455,9 @@ fn bundled() -> ClaudeCatalog {
 /// In-memory manifest plus the fetch bookkeeping that paces refreshes.
 pub(crate) struct ManifestState {
     catalog: Arc<ClaudeCatalog>,
+    /// `updatedAt` of the bundle this state started from: the floor a fetched
+    /// or cached manifest must reach to be adopted.
+    bundled_updated_at: Option<String>,
     /// Wall-clock millis of the fetch that produced `catalog`; `None` for the
     /// bundle. Persisted with the disk cache so a restart does not refetch.
     fetched_at_ms: Option<u64>,
@@ -475,6 +482,7 @@ pub(crate) fn current() -> Arc<ClaudeCatalog> {
 impl ManifestState {
     pub(crate) fn new(catalog: ClaudeCatalog) -> Self {
         Self {
+            bundled_updated_at: catalog.updated_at.clone(),
             catalog: Arc::new(catalog),
             fetched_at_ms: None,
             last_attempt_ms: None,
@@ -561,10 +569,17 @@ mod refresh {
         }
 
         /// Replace the catalog with a fetched manifest; an undecodable or
-        /// invalid body leaves the current catalog in place.
+        /// invalid body leaves the current catalog in place. A valid manifest
+        /// older than the bundle by `updatedAt` is not adopted either, but it
+        /// still counts as a fetch so the TTL paces the next attempt.
         pub(crate) fn install(&mut self, now_ms: u64, body: &[u8]) -> Result<Value, String> {
             let value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
-            self.catalog = ClaudeCatalog::from_value(value.clone())?.into();
+            let catalog = ClaudeCatalog::from_value(value.clone())?;
+            if catalog.updated_at >= self.bundled_updated_at {
+                self.catalog = catalog.into();
+            } else {
+                log::info!("bundled Claude model manifest is newer than the remote copy");
+            }
             self.fetched_at_ms = Some(now_ms);
             Ok(value)
         }
@@ -916,6 +931,24 @@ mod tests {
             state.install(2_000, fresh.to_string().as_bytes()).unwrap();
             assert_eq!(model_ids(&state)[0], "test-remote");
             assert_eq!(state.fetched_at_ms, Some(2_000));
+        }
+
+        #[test]
+        fn stale_fetch_keeps_the_newer_bundle() {
+            // The test catalog is dated 2030; a remote copy from 2029 is a
+            // valid manifest that predates the bundle.
+            let mut state = fresh_state();
+            let stale = manifest_with("2029-12-31T23:59:59Z", "test-remote");
+            state.install(3_000, stale.to_string().as_bytes()).unwrap();
+            assert_eq!(model_ids(&state)[0], "test-wide");
+            assert_eq!(state.fetched_at_ms, Some(3_000), "still paced by the TTL");
+
+            // Once the remote catches up it is adopted as before.
+            let current = manifest_with("2030-01-01T00:00:00Z", "test-remote");
+            state
+                .install(4_000, current.to_string().as_bytes())
+                .unwrap();
+            assert_eq!(model_ids(&state)[0], "test-remote");
         }
 
         #[test]
