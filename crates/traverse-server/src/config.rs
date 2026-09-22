@@ -63,11 +63,15 @@ get_burst = 40
 eviction = "7d"
 
 [lock]
-# Region lock: only works behind a reverse proxy that sets X-Forwarded-For and
-# X-TCP-RTT (microseconds, nginx: $tcpinfo_rtt) on the relay upgrade request.
-# Clients with RTT <= home_rtt_max_ms or an address in allow_cidrs are always
-# admitted; everyone else shares far_connection_quota concurrent connections.
+# Region lock: clients with RTT <= home_rtt_max_ms or an address in
+# allow_cidrs are always admitted; everyone else shares far_connection_quota
+# concurrent connections. RTT and address come from X-TCP-RTT (microseconds,
+# nginx: $tcpinfo_rtt) and X-Forwarded-For on the relay upgrade request, read
+# only with trust_proxy_headers = true: enable it only behind a reverse proxy
+# that overwrites both. Without it every client counts as far, so the lock
+# needs a positive far_connection_quota.
 enabled = false
+trust_proxy_headers = false
 home_rtt_max_ms = 80
 far_connection_quota = 64
 allow_cidrs = []
@@ -180,6 +184,8 @@ pub struct PkarrConfig {
 pub struct LockConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub trust_proxy_headers: bool,
     #[serde(default = "default_home_rtt_max_ms")]
     pub home_rtt_max_ms: u32,
     #[serde(default = "default_far_connection_quota")]
@@ -302,6 +308,7 @@ impl Default for LockConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            trust_proxy_headers: false,
             home_rtt_max_ms: default_home_rtt_max_ms(),
             far_connection_quota: default_far_connection_quota(),
             allow_cidrs: Vec::new(),
@@ -393,6 +400,12 @@ impl Config {
         if self.relay.rx_bytes_per_second == 0 && self.relay.rx_max_burst_bytes != 0 {
             return Err("relay.rx_max_burst_bytes needs relay.rx_bytes_per_second".into());
         }
+        if self.lock.enabled
+            && !self.lock.trust_proxy_headers
+            && self.lock.far_connection_quota == 0
+        {
+            return Err("lock.enabled without lock.trust_proxy_headers treats every client as far, so lock.far_connection_quota must be positive or nothing can connect".into());
+        }
         Ok(())
     }
 
@@ -456,6 +469,17 @@ mod tests {
         let error = Config::parse("[pkarr]\nput_burst = 0\n[tls]\nmode = \"off\"").unwrap_err();
         assert!(error.contains("put_burst"), "{error}");
         assert!(Config::parse("unknown = 1\n[tls]\nmode = \"off\"").is_err());
+        let error = Config::parse(
+            "[tls]\nmode = \"off\"\n[lock]\nenabled = true\nfar_connection_quota = 0",
+        )
+        .unwrap_err();
+        assert!(error.contains("trust_proxy_headers"), "{error}");
+        assert!(
+            Config::parse(
+                "[tls]\nmode = \"off\"\n[lock]\nenabled = true\ntrust_proxy_headers = true\nfar_connection_quota = 0",
+            )
+            .is_ok()
+        );
 
         let config = Config::parse(
             "[tls]\nmode = \"off\"\n[lock]\nenabled = true\nallow_cidrs = [\"10.0.0.0/8\"]\n[metrics]\n[[peers]]\nurl = \"https://relay-2.example.org/\"\nquic_port = 0",
