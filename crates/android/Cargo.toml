@@ -13,7 +13,7 @@ gpui = { package = "gpui-pre", version = "=0.3.5", default-features = false }
 gpui-android = { path = "../platform/gpui-android" }
 log = "0.4"
 tcode-client = { path = "../client" }
-tcode-remote = { path = "../remote", default-features = false, features = ["client"] }
+tcode-traverse = { path = "../traverse", default-features = false, features = ["native"] }
 tcode-ui = { path = "../ui", default-features = false, features = ["native-preview"] }
 async-channel = "2"
 

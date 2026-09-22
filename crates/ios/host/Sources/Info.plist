@@ -27,10 +27,12 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <!-- Paired machines advertise this type; the app browses it through the
+         system daemon to find them again (crates/ios/host/Sources/MachineBrowse.swift). -->
     <key>NSBonjourServices</key>
-    <array><string>_tcode._tcp</string></array>
+    <array><string>_tcode._udp</string></array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>查找同一网络中的 Tcode 执行端以进行配对。</string>
+    <string>直接连接同一网络中已配对的 Tcode 执行端。</string>
     <key>NSCameraUsageDescription</key>
     <string>Scan a QR code to pair with a Tcode host.</string>
     <key>UIApplicationSceneManifest</key>

@@ -197,7 +197,7 @@ mod tests {
         ClientPayload, Command, EventEnvelope, HostMessage, IndexSnapshot, ServerEvent,
         Subscription, Topic, decode_client_line, encode_line,
     };
-    use tcode_remote::HostMux;
+    use tcode_traverse::HostMux;
 
     use super::*;
 

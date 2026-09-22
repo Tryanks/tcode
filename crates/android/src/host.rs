@@ -20,7 +20,7 @@ use jni::{
     refs::Global,
 };
 use tcode_client::host::HostFuture;
-use tcode_remote::NativeClientHost;
+use tcode_traverse::NativeClientHost;
 
 const RESULT_OK: i32 = 0;
 const RESULT_CANCELLED: i32 = 1;
@@ -29,10 +29,14 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static EVENT_SENDER: LazyLock<Mutex<Option<mpsc::UnboundedSender<BridgeEvent>>>> =
     LazyLock::new(|| Mutex::new(None));
 
-struct BridgeEvent {
-    request_id: u64,
-    status: i32,
-    value: Option<String>,
+/// What the activity reports to the GPUI thread through [`EVENT_SENDER`].
+enum BridgeEvent {
+    CameraResult {
+        request_id: u64,
+        status: i32,
+        value: Option<String>,
+    },
+    NetworkChanged,
 }
 
 #[derive(Clone)]
@@ -141,7 +145,7 @@ impl JavaBridge {
 pub(crate) fn native_host(
     app: AndroidApp,
     cx: &mut App,
-) -> Result<(NativeClientHost, Option<String>), String> {
+) -> Result<(Rc<NativeClientHost>, Option<String>), String> {
     let bridge = JavaBridge::new(app)?;
     let appearance_bridge = bridge.clone();
     // Keep system chrome in sync with explicit app themes as well as system mode.
@@ -174,50 +178,22 @@ pub(crate) fn native_host(
         u64,
         async_channel::Sender<Result<String, String>>,
     >::new()));
-    let (sender, mut receiver) = mpsc::unbounded();
-    *EVENT_SENDER.lock().expect("Android event sender poisoned") = Some(sender);
     let pending = callbacks.clone();
-    cx.spawn(async move |cx| {
-        while let Some(event) = receiver.next().await {
-            let pending = pending.clone();
-            cx.update(move |_cx| {
-                let sender = pending.borrow_mut().remove(&event.request_id);
-                let Some(sender) = sender else {
-                    log::warn!(
-                        "received result for unknown Android camera request {}",
-                        event.request_id
-                    );
-                    return;
-                };
-                let result = match (event.status, event.value) {
-                    (RESULT_OK, Some(value)) if !value.is_empty() => Ok(value),
-                    (RESULT_CANCELLED, value) => Err(value.unwrap_or_else(|| "已取消扫描".into())),
-                    (_, value) => Err(value.unwrap_or_else(|| "Android 相机扫描失败".into())),
-                };
-                let _ = sender.try_send(result);
-            });
-        }
-    })
-    .detach();
-
     let multicast = bridge.object.clone();
     let camera = bridge.clone();
     let host = NativeClientHost::new(data_dir, device_name)
         .with_platform(platform)
         .with_multicast_lock(move |acquire| {
-            if multicast
-                .with_env(|env, activity| {
-                    env.call_method(
-                        activity,
-                        jni_str!("gpuiMulticastLock"),
-                        jni_sig!("(Z)V"),
-                        &[JValue::Bool(acquire)],
-                    )?;
-                    Ok(())
-                })
-                .is_err()
-            {
-                log::warn!("Android multicast lock unavailable");
+            if let Err(error) = multicast.with_env(|env, activity| {
+                env.call_method(
+                    activity,
+                    jni_str!("gpuiMulticastLock"),
+                    jni_sig!("(Z)V"),
+                    &[JValue::Bool(acquire)],
+                )?;
+                Ok(())
+            }) {
+                log::warn!("Android multicast lock unavailable: {error}");
             }
         })
         .with_qr_scanner(move || -> HostFuture<'static, Result<String, String>> {
@@ -232,21 +208,83 @@ pub(crate) fn native_host(
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
         });
+    let host = Rc::new(host);
+
+    let (sender, mut receiver) = mpsc::unbounded();
+    *EVENT_SENDER.lock().expect("Android event sender poisoned") = Some(sender);
+    let events_host = host.clone();
+    cx.spawn(async move |cx| {
+        while let Some(event) = receiver.next().await {
+            let pending = pending.clone();
+            let host = events_host.clone();
+            cx.update(move |_cx| match event {
+                BridgeEvent::NetworkChanged => host.network_changed(),
+                BridgeEvent::CameraResult {
+                    request_id,
+                    status,
+                    value,
+                } => {
+                    let sender = pending.borrow_mut().remove(&request_id);
+                    let Some(sender) = sender else {
+                        log::warn!(
+                            "received result for unknown Android camera request {request_id}"
+                        );
+                        return;
+                    };
+                    let result = match (status, value) {
+                        (RESULT_OK, Some(value)) if !value.is_empty() => Ok(value),
+                        (RESULT_CANCELLED, value) => {
+                            Err(value.unwrap_or_else(|| "已取消扫描".into()))
+                        }
+                        (_, value) => Err(value.unwrap_or_else(|| "Android 相机扫描失败".into())),
+                    };
+                    let _ = sender.try_send(result);
+                }
+            });
+        }
+    })
+    .detach();
     Ok((host, system_locale))
 }
 
-pub(crate) fn deliver_result(request_id: u64, status: i32, value: Option<String>) {
+fn send_event(event: BridgeEvent, dropped: &str) {
     let sender = EVENT_SENDER
         .lock()
         .expect("Android event sender poisoned")
         .clone();
     if let Some(sender) = sender {
-        let _ = sender.unbounded_send(BridgeEvent {
+        let _ = sender.unbounded_send(event);
+    } else {
+        log::warn!("dropping Android {dropped} before host initialization");
+    }
+}
+
+pub(crate) fn deliver_result(request_id: u64, status: i32, value: Option<String>) {
+    send_event(
+        BridgeEvent::CameraResult {
             request_id,
             status,
             value,
-        });
-    } else {
-        log::warn!("dropping Android camera result before host initialization");
-    }
+        },
+        "camera result",
+    );
+}
+
+/// The activity's `ConnectivityManager.NetworkCallback` fired or the
+/// activity resumed: the device endpoint rebinds its paths and every live
+/// transport is probed at once ([`NativeClientHost::network_changed`]).
+///
+/// The endpoint is not shut down when the activity stops. iroh's Android
+/// guidance is to close it before backgrounding and rebind on return, but
+/// the reconnecting transport already notices a dead connection through
+/// `closed()`, the shell's foreground policy reconnects outright after ten
+/// seconds away, and this call arrives on every resume. A socket the OS
+/// destroyed in the background is only rebound when iroh's interface watcher
+/// classifies the resume as a major link change; whether Android leaves the
+/// interface state unchanged in that case has not been observed on a device.
+/// TODO(traverse-android-background): if a resumed app keeps failing to
+/// reconnect until the network actually changes, close the endpoint on
+/// `Background` and rebuild it on `Foreground` instead of relying on rebind.
+pub(crate) fn network_changed() {
+    send_event(BridgeEvent::NetworkChanged, "network change");
 }

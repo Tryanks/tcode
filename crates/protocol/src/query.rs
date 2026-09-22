@@ -260,17 +260,26 @@ pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub enum HostingAction {
     State,
     SetEnabled(bool),
-    NewCode,
+    /// Mint an invitation, replacing the current one.
+    #[serde(alias = "new_code")]
+    NewInvitation,
     RevokeDevice(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostingState {
     pub enabled: bool,
-    pub code: Option<String>,
+    /// Seconds until `invite` expires; `0` without one.
+    #[serde(default)]
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
+    /// The `tcode://pair?…` link for the active invitation, with where the
+    /// machine is reachable right now. The link is the secret — there is no
+    /// separate code. A client shows it as a QR or copies it; it never takes
+    /// it apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<String>,
     pub devices: Vec<HostedDevice>,
 }
 
@@ -282,4 +291,46 @@ pub struct HostedDevice {
     /// Operating system name and version the device last reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// How the device reaches the machine while connected; `None` offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathInfo>,
+}
+
+/// How one live connection between a device and a machine is carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathInfo {
+    /// The selected path is a direct UDP path rather than a relay.
+    pub direct: bool,
+    /// The relay URL carrying the connection when it is not direct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    /// The direct path's remote address is on this machine's own network
+    /// (private, link-local or loopback) rather than punched across the
+    /// internet. A peer that predates the flag reads as punched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lan: bool,
+    /// A relay carries the connection while a direct path is open but not
+    /// yet the selected one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub probing_direct: bool,
+}
+
+/// The selected path, as the flags spell it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind<'a> {
+    Lan,
+    Tunnel,
+    Relay { url: Option<&'a str> },
+}
+
+impl PathInfo {
+    pub fn kind(&self) -> PathKind<'_> {
+        match (self.direct, self.lan) {
+            (true, true) => PathKind::Lan,
+            (true, false) => PathKind::Tunnel,
+            (false, _) => PathKind::Relay {
+                url: self.relay.as_deref(),
+            },
+        }
+    }
 }

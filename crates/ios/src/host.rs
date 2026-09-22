@@ -3,22 +3,30 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    ptr, slice,
-    sync::atomic::{AtomicU64, Ordering},
+    ptr,
+    rc::{Rc, Weak},
+    slice,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
-use tcode_client::host::{DiscoveredHost, HostFuture};
-use tcode_remote::NativeClientHost;
+use tcode_client::host::HostFuture;
+use tcode_traverse::{NativeClientHost, lan::SystemBrowser};
 
-type BrowseDone = Box<dyn FnOnce(Vec<DiscoveredHost>)>;
 type ScanDone = Box<dyn FnOnce(Result<String, String>)>;
 
 thread_local! {
-    static BROWSE_CALLBACKS: RefCell<HashMap<u64, BrowseDone>> = RefCell::new(HashMap::new());
     static CAMERA_CALLBACKS: RefCell<HashMap<u64, ScanDone>> = RefCell::new(HashMap::new());
+    /// The shell owns the host; scene callbacks reach it while it lives.
+    static HOST: RefCell<Weak<NativeClientHost>> = const { RefCell::new(Weak::new()) };
 }
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+/// The DNS-SD browser Swift runs for the LAN lookup; results arrive through
+/// [`tcode_ios_browse_found`] from the browse queue.
+static BROWSER: OnceLock<Arc<SystemBrowser>> = OnceLock::new();
 
 unsafe extern "C" {
     fn tcode_ios_host_set_app_background_dark(dark: u8);
@@ -26,10 +34,25 @@ unsafe extern "C" {
     fn tcode_ios_host_device_platform(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_start_camera_scan(request_id: u64);
-    fn tcode_ios_host_browse(request_id: u64);
+    fn tcode_ios_host_browse_start(request: u64);
+    fn tcode_ios_host_browse_stop(request: u64);
 }
 
-pub(crate) fn native_host(cx: &mut gpui::App) -> (NativeClientHost, Option<String>) {
+fn system_browser() -> Arc<SystemBrowser> {
+    BROWSER
+        .get_or_init(|| {
+            Arc::new(SystemBrowser::new(
+                // SAFETY: Swift hops to the main queue and keeps the browse
+                // until the matching stop.
+                |request| unsafe { tcode_ios_host_browse_start(request) },
+                // SAFETY: as above; an unknown request is ignored.
+                |request| unsafe { tcode_ios_host_browse_stop(request) },
+            ))
+        })
+        .clone()
+}
+
+pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<String>) {
     // Native chrome follows the resolved app theme, which may differ from UIKit.
     cx.observe_global::<tcode_ui::theme::Theme>(|cx| {
         let dark = cx.global::<tcode_ui::theme::Theme>().mode.is_dark();
@@ -57,23 +80,7 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (NativeClientHost, Option<Strin
 
     let host = NativeClientHost::from_env_with_device_name(device_name)
         .with_platform(platform)
-        .with_browser(|| -> HostFuture<'static, Vec<DiscoveredHost>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-            BROWSE_CALLBACKS.with(|callbacks| {
-                callbacks.borrow_mut().insert(
-                    request_id,
-                    Box::new(move |hosts| {
-                        let _ = sender.try_send(hosts);
-                    }),
-                );
-            });
-            // SAFETY: Swift completes once on the main thread with bounded JSON.
-            unsafe {
-                tcode_ios_host_browse(request_id);
-            }
-            Box::pin(async move { receiver.recv().await.unwrap_or_default() })
-        })
+        .with_system_browser(system_browser())
         .with_qr_scanner(|| -> HostFuture<'static, Result<String, String>> {
             let (sender, receiver) = async_channel::bounded(1);
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
@@ -94,7 +101,50 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (NativeClientHost, Option<Strin
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
         });
+    let host = Rc::new(host);
+    HOST.with(|slot| *slot.borrow_mut() = Rc::downgrade(&host));
     (host, system_locale)
+}
+
+/// The scene entered the foreground: the device endpoint rebinds its paths
+/// and every live transport is probed at once. The endpoint outlives
+/// backgrounding; the shell's foreground policy decides between a probe and
+/// a full reconnect, and this call covers a network that changed while the
+/// process was suspended.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcode_ios_network_changed() {
+    HOST.with(|slot| {
+        if let Some(host) = slot.borrow().upgrade() {
+            host.network_changed();
+        }
+    });
+}
+
+/// One `_tcode._udp` instance Swift resolved for browse `request`: the id
+/// its TXT record claims and one `ip:port`. Called from the browse queue.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcode_ios_browse_found(
+    request: u64,
+    id_bytes: *const u8,
+    id_length: usize,
+    address_bytes: *const u8,
+    address_length: usize,
+) {
+    let Some(browser) = BROWSER.get() else {
+        return;
+    };
+    if id_length > 64 || address_length > 64 {
+        return;
+    }
+    // SAFETY: Swift keeps both temporary buffers alive through this call.
+    let id = unsafe { ffi_string(id_bytes, id_length) };
+    // SAFETY: same as above.
+    let address = unsafe { ffi_string(address_bytes, address_length) };
+    if let (Some(id), Some(address)) = (id, address)
+        && let Ok(address) = address.parse::<std::net::SocketAddr>()
+    {
+        browser.found(request, &id, [address]);
+    }
 }
 
 /// Completes a one-shot AVFoundation QR scan from Swift.
@@ -145,23 +195,4 @@ unsafe fn ffi_string(bytes: *const u8, length: usize) -> Option<String> {
     // SAFETY: the caller guarantees `bytes` is readable for `length` bytes.
     let bytes = unsafe { slice::from_raw_parts(bytes, length) };
     String::from_utf8(bytes.to_vec()).ok()
-}
-
-/// Completes the Bonjour browse on the main thread.
-#[unsafe(no_mangle)]
-pub extern "C" fn tcode_ios_browse_completed(request_id: u64, bytes: *const u8, length: usize) {
-    let callback = BROWSE_CALLBACKS.with(|callbacks| callbacks.borrow_mut().remove(&request_id));
-    let Some(callback) = callback else {
-        return;
-    };
-    // SAFETY: Swift holds the JSON buffer for this call; reject unbounded input.
-    let json = if length <= 65536 {
-        unsafe { ffi_string(bytes, length) }
-    } else {
-        None
-    };
-    let hosts = json
-        .map(|s| tcode_client::host::parse_discovered_hosts(&s))
-        .unwrap_or_default();
-    callback(hosts);
 }

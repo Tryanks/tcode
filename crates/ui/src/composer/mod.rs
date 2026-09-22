@@ -528,8 +528,11 @@ impl Composer {
             return;
         }
         if self.compact
-            && *self.workspace_store.read(cx).connection_state()
-                != tcode_client::ConnectionState::Connected
+            && !self
+                .workspace_store
+                .read(cx)
+                .connection_state()
+                .is_connected()
         {
             return;
         }

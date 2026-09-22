@@ -103,6 +103,17 @@ pub enum WorkspaceAttachment {
     Remote { host_id: String, host_name: String },
 }
 
+/// Where a remote attachment's Preview goes: the paired machine and the
+/// tunnels the attachment's transport opens to it.
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows", target_os = "android")
+))]
+pub(crate) type PreviewTarget = (
+    tcode_client::pairing::PairedHost,
+    std::sync::Arc<dyn tcode_client::host::TunnelOpener>,
+);
+
 /// The client-facing projection and command boundary for workspace state.
 ///
 /// Views observe this entity and use its typed accessors instead of retaining
@@ -111,10 +122,16 @@ pub struct WorkspaceStore {
     host: HostLink,
     attachment: WorkspaceAttachment,
     client_host: Option<Rc<dyn ClientHost>>,
-    #[cfg(all(
-        feature = "native-preview",
-        any(target_os = "macos", target_os = "windows", target_os = "android")
-    ))]
+    /// The transport's live view of the attached machine: its authenticated
+    /// pairing and how the connection is carried. `None` locally and in a
+    /// browser.
+    #[cfg_attr(
+        not(all(
+            feature = "native-preview",
+            any(target_os = "macos", target_os = "windows", target_os = "android")
+        )),
+        allow(dead_code)
+    )]
     current_host: Option<LiveHost>,
     client_preferences: ClientPreferences,
     image_namespace: u64,
@@ -142,8 +159,6 @@ pub struct WorkspaceStore {
     settings_hydrated: bool,
     baseline_topics: HashSet<Topic>,
     index_hydrated: bool,
-    last_refresh_attempt: Option<u32>,
-    address_refresh: Option<Task<()>>,
     hydrated_sessions: HashSet<String>,
     selected_session_id: Option<String>,
     session_records: HashMap<String, Vec<StoredEvent>>,
@@ -277,7 +292,7 @@ impl WorkspaceStore {
         host: HostLink,
         attachment: WorkspaceAttachment,
         client_host: Option<Rc<dyn ClientHost>>,
-        _current_host: Option<LiveHost>,
+        current_host: Option<LiveHost>,
         seed_blocking: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -300,11 +315,7 @@ impl WorkspaceStore {
             host: host.clone(),
             attachment,
             client_host,
-            #[cfg(all(
-                feature = "native-preview",
-                any(target_os = "macos", target_os = "windows", target_os = "android")
-            ))]
-            current_host: _current_host,
+            current_host,
             client_preferences,
             image_namespace,
             attachment_tasks: Vec::new(),
@@ -314,7 +325,7 @@ impl WorkspaceStore {
             connection_state: if remote {
                 host.connection_state()
             } else {
-                ConnectionState::Connected
+                ConnectionState::Connected { path: None }
             },
             index_replica: (Vec::new(), Vec::new()),
             title_generating: HashSet::new(),
@@ -322,8 +333,6 @@ impl WorkspaceStore {
             settings_hydrated: false,
             baseline_topics: HashSet::new(),
             index_hydrated: false,
-            last_refresh_attempt: None,
-            address_refresh: None,
             hydrated_sessions: HashSet::new(),
             selected_session_id: None,
             session_records: HashMap::new(),
@@ -459,7 +468,6 @@ impl WorkspaceStore {
                 while let Ok(state) = changes.recv().await {
                     if this
                         .update(cx, |store, cx| {
-                            store.refresh_address(&state, cx);
                             cx.emit(state.clone());
                             store.apply_connection_state(state);
                             cx.emit(StoreChange {
@@ -494,7 +502,6 @@ impl WorkspaceStore {
             while let Ok(state) = changes.recv().await {
                 if this
                     .update(cx, |store, cx| {
-                        store.refresh_address(&state, cx);
                         cx.emit(state.clone());
                         store.apply_connection_state(state);
                         cx.notify();
@@ -522,22 +529,21 @@ impl WorkspaceStore {
         self.remote_preview.1.clone()
     }
 
+    /// The paired machine Preview reaches and the tunnels that reach it.
     #[cfg(all(
         feature = "native-preview",
         any(target_os = "macos", target_os = "windows", target_os = "android")
     ))]
-    pub(crate) fn preview_proxy(
-        &self,
-    ) -> Result<Option<tcode_client::pairing::PairedHost>, String> {
+    pub(crate) fn preview_proxy(&self) -> Result<Option<PreviewTarget>, String> {
         if !self.is_remote() {
             return Ok(None);
         }
         self.current_host
             .as_ref()
-            .map(LiveHost::snapshot)
-            .filter(|host| Some(host.host_id.as_str()) == self.remote_host_id())
+            .filter(|live| Some(live.snapshot().host_id.as_str()) == self.remote_host_id())
+            .and_then(|live| Some((live.snapshot(), live.tunnels()?)))
             .map(Some)
-            .ok_or_else(|| "remote preview requires a paired machine credential".into())
+            .ok_or_else(|| "remote preview requires a paired machine connection".into())
     }
 
     pub fn is_remote(&self) -> bool {
@@ -558,66 +564,16 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn connection_state(&self) -> &ConnectionState {
-        if matches!(
-            self.connection_state,
-            ConnectionState::Connected | ConnectionState::Syncing
-        ) {
-            if self.baseline_ready() {
-                &ConnectionState::Connected
-            } else {
-                &ConnectionState::Syncing
+    /// Connected only once the baseline is in: the transport's `Connected`
+    /// says the host answers, the replayed snapshots say the screen is current.
+    pub fn connection_state(&self) -> ConnectionState {
+        match &self.connection_state {
+            ConnectionState::Connected { .. } if !self.baseline_ready() => ConnectionState::Syncing,
+            ConnectionState::Syncing if self.baseline_ready() => {
+                ConnectionState::Connected { path: None }
             }
-        } else {
-            &self.connection_state
+            state => state.clone(),
         }
-    }
-
-    /// Feed LAN hints after unreachable retries, letting each platform browse
-    /// finish even when connection retries advance faster than discovery.
-    /// The transport owns finding the machine again (saved candidates, LAN
-    /// probes, interface watching, identity-verified racing); this only runs
-    /// the platform browser, which iOS can drive solely from the UI thread.
-    fn refresh_address(&mut self, state: &ConnectionState, cx: &mut Context<Self>) {
-        if matches!(
-            state,
-            ConnectionState::Connected | ConnectionState::Syncing | ConnectionState::Offline { .. }
-        ) {
-            self.address_refresh.take();
-            self.last_refresh_attempt = None;
-        }
-        let ConnectionState::Reconnecting {
-            attempt,
-            reason:
-                Some(
-                    tcode_client::ConnectionFailure::Unreachable
-                    | tcode_client::ConnectionFailure::Timeout,
-                ),
-        } = state
-        else {
-            return;
-        };
-        if self.address_refresh.is_some() || self.last_refresh_attempt == Some(*attempt) {
-            return;
-        }
-        self.last_refresh_attempt = Some(*attempt);
-        let Some(host_id) = self.remote_host_id().map(str::to_owned) else {
-            return;
-        };
-        let Some(client) = self.client_host.clone() else {
-            return;
-        };
-        self.address_refresh = Some(cx.spawn(async move |this, cx| {
-            let origins = client.discover_origins(&host_id).await;
-            let _ = this.update(cx, |store, _| {
-                store.address_refresh.take();
-                if !origins.is_empty() {
-                    store
-                        .host
-                        .wake(tcode_client::recovery::Wake::Candidates(origins));
-                }
-            });
-        }));
     }
 
     fn apply_connection_state(&mut self, state: ConnectionState) {
@@ -661,16 +617,6 @@ impl WorkspaceStore {
             }
         }
         sessions
-    }
-
-    pub(crate) fn pending_write_count(&self) -> usize {
-        self.host.pending_commands().len()
-    }
-
-    pub(crate) fn session_has_pending_writes(&self, id: &str) -> bool {
-        self.pending_sessions()
-            .iter()
-            .any(|(session, _)| session == id)
     }
 
     pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
@@ -758,7 +704,7 @@ impl WorkspaceStore {
     pub fn threads_loading(&self) -> bool {
         !self.index_hydrated
             || !self.settings_hydrated
-            || (!matches!(self.connection_state(), ConnectionState::Connected)
+            || (!self.connection_state().is_connected()
                 && self.index_replica.0.is_empty()
                 && self.index_replica.1.is_empty())
     }
@@ -783,7 +729,6 @@ impl WorkspaceStore {
     pub fn detach(&mut self, cx: &mut App) {
         self.history_task = None;
         self.attachment_tasks.clear();
-        self.address_refresh.take();
         for subscription in self.host.subscriptions() {
             let _ = self.host.unsubscribe(subscription);
         }
@@ -2824,21 +2769,23 @@ mod tests {
             std::process::id(),
             tcode_services::store::now_millis()
         ));
-        let client = Rc::new(tcode_remote::client_host::NativeClientHost::new(
-            root.clone(),
-            "phone",
-        ));
+        let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         let mut host = tcode_client::pairing::PairedHost {
             host_id: "machine".into(),
             name: "Machine".into(),
-            origin: "http://192.168.31.5:47420".into(),
-            candidates: Vec::new(),
-            token: "test token".into(),
-            identity_key: None,
+            traverse: None,
+            relay: None,
+            addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,
         };
         client.remember_host(host.clone());
-        let current_host = LiveHost::new(host.clone());
+        struct NoTunnels;
+        impl tcode_client::host::TunnelOpener for NoTunnels {
+            fn open(&self, _host: &str, _port: u16) -> tcode_client::host::TunnelFuture {
+                Box::pin(async { Err(std::io::Error::from(std::io::ErrorKind::NotConnected)) })
+            }
+        }
+        let current_host = LiveHost::with_tunnels(host.clone(), std::sync::Arc::new(NoTunnels));
         let (to_host, _outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
         let store = cx.new(|cx| {
@@ -2854,100 +2801,10 @@ mod tests {
                 cx,
             )
         });
-        host.origin = "http://192.168.1.161:47420".into();
+        host.addrs = vec!["192.168.1.161:47420".into()];
         current_host.authenticated(&host);
-        cx.update(|cx| assert_eq!(store.read(cx).preview_proxy().unwrap().unwrap(), host));
-        assert_eq!(client.load_hosts()[0].origin, "http://192.168.31.5:47420");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(feature = "remote-hosting")]
-    #[gpui::test]
-    fn discovery_completes_across_faster_retries_and_stops_when_connected(cx: &mut TestAppContext) {
-        use std::{cell::Cell, rc::Rc};
-        use tcode_client::{ConnectionFailure, ConnectionState, host::ClientHost as _};
-        let root = scratch_root("tcode-discovery");
-        let (results, discovered) = async_channel::unbounded();
-        let calls = Rc::new(Cell::new(0));
-        let observed = calls.clone();
-        let client = tcode_remote::client_host::NativeClientHost::new(root.clone(), "phone")
-            .with_browser(move || {
-                observed.set(observed.get() + 1);
-                let discovered = discovered.clone();
-                Box::pin(async move { discovered.recv().await.unwrap() })
-            });
-        client.save_hosts(&[tcode_client::pairing::PairedHost {
-            host_id: "machine".into(),
-            name: "Machine".into(),
-            origin: "http://192.168.31.5:47420".into(),
-            candidates: Vec::new(),
-            token: "test token".into(),
-            identity_key: None,
-            last_connected_unix: None,
-        }]);
-        let (to_host, outgoing) = tcode_client::outgoing::channel();
-        let (_incoming, from_host) = async_channel::unbounded();
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                tcode_client::HostLink::new(to_host, from_host),
-                WorkspaceAttachment::Remote {
-                    host_id: "machine".into(),
-                    host_name: "Machine".into(),
-                },
-                Some(Rc::new(client)),
-                None,
-                false,
-                cx,
-            )
-        });
-        let retry = |attempt| ConnectionState::Reconnecting {
-            attempt,
-            reason: Some(ConnectionFailure::Unreachable),
-        };
-        store.update(cx, |store, cx| store.refresh_address(&retry(1), cx));
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.refresh_address(&retry(2), cx));
-        cx.run_until_parked();
-        assert_eq!(
-            calls.get(),
-            1,
-            "a faster retry must not cancel the in-flight browse"
-        );
-        let origin = "http://192.168.1.161:47420";
-        results
-            .send_blocking(vec![tcode_client::host::DiscoveredHost {
-                host_id: "machine".into(),
-                name: "Machine".into(),
-                origin: origin.into(),
-            }])
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(
-            outgoing.wake.try_recv().unwrap(),
-            tcode_client::recovery::Wake::Candidates(vec![origin.into()])
-        );
-        store.update(cx, |store, cx| store.refresh_address(&retry(3), cx));
-        cx.run_until_parked();
-        assert_eq!(
-            calls.get(),
-            2,
-            "a completed browse allows a later retry to browse again"
-        );
-        store.update(cx, |store, cx| {
-            store.refresh_address(&ConnectionState::Connected, cx)
-        });
-        results
-            .send_blocking(vec![tcode_client::host::DiscoveredHost {
-                host_id: "machine".into(),
-                name: "Machine".into(),
-                origin: origin.into(),
-            }])
-            .unwrap();
-        cx.run_until_parked();
-        assert!(
-            outgoing.wake.try_recv().is_err(),
-            "a completed connection retires its browse"
-        );
+        cx.update(|cx| assert_eq!(store.read(cx).preview_proxy().unwrap().unwrap().0, host));
+        assert_eq!(client.load_hosts()[0].addrs, ["192.168.31.5:47420"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3182,7 +3039,7 @@ mod tests {
             workspace.read_with(cx, |store, _| store.active_session_id()),
             Some("deleted".into())
         );
-        link.set_connection_state(tcode_client::ConnectionState::Connected);
+        link.set_connection_state(tcode_client::ConnectionState::Connected { path: None });
         wait_until(cx, &workspace, "rejected send", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -3208,7 +3065,7 @@ mod tests {
         use tcode_client::host::{ClientHost as _, ClientPreferences};
 
         let root = scratch_root("tcode-desktop-preferences");
-        let client = tcode_remote::NativeClientHost::new(root.clone(), "fallback device");
+        let client = tcode_traverse::NativeClientHost::new(root.clone(), "fallback device");
         let host = Settings {
             theme_mode: ThemeMode::Dark,
             language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.into()),
@@ -3226,7 +3083,7 @@ mod tests {
             device_name: Some("Desk client".into()),
             ..Default::default()
         });
-        let reloaded = tcode_remote::NativeClientHost::new(root.clone(), "different fallback");
+        let reloaded = tcode_traverse::NativeClientHost::new(root.clone(), "different fallback");
         let preferences = reloaded.load_preferences();
         let effective = effective_client_settings(&host, &preferences);
         assert_eq!(effective.theme_mode, ThemeMode::Light);
@@ -3680,7 +3537,7 @@ mod tests {
             assert!(!store.chat_loading(), "cached thread remains visible");
             assert_eq!(store.active_session_id().as_deref(), Some("one"));
             for (topic, event) in snapshots {
-                assert_eq!(store.connection_state(), &ConnectionState::Syncing);
+                assert_eq!(store.connection_state(), ConnectionState::Syncing);
                 store.apply_domain_event(
                     &EventEnvelope {
                         request_id: None,
@@ -3690,7 +3547,7 @@ mod tests {
                     cx,
                 );
             }
-            assert_eq!(store.connection_state(), &ConnectionState::Connected);
+            assert!(store.connection_state().is_connected());
         });
         host.shutdown_blocking().unwrap();
         let _ = std::fs::remove_dir_all(root);
@@ -4017,7 +3874,7 @@ mod tests {
                 reason: None,
             });
         host.link()
-            .set_connection_state(tcode_client::ConnectionState::Connected);
+            .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
         command(&host, Command::ClearRelaunchMarker);
         workspace.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);

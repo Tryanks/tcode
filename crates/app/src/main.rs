@@ -10,9 +10,9 @@ use gpui::{
 };
 use tcode_client::{HostLink, host::ClientHost as _, host::Transport};
 use tcode_protocol::{Command, CommandResponse};
-use tcode_remote::{HostMux, NativeClientHost};
 use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
+use tcode_traverse::{HostMux, NativeClientHost};
 use tcode_ui::remote::{AttachmentTarget, RemoteController, machine_name};
 use tcode_ui::{AppShell, Quit, ShellOptions, ShellSetup, WindowState, theme::ActiveTheme as _};
 use tcode_ui::{assets, settings};
@@ -166,23 +166,16 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
         .map(|pair| pair[1].clone())
 }
 
-/// Hidden `tcode --pair <addr> <port> <code>`: pair with a host over HTTP,
-/// record it in `hosts.json`, print its id and exit. The desktop pairing UI
-/// does the same thing; this is the headless path used by the remote e2e run.
+/// Hidden `tcode --pair <tcode://pair?…>`: pair with the machine an invite
+/// names, record it in `hosts.json`, print its id and exit. The desktop
+/// pairing UI does the same thing; this is the headless path used by the
+/// remote e2e run.
 fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<String, String> {
-    let [addr, port, code] = args else {
-        return Err("usage: tcode --pair <addr> <port> <code>".into());
+    let [invite] = args else {
+        return Err("usage: tcode --pair <tcode://pair?...>".into());
     };
-    let port: u16 = port
-        .parse()
-        .map_err(|error| format!("invalid port: {error}"))?;
-    let host = smol::block_on(client_host.pair(tcode_client::host::PairRequest {
-        origin: tcode_client::pairing::lan_origin(addr, port),
-        code: code.clone(),
-        host_id: None,
-        identity_key: None,
-        candidates: Vec::new(),
-    }))?;
+    let invite = tcode_client::pairing::parse_pair_url(invite).ok_or("invalid invite link")?;
+    let host = smol::block_on(client_host.pair(invite))?;
     let host_id = host.host_id.clone();
     client_host.remember_host(host);
     Ok(host_id)
@@ -352,7 +345,7 @@ fn main() {
                 .find(|host| host.host_id == host_id)
             else {
                 eprintln!(
-                    "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <addr> <port> <code>)",
+                    "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <tcode://pair?...>)",
                     data_dir.display()
                 );
                 std::process::exit(1);
@@ -397,15 +390,12 @@ fn main() {
                 local_settings.clone(),
             ));
             if local_settings.remote_hosting_enabled {
-                let port = local_settings
-                    .remote_port
-                    .unwrap_or(tcode_ui::remote::DEFAULT_REMOTE_PORT);
                 let name = local_settings
                     .remote_host_name
                     .clone()
                     .unwrap_or_else(machine_name);
                 cx.update_global::<RemoteController, _>(|controller, _| {
-                    if let Err(error) = controller.start_hosting(port, name) {
+                    if let Err(error) = controller.start_hosting(&local_settings.traverse, name) {
                         log::error!("remote hosting could not start: {error}");
                     }
                 });

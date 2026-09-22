@@ -16,7 +16,7 @@ icon = ["../../assets/icons/app/tcode.icns"]
 tcode-client = { path = "../client" }
 tcode-services = { path = "../services" }
 tcode-protocol = { path = "../protocol" }
-tcode-remote = { path = "../remote" }
+tcode-traverse = { path = "../traverse", features = ["native"] }
 tcode-runtime = { path = "../runtime" }
 tcode-ui = { path = "../ui" }
 preview-mcp = { path = "../preview-mcp" }
