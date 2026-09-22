@@ -18,8 +18,9 @@
 //! [`ManifestLoader`]: preference is remote, then the disk cache, then the
 //! bundle — except that a bundle whose `updatedAt` is newer than the cache
 //! outranks it — and invalid data never replaces a usable copy. A self-hosted
-//! instance has no bundle: with no cache and no fetch it is an error, never
-//! the official service.
+//! instance has no bundle: with no cache and no fetch there is no manifest,
+//! never the official one, and its endpoint runs without relay or lookup
+//! until a refresh brings it.
 use std::{
     fs,
     io::{self, Read as _},
@@ -231,7 +232,7 @@ pub struct ManifestState {
     /// the bundle. Persisted with the disk cache so a restart does not
     /// refetch.
     fetched_at_ms: Option<u64>,
-    last_attempt_ms: Option<u64>,
+    pub(crate) last_attempt_ms: Option<u64>,
     disk_loaded: bool,
 }
 
@@ -374,7 +375,7 @@ impl ManifestLoader {
         &self.inner.source
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, ManifestState> {
+    pub(crate) fn state(&self) -> std::sync::MutexGuard<'_, ManifestState> {
         self.inner
             .state
             .lock()
