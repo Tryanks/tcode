@@ -47,6 +47,8 @@ pub struct PkarrMetrics {
     pub gets: Counter,
     #[metrics(help = "GETs for unknown keys")]
     pub get_missing: Counter,
+    #[metrics(help = "GETs refused by the per-IP limit")]
+    pub get_rate_limited: Counter,
     #[metrics(help = "Records removed by eviction")]
     pub evicted: Counter,
 }
@@ -189,7 +191,8 @@ impl RateLimiter {
 
 pub struct PkarrService {
     pub store: Store,
-    pub limiter: RateLimiter,
+    pub put_limiter: RateLimiter,
+    pub get_limiter: RateLimiter,
     pub trust_forwarded_for: bool,
     pub metrics: Arc<PkarrMetrics>,
 }
@@ -252,10 +255,28 @@ fn parse_key(key: &str) -> Option<PublicKey> {
     PublicKey::from_z32(key).ok()
 }
 
+fn rate_limited(what: &'static str) -> Response {
+    cors(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "1")],
+            what,
+        )
+            .into_response(),
+    )
+}
+
 async fn get_packet(
     State(service): State<Arc<PkarrService>>,
     UrlPath(key): UrlPath<String>,
+    Extension(PeerAddr(peer)): Extension<PeerAddr>,
+    headers: HeaderMap,
 ) -> Response {
+    let ip = client_ip(&headers, peer, service.trust_forwarded_for);
+    if !service.get_limiter.allow(ip, Instant::now()) {
+        service.metrics.get_rate_limited.inc();
+        return rate_limited("pkarr GET rate limit");
+    }
     let Some(key) = parse_key(&key) else {
         return cors((StatusCode::BAD_REQUEST, "invalid pkarr key").into_response());
     };
@@ -296,16 +317,9 @@ async fn put_packet(
     body: Bytes,
 ) -> Response {
     let ip = client_ip(&headers, peer, service.trust_forwarded_for);
-    if !service.limiter.allow(ip, Instant::now()) {
+    if !service.put_limiter.allow(ip, Instant::now()) {
         service.metrics.put_rate_limited.inc();
-        return cors(
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, "1")],
-                "pkarr PUT rate limit",
-            )
-                .into_response(),
-        );
+        return rate_limited("pkarr PUT rate limit");
     }
     let Some(key) = parse_key(&key) else {
         service.metrics.put_rejected.inc();

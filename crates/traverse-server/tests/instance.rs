@@ -47,6 +47,8 @@ async fn manifest_and_pkarr_store_over_http() {
         config.region = Some("test".into());
         config.pkarr.put_per_second = 1;
         config.pkarr.put_burst = 3;
+        config.pkarr.get_per_second = 1;
+        config.pkarr.get_burst = 3;
     })
     .await;
     let base = server.base().clone();
@@ -104,6 +106,10 @@ async fn manifest_and_pkarr_store_over_http() {
     // The root form of the pkarr relay specification serves the same record.
     let root = http.get(base.join(&key).unwrap()).send().await.unwrap();
     assert_eq!(root.status(), 200);
+    // Three GETs used their own burst; PUTs keep theirs.
+    let limited = http.get(pkarr.clone()).send().await.unwrap();
+    assert_eq!(limited.status(), 429);
+    assert_eq!(limited.headers()["retry-after"], "1");
 
     let stale = http
         .put(pkarr.clone())

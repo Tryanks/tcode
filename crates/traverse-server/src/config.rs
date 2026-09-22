@@ -27,7 +27,7 @@ region = "eu-central"
 # Plain HTTP listener: captive-portal probes and, with tls.mode = "off", every
 # route including the relay.
 bind = "[::]:80"
-# Trust X-Forwarded-For for the per-IP pkarr PUT limit. Enable only behind a
+# Trust X-Forwarded-For for the per-IP pkarr limits. Enable only behind a
 # reverse proxy that overwrites the header.
 trust_forwarded_for = false
 
@@ -50,13 +50,15 @@ key = ""
 quic_addr_discovery = true
 quic_bind = "[::]:7842"
 # Per-connection limit on bytes received from a relay client; 0 disables.
-rx_bytes_per_second = 0
-rx_max_burst_bytes = 0
+rx_bytes_per_second = 2_000_000
+rx_max_burst_bytes = 4_000_000
 
 [pkarr]
-# Per-IP token bucket for PUT /pkarr/<key>.
+# Per-IP token buckets for PUT and GET /pkarr/<key>.
 put_per_second = 4
 put_burst = 8
+get_per_second = 20
+get_burst = 40
 # Records not refreshed for this long are removed (s, m, h or d).
 eviction = "7d"
 
@@ -149,9 +151,9 @@ pub struct RelayConfig {
     pub quic_addr_discovery: bool,
     #[serde(default = "default_quic_bind")]
     pub quic_bind: SocketAddr,
-    #[serde(default)]
+    #[serde(default = "default_rx_bytes_per_second")]
     pub rx_bytes_per_second: u32,
-    #[serde(default)]
+    #[serde(default = "default_rx_max_burst_bytes")]
     pub rx_max_burst_bytes: u32,
 }
 
@@ -162,6 +164,10 @@ pub struct PkarrConfig {
     pub put_per_second: u32,
     #[serde(default = "default_put_burst")]
     pub put_burst: u32,
+    #[serde(default = "default_get_per_second")]
+    pub get_per_second: u32,
+    #[serde(default = "default_get_burst")]
+    pub get_burst: u32,
     #[serde(
         default = "default_eviction",
         deserialize_with = "deserialize_duration"
@@ -226,6 +232,18 @@ fn default_put_per_second() -> u32 {
 fn default_put_burst() -> u32 {
     8
 }
+fn default_get_per_second() -> u32 {
+    20
+}
+fn default_get_burst() -> u32 {
+    40
+}
+fn default_rx_bytes_per_second() -> u32 {
+    2_000_000
+}
+fn default_rx_max_burst_bytes() -> u32 {
+    4_000_000
+}
 fn default_eviction() -> Duration {
     Duration::from_secs(7 * 24 * 60 * 60)
 }
@@ -262,8 +280,8 @@ impl Default for RelayConfig {
         Self {
             quic_addr_discovery: true,
             quic_bind: default_quic_bind(),
-            rx_bytes_per_second: 0,
-            rx_max_burst_bytes: 0,
+            rx_bytes_per_second: default_rx_bytes_per_second(),
+            rx_max_burst_bytes: default_rx_max_burst_bytes(),
         }
     }
 }
@@ -273,6 +291,8 @@ impl Default for PkarrConfig {
         Self {
             put_per_second: default_put_per_second(),
             put_burst: default_put_burst(),
+            get_per_second: default_get_per_second(),
+            get_burst: default_get_burst(),
             eviction: default_eviction(),
         }
     }
@@ -363,6 +383,9 @@ impl Config {
         }
         if self.pkarr.put_per_second == 0 || self.pkarr.put_burst == 0 {
             return Err("pkarr.put_per_second and pkarr.put_burst must be positive".into());
+        }
+        if self.pkarr.get_per_second == 0 || self.pkarr.get_burst == 0 {
+            return Err("pkarr.get_per_second and pkarr.get_burst must be positive".into());
         }
         if self.pkarr.eviction.is_zero() {
             return Err("pkarr.eviction must be positive".into());
