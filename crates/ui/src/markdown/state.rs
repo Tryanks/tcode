@@ -456,10 +456,7 @@ impl Render for MarkdownState {
             .child(render::render_root(
                 &parsed,
                 self.list_state.clone(),
-                render::RootMeasurements {
-                    width: self.bounds.size.width,
-                    content_height: measured_content_height,
-                },
+                measured_content_height,
                 &state,
                 window,
                 cx,
