@@ -1333,6 +1333,7 @@ mod tests {
                 total_turns: 0,
                 truncated: false,
                 from: 0,
+                end: 0,
                 records: vec![],
             },
         };
@@ -1361,6 +1362,7 @@ mod tests {
                 total_turns: 0,
                 truncated: false,
                 from: 0,
+                end: 0,
                 records: vec![],
             },
         };
@@ -1478,8 +1480,7 @@ mod tests {
                         request_id: None,
                         topic: Topic::Index,
                         event: ServerEvent::IndexSnapshot(IndexSnapshot {
-                            title_generating: Default::default(),
-                            activity: Default::default(),
+                            summary: Default::default(),
                             sessions: Vec::new(),
                             projects: Vec::new(),
                         }),

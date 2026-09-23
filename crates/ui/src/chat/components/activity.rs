@@ -15,16 +15,38 @@ use agent::{ItemContent, ItemStatus};
 use tcode_core::session::{EntryContent, TimelineEntry};
 
 use super::super::model::{one_line, one_line_with_break_markers, tool_brief};
+use super::changed_files::quiet_control;
 use super::command_panel::CommandPanelCache;
 use super::indicator;
+use super::subagent::ClickHandler;
+
+/// Characters of a fetched whole output the detail lays out.
+const FULL_OUTPUT_CHARS: usize = 256 * 1024;
+
+/// A tool output that reached this client as a preview, and how far the
+/// reader has gone in fetching the rest.
+pub(crate) enum ElidedOutput {
+    Preview {
+        full_bytes: u64,
+        on_load: ClickHandler,
+    },
+    Loading,
+    Loaded(SharedString),
+    Failed {
+        error: String,
+        on_load: ClickHandler,
+    },
+}
 
 /// One Work Log activity row: a muted status icon + a one-line summary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn activity_row(
     entry: &TimelineEntry,
     compact: bool,
     live_reasoning: bool,
     expanded: bool,
     command_detail: Option<AnyElement>,
+    elided_output: Option<ElidedOutput>,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
@@ -153,7 +175,7 @@ pub(crate) fn activity_row(
 
     let mut block = v_flex().w_full().gap_1().child(row);
     if expanded && expandable {
-        block = block.child(activity_detail(entry, command_detail, cx));
+        block = block.child(activity_detail(entry, command_detail, elided_output, cx));
     }
     block.into_any_element()
 }
@@ -212,6 +234,7 @@ fn argument(text: String) -> Option<AnyElement> {
 fn activity_detail(
     entry: &TimelineEntry,
     command_detail: Option<AnyElement>,
+    elided_output: Option<ElidedOutput>,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -237,12 +260,22 @@ fn activity_detail(
                     cx,
                 ))
                 .when_some(output.clone(), |detail, output| {
-                    detail.child(activity_detail_section(
-                        crate::tr!("chat.output").into_owned(),
-                        truncate_chars(&output, 240),
-                        false,
-                        cx,
-                    ))
+                    let full = match &elided_output {
+                        Some(ElidedOutput::Loaded(full)) => Some(full.clone()),
+                        _ => None,
+                    };
+                    detail.child(match full {
+                        Some(full) => full_output_section(full, entry, cx),
+                        None => activity_detail_section(
+                            crate::tr!("chat.output").into_owned(),
+                            truncate_chars(&output, 240),
+                            false,
+                            cx,
+                        ),
+                    })
+                })
+                .when_some(elided_output, |detail, elided| {
+                    detail.children(elided_output_control(elided, entry, cx))
                 })
                 .into_any_element()
         }
@@ -326,6 +359,94 @@ fn activity_detail_section(label: String, text: String, monospace: bool, cx: &Ap
                     text
                 }),
         )
+}
+
+fn full_output_section(full: SharedString, entry: &TimelineEntry, cx: &App) -> Div {
+    let muted = cx.theme().muted_foreground;
+    let shown: SharedString = if full.chars().count() > FULL_OUTPUT_CHARS {
+        let head: String = full.chars().take(FULL_OUTPUT_CHARS).collect();
+        format!("{head}…").into()
+    } else {
+        full
+    };
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(10.5))
+                .font_medium()
+                .text_color(muted)
+                .child(crate::material::tracked_uppercase(&crate::tr!(
+                    "chat.full_output"
+                ))),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("full-output-{}", entry.id)))
+                .w_full()
+                .max_h(px(360.))
+                .overflow_y_scroll()
+                .line_height(px(18.))
+                .text_size(px(11.5))
+                .text_color(muted)
+                .font_family(cx.theme().mono_font_family.clone())
+                .whitespace_normal()
+                .child(shown),
+        )
+}
+
+fn elided_output_control(
+    elided: ElidedOutput,
+    entry: &TimelineEntry,
+    cx: &App,
+) -> Option<AnyElement> {
+    let muted = cx.theme().muted_foreground;
+    let id = SharedString::from(format!("load-output-{}", entry.id));
+    let note = |text: String| {
+        div()
+            .text_size(px(11.))
+            .text_color(muted)
+            .child(text)
+            .into_any_element()
+    };
+    Some(match elided {
+        ElidedOutput::Preview {
+            full_bytes,
+            on_load,
+        } => h_flex()
+            .gap_2()
+            .items_center()
+            .child(note(
+                crate::tr!(
+                    "chat.output_elided",
+                    size = crate::thread_export::format_size(full_bytes as usize)
+                )
+                .into_owned(),
+            ))
+            .child(quiet_control(
+                id,
+                crate::tr!("chat.load_full_output").into_owned().into(),
+                on_load,
+                cx,
+            ))
+            .into_any_element(),
+        ElidedOutput::Loading => note(crate::tr!("chat.full_output_loading").into_owned()),
+        ElidedOutput::Loaded(_) => return None,
+        ElidedOutput::Failed { error, on_load } => h_flex()
+            .gap_2()
+            .items_center()
+            .child(note(
+                crate::tr!("chat.full_output_failed", error = error).into_owned(),
+            ))
+            .child(quiet_control(
+                id,
+                crate::tr!("chat.load_full_output").into_owned().into(),
+                on_load,
+                cx,
+            ))
+            .into_any_element(),
+    })
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {

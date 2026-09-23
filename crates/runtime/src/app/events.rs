@@ -502,23 +502,22 @@ impl AppState {
     }
 
     fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
-        self.event_records
-            .entry(session_id.to_string())
-            .or_insert_with(|| SessionLog::load(&self.store, session_id))
-            .push(SessionEventRecord {
-                ts: Some(ts),
-                event: event.clone(),
-            });
+        let record = SessionEventRecord {
+            ts: Some(ts),
+            event: event.clone(),
+            elided: None,
+        };
         self.emit_domain(
             Topic::SessionEvents {
                 session_id: session_id.to_string(),
             },
-            ServerEvent::SessionEvent(SessionEventRecord {
-                ts: Some(ts),
-                event: event.clone(),
-            }),
+            ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
             cx,
         );
+        self.event_records
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionLog::load(&self.store, session_id))
+            .push(record);
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),

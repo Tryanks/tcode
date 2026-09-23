@@ -706,6 +706,17 @@ fn dispatch_query(
             let task = app.search_session_content(query, limit, cx);
             cx.spawn_background(async move { Ok(QueryResponse::SessionContentHits(task.await)) })
         }
+        Query::ReadItemOutput {
+            session_id,
+            item_id,
+        } => {
+            let result = app.item_output(&session_id, &item_id);
+            cx.spawn_background(async move { result })
+        }
+        Query::ArchivedSessions => {
+            let sessions = app.archived_sessions();
+            cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(sessions)) })
+        }
         Query::RenderStoredOutput {
             session_id,
             item_id,
@@ -1243,12 +1254,12 @@ mod tests {
         .unwrap();
         let event = next_event(
             &events,
-            |event| matches!(&event.event, ServerEvent::IndexSnapshot(snapshot) if snapshot.projects[0].icon_path.is_some()),
+            |event| matches!(&event.event, ServerEvent::IndexUpsertProject(project) if project.icon_path.is_some()),
         );
-        let ServerEvent::IndexSnapshot(snapshot) = event.event else {
+        let ServerEvent::IndexUpsertProject(project) = event.event else {
             panic!()
         };
-        let first = snapshot.projects[0].icon_path.clone().unwrap();
+        let first = project.icon_path.clone().unwrap();
         assert!(first.starts_with(root.join("project-icons")));
         host.shutdown_blocking().unwrap();
         assert_eq!(
@@ -1340,7 +1351,7 @@ mod tests {
         });
         assert!(matches!(
             snapshot.event,
-            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot { activity: _,
+            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
                 ref sessions,
                 ref projects,
                 ..
@@ -1356,23 +1367,17 @@ mod tests {
             CommandResponse::ProjectId(Some(project_id)) => project_id,
             other => panic!("unexpected create-project response: {other:?}"),
         };
-        let replacement = next_event(&events, |event| {
+        let upsert = next_event(&events, |event| {
             event.topic == Topic::Index
                 && matches!(
                     &event.event,
-                    ServerEvent::IndexSnapshot(snapshot)
-                        if snapshot.projects.iter().any(|project| project.id == project_id)
+                    ServerEvent::IndexUpsertProject(project) if project.id == project_id
                 )
         });
-        let ServerEvent::IndexSnapshot(snapshot) = replacement.event else {
-            unreachable!("filtered to index snapshots")
+        let ServerEvent::IndexUpsertProject(project) = upsert.event else {
+            unreachable!("filtered to project upserts")
         };
-        assert!(
-            snapshot
-                .projects
-                .iter()
-                .any(|project| project.id == project_id && project.root == project_root)
-        );
+        assert_eq!(project.root, project_root);
 
         // A path the client believes in but the host cannot resolve is refused
         // by the host, not by whatever OS the client happens to run.

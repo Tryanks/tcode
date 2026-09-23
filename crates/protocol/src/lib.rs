@@ -15,17 +15,18 @@ mod wire;
 pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
 pub use event::{
     AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, GitActionRequest,
-    GitStatusStatus, IndexSnapshot, MergeWorktreeFailure, NoticeSeverity, ProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
-    RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord,
-    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    Topic,
+    GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure, NoticeSeverity,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent,
+    SessionEventRecord, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
-    HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, PathEntry,
-    PathInfo, PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS,
-    STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool,
+    HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES,
+    OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query, QueryResponse, RecentDir,
+    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS,
+    SessionSearchHit, SourceTool,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -34,8 +35,10 @@ pub use wire::{
 };
 
 // Version 4 adds client-generated command deduplication keys; version 5 moves
-// authentication into the transport, so hello carries no token.
-pub const PROTOCOL_VERSION: u32 = 5;
+// authentication into the transport, so hello carries no token; version 6
+// sends index and history changes instead of whole replacements and
+// compresses the native transport.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[cfg(test)]
 mod tests;

@@ -26,14 +26,20 @@ impl DomainDiff {
     pub(crate) fn emit_changes(&mut self, state: &AppState, cx: &mut HostCx) {
         let index = state.index_snapshot();
         if self.index != index {
-            self.index = index.clone();
-            emit_replacement(Topic::Index, ServerEvent::IndexSnapshot(index), cx);
+            for event in index_changes(&self.index, &index) {
+                emit_replacement(Topic::Index, event, cx);
+            }
+            self.index = index;
         }
 
         if self.settings != state.settings {
             let settings = state.settings_snapshot();
-            self.settings = settings.clone();
-            emit_replacement(Topic::Settings, ServerEvent::SettingsReplaced(settings), cx);
+            emit_replacement(
+                Topic::Settings,
+                settings_change(&self.settings, &settings),
+                cx,
+            );
+            self.settings = settings;
         }
 
         let providers = state.providers_status_snapshot();
@@ -86,6 +92,67 @@ impl DomainDiff {
     }
 }
 
+/// The events that turn a client's `old` index into `new`: the changed
+/// threads and projects one by one, and the summary whole.
+fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
+    let mut events = Vec::new();
+    let old_projects: HashMap<_, _> = old.projects.iter().map(|p| (p.id.as_str(), p)).collect();
+    let new_projects: HashSet<_> = new.projects.iter().map(|p| p.id.as_str()).collect();
+    for project in &new.projects {
+        if old_projects.get(project.id.as_str()) != Some(&project) {
+            events.push(ServerEvent::IndexUpsertProject(project.clone()));
+        }
+    }
+    let old_sessions: HashMap<_, _> = old.sessions.iter().map(|m| (m.id.as_str(), m)).collect();
+    let new_sessions: HashSet<_> = new.sessions.iter().map(|m| m.id.as_str()).collect();
+    for meta in &new.sessions {
+        if old_sessions.get(meta.id.as_str()) != Some(&meta) {
+            events.push(ServerEvent::IndexUpsertSession(meta.clone()));
+        }
+    }
+    for meta in &old.sessions {
+        if !new_sessions.contains(meta.id.as_str()) {
+            events.push(ServerEvent::IndexRemoveSession {
+                session_id: meta.id.clone(),
+            });
+        }
+    }
+    for project in &old.projects {
+        if !new_projects.contains(project.id.as_str()) {
+            events.push(ServerEvent::IndexRemoveProject {
+                project_id: project.id.clone(),
+            });
+        }
+    }
+    if old.summary != new.summary {
+        events.push(ServerEvent::IndexSummaryReplaced(new.summary.clone()));
+    }
+    events
+}
+
+/// Visiting a thread changes only its visit time, so that alone crosses the
+/// wire rather than every setting.
+fn settings_change(old: &Settings, new: &Settings) -> ServerEvent {
+    let only_visits = Settings {
+        last_visited: new.last_visited.clone(),
+        ..old.clone()
+    } == *new
+        && old
+            .last_visited
+            .keys()
+            .all(|id| new.last_visited.contains_key(id));
+    if !only_visits {
+        return ServerEvent::SettingsReplaced(new.clone());
+    }
+    ServerEvent::LastVisitedChanged(
+        new.last_visited
+            .iter()
+            .filter(|(id, at)| old.last_visited.get(*id) != Some(at))
+            .map(|(id, at)| (id.clone(), *at))
+            .collect(),
+    )
+}
+
 fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
     cx.emit(HostEvent::Domain(EventEnvelope {
         request_id: None,
@@ -96,7 +163,7 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 
 impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
-        IndexSnapshot {
+        let mut summary = IndexSummary {
             title_generating: self.title_generating.clone(),
             activity: self
                 .residents
@@ -116,9 +183,42 @@ impl AppState {
                     ))
                 })
                 .collect(),
-            sessions: self.sessions.clone(),
+            ..IndexSummary::default()
+        };
+        let mut sessions = Vec::new();
+        for meta in &self.sessions {
+            if meta.archived_at.is_none() {
+                sessions.push(meta.clone());
+                continue;
+            }
+            if let Some(project_id) = &meta.project_id {
+                *summary
+                    .archived_counts
+                    .entry(project_id.clone())
+                    .or_default() += 1;
+            }
+            if let Some(worktree) = &meta.worktree {
+                summary
+                    .archived_worktree_branches
+                    .insert(worktree.branch.clone());
+            }
+        }
+        IndexSnapshot {
+            summary,
+            sessions,
             projects: self.projects.clone(),
         }
+    }
+
+    pub fn archived_sessions(&self) -> Vec<SessionMeta> {
+        let mut archived: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.archived_at.is_some())
+            .cloned()
+            .collect();
+        archived.sort_by_key(|meta| std::cmp::Reverse(meta.archived_at));
+        archived
     }
 
     pub fn settings_snapshot(&self) -> Settings {
