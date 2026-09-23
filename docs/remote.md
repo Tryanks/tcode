@@ -27,10 +27,10 @@ data they need to show and operate that work.
 
 1. Open the desktop app on the machine where your projects and agent CLIs live.
    Configure the providers and add your projects there.
-2. Open **Settings → Other devices**. Set **Machine name** (shown to devices)
-   and choose a **Traverse** mode: **Official Traverse**, **Self-hosted
-   Traverse** with the base URL of your instance, or **Off**. Use **Apply** to
-   apply changes while hosting is already on.
+2. Open **Settings → Remote**. Set **Machine name** (shown to devices) and
+   choose a **Traverse** mode: **Official Traverse**, **Self-hosted Traverse**
+   with the base URL of your instance, or **Off**. A change applies when the
+   field is left, restarting the endpoint if hosting is already on.
 3. Turn on **Let other devices connect to this machine**. The desktop binds its
    Traverse endpoint to UDP port `47420` on all IPv4 and IPv6 interfaces (IPv4
    only where IPv6 is unavailable), so invitation addresses, firewall rules
@@ -39,16 +39,19 @@ data they need to show and operate that work.
    [Finding the machine again](#finding-the-machine-again)). Allow that UDP
    port through the machine's firewall for direct LAN connections; a relayed
    connection needs only outbound access.
-4. Under **Invitation**, scan the QR code with the phone, or use **Copy
+4. Open **Machines** (the sidebar entry under the search field). Under **Let
+   other devices connect**, scan the QR code with the phone, or use **Copy
    invitation link** and paste the link into Tcode on the other device. The QR
    is redrawn with the machine's current relay and addresses while the
    invitation is valid, so a link copied a minute later still works. Use **New
-   invitation** when one expires or you need to add another device. **Machine
-   ‹fingerprint›** copies the full machine id.
-5. Check **Connected devices** after pairing. Each row shows the device's name
-   and operating system (for example `Xiaomi 15 · Android 15`), when it first
-   connected, and **Direct**, **Relay via ‹host›** or **Offline**; the list
-   refreshes every two seconds. Use **Remove** to withdraw a device's access.
+   invitation** when one expires or you need to add another device. While
+   hosting is off, or **Accept new devices** is off, this section says so and
+   leads to **Settings → Remote**.
+5. Check **Connected devices** in **Settings → Remote** after pairing. Each
+   row shows the device's name and operating system (for example
+   `Xiaomi 15 · Android 15`) and **LAN**, **Tunnel**, **Relay (‹region›)** or
+   **Offline**; the list refreshes every two seconds. Use **Remove** to
+   withdraw a device's access.
 
 Hosting keeps running while this window is connected to another machine:
 devices that opened this machine continue working, and **Let other devices
@@ -122,13 +125,13 @@ devices only; it does not serve the browser app.
    directory: written whenever an invitation is minted, at startup or from a
    paired device, and removed once it is used, expires, pairing is turned off
    or `serve` stops. `pair` cannot mint one: when it reports no valid
-   invitation, create one from a paired device's **Settings → Other devices →
+   invitation, create one from the logged-in browser's **Settings → Remote →
    New invitation** or restart `serve`.
-7. From a paired device (or the logged-in browser), **Settings → Other
-   devices** shows this machine's invitation QR and link, creates a new
-   invitation, lists connected devices with their path, and removes devices.
-   A native device sees the native devices; the browser also sees the
-   browsers logged in to this machine, listed after them.
+7. The logged-in browser's **Settings → Remote** shows this machine's
+   invitation QR and link, creates a new invitation, lists connected devices
+   with their path, and removes devices: the native devices, then the
+   browsers logged in to this machine. A native device's own **Settings →
+   Remote** configures that device's hosting, not this machine's.
    **Accept new devices** controls whether the machine accepts pairings; it
    defaults to on and is saved in `traverse.json`. Turning it off discards the
    current invitation and does not disconnect already paired devices.
@@ -252,12 +255,12 @@ tab gets the desktop split and a narrow one gets the compact stack.
 
 1. Open **Machines** on this device — the sidebar entry under the search field,
    or the opening screen when no machine has been added yet.
-2. Under **Add a machine**, paste the machine's invitation link
-   (`tcode://pair?…`). The form shows **Invitation from ‹name› · ‹fingerprint›**
-   once the link is valid.
-3. Choose **Add a machine**, then **Connect to ‹machine›**.
-4. The same window immediately opens that machine's projects and threads.
-   Choose another machine under **Your machines** to switch again;
+2. Under **Add a machine**, choose **Paste an invitation link** and paste the
+   machine's invitation link (`tcode://pair?…`). A link that parses is sent at
+   once: the page shows **Connecting to ‹machine›…**, and when the machine
+   admits this device the window opens that machine's projects and threads.
+   A failure is shown under the field, and **Connect** retries.
+3. Choose another machine under **Your machines** to switch again;
    **This machine** restores the local workspace, and a machine row's
    **⋯ → Disconnect** leaves without removing it. Switching closes only this
    device's link, not Tcode on either machine. Opening **Machines** by itself
@@ -289,7 +292,9 @@ data directory for `--pair` and `--connect`.
    Native QR scanning uses AVFoundation on iOS and CameraX/ML Kit on Android;
    a simulator's permission and cancel flows do not prove that real camera
    recognition works.
-3. Choose **Add a machine**, then **Connect to ‹machine›**.
+3. A scanned or pasted invitation pairs and connects in one step: the page
+   shows **Connecting to ‹machine›…** and then opens the machine's threads. A
+   failure is shown under the rows that started the attempt.
 4. Open a thread from the list, or use **+** to start one. Read replies, send or
    queue a message, steer a running turn, stop it, and answer approvals — the
    same views the desktop shows, laid out for the width.
@@ -320,8 +325,8 @@ relay; to reach a machine from elsewhere, use the native app.
 3. A rejected or revoked token returns to the login form. Five wrong passwords
    lock browser login for five minutes. Native pairing is unaffected by this
    lockout.
-4. **Settings → Other devices** manages this machine's native pairing: **Allow
-   other devices**, the current invitation QR and link, **New invitation**, and
+4. **Settings → Remote** manages this machine's native pairing: **Accept new
+   devices**, the current invitation QR and link, **New invitation**, and
    removing paired devices. Phones and other desktops always pair with an
    invitation, never with the browser password. The device list shows the
    native devices, then every browser logged in to this machine (browser ·
@@ -359,7 +364,7 @@ device list follows them.
 ## Traverse
 
 A machine has one Traverse setting: **Official**, **Self-hosted** (a base
-URL) or **Off**. On the desktop it is in **Settings → Other devices →
+URL) or **Off**. On the desktop it is in **Settings → Remote →
 Traverse**; headless uses `serve --traverse official|off|<url>`. Devices need
 no Traverse setting: the invitation carries the machine's Traverse URL (absent
 for the official service, `off` for none), and each saved machine keeps its
@@ -583,15 +588,15 @@ own window, including Preview tunnels to the machine's loopback and network.
 
 ### Revocation
 
-On the machine, use **Settings → Other devices → Connected devices → Remove**
-(from the desktop, a paired device or the logged-in browser). The device is
+On the machine, use **Settings → Remote → Connected devices → Remove**
+(on the desktop, or in the logged-in browser of a headless machine). The device is
 taken off the allow list and saved, its live connections are closed at once,
 and a new connection from it is refused from that moment. The device shows
 **Access rejected · Pair again** and stops retrying. Pairing it again needs a
 new invitation.
 
 A browser logged in to a headless machine is listed after the native devices
-in the logged-in browser's **Settings → Other devices**; **Remove** there
+in the logged-in browser's **Settings → Remote**; **Remove** there
 invalidates its token and closes its socket at the next message or
 keep-alive, and that tab returns to the login form. Native devices do not
 list browsers; `set-password --revoke-tokens` on the stopped host removes
@@ -612,13 +617,13 @@ list in memory and writes it back.
 | --- | --- |
 | **That is not a Tcode invitation link** | The pasted text is not a complete `tcode://pair?v=2&…` link with a valid machine id and secret. Copy the link again from the machine or scan the QR. |
 | **The machine rejected this invitation** | The invitation expired (five minutes), was already used, was replaced by a newer one, or five wrong secrets invalidated it. Create **New invitation** on the machine or restart `serve`; get a separate invitation for each device. |
-| **This machine is not accepting new device pairings** | Turn on **Accept new devices** on the machine (desktop **Settings → Other devices**, or from a paired device or the logged-in browser). |
+| **This machine is not accepting new device pairings** | Turn on **Accept new devices** on the machine (desktop **Settings → Remote**, or the logged-in browser of a headless machine). |
 | **Could not reach ‹machine›** while pairing | The device reached none of the invitation's addresses or its relay within 20 seconds. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN. With Traverse off, only the printed addresses and the LAN lookup work. |
 | **Reconnecting to ‹machine›… (attempt N)** stays up | The device keeps trying the saved relay and addresses with growing delays, and on every attempt looks for the machine on its own network (see [Finding the machine again](#finding-the-machine-again)). If the machine moved to another network with Traverse off and the device did not move with it, pair again with a new invitation. Direct paths need UDP between the two ends; a relayed connection reaches the relay over HTTPS (TCP), so it still works where UDP is blocked, as long as the machine publishes to a relay. |
 | **Access rejected · Pair again** | The machine no longer lists this device (removed, or the machine's data directory was replaced). Pair again with a new invitation if access is intended. |
 | **Protocol mismatch · Update the app** | The machine and the device run different protocol versions. Update both. |
 | **Connected … · Relay** when both are on the same LAN | Hole punching has not found a direct path yet, or the LAN blocks UDP between the two. The path can switch to **Direct** while connected; the machine's fixed UDP port (`47420`) allowed through its firewall helps. |
-| `tcode-headless pair` says there is no valid invitation | The last one was used or expired, or `serve` is not running. Create a new invitation from a paired device's **Settings → Other devices**, or restart `serve`. |
+| `tcode-headless pair` says there is no valid invitation | The last one was used or expired, or `serve` is not running. Create a new invitation from the logged-in browser's **Settings → Remote**, or restart `serve`. |
 | A self-hosted machine hosts with `Relay: none (LAN only)` | The instance's `relays.json` could not be fetched and nothing is cached; the machine is reachable on the LAN only until a background refresh (every five minutes) gets the manifest. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
 | Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if logged-in browsers should lose access. |
 | Browser page unreachable from another device | The listener binds `127.0.0.1:47420` by default. Start `serve --browser-listen 0.0.0.0:47420` and open the machine's LAN address; `serve` refuses that bind until a password is set. |

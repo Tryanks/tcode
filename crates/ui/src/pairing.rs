@@ -5,24 +5,24 @@ use tcode_client::pairing::{PairInvite, PairedHost, parse_pair_url};
 use crate::widgets::input::InputState;
 
 /// The form holds one thing: the invitation link a machine shows, scanned or
-/// pasted. The link is the whole secret, so there is nothing else to type.
+/// pasted. The link is the whole secret, so there is nothing else to type, and
+/// a link that parses is submitted the moment it lands: pairing and
+/// connecting are one step, not a form and a confirmation.
 pub struct PairForm {
-    /// Paired but waiting for the user to connect.
-    pub paired: Option<PairedHost>,
     /// The `tcode://pair?…` link.
     pub invitation: Entity<InputState>,
     pub busy: bool,
     pub error: Option<String>,
     /// Bumped whenever the form is retargeted; stamps in-flight results.
     pub generation: u64,
-    /// Whether the shell has already installed its paste listeners.
-    pub listening: bool,
+    /// The link of the attempt in flight or the one that last failed. A field
+    /// that still holds it is not submitted again on every keystroke.
+    attempted: Option<String>,
 }
 
 impl PairForm {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
-            paired: None,
             invitation: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(crate::tr!("hosts.pair.invitation_placeholder").into_owned())
@@ -30,7 +30,7 @@ impl PairForm {
             busy: false,
             error: None,
             generation: 0,
-            listening: false,
+            attempted: None,
         }
     }
 
@@ -46,12 +46,22 @@ impl PairForm {
         !value.trim().is_empty() && parse_pair_url(&value).is_none()
     }
 
+    /// Whether the field holds an invitation that has not been tried yet: the
+    /// signal to submit without waiting for a button.
+    pub fn should_submit(&self, cx: &App) -> bool {
+        if self.busy {
+            return false;
+        }
+        let value = self.invitation.read(cx).value();
+        parse_pair_url(&value).is_some() && self.attempted.as_deref() != Some(value.trim())
+    }
+
     /// Reset for a fresh attempt and stamp it. Any in-flight pairing result
     /// from the previous generation is discarded when it lands.
     pub fn restart(&mut self) -> u64 {
-        self.paired = None;
         self.error = None;
         self.busy = false;
+        self.attempted = None;
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
@@ -61,36 +71,34 @@ impl PairForm {
         if self.busy {
             return None;
         }
-        let request = self.request(cx)?;
+        let value = self.invitation.read(cx).value();
+        let request = parse_pair_url(&value)?;
+        self.attempted = Some(value.trim().to_owned());
         self.busy = true;
         self.error = None;
         Some((request, self.generation))
     }
 
-    /// Apply a pairing result. Returns `false` when it belongs to a superseded
-    /// attempt and was dropped.
+    /// Apply a pairing result. The paired machine is returned so the caller
+    /// connects to it; `None` when the attempt failed (the error is kept for
+    /// the page) or belongs to a superseded attempt and was dropped.
     pub fn finish_pair(
         &mut self,
         generation: u64,
         result: Result<PairedHost, String>,
         address: &str,
-    ) -> bool {
+    ) -> Option<PairedHost> {
         if generation != self.generation {
-            return false;
+            return None;
         }
         self.busy = false;
         match result {
-            Ok(host) => {
-                self.paired = Some(host);
+            Ok(host) => Some(host),
+            Err(error) => {
+                self.error = Some(pair_error(&error, address));
+                None
             }
-            Err(error) => self.error = Some(pair_error(&error, address)),
         }
-        true
-    }
-
-    /// Take the paired host so the shell can connect to it.
-    pub fn take_paired(&mut self) -> Option<PairedHost> {
-        self.paired.take()
     }
 
     /// Adopt a scanned or pasted `tcode://pair?…` link. Returns `false`, and
@@ -108,6 +116,7 @@ impl PairForm {
     /// Empty the field for a fresh invitation.
     pub fn clear(&mut self, window: &mut Window, cx: &mut App) {
         self.error = None;
+        self.attempted = None;
         self.invitation.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
@@ -203,6 +212,25 @@ mod tests {
         form.read_with(cx, |holder, cx| {
             assert_eq!(holder.0.request(cx), Some(invite()));
             assert!(!holder.0.invalid(cx));
+            assert!(
+                holder.0.should_submit(cx),
+                "a link that parses is submitted without a button"
+            );
+        });
+        // Once tried, the same link is not sent again while it sits in the
+        // field: not while the attempt is in flight, and not after it failed.
+        form.update(cx, |holder, cx| {
+            let (_, generation) = holder.0.begin_pair(cx).expect("a request");
+            assert!(!holder.0.should_submit(cx));
+            assert!(
+                holder
+                    .0
+                    .finish_pair(generation, Err("pairing_disabled".into()), "Studio")
+                    .is_none()
+            );
+            assert!(!holder.0.busy);
+            assert!(holder.0.error.is_some());
+            assert!(!holder.0.should_submit(cx));
         });
         for rejected in [
             "tcode://pair?v=1&id=abc&code=123456",
@@ -232,6 +260,7 @@ mod tests {
         form.read_with(cx, |holder, cx| {
             assert!(!holder.0.invalid(cx), "an empty field is not an error");
             assert_eq!(holder.0.request(cx), None);
+            assert!(!holder.0.should_submit(cx));
         });
     }
 
@@ -249,12 +278,12 @@ mod tests {
         form.update(cx, |holder, _| {
             let rejected = || Err("invalid or expired invitation".into());
             assert!(
-                !holder.0.finish_pair(stale, rejected(), "a:1"),
+                holder.0.finish_pair(stale, rejected(), "a:1").is_none(),
                 "a pairing answer from the previous attempt must be dropped"
             );
             assert_eq!(holder.0.error, None);
 
-            assert!(holder.0.finish_pair(current, rejected(), "a:1"));
+            assert!(holder.0.finish_pair(current, rejected(), "a:1").is_none());
             assert_eq!(
                 holder.0.error.as_deref(),
                 Some(crate::tr!("hosts.pair.rejected").into_owned().as_str())

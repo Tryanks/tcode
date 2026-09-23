@@ -114,11 +114,12 @@ wider tablet and every desktop window use the split layout. Some actions depend
 on the device in your hands, such as opening a native file dialog or driving the
 embedded preview browser.
 
-**Use your desktop as the machine.** In **Settings → Other devices**, turn on
-**Let other devices connect to this machine**. Scan the QR code with the device
-you want to connect, or send it the invitation link. An invitation admits one
-device and expires after five minutes; the link is the secret, so share it only
-with that device.
+**Use your desktop as the machine.** In **Settings → Remote**, turn on
+**Let other devices connect to this machine**. The sidebar's **Machines** page
+then shows the invitation: scan its QR code with the device you want to
+connect, or send it the invitation link. An invitation admits one device and
+expires after five minutes; the link is the secret, so share it only with that
+device.
 
 **Use a server as the machine.** Download `tcode-headless` from
 [Releases](https://github.com/Tryanks/tcode/releases), install your agent CLIs
@@ -136,10 +137,11 @@ address. Set a password on first open, or preset it with `TCODE_PASSWORD`.
 
 **Connect another device.** Open the sidebar's **Machines** row on a desktop,
 or the opening screen on a phone. Scan the machine's QR code or paste its
-invitation link, then connect. In a browser, open the printed HTTP link and
-log in with the password; the browser is for direct access on the machine or
-its LAN and does not use Traverse. Its **Settings → Other devices** shows the
-machine's invitation for native clients and controls pairing and revocation.
+invitation link; pairing connects at once. In a browser, open the printed HTTP
+link and log in with the password; the browser is for direct access on the
+machine or its LAN and does not use Traverse. Its **Settings → Remote** shows
+the machine's invitation for native clients and controls pairing and
+revocation.
 See [Use Tcode from other devices](docs/remote.md) for the full guide.
 
 **Security.** Native connections are authenticated by device and machine keys
