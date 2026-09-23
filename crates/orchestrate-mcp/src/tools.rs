@@ -16,6 +16,9 @@ use crate::{Broker, OrchestrateOp, ThreadPurpose};
 struct DispatchParams {
     provider: String,
     #[serde(default)]
+    #[schemars(
+        description = "Model ID from the current Orchestrate configuration, for example gpt-6-sol. This is separate from the provider endpoint profile ID."
+    )]
     model: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -23,6 +26,9 @@ struct DispatchParams {
     )]
     effort: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Provider endpoint profile ID. Set only when the chosen configuration entry explicitly lists a profile ID; otherwise omit for the built-in endpoint. Do not put the model name here; use model instead."
+    )]
     profile: Option<String>,
     #[serde(default)]
     access: Option<String>,
@@ -70,6 +76,9 @@ impl CollaborationEffort {
 struct CollaborateParams {
     provider: String,
     #[serde(default)]
+    #[schemars(
+        description = "Model ID from the current Orchestrate configuration, for example gpt-6-sol. This is separate from the provider endpoint profile ID."
+    )]
     model: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -77,6 +86,9 @@ struct CollaborateParams {
     )]
     effort: Option<CollaborationEffort>,
     #[serde(default)]
+    #[schemars(
+        description = "Provider endpoint profile ID. Set only when the chosen configuration entry explicitly lists a profile ID; otherwise omit for the built-in endpoint. Do not put the model name here; use model instead."
+    )]
     profile: Option<String>,
     title: String,
     #[schemars(
