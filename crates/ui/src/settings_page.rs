@@ -75,8 +75,9 @@ enum Section {
 
 /// Navigation order, shared by the desktop rail and the compact section list.
 /// Device-local settings come first; replicated settings for the attached
-/// machine follow. Other devices manages the local desktop listener, or the
-/// serving headless listener in a browser. Choosing a machine lives in `crate::remote`.
+/// machine follow. Remote configures the local desktop listener, or the serving
+/// headless listener in a browser. Choosing a machine, and the invitation other
+/// devices pair with, live in `crate::remote`.
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 const SECTIONS: [Section; 8] = [
     Section::General,
@@ -206,7 +207,7 @@ impl Section {
             Self::ComputerUse => IconName::LayoutDashboard,
             Self::Orchestrate => IconName::Map,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-            Self::Remote => IconName::HardDrive,
+            Self::Remote => IconName::Network,
             Self::Archived => IconName::Inbox,
         }
     }

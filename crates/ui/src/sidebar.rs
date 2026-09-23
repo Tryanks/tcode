@@ -1596,17 +1596,18 @@ impl SessionsSidebar {
         let compact = self.window_state.read(cx).compact;
         let active = self.window_state.read(cx).route() == Route::Hosts;
         let store = self.store.read(cx);
-        let host = store
-            .remote_host_name()
-            .map(SharedString::from)
-            .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into());
-        let connection_state = store.connection_state();
-        let connection_color = cx.theme().connection_color(&connection_state);
-        // The dot says whether the link is up; hovering says how it is
-        // carried, which only a remote link has to tell.
-        let connection = store
-            .remote_host_name()
-            .map(|_| SharedString::from(crate::remote::connection_label(&connection_state)));
+        // A remote link has a machine to name and a state to report: the dot
+        // says whether the link is up, hovering says how it is carried. The
+        // window that is the host itself has neither, so its row is the
+        // entry alone.
+        let remote = store.remote_host_name().map(|name| {
+            let connection_state = store.connection_state();
+            (
+                SharedString::from(name.to_owned()),
+                cx.theme().connection_color(&connection_state),
+                SharedString::from(crate::remote::connection_label(&connection_state)),
+            )
+        });
         div()
             .flex_none()
             .px(px(if compact { COMPACT_PAGE_PADDING } else { 8. }))
@@ -1634,7 +1635,7 @@ impl SessionsSidebar {
                     this.window_state
                         .update(cx, |state, cx| state.go(Destination::Hosts, cx));
                 }))
-                .when_some(connection, |row, connection| {
+                .when_some(remote.clone(), |row, (_, _, connection)| {
                     row.tooltip(move |window, cx| {
                         Tooltip::new(connection.clone()).build(window, cx)
                     })
@@ -1652,23 +1653,25 @@ impl SessionsSidebar {
                         .text_color(cx.theme().sidebar_foreground)
                         .child(crate::tr!("hosts.title")),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(if compact { 13. } else { 12. }))
-                        .text_align(gpui::TextAlign::Right)
-                        .text_color(cx.theme().muted_foreground)
-                        .child(host),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(8.))
-                        .rounded_full()
-                        .bg(connection_color),
-                ),
+                .when_some(remote, |row, (host, connection_color, _)| {
+                    row.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(if compact { 13. } else { 12. }))
+                            .text_align(gpui::TextAlign::Right)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(host),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(connection_color),
+                    )
+                }),
             )
     }
 
