@@ -135,7 +135,7 @@ counters (a second copy labelled `component="qad"` for the QUIC socket) and
 
 ## Pointing a Tcode machine at it
 
-Desktop: **Settings → Other devices → Traverse → Self-hosted Traverse**, then
+Desktop: **Settings → Remote → Traverse → Self-hosted Traverse**, then
 the base URL, `https://traverse.example.org`. Headless:
 `tcode-headless serve --traverse https://traverse.example.org`. Devices take
 the URL from the machine's invitation, so nothing is configured on a phone.

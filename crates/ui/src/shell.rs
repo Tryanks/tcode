@@ -4711,9 +4711,10 @@ mod tests {
         });
     }
 
-    /// Hosts answers "which host am I talking to" and nothing else. Hosting
-    /// this machine is a setting of this machine, and stays in Settings even
-    /// where the build can actually host.
+    /// Hosts is where connections are made, in both directions; *configuring*
+    /// hosting — the endpoint, its name, Traverse, the paired devices — is a
+    /// setting of this machine, and stays in Settings even where the build
+    /// can actually host.
     #[gpui::test]
     fn the_hosts_page_never_shows_hosting_settings(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();

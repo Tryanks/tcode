@@ -1,5 +1,6 @@
-//! Hosting this machine: the Traverse endpoint, minted invitations and the
-//! devices that have paired with it.
+//! Hosting this machine: the Traverse endpoint, its settings and the devices
+//! that have paired with it. The invitation those settings mint is shown on
+//! the Hosts page, where connections are made; `invitation_card` draws it.
 //!
 //! [`RemoteController`] is the process-wide handle the composition root installs.
 //! It owns the local [`HostMux`] and endpoint independently of whichever host
@@ -164,6 +165,13 @@ impl RemoteController {
         Ok(())
     }
 
+    /// Adopt a host started elsewhere: tests bind a random port, since the
+    /// desktop's fixed one may be taken on the machine running them.
+    #[cfg(test)]
+    pub(super) fn adopt_host(&mut self, host: TraverseHost) {
+        self.host = Some(host);
+    }
+
     pub fn stop_hosting(&mut self) {
         if let Some(host) = self.host.take() {
             host.shutdown();
@@ -206,6 +214,23 @@ impl RemoteController {
         (remaining.as_secs() > 0).then_some((invitation, remaining.as_secs()))
     }
 
+    /// What the Hosts page can offer another device right now.
+    pub fn invitation_offer(&self) -> InvitationOffer {
+        if !self.is_hosting() {
+            return InvitationOffer::NotHosting;
+        }
+        if !self.pairing_enabled() {
+            return InvitationOffer::PairingOff;
+        }
+        match self.invitation() {
+            Some((invitation, remaining)) => InvitationOffer::Live {
+                invitation,
+                remaining,
+            },
+            None => InvitationOffer::Expired,
+        }
+    }
+
     pub fn devices(&self) -> Vec<DeviceInfo> {
         self.host
             .as_ref()
@@ -221,6 +246,20 @@ impl RemoteController {
             None => Ok(()),
         }
     }
+}
+
+/// Whether this machine has an invitation to show, and if not, why: the
+/// Hosts page names the setting that would change that.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InvitationOffer {
+    NotHosting,
+    PairingOff,
+    Expired,
+    Live {
+        invitation: Invitation,
+        /// Seconds left.
+        remaining: u64,
+    },
 }
 
 /// The transport's view of a Traverse setting. A self-hosted instance needs
@@ -308,7 +347,7 @@ fn traverse_label(setting: &TraverseSetting) -> SharedString {
     .into()
 }
 
-/// Settings → Other devices: the editable hosting controls for *this machine*.
+/// Settings → Remote: the editable hosting controls for *this machine*.
 /// Their live state lives in the process-wide [`RemoteController`]; only the
 /// in-progress edits belong here.
 pub struct HostingPanel {
@@ -317,8 +356,7 @@ pub struct HostingPanel {
     /// `traverse_url_input`.
     traverse_choice: SelectTraverse,
     traverse_url_input: Entity<InputState>,
-    /// Repaint while hosting: every second while a code counts down, every
-    /// [`DEVICE_REFRESH`] otherwise for the devices' paths.
+    /// Repaint while hosting, every [`DEVICE_REFRESH`], for the devices' paths.
     ticker: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -382,16 +420,7 @@ impl HostingPanel {
             (true, false) => {
                 self.ticker = Some(cx.spawn(async move |this, cx| {
                     loop {
-                        let counting = cx.update(|cx| {
-                            cx.try_global::<RemoteController>()
-                                .is_some_and(|controller| controller.invitation().is_some())
-                        });
-                        let interval = if counting {
-                            Duration::from_secs(1)
-                        } else {
-                            DEVICE_REFRESH
-                        };
-                        cx.background_executor().timer(interval).await;
+                        cx.background_executor().timer(DEVICE_REFRESH).await;
                         if this.update(cx, |_, cx| cx.notify()).is_err() {
                             return;
                         }
@@ -679,111 +708,9 @@ impl HostingPanel {
                 ),
         );
         if hosting {
-            column = column.child(self.render_pairing_card(compact, cx));
             column = column.child(self.render_devices(compact, cx));
         }
         column.into_any_element()
-    }
-
-    fn render_pairing_card(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some(controller) = cx.try_global::<RemoteController>() else {
-            return div().into_any_element();
-        };
-        if !controller.pairing_enabled() {
-            return div().into_any_element();
-        }
-        let new_invitation = |id: &'static str, cx: &mut Context<Self>| {
-            Button::new(id)
-                .compact()
-                .label(crate::tr!("remote.invite.new"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.update_global::<RemoteController, _>(|controller, _| {
-                        controller.new_invitation();
-                    });
-                    this.sync_ticker(cx);
-                    cx.notify();
-                }))
-        };
-        let Some((invitation, remaining)) = controller.invitation() else {
-            return crate::material::group(cx)
-                .debug_selector(|| "remote-invitation".into())
-                .child(
-                    row(compact)
-                        .child(labels(
-                            crate::tr!("remote.invite.expired").into_owned().into(),
-                            None,
-                            cx,
-                        ))
-                        .child(new_invitation("remote-new-invitation", cx).primary()),
-                )
-                .into_any_element();
-        };
-        let link = invitation.url();
-        let qr = qr_element(&link);
-        crate::material::group(cx)
-            .debug_selector(|| "remote-invitation".into())
-            .child(
-                // Compact stacks the QR under the text rather than putting a
-                // fixed-size image beside text that then has nowhere to wrap.
-                if compact { v_flex() } else { h_flex() }
-                    .w_full()
-                    .px_3()
-                    .py_3()
-                    .gap_4()
-                    .items_start()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .font_medium()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!("remote.invite.title")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!(
-                                        "remote.invite.expires",
-                                        time = countdown(remaining)
-                                    )),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("remote-copy-invitation")
-                                            .ghost()
-                                            .outline()
-                                            .compact()
-                                            .label(crate::tr!("remote.invite.copy"))
-                                            .on_click(cx.listener(move |_, _, window, cx| {
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    link.clone(),
-                                                ));
-                                                window.push_notification(
-                                                    Notification::info(
-                                                        crate::tr!("remote.invite.copied")
-                                                            .into_owned(),
-                                                    ),
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        new_invitation("remote-new-invitation", cx)
-                                            .ghost()
-                                            .outline(),
-                                    ),
-                            ),
-                    )
-                    .children(qr),
-            )
-            .into_any_element()
     }
 
     fn render_devices(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -862,6 +789,109 @@ impl HostingPanel {
     }
 }
 
+/// Mint a new invitation. The row that offers it repaints on its next tick.
+fn new_invitation_button<V: 'static>(id: &'static str, cx: &mut Context<V>) -> Button {
+    Button::new(id)
+        .compact()
+        .label(crate::tr!("remote.invite.new"))
+        .on_click(cx.listener(|_, _, _, cx| {
+            cx.update_global::<RemoteController, _>(|controller, _| {
+                controller.new_invitation();
+            });
+            cx.notify();
+        }))
+}
+
+/// The invitation this machine shows other devices: the QR to scan, the link
+/// to copy, how long it lasts and the way to a fresh one. Drawn on the Hosts
+/// page, in its plain-list vocabulary; `inset` is that page's margin.
+pub(super) fn invitation_card<V: 'static>(
+    invitation: &Invitation,
+    remaining: u64,
+    compact: bool,
+    inset: f32,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let link = invitation.url();
+    let qr = qr_element(&link);
+    let text = v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_3()
+        .child(
+            div()
+                .text_size(px(15.))
+                .line_height(px(20.))
+                .child(crate::tr!("hosts.invite.description")),
+        )
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::tr!(
+                    "remote.invite.expires",
+                    time = countdown(remaining)
+                )),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    Button::new("remote-copy-invitation")
+                        .ghost()
+                        .outline()
+                        .compact()
+                        .label(crate::tr!("remote.invite.copy"))
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                            window.push_notification(
+                                Notification::info(crate::tr!("remote.invite.copied").into_owned()),
+                                cx,
+                            );
+                        })),
+                )
+                .child(
+                    new_invitation_button("remote-new-invitation", cx)
+                        .ghost()
+                        .outline(),
+                ),
+        );
+    // Compact stacks the QR over the text rather than putting a fixed-size
+    // image beside text that then has nowhere to wrap.
+    let card = if compact {
+        v_flex().items_center().children(qr).child(text)
+    } else {
+        h_flex().items_start().child(text).children(qr)
+    };
+    card.w_full()
+        .px(px(inset))
+        .py(px(8.))
+        .gap_4()
+        .debug_selector(|| "remote-invitation".into())
+        .into_any_element()
+}
+
+/// The invitation ran out: say so, next to the button that mints another.
+pub(super) fn expired_invitation_row<V: 'static>(inset: f32, cx: &mut Context<V>) -> AnyElement {
+    h_flex()
+        .w_full()
+        .px(px(inset))
+        .py(px(8.))
+        .gap_3()
+        .items_center()
+        .debug_selector(|| "remote-invitation-expired".into())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(15.))
+                .child(crate::tr!("remote.invite.expired")),
+        )
+        .child(new_invitation_button("remote-new-invitation", cx).primary())
+        .into_any_element()
+}
+
 impl Render for HostingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
@@ -893,7 +923,8 @@ mod tests {
     /// Edits apply themselves: a Traverse choice when it is made, a typed
     /// name when its field is left. The pairing switch exists only while
     /// hosting; flipping it reaches the transport, which drops or mints the
-    /// invitation, and the card follows.
+    /// invitation. The invitation itself is the Hosts page's to show, never
+    /// this settings panel's.
     #[gpui::test]
     fn edits_apply_themselves_and_the_pairing_switch_drives_the_transport(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -962,19 +993,28 @@ mod tests {
         });
         draw(cx);
         assert!(cx.debug_bounds("remote-pairing").is_some());
-        assert!(cx.debug_bounds("remote-invitation").is_some());
+        assert!(
+            cx.debug_bounds("remote-invitation").is_none(),
+            "the invitation is made on the Hosts page, not in Settings"
+        );
+        cx.read(|cx| {
+            assert!(matches!(
+                cx.global::<RemoteController>().invitation_offer(),
+                InvitationOffer::Live { .. }
+            ));
+        });
 
         panel.update(cx, |panel, cx| panel.set_pairing_enabled(false, cx));
         cx.read(|cx| {
             let controller = cx.global::<RemoteController>();
             assert!(!controller.pairing_enabled());
             assert!(controller.invitation().is_none());
+            assert_eq!(
+                controller.invitation_offer(),
+                InvitationOffer::PairingOff,
+                "no invitation is offered while pairing is off"
+            );
         });
-        draw(cx);
-        assert!(
-            cx.debug_bounds("remote-invitation").is_none(),
-            "no invitation is offered while pairing is off"
-        );
 
         panel.update(cx, |panel, cx| panel.set_pairing_enabled(true, cx));
         cx.read(|cx| {
@@ -985,14 +1025,18 @@ mod tests {
                 "turning pairing on mints an invitation at once"
             );
         });
-        draw(cx);
-        assert!(cx.debug_bounds("remote-invitation").is_some());
 
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.stop_hosting());
         });
         draw(cx);
         assert!(cx.debug_bounds("remote-pairing").is_none());
+        cx.read(|cx| {
+            assert_eq!(
+                cx.global::<RemoteController>().invitation_offer(),
+                InvitationOffer::NotHosting
+            );
+        });
         std::fs::remove_dir_all(root).unwrap();
     }
 
