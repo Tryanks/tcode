@@ -696,9 +696,15 @@ with **Pair again**; protocol mismatches stop with **Update the app**.
 - One machine holds at most 64 open streams per device connection, of which
   56 may be Preview tunnels; a device that opens more is refused with **too
   many tunnels** until one closes.
-- The Android arm64 APK is a release build signed with Gradle's debug key, so
-  the key may change between releases; uninstall the previous build if an
-  install is rejected. iOS is not published yet; build it from source with
+- The Android arm64 APK is signed with the project's release key, so each
+  release installs over the previous one. Android rejects an update signed with
+  a different key: uninstall first when switching between a release and a
+  local build, or from a release older than the key. To sign a local release
+  build with the same key, export `TCODE_ANDROID_KEYSTORE` (path to the
+  keystore), `TCODE_ANDROID_KEYSTORE_PASSWORD`, `TCODE_ANDROID_KEY_ALIAS` and
+  `TCODE_ANDROID_KEY_PASSWORD` before running `crates/android/host/build.sh
+  --release`; with none of them set, Gradle's per-machine debug keystore signs
+  the build. iOS is not published yet; build it from source with
   `crates/ios/host/build.sh`. For Android, enable USB debugging and authorize
   your computer, then replace `VERSION` with the downloaded release version:
 
