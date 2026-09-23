@@ -383,9 +383,14 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::E
         Ok(envelope) => Ok(StoredEvent {
             ts: Some(envelope.ts),
             event: envelope.event,
+            elided: None,
         }),
         Err(_envelope_err) => match serde_json::from_str::<AgentEvent>(line) {
-            Ok(event) => Ok(StoredEvent { ts: None, event }),
+            Ok(event) => Ok(StoredEvent {
+                ts: None,
+                event,
+                elided: None,
+            }),
             // Both forms failed: the line is genuinely corrupt. The bare-event
             // error is the more informative one (the envelope attempt always
             // fails on a bare event merely because `ts` is missing).

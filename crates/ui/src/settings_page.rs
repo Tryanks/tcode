@@ -574,6 +574,11 @@ impl SettingsPage {
         page.build_provider_cards(cx);
         page.sync_acp_cards(window, cx);
         page.hydrate_inputs(window, cx);
+        page._subscriptions.push(cx.on_release(|this, cx| {
+            this.store
+                .update(cx, |store, _| store.release_archived_sessions());
+        }));
+        page.sync_archived(cx);
         page
     }
 
@@ -724,6 +729,19 @@ impl SettingsPage {
         self.store.update(cx, |store, _cx| intent(store));
     }
 
+    /// The index leaves archived threads out; the Archived section holds
+    /// them only while it is open.
+    fn sync_archived(&self, cx: &mut Context<Self>) {
+        let open = self.section == Section::Archived;
+        self.store.update(cx, |store, cx| {
+            if open {
+                store.load_archived_sessions(cx);
+            } else {
+                store.release_archived_sessions();
+            }
+        });
+    }
+
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
         self.host_permissions = None;
         if !section.applies(&self.capabilities) {
@@ -733,6 +751,7 @@ impl SettingsPage {
             return;
         }
         self.section = section;
+        self.sync_archived(cx);
         // Arriving from a deep link or the palette must not leave the selected
         // section hidden inside a folded subgroup.
         if section.advanced() {
@@ -2004,6 +2023,7 @@ impl SettingsPage {
             .child(self.grouped_plain(rows, cx));
 
         if groups.is_empty() {
+            let loading = self.store.read(cx).archived_loading();
             return v_flex()
                 .gap(px(20.))
                 .child(controls)
@@ -2013,18 +2033,29 @@ impl SettingsPage {
                         .py(px(48.))
                         .gap_1()
                         .items_center()
-                        .child(
-                            div()
-                                .text_size(px(15.))
-                                .font_medium()
-                                .child(crate::tr!("settings.archived_empty")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!("settings.archived_empty_desc")),
-                        ),
+                        .when(loading, |empty| {
+                            empty.child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::tr!("settings.archived_loading")),
+                            )
+                        })
+                        .when(!loading, |empty| {
+                            empty
+                                .child(
+                                    div()
+                                        .text_size(px(15.))
+                                        .font_medium()
+                                        .child(crate::tr!("settings.archived_empty")),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(crate::tr!("settings.archived_empty_desc")),
+                                )
+                        }),
                 );
         }
 

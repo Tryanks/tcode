@@ -4085,10 +4085,9 @@ mod tests {
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
-                title_generating: Default::default(),
+                summary: Default::default(),
                 sessions: vec![active, settled],
                 projects: vec![project],
-                activity: HashMap::new(),
             }),
         );
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -4213,10 +4212,9 @@ mod tests {
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
-                title_generating: Default::default(),
+                summary: Default::default(),
                 sessions,
                 projects: store.read_with(cx, |store, _| store.projects()),
-                activity: HashMap::new(),
             }),
         );
         window_state.update(cx, |state, _| state.compact = false);
@@ -5107,10 +5105,9 @@ mod tests {
             (
                 tcode_protocol::Topic::Index,
                 tcode_protocol::ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    summary: Default::default(),
                     sessions,
                     projects: vec![project],
-                    activity: Default::default(),
-                    title_generating: Default::default(),
                 }),
             ),
         ] {
@@ -5259,10 +5256,9 @@ mod tests {
             (
                 Topic::Index,
                 ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
                     sessions,
                     projects: projects.to_vec(),
-                    activity: Default::default(),
-                    title_generating: Default::default(),
                 }),
             ),
         ] {
@@ -5361,10 +5357,9 @@ mod tests {
                         request_id: None,
                         topic: Topic::Index,
                         event: ServerEvent::IndexSnapshot(IndexSnapshot {
+                            summary: Default::default(),
                             sessions,
                             projects: projects.to_vec(),
-                            activity: Default::default(),
-                            title_generating: Default::default(),
                         }),
                     }))
                     .unwrap(),
@@ -5475,10 +5470,9 @@ mod tests {
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
-                title_generating: Default::default(),
+                summary: Default::default(),
                 sessions,
                 projects: vec![project],
-                activity: HashMap::new(),
             }),
         );
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -5573,10 +5567,15 @@ mod tests {
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
-                title_generating: Default::default(),
+                summary: tcode_protocol::IndexSummary {
+                    activity: HashMap::from([(
+                        "running-child".into(),
+                        (true, false, false, false),
+                    )]),
+                    ..tcode_protocol::IndexSummary::default()
+                },
                 sessions,
                 projects: vec![project],
-                activity: HashMap::from([("running-child".into(), (true, false, false, false))]),
             }),
         );
         let link = tcode_client::HostLink::new(to_host, from_host);

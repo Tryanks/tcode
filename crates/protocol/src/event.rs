@@ -66,8 +66,11 @@ pub enum ServerEvent {
     SessionStatusReplaced(SessionStatus),
     ProvidersReplaced(ProvidersStatus),
     GitStatusReplaced(GitStatusStatus),
+    /// An unarchived thread was added or changed. Archiving a thread removes
+    /// it with [`ServerEvent::IndexRemoveSession`].
     IndexUpsertSession(SessionMeta),
     IndexUpsertProject(Project),
+    IndexSummaryReplaced(IndexSummary),
     IndexRemoveSession {
         session_id: String,
     },
@@ -75,6 +78,8 @@ pub enum ServerEvent {
         project_id: String,
     },
     SettingsReplaced(Settings),
+    /// Visit times that changed while the rest of the settings did not.
+    LastVisitedChanged(HashMap<String, u64>),
     Runtime(RuntimeNotification),
 
     /// A provider-native rewind prompt is delivered once over the serialized
@@ -107,8 +112,12 @@ pub enum ServerEvent {
         /// the reviewer judged the flag not a false positive.
         draft: String,
     },
+    /// Records standing for the log cursors `from..end`. The host may merge
+    /// or drop records whose effect a later record in the log repeats, so
+    /// `records` can be shorter than the range.
     SessionSnapshot {
         from: u64,
+        end: u64,
         records: Vec<StoredEvent>,
         #[serde(default)]
         total: u64,
@@ -318,16 +327,31 @@ pub struct QueuedMessageStatus {
     pub fire_at_unix_secs: Option<u64>,
 }
 
+/// The unarchived threads and every project. Archived threads are read on
+/// demand with [`crate::Query::ArchivedSessions`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexSnapshot {
+    #[serde(flatten)]
+    pub summary: IndexSummary,
+    pub sessions: Vec<SessionMeta>,
+    pub projects: Vec<Project>,
+}
+
+/// Index facts that are not one thread's metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexSummary {
     /// Working, approval, user-input and background-only flags for sidebar rows.
     #[serde(default)]
     pub activity: HashMap<String, (bool, bool, bool, bool)>,
     /// Background title requests, including threads with no live provider.
     #[serde(default)]
     pub title_generating: HashSet<String>,
-    pub sessions: Vec<SessionMeta>,
-    pub projects: Vec<Project>,
+    /// Archived threads per project id.
+    #[serde(default)]
+    pub archived_counts: HashMap<String, usize>,
+    /// Worktree branches archived threads still use.
+    #[serde(default)]
+    pub archived_worktree_branches: HashSet<String>,
 }
 
 /// A transient runtime notification delivered to clients.

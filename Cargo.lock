@@ -10336,6 +10336,7 @@ dependencies = [
  "core-foundation 0.9.4",
  "dirs 7.0.0",
  "env_logger",
+ "flate2",
  "futures-lite",
  "futures-util",
  "getrandom 0.4.3",

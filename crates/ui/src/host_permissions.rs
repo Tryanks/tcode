@@ -194,10 +194,9 @@ mod tests {
                 (
                     Topic::Index,
                     ServerEvent::IndexSnapshot(IndexSnapshot {
+                        summary: Default::default(),
                         projects: vec![],
                         sessions: vec![],
-                        activity: Default::default(),
-                        title_generating: Default::default(),
                     }),
                 ),
                 (

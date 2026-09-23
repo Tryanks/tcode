@@ -47,12 +47,12 @@ use tcode_core::ui::{
 };
 use tcode_protocol::{
     AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, ExternalThread,
-    GitActionRequest, GitStatusStatus, IndexSnapshot, MergeWorktreeFailure, PathEntry,
-    ProtocolError, ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus,
-    QueryResponse, QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice,
-    RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionEventRecord, SessionSearchHit, SessionStatus, TcodeUpdateStatus, TerminalStatus,
-    ThreadExportFormat, Topic,
+    GitActionRequest, GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure,
+    PathEntry, ProtocolError, ProviderVersionStatus as ProtocolProviderVersionStatus,
+    ProvidersStatus, QueryResponse, QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast,
+    ServerEvent, SessionEventRecord, SessionSearchHit, SessionStatus, TcodeUpdateStatus,
+    TerminalStatus, ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,

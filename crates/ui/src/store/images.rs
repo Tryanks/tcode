@@ -198,10 +198,9 @@ mod tests {
                     }
                     // Seed a baseline before caching the error, then replace it on reconnect.
                     ServerEvent::IndexSnapshot(IndexSnapshot {
+                        summary: Default::default(),
                         sessions: vec![],
                         projects: vec![project.clone()],
-                        activity: Default::default(),
-                        title_generating: Default::default(),
                     })
                 };
                 store.apply_domain_event(

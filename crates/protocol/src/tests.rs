@@ -105,6 +105,7 @@ fn event_envelopes_keep_stored_record_shape_and_optional_request_id() {
             event: AgentEvent::TurnStarted {
                 turn_id: "turn-1".into(),
             },
+            elided: None,
         }),
     };
     let expected = json!({
@@ -175,7 +176,7 @@ fn older_messages_default_new_optional_fields() {
     );
     let index: IndexSnapshot =
         serde_json::from_value(json!({"sessions": [], "projects": []})).unwrap();
-    assert!(index.activity.is_empty());
+    assert_eq!(index.summary, IndexSummary::default());
     let queued: QueuedMessageStatus =
         serde_json::from_value(json!({"id": 1, "text": "next"})).unwrap();
     assert_eq!(queued.fire_at_unix_secs, None);
@@ -808,14 +809,16 @@ fn history_paging_literal_json_contract() {
     let response = QueryResponse::SessionHistoryPage {
         records: vec![],
         from: 1600,
+        end: 1800,
         truncated: true,
     };
     assert_eq!(
         serde_json::to_string(&response).unwrap(),
-        r#"{"type":"session_history_page","content":{"records":[],"from":1600,"truncated":true}}"#
+        r#"{"type":"session_history_page","content":{"records":[],"from":1600,"end":1800,"truncated":true}}"#
     );
     let snapshot = ServerEvent::SessionSnapshot {
         from: 1800,
+        end: 2000,
         records: vec![],
         total: 2000,
         total_turns: 0,
@@ -823,11 +826,11 @@ fn history_paging_literal_json_contract() {
     };
     assert_eq!(
         serde_json::to_string(&snapshot).unwrap(),
-        r#"{"type":"session_snapshot","content":{"from":1800,"records":[],"total":2000,"total_turns":0,"truncated":false}}"#
+        r#"{"type":"session_snapshot","content":{"from":1800,"end":2000,"records":[],"total":2000,"total_turns":0,"truncated":false}}"#
     );
     assert!(matches!(
         serde_json::from_str::<ServerEvent>(
-            r#"{"type":"session_snapshot","content":{"from":0,"records":[]}}"#
+            r#"{"type":"session_snapshot","content":{"from":0,"end":0,"records":[]}}"#
         )
         .unwrap(),
         ServerEvent::SessionSnapshot {
@@ -837,6 +840,60 @@ fn history_paging_literal_json_contract() {
             ..
         }
     ));
+}
+
+#[test]
+fn version_six_index_visits_output_and_elision_literal_json() {
+    let index = IndexSnapshot {
+        summary: IndexSummary {
+            archived_counts: [("p".to_string(), 2)].into(),
+            ..IndexSummary::default()
+        },
+        sessions: vec![],
+        projects: vec![],
+    };
+    assert_eq!(
+        serde_json::to_value(&index).unwrap(),
+        json!({"activity": {}, "title_generating": [], "archived_counts": {"p": 2},
+            "archived_worktree_branches": [], "sessions": [], "projects": []})
+    );
+    assert_eq!(
+        serde_json::to_value(ServerEvent::LastVisitedChanged(
+            [("s".to_string(), 5)].into()
+        ))
+        .unwrap(),
+        json!({"type": "last_visited_changed", "content": {"s": 5}})
+    );
+    assert_eq!(
+        serde_json::from_str::<Query>(
+            r#"{"type":"read_item_output","content":{"session_id":"s","item_id":"i"}}"#
+        )
+        .unwrap(),
+        Query::ReadItemOutput {
+            session_id: "s".into(),
+            item_id: "i".into()
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<Query>(r#"{"type":"archived_sessions"}"#).unwrap(),
+        Query::ArchivedSessions
+    );
+    let turn_started = AgentEvent::TurnStarted {
+        turn_id: "t".into(),
+    };
+    let record = SessionEventRecord {
+        ts: Some(1),
+        event: turn_started.clone(),
+        elided: Some(9000),
+    };
+    assert_eq!(
+        serde_json::to_value(&record).unwrap(),
+        json!({"ts": 1, "event": {"type": "turn_started", "turn_id": "t"}, "elided": 9000})
+    );
+    assert_eq!(
+        serde_json::to_value(SessionEventRecord::from(turn_started)).unwrap(),
+        json!({"ts": null, "event": {"type": "turn_started", "turn_id": "t"}})
+    );
 }
 
 #[test]

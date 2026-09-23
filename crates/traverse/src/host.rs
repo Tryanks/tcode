@@ -991,7 +991,9 @@ impl StreamTask {
     /// Pump NDJSON between the stream and one mux attachment until either
     /// side ends. Retained-command keys are scoped to the device so its
     /// dedup cache cannot be shared with or spoofed by another device.
-    async fn bridge(&self, mut send: SendStream, mut reader: LineReader) -> io::Result<()> {
+    async fn bridge(&self, send: SendStream, reader: LineReader) -> io::Result<()> {
+        let mut send = wire::LineWriter::new(send);
+        let mut reader = wire::LineStream::new(reader);
         let attachment = self.shared.mux.attach();
         let scope = self.connection.remote_id().to_string();
         let (outbound, outbound_rx) = async_channel::unbounded::<String>();
@@ -1006,15 +1008,15 @@ impl StreamTask {
         });
         let writer = tokio::spawn(async move {
             while let Ok(line) = outbound_rx.recv().await {
-                if wire::write_raw_line(&mut send, &line).await.is_err() {
+                if send.write_line(&line).await.is_err() {
                     break;
                 }
             }
-            let _ = send.finish();
+            send.finish();
         });
         let result =
             async {
-                while let Some(line) = wire::read_line(&mut reader, wire::MAX_LINE).await? {
+                while let Some(line) = reader.read_line(wire::MAX_LINE).await? {
                     if line.trim().is_empty() {
                         continue;
                     }
