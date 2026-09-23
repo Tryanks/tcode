@@ -14,12 +14,39 @@ android {
         ndk { abiFilters += "arm64-v8a" }
     }
 
+    // Android only installs an update signed with the same key as the installed
+    // build, so release APKs need one fixed key across machines and CI runs. Set all
+    // four TCODE_ANDROID_* variables to sign with it; with none set, release builds
+    // fall back to Gradle's per-machine debug keystore (see docs/remote.md).
+    signingConfigs {
+        val releaseKeyVars = listOf(
+            "TCODE_ANDROID_KEYSTORE",
+            "TCODE_ANDROID_KEYSTORE_PASSWORD",
+            "TCODE_ANDROID_KEY_ALIAS",
+            "TCODE_ANDROID_KEY_PASSWORD",
+        )
+        val releaseKey = releaseKeyVars.associateWith { System.getenv(it)?.takeIf(String::isNotEmpty) }
+        val missing = releaseKey.filterValues { it == null }.keys
+        if (missing.isEmpty()) {
+            val keystore = file(releaseKey.getValue("TCODE_ANDROID_KEYSTORE")!!)
+            if (!keystore.isFile) throw GradleException("TCODE_ANDROID_KEYSTORE does not exist: $keystore")
+            create("release") {
+                storeFile = keystore
+                storePassword = releaseKey.getValue("TCODE_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = releaseKey.getValue("TCODE_ANDROID_KEY_ALIAS")
+                keyPassword = releaseKey.getValue("TCODE_ANDROID_KEY_PASSWORD")
+            }
+        } else if (missing.size < releaseKeyVars.size) {
+            throw GradleException("Android release signing partially configured; missing: ${missing.joinToString(" ")}")
+        }
+    }
+
     buildTypes {
         debug { isJniDebuggable = true }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
