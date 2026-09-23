@@ -172,7 +172,7 @@ also include a `SHA256SUMS.txt` file.
 | macOS, arm64 / x64 | Desktop `.zip` / `.dmg`; headless `.zip` |
 | Windows, x64 / arm64 | Desktop or headless `.zip` |
 | Linux, x64 / arm64 | Desktop or headless `.tar.gz` |
-| Android, arm64 | `tcode-<version>-android-arm64.apk` — release build signed with a debug key; install with adb |
+| Android, arm64 | `tcode-<version>-android-arm64.apk` — signed with the project's release key; install with adb |
 | iOS / iPadOS, arm64 | Not published yet; build from source with `crates/ios/host/build.sh` |
 | Browser | Embedded in the headless release; open the HTTP link it prints (HTTPS only through your own tunnel). No separate signed app package |
 

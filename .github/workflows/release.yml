@@ -353,7 +353,7 @@ jobs:
 
           - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
           - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
-          - **Android**: the arm64 APK is a release build signed with Gradle's debug keystore; the signing key may change between releases, so uninstall a previous build if the install is rejected.
+          - **Android**: the arm64 APK is signed with the project's release key and installs over previous releases signed with it. A build signed with a different key (a local build, or a release from before the key existed) must be uninstalled first.
           - **iOS**: not published yet.
 
           Packages are uploaded as soon as each platform build completes. macOS artifacts are
@@ -706,8 +706,48 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
           cargo install cargo-ndk --locked
 
-      # Release profile, stripped native library, R8; signed with Gradle's debug
-      # keystore until a release key exists, so the key may change between releases.
+      # Signing credentials are optional. With none of the four ANDROID_* secrets the
+      # APK is signed with Gradle's debug keystore, which is generated per runner, so
+      # it does not install over a previous build; with all four it is signed with the
+      # fixed release key; a partial set fails this step naming the missing secrets.
+      # Create the key once and keep it (a lost key means users must uninstall):
+      #   keytool -genkeypair -v -keystore tcode-release.jks -alias tcode \
+      #     -keyalg RSA -keysize 4096 -validity 10000
+      #   ANDROID_KEYSTORE          base64 of tcode-release.jks (`base64 -i tcode-release.jks`)
+      #   ANDROID_KEYSTORE_PASSWORD keystore password chosen above
+      #   ANDROID_KEY_ALIAS         the alias chosen above (`tcode`)
+      #   ANDROID_KEY_PASSWORD      key password chosen above
+      # Verify a signed release locally with
+      #   apksigner verify --print-certs tcode-*-android-arm64.apk
+      - name: Configure Android release signing
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in ANDROID_KEYSTORE ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            [[ -n "${!var:-}" ]] || missing+=("$var")
+          done
+          if (( ${#missing[@]} == 4 )); then
+            echo "::notice::Android signing secrets not configured — signing with the debug keystore."
+            exit 0
+          elif (( ${#missing[@]} > 0 )); then
+            echo "::error::Android signing partially configured; missing: ${missing[*]}" >&2
+            exit 1
+          fi
+          keystore="$RUNNER_TEMP/tcode-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE" | base64 --decode > "$keystore"
+          {
+            echo "TCODE_ANDROID_KEYSTORE=$keystore"
+            echo "TCODE_ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "TCODE_ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "TCODE_ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      # Release profile, stripped native library, R8; signed by the step above.
       - name: Build Android release APK
         run: crates/android/host/build.sh --release
 
