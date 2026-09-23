@@ -2402,6 +2402,48 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
 }
 
 #[test]
+fn orchestrate_dispatch_distinguishes_model_from_provider_profile() {
+    let settings = OrchestrateSettings::default();
+    for (model, effort) in [
+        (None, Some("high")),
+        (Some("gpt-6-sol"), Some("high")),
+        (None, None),
+    ] {
+        let error = resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            model,
+            effort,
+            Some("gpt-6-sol"),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("no enabled profile matches"));
+        assert!(
+            error.contains("model=gpt-6-sol (built-in endpoint; omit profile)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("profile selects a provider endpoint, not a model"),
+            "{error}"
+        );
+    }
+    for effort in [None, Some("high")] {
+        let resolved = resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-6-sol"),
+            effort,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(resolved.2.as_deref(), Some(effort.unwrap_or("medium")));
+        assert_eq!(resolved.4, None);
+    }
+}
+
+#[test]
 fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let mut settings = OrchestrateSettings::default();
     assert_eq!(
@@ -2513,7 +2555,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     assert!(
         resolve_orchestrate_dispatch(&empty, "codex", None, None, None, &HashMap::new())
             .unwrap_err()
-            .contains("enabled profiles: none")
+            .contains("enabled model/endpoint combinations: none")
     );
 }
 
