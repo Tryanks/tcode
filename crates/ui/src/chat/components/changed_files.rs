@@ -169,7 +169,7 @@ pub(crate) fn changed_files(
     content.into_any_element()
 }
 
-fn quiet_control(
+pub(crate) fn quiet_control(
     id: impl Into<ElementId>,
     label: SharedString,
     on_click: ClickHandler,

@@ -973,15 +973,17 @@ async fn relay_connected(
 ) -> Lost {
     let Established {
         connection,
-        mut send,
-        mut reader,
+        send,
+        reader,
     } = established;
+    let mut send = wire::LineWriter::new(send);
+    let mut reader = wire::LineStream::new(reader);
     // Reads and writes run in their own tasks: a line read or written
     // halfway must never be abandoned by a select branch.
     let (lines_tx, lines_rx) = async_channel::unbounded::<String>();
     let reader_task = tokio::spawn(async move {
         loop {
-            match wire::read_line(&mut reader, wire::MAX_LINE).await {
+            match reader.read_line(wire::MAX_LINE).await {
                 Ok(Some(line)) => {
                     if lines_tx.send(line).await.is_err() {
                         return Ok(());
@@ -998,7 +1000,7 @@ async fn relay_connected(
         let mut unsent = Vec::new();
         let ping = ping_line();
         while let Ok(line) = wire_rx.recv().await {
-            if wire::write_raw_line(&mut send, &line).await.is_err() {
+            if send.write_line(&line).await.is_err() {
                 unsent.push(line);
                 break;
             }

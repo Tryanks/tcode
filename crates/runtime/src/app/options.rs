@@ -298,6 +298,7 @@ impl AppState {
                 total_turns: 0,
                 truncated: false,
                 from: 0,
+                end: 0,
                 records: Vec::new(),
             },
             cx,

@@ -7,6 +7,11 @@
 //! terminated by `\n`, at most [`MAX_CONTROL_LINE`] bytes, and must arrive
 //! within [`CONTROL_TIMEOUT`].
 //!
+//! The protocol lines after `hello_ok` travel as one raw deflate stream per
+//! direction ([`LineWriter`], [`LineStream`]), sync-flushed after every line
+//! so each line decodes as soon as it arrives. One dictionary spans the
+//! connection: a line mostly repeats the keys and ids of earlier ones.
+//!
 //! After hello, a further bi stream on `tcode/1` opening with
 //! `{"type":"connect","host":..,"port":..}` carries one Preview TCP tunnel:
 //! the machine dials `host:port` the way any local program would (loopback
@@ -18,6 +23,7 @@
 //! [`MAX_TUNNELS`] tunnels at once.
 use std::{io, time::Duration};
 
+use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
 use iroh::endpoint::{QuicTransportConfig, RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -221,11 +227,136 @@ pub async fn write_line<T: Serialize>(send: &mut SendStream, value: &T) -> io::R
     Ok(())
 }
 
-pub async fn write_raw_line(send: &mut SendStream, line: &str) -> io::Result<()> {
-    let line = line.trim_end_matches(['\n', '\r']);
-    send.write_all(line.as_bytes()).await?;
-    send.write_all(b"\n").await?;
-    Ok(())
+/// Writes the protocol lines of a main stream, compressed.
+pub struct LineWriter {
+    send: SendStream,
+    deflate: Compress,
+    buffer: Vec<u8>,
+}
+
+impl LineWriter {
+    pub fn new(send: SendStream) -> Self {
+        Self {
+            send,
+            deflate: Compress::new(Compression::default(), false),
+            buffer: Vec::new(),
+        }
+    }
+
+    pub async fn write_line(&mut self, line: &str) -> io::Result<()> {
+        let line = line.trim_end_matches(['\n', '\r']);
+        self.buffer.clear();
+        deflate(
+            &mut self.deflate,
+            line.as_bytes(),
+            &mut self.buffer,
+            FlushCompress::None,
+        )?;
+        deflate(
+            &mut self.deflate,
+            b"\n",
+            &mut self.buffer,
+            FlushCompress::Sync,
+        )?;
+        self.send.write_all(&self.buffer).await?;
+        Ok(())
+    }
+
+    pub fn finish(&mut self) {
+        let _ = self.send.finish();
+    }
+}
+
+fn deflate(
+    deflate: &mut Compress,
+    mut input: &[u8],
+    output: &mut Vec<u8>,
+    flush: FlushCompress,
+) -> io::Result<()> {
+    loop {
+        output.reserve(input.len() + 64);
+        let consumed = deflate.total_in();
+        deflate
+            .compress_vec(input, output, flush)
+            .map_err(io::Error::other)?;
+        input = &input[(deflate.total_in() - consumed) as usize..];
+        // Spare room left after a call means the flush produced everything.
+        if input.is_empty() && output.len() < output.capacity() {
+            return Ok(());
+        }
+    }
+}
+
+/// Reads the protocol lines of a main stream, decompressed.
+pub struct LineStream {
+    reader: LineReader,
+    inflate: Decompress,
+    pending: Vec<u8>,
+    /// How much of `pending` holds no newline.
+    scanned: usize,
+}
+
+impl LineStream {
+    /// Continue `reader` after its control line; bytes it already buffered
+    /// are the start of the compressed stream.
+    pub fn new(reader: LineReader) -> Self {
+        Self {
+            reader,
+            inflate: Decompress::new(false),
+            pending: Vec::new(),
+            scanned: 0,
+        }
+    }
+
+    /// Read one line of at most `max` bytes, as [`read_line`] does.
+    pub async fn read_line(&mut self, max: usize) -> io::Result<Option<String>> {
+        loop {
+            if let Some(newline) = self.pending[self.scanned..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            {
+                let end = self.scanned + newline;
+                let line = self.pending.drain(..=end).take(end).collect::<Vec<_>>();
+                self.scanned = 0;
+                if line.len() > max {
+                    return Err(line_too_long(max));
+                }
+                let mut line = String::from_utf8(line)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "line is not UTF-8"))?;
+                line.truncate(line.trim_end_matches('\r').len());
+                return Ok(Some(line));
+            }
+            self.scanned = self.pending.len();
+            if self.pending.len() > max {
+                return Err(line_too_long(max));
+            }
+            let compressed = self.reader.fill_buf().await?;
+            if compressed.is_empty() {
+                return if self.pending.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "stream ended inside a line",
+                    ))
+                };
+            }
+            self.pending.reserve(compressed.len() * 4 + 1024);
+            let consumed = self.inflate.total_in();
+            self.inflate
+                .decompress_vec(compressed, &mut self.pending, FlushDecompress::None)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let consumed = (self.inflate.total_in() - consumed) as usize;
+            self.reader.consume(consumed);
+        }
+    }
+}
+
+fn line_too_long(max: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("line exceeds {max} bytes"),
+    )
 }
 
 #[cfg(test)]

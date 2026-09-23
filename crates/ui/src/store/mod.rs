@@ -25,7 +25,7 @@ use tcode_core::{
 use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
     Command, CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
-    GitDiffScope, GitStatusStatus, PathEntry, ProtocolError, ProviderVersionStatus,
+    GitDiffScope, GitStatusStatus, IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus,
     ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
     Subscription, TerminalFrame, Topic,
 };
@@ -151,7 +151,14 @@ pub struct WorkspaceStore {
     import_statuses: HashMap<String, Option<ExternalImportStatus>>,
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
-    title_generating: HashSet<String>,
+    index_summary: IndexSummary,
+    /// Archived threads, which the index leaves out; loaded while a view
+    /// asks for them.
+    archived_replica: Option<Vec<SessionMeta>>,
+    archived_task: Option<Task<()>>,
+    /// The thread the index event being applied removed, so the destination
+    /// can still follow it to its parent.
+    removed_session: Option<SessionMeta>,
     settings_replica: Settings,
     /// Whether `settings_replica` is the host's settings or still the local
     /// defaults it was constructed with. Views that copy a setting into an
@@ -162,7 +169,10 @@ pub struct WorkspaceStore {
     hydrated_sessions: HashSet<String>,
     selected_session_id: Option<String>,
     session_records: HashMap<String, Vec<StoredEvent>>,
+    /// The log cursors `session_records` stands for. The host may merge
+    /// records, so the range can be longer than the records.
     session_from: HashMap<String, u64>,
+    session_end: HashMap<String, u64>,
     selection_generation: u64,
     session_turn_offset: usize,
     history_task: Option<Task<()>>,
@@ -328,7 +338,10 @@ impl WorkspaceStore {
                 ConnectionState::Connected { path: None }
             },
             index_replica: (Vec::new(), Vec::new()),
-            title_generating: HashSet::new(),
+            index_summary: IndexSummary::default(),
+            archived_replica: None,
+            archived_task: None,
+            removed_session: None,
             settings_replica: Settings::default(),
             settings_hydrated: false,
             baseline_topics: HashSet::new(),
@@ -337,6 +350,7 @@ impl WorkspaceStore {
             selected_session_id: None,
             session_records: HashMap::new(),
             session_from: HashMap::new(),
+            session_end: HashMap::new(),
             selection_generation: 0,
             session_turn_offset: 0,
             history_task: None,
@@ -817,6 +831,9 @@ impl WorkspaceStore {
                 },
             ) if terminal_id == delta_id => self.apply_terminal_delta(*terminal_id, delta),
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
+                if let Some(archived) = &mut self.archived_replica {
+                    archived.retain(|archived| archived.id != meta.id);
+                }
                 match self
                     .index_replica
                     .0
@@ -843,7 +860,18 @@ impl WorkspaceStore {
                 }
             }
             (Topic::Index, ServerEvent::IndexRemoveSession { session_id }) => {
-                self.index_replica.0.retain(|meta| meta.id != *session_id);
+                if let Some(position) = self
+                    .index_replica
+                    .0
+                    .iter()
+                    .position(|meta| meta.id == *session_id)
+                {
+                    self.removed_session = Some(self.index_replica.0.remove(position));
+                }
+                // Archived or deleted: only the host can say which.
+                if self.archived_replica.is_some() {
+                    self.load_archived_sessions(cx);
+                }
                 self.native_rewind_prefills.remove(session_id);
                 self.fallback_blocks.remove(session_id);
                 self.fallback_reviews.remove(session_id);
@@ -883,11 +911,9 @@ impl WorkspaceStore {
                     }
                 }
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
-                self.title_generating = snapshot.title_generating.clone();
                 // Client state for a conversation the index no longer lists has
                 // nothing left to return to: a deleted project takes its draft's
-                // state, a deleted thread its own. Archived threads stay listed,
-                // so archiving keeps its state.
+                // state, a deleted or archived thread its own.
                 self.conversation_ui
                     .retain(|destination, _| match destination {
                         ConversationDestination::ProjectDraft(project_id) => snapshot
@@ -898,10 +924,18 @@ impl WorkspaceStore {
                             snapshot.sessions.iter().any(|meta| meta.id == *session_id)
                         }
                     });
-                self.background_session_flags = snapshot.activity.clone();
-                if let Some(id) = &self.selected_session_id {
-                    self.background_session_flags.remove(id);
+                self.apply_index_summary(&snapshot.summary);
+                if self.archived_replica.is_some() {
+                    self.load_archived_sessions(cx);
                 }
+            }
+            (Topic::Index, ServerEvent::IndexSummaryReplaced(summary)) => {
+                self.apply_index_summary(summary);
+            }
+            (Topic::Settings, ServerEvent::LastVisitedChanged(visits)) => {
+                self.settings_replica
+                    .last_visited
+                    .extend(visits.iter().map(|(id, at)| (id.clone(), *at)));
             }
             (Topic::Settings, ServerEvent::SettingsReplaced(settings))
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
@@ -955,6 +989,7 @@ impl WorkspaceStore {
                 Topic::SessionEvents { session_id },
                 ServerEvent::SessionSnapshot {
                     from,
+                    end,
                     records,
                     total,
                     total_turns,
@@ -966,12 +1001,15 @@ impl WorkspaceStore {
                 }
                 let held = self.session_records.entry(session_id.clone()).or_default();
                 let start = self.session_from.entry(session_id.clone()).or_insert(*from);
+                let held_end = self.session_end.entry(session_id.clone()).or_insert(*from);
                 if *from == 0 {
                     held.clear();
                     *start = 0;
-                } else if *from != *start + held.len() as u64 {
+                    *held_end = 0;
+                } else if *from != *held_end {
                     held.clear();
                     self.session_from.remove(session_id);
+                    self.session_end.remove(session_id);
                     self.session_replica = None;
                     self.hydrated_sessions.remove(session_id);
                     self.baseline_topics.remove(&envelope.topic);
@@ -988,7 +1026,8 @@ impl WorkspaceStore {
                     return;
                 }
                 held.extend(records.iter().cloned());
-                let after = *start + held.len() as u64;
+                *held_end = *end;
+                let after = *end;
                 self.session_catching_up = after < *total;
                 let _ = self.host.update_after(&envelope.topic, after);
                 if self.session_catching_up {
@@ -1015,9 +1054,12 @@ impl WorkspaceStore {
                 if self.session_catching_up || !self.session_from.contains_key(session_id) {
                     return;
                 }
-                let held = self.session_records.entry(session_id.clone()).or_default();
-                held.push(record.clone());
-                let after = self.session_from[session_id] + held.len() as u64;
+                self.session_records
+                    .entry(session_id.clone())
+                    .or_default()
+                    .push(record.clone());
+                let after = self.session_end.get(session_id).map_or(0, |end| end + 1);
+                self.session_end.insert(session_id.clone(), after);
                 let _ = self.host.update_after(&envelope.topic, after);
                 // A new turn means the user moved on; the recovery card for the
                 // stopped one is stale.
@@ -1029,7 +1071,7 @@ impl WorkspaceStore {
                 if let Some((replica_id, timeline)) = self.session_replica.as_mut()
                     && replica_id == session_id
                 {
-                    timeline.apply_at(record.ts, &record.event);
+                    timeline.apply_stored(record);
                 }
             }
             (
@@ -1091,6 +1133,7 @@ impl WorkspaceStore {
         // Every index mutation re-decides the destination in one place.
         if envelope.topic == Topic::Index {
             self.reconcile_destination(cx);
+            self.removed_session = None;
         }
     }
 
@@ -1136,6 +1179,7 @@ impl WorkspaceStore {
                     .index_replica
                     .0
                     .iter()
+                    .chain(&self.removed_session)
                     .find(|meta| meta.id == session_id)
                     .and_then(|meta| meta.parent_session_id.clone())
                     .filter(|parent| self.session_visible(parent));
@@ -1523,7 +1567,44 @@ impl WorkspaceStore {
     }
 
     pub fn title_generating(&self, session_id: &str) -> bool {
-        self.title_generating.contains(session_id)
+        self.index_summary.title_generating.contains(session_id)
+    }
+
+    fn apply_index_summary(&mut self, summary: &IndexSummary) {
+        self.index_summary = summary.clone();
+        self.background_session_flags = summary.activity.clone();
+        if let Some(id) = &self.selected_session_id {
+            self.background_session_flags.remove(id);
+        }
+    }
+
+    /// Fetch the archived threads, and keep them current while they are held.
+    pub fn load_archived_sessions(&mut self, cx: &mut Context<Self>) {
+        let host = self.host.clone();
+        self.archived_task = Some(cx.spawn(async move |this, cx| {
+            let result = host.query(Query::ArchivedSessions).await;
+            let _ = this.update(cx, |store, cx| {
+                match result {
+                    Ok(QueryResponse::ArchivedSessions(sessions)) => {
+                        store.archived_replica = Some(sessions);
+                    }
+                    Ok(other) => log::warn!("unexpected archived-sessions response: {other:?}"),
+                    Err(error) => log::warn!("archived sessions failed: {}", error.message),
+                }
+                store.archived_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Stop keeping the archived threads current.
+    pub fn release_archived_sessions(&mut self) {
+        self.archived_replica = None;
+        self.archived_task = None;
+    }
+
+    pub fn archived_loading(&self) -> bool {
+        self.archived_replica.is_none()
     }
 
     /// Whether the Index baseline has arrived, including an empty Index.
@@ -1631,13 +1712,7 @@ impl WorkspaceStore {
     }
 
     pub fn archived_groups(&self) -> Vec<ProjectGroup> {
-        let archived: Vec<_> = self
-            .index_replica
-            .0
-            .iter()
-            .filter(|meta| meta.archived_at.is_some())
-            .cloned()
-            .collect();
+        let archived = self.archived_replica.clone().unwrap_or_default();
         let mut groups = group_sessions(
             &self.index_replica.1,
             &archived,
@@ -2028,7 +2103,13 @@ impl WorkspaceStore {
             .0
             .iter()
             .filter(|meta| meta.project_id.as_deref() == Some(project_id))
-            .count();
+            .count()
+            + self
+                .index_summary
+                .archived_counts
+                .get(project_id)
+                .copied()
+                .unwrap_or_default();
         Some((project.name.clone(), count))
     }
 
@@ -2308,6 +2389,29 @@ impl WorkspaceStore {
                     mime,
                 }),
                 Ok(other) => Err(format!("unexpected thread-export response: {other:?}")),
+                Err(error) => Err(error.message),
+            }
+        })
+    }
+
+    /// The whole output of an item whose history record carried a preview.
+    pub fn read_item_output(
+        &self,
+        session_id: String,
+        item_id: String,
+        cx: &mut App,
+    ) -> Task<Result<String, String>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::ReadItemOutput {
+                    session_id,
+                    item_id,
+                })
+                .await
+            {
+                Ok(QueryResponse::ItemOutput(output)) => Ok(output),
+                Ok(other) => Err(format!("unexpected item-output response: {other:?}")),
                 Err(error) => Err(error.message),
             }
         })
@@ -2726,7 +2830,10 @@ impl WorkspaceStore {
                     .worktree
                     .as_ref()
                     .is_some_and(|other| other.branch == worktree.branch)
-        });
+        }) || self
+            .index_summary
+            .archived_worktree_branches
+            .contains(&worktree.branch);
         (!shared).then_some(worktree)
     }
 }
@@ -2981,10 +3088,9 @@ mod tests {
                     request_id: None,
                     topic: Topic::Index,
                     event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
-                        title_generating: Default::default(),
+                        summary: Default::default(),
                         sessions: vec![],
                         projects: vec![],
-                        activity: Default::default(),
                     }),
                 },
                 cx,
@@ -3158,6 +3264,7 @@ mod tests {
                         total_turns: 0,
                         truncated: false,
                         from: 0,
+                        end: 0,
                         records: vec![],
                     },
                 },
@@ -3230,6 +3337,7 @@ mod tests {
                     },
                     event: ServerEvent::SessionSnapshot {
                         from: 1800,
+                        end: 2000,
                         records,
                         total: 2000,
                         total_turns: 500,
@@ -3266,6 +3374,7 @@ mod tests {
                     topic: topic.clone(),
                     event: ServerEvent::SessionSnapshot {
                         from: 2000,
+                        end: 2000,
                         records: vec![],
                         total: 2000,
                         total_turns: 500,
@@ -3285,6 +3394,101 @@ mod tests {
                 ),
                 "empty replay must retain the existing timeline"
             );
+        });
+    }
+
+    /// The host merges records, so the cursors a client resumes from are the
+    /// window it was sent, not the records it holds; visit times and index
+    /// facts arrive as changes rather than replacements.
+    #[gpui::test]
+    fn merged_windows_visits_and_summaries_apply_as_changes(cx: &mut TestAppContext) {
+        use std::collections::{HashMap, HashSet};
+        use tcode_core::session::StoredEvent;
+        use tcode_protocol::IndexSummary;
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        let topic = Topic::SessionEvents {
+            session_id: "merged".into(),
+        };
+        let tool = agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: "shot".into(),
+            parent_item_id: None,
+            content: ItemContent::ToolCall {
+                name: "screenshot".into(),
+                input: serde_json::json!({}),
+                output: Some("preview".into()),
+                status: agent::ItemStatus::Completed,
+            },
+        });
+        workspace.update(cx, |store, cx| {
+            store.selected_session_id = Some("merged".into());
+            store.settings_replica.last_visited = HashMap::from([("old".into(), 1)]);
+            let event = |event| EventEnvelope {
+                request_id: None,
+                topic: topic.clone(),
+                event,
+            };
+            store.apply_domain_event(
+                &event(ServerEvent::SessionSnapshot {
+                    from: 10,
+                    end: 20,
+                    records: vec![StoredEvent {
+                        ts: Some(1),
+                        event: tool.clone(),
+                        elided: Some(700_000),
+                    }],
+                    total: 20,
+                    total_turns: 1,
+                    truncated: false,
+                }),
+                cx,
+            );
+            assert_eq!(
+                (store.session_from["merged"], store.session_end["merged"]),
+                (10, 20)
+            );
+            assert_eq!(
+                store.with_active_timeline(|timeline| timeline.elided_outputs.get("shot").copied()),
+                Some(Some(700_000))
+            );
+            store.apply_domain_event(
+                &event(ServerEvent::SessionEvent(
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: "next".into(),
+                    }
+                    .into(),
+                )),
+                cx,
+            );
+            assert_eq!(store.session_end["merged"], 21);
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::LastVisitedChanged(HashMap::from([("new".into(), 2)])),
+                },
+                cx,
+            );
+            assert_eq!(
+                store.settings_replica.last_visited,
+                HashMap::from([("old".into(), 1), ("new".into(), 2)])
+            );
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexSummaryReplaced(IndexSummary {
+                        title_generating: HashSet::from(["named".into()]),
+                        ..IndexSummary::default()
+                    }),
+                },
+                cx,
+            );
+            assert!(store.title_generating("named"));
         });
     }
 
@@ -3324,6 +3528,7 @@ mod tests {
                     },
                     event: ServerEvent::SessionSnapshot {
                         from: 1800,
+                        end: 2000,
                         records: (0..200)
                             .map(|_| {
                                 agent::AgentEvent::Warning {
@@ -3397,6 +3602,7 @@ mod tests {
                         result: Ok(tcode_protocol::QueryResponse::SessionHistoryPage {
                             records,
                             from: before - 200,
+                            end: before,
                             truncated: false,
                         }),
                     })
@@ -3494,10 +3700,9 @@ mod tests {
                 (
                     Topic::Index,
                     ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
-                        title_generating: Default::default(),
+                        summary: Default::default(),
                         sessions: store.index_replica.0.clone(),
                         projects: store.index_replica.1.clone(),
-                        activity: Default::default(),
                     }),
                 ),
                 (
@@ -3516,6 +3721,7 @@ mod tests {
                     },
                     ServerEvent::SessionSnapshot {
                         from: 0,
+                        end: 0,
                         records: vec![],
                         total: 0,
                         total_turns: 0,
@@ -3645,13 +3851,11 @@ mod tests {
         });
     }
 
+    /// Archived threads leave the index; the host still has them.
     fn archived(cx: &TestAppContext, workspace: &gpui::Entity<WorkspaceStore>, id: &str) -> bool {
         workspace.read_with(cx, |store, _| {
-            store
-                .index_replica
-                .0
-                .iter()
-                .any(|meta| meta.id == id && meta.archived_at.is_some())
+            !store.index_replica.0.iter().any(|meta| meta.id == id)
+                && store.index_summary.archived_counts.values().sum::<usize>() > 0
         })
     }
 
@@ -3900,6 +4104,7 @@ mod tests {
                         total_turns: 0,
                         truncated: false,
                         from: 2,
+                        end: 2,
                         records: vec![],
                     },
                 },
@@ -4161,15 +4366,21 @@ mod tests {
         wait_until(cx, &workspace, "index and settings replicas", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.index_replica.1.len() == 2
-                    && store
+                    && !store
                         .index_replica
                         .0
                         .iter()
-                        .find(|meta| meta.id == seed_session_id)
-                        .is_some_and(|meta| meta.archived_at.is_some())
+                        .any(|meta| meta.id == seed_session_id)
                     && store.settings_replica.word_wrap_diffs == expected_word_wrap
             })
         });
+        let tcode_protocol::QueryResponse::ArchivedSessions(archived) =
+            smol::block_on(host.link().query(tcode_protocol::Query::ArchivedSessions))
+                .expect("archived threads")
+        else {
+            panic!("archived threads")
+        };
+        assert!(archived.iter().any(|meta| meta.id == seed_session_id));
 
         workspace.read_with(cx, |store, _| {
             assert!(
@@ -4184,18 +4395,20 @@ mod tests {
                     .iter()
                     .any(|meta| meta.id == seed_session_id)
             );
-            assert!(
+            assert_eq!(
                 store
-                    .archived_groups()
-                    .iter()
-                    .any(|group| { group.sessions.iter().any(|meta| meta.id == seed_session_id) })
+                    .project_summary(&seed_project.id)
+                    .map(|(_, count)| count),
+                Some(1),
+                "the archived thread still counts toward its project"
             );
         });
 
         let live_index = update_host!(&host, |state, _| {
+            let index = state.index_snapshot();
             (
-                serde_json::to_value(&state.sessions).unwrap(),
-                serde_json::to_value(&state.projects).unwrap(),
+                serde_json::to_value(&index.sessions).unwrap(),
+                serde_json::to_value(&index.projects).unwrap(),
             )
         });
         let live_settings = update_host!(&host, |state, _| {
@@ -4581,6 +4794,7 @@ mod tests {
                     event: AgentEvent::TurnStarted {
                         turn_id: "turn-next".into(),
                     },
+                    elided: None,
                 }),
             }));
         });

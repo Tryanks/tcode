@@ -87,9 +87,10 @@ impl WorkspaceStore {
                     return false;
                 }
                 match result {
-                    Ok(QueryResponse::SessionHistoryPage { records, from, .. })
-                        if from < before
-                            && from + records.len() as u64 == before
+                    Ok(QueryResponse::SessionHistoryPage {
+                        records, from, end, ..
+                    }) if from < before
+                            && end == before
                             && store.session_from.get(&session_id) == Some(&before) =>
                     {
                         store.history_pages_fetched += 1;

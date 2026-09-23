@@ -293,12 +293,9 @@ impl WorkspaceStore {
             .get(&session_id)
             .cloned()
             .unwrap_or_default();
-        let records = self.session_records.entry(session_id.clone()).or_default();
+        self.session_records.entry(session_id.clone()).or_default();
         self.session_replica = None;
-        let after = self
-            .session_from
-            .get(&session_id)
-            .map(|from| from + records.len() as u64);
+        let after = self.session_end.get(&session_id).copied();
         for topic in [
             tcode_protocol::Topic::SessionStatus {
                 session_id: session_id.clone(),
