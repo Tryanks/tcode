@@ -15,9 +15,9 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ListSizingBehavior, ListState, ObjectFit, ParentElement as _, Pixels, Role,
-    SharedString, StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, Window,
-    div, img, prelude::FluentBuilder as _, px, relative, rems, size,
+    LayoutId, ListState, ObjectFit, ParentElement as _, Pixels, Role, SharedString,
+    StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, Window, div, img,
+    prelude::FluentBuilder as _, px, relative, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -95,15 +95,10 @@ impl RenderOptions {
     }
 }
 
-pub(super) struct RootMeasurements {
-    pub(super) width: Pixels,
-    pub(super) content_height: Option<Pixels>,
-}
-
 pub(super) fn render_root(
     node: &BlockNode,
     list_state: ListState,
-    measurements: RootMeasurements,
+    content_height: Option<Pixels>,
     state: &Entity<MarkdownState>,
     window: &mut Window,
     cx: &mut App,
@@ -115,33 +110,16 @@ pub(super) fn render_root(
         list_state.reset(children.len());
     }
 
-    if let Some(content_height) = measurements.content_height {
-        return div()
-            .id("root")
-            .w_full()
-            .child(VirtualizedBlockList {
-                blocks: children.clone(),
-                list_state,
-                content_height,
-                state: state.clone(),
-            })
-            .into_any_element();
-    }
-
-    let blocks = children.clone();
-    let state = state.clone();
-    // `Infer` asks for min-content width during request-layout. Pin the list and
-    // its blocks to the last real parent width so that intrinsic probes cannot
-    // invalidate ListState at a narrow width while this frame measures height.
-    let list = gpui::list(list_state, move |ix, window, cx| {
-        render_root_block(&blocks, ix, measurements.width, &state, window, cx)
-    })
-    .with_sizing_behavior(ListSizingBehavior::Infer)
-    .w_full()
-    .when(measurements.width > px(0.), |list| {
-        list.w(measurements.width)
-    });
-    div().id("root").w_full().child(list).into_any_element()
+    div()
+        .id("root")
+        .w_full()
+        .child(VirtualizedBlockList {
+            blocks: children.clone(),
+            list_state,
+            content_height,
+            state: state.clone(),
+        })
+        .into_any_element()
 }
 
 fn render_root_block(
@@ -184,7 +162,7 @@ fn render_root_block(
 struct VirtualizedBlockList {
     blocks: Vec<BlockNode>,
     list_state: ListState,
-    content_height: Pixels,
+    content_height: Option<Pixels>,
     state: Entity<MarkdownState>,
 }
 
@@ -197,7 +175,7 @@ impl IntoElement for VirtualizedBlockList {
 }
 
 impl Element for VirtualizedBlockList {
-    type RequestLayoutState = ();
+    type RequestLayoutState = Option<AnyElement>;
     type PrepaintState = Option<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
@@ -213,9 +191,22 @@ impl Element for VirtualizedBlockList {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let content_height = self.content_height;
+        let Some(content_height) = self.content_height else {
+            // Outer-list overdraw lays out rows without prepainting them. A
+            // regular column measures cold blocks at the actual parent width;
+            // an Infer list would cache their min-content heights instead.
+            let mut column =
+                v_flex()
+                    .w_full()
+                    .children((0..self.blocks.len()).map(|ix| {
+                        render_root_block(&self.blocks, ix, px(0.), &self.state, window, cx)
+                    }))
+                    .into_any_element();
+            let layout = column.request_layout(window, cx);
+            return (layout, Some(column));
+        };
         let layout_id = window.request_measured_layout(
             Style::default(),
             move |known_dimensions, available_space, _, _| {
@@ -228,7 +219,7 @@ impl Element for VirtualizedBlockList {
                 size(width, content_height)
             },
         );
-        (layout_id, ())
+        (layout_id, None)
     }
 
     fn prepaint(
