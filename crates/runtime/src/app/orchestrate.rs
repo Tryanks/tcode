@@ -1300,7 +1300,7 @@ pub(super) fn render_orchestrate_configuration(
         ("Execution models", "dispatch", &settings.child_models),
     ] {
         text.push_str(&format!("\n### {heading} — `{tool}`\n\n"));
-        text.push_str("Choose the model across providers, then set the tool's effort parameter from that model's available values according to its description and task difficulty. Effort is a per-call choice; omitted effort uses medium when available, otherwise the provider default. Match model and endpoint profile exactly. Fast mode follows the configuration unless the user explicitly requests an override. Descriptions under peer headings belong to those peers, not to the main thread. The main thread's own peer entry is omitted.\n");
+        text.push_str("Choose the model across providers, then set the tool's effort parameter from that model's available values according to its description and task difficulty. Effort is a per-call choice; omitted effort uses medium when available, otherwise the provider default. Headings list provider / model: pass these as provider and model. Set profile only when the entry explicitly lists a profile ID; otherwise omit it for the built-in endpoint. profile selects an endpoint configuration, not a model. Fast mode follows the configuration unless the user explicitly requests an override. Descriptions under peer headings belong to those peers, not to the main thread. The main thread's own peer entry is omitted.\n");
         let collaboration = tool == "collaborate";
         let available: Vec<_> = profiles
             .iter()
@@ -1476,23 +1476,19 @@ fn resolve_orchestrate_profiles(
         let enabled = profiles.iter()
             .filter(|entry| entry.enabled && entry.provider == provider)
             .map(|entry| {
-                let mut option = entry.model.clone();
-                if let Some(profile_id) = entry.profile_id.as_deref() {
-                    option.push_str(&format!(", profile {profile_id}"));
+                match entry.profile_id.as_deref() {
+                    Some(profile_id) => format!("model={} (profile {profile_id})", entry.model),
+                    None => format!("model={} (built-in endpoint; omit profile)", entry.model),
                 }
-                option
             })
             .collect::<Vec<_>>()
             .join(", ");
         let requested = requested_model.unwrap_or("provider default model");
-        let effort = requested_effort
-            .map(|effort| format!(" (effort {effort})"))
-            .unwrap_or_default();
         let profile = requested_profile
             .map(|profile| format!(" under profile {profile}"))
             .unwrap_or_default();
         format!(
-            "no enabled profile matches {requested}{effort}{profile} under {}; enabled profiles: {}",
+            "no enabled profile matches {requested}{profile} under {}; enabled model/endpoint combinations: {}. profile selects a provider endpoint, not a model; pass the model name as model and omit profile unless the configuration lists an explicit profile ID. Effort has not been validated yet.",
             provider_name(provider),
             if enabled.is_empty() { "none" } else { &enabled }
         )
