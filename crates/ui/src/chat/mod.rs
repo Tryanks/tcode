@@ -5023,6 +5023,65 @@ mod tests {
     }
 
     #[gpui::test]
+    fn upward_scroll_moves_only_by_the_input_distance(cx: &mut TestAppContext) {
+        use gpui::{ScrollDelta, ScrollWheelEvent, point, px, size};
+
+        for width in [393., 1024.] {
+            let mut timeline = synthetic_markdown_timeline(3);
+            for entry in &mut timeline.entries {
+                if let EntryContent::Item(ItemContent::AssistantMessage { text }) =
+                    &mut Arc::make_mut(entry).content
+                {
+                    *text = (0..40)
+                        .map(|n| {
+                            format!(
+                                "## Section {n}\n\nA paragraph with **bold** text and `code`.\n\n"
+                            )
+                        })
+                        .collect();
+                }
+            }
+            let (store, window_state, _) = seed_chat(cx, timeline);
+            let (view, cx) =
+                cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+            cx.simulate_resize(size(px(width), px(700.)));
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+            list.set_offset_from_scrollbar(point(
+                px(0.),
+                list.scroll_px_offset_for_scrollbar().y + px(40.),
+            ));
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            for step in 0..160 {
+                let item = list.logical_scroll_top().item_ix;
+                let before = list.bounds_for_item(item).unwrap().top();
+                cx.simulate_event(ScrollWheelEvent {
+                    position: list.viewport_bounds().center(),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(40.))),
+                    touch_phase: gpui::TouchPhase::Moved,
+                    ..Default::default()
+                });
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let after = list
+                    .bounds_for_item(item)
+                    .expect("reading anchor stays visible")
+                    .top();
+                assert!(
+                    (f32::from(after - before) - 40.).abs() < 1.,
+                    "step {step}: upward input of 40px moved from {before:?} to {after:?}"
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
     fn chat_view_applies_markdown_residency_decisions(cx: &mut TestAppContext) {
         use gpui::{FollowMode, ListOffset, VisualTestContext, px, size};
 
