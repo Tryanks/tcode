@@ -79,6 +79,14 @@ pub enum Query {
         item_id: String,
         cols: u16,
     },
+    /// The whole output of a tool call or command whose history record carried
+    /// only [`OUTPUT_PREVIEW_BYTES`] of it.
+    ReadItemOutput {
+        session_id: String,
+        item_id: String,
+    },
+    /// Every archived thread, most recently archived first.
+    ArchivedSessions,
 }
 
 /// Widths the host will render stored output at. Narrower than the low bound is
@@ -102,9 +110,12 @@ pub enum QueryResponse {
     Hosting(HostingState),
     ComputerUsePermissions(tcode_core::permissions::ComputerUsePermissions),
     Pong,
+    /// Records standing for the log cursors `from..end`, with the same
+    /// merging as [`crate::ServerEvent::SessionSnapshot`].
     SessionHistoryPage {
         records: Vec<crate::SessionEventRecord>,
         from: u64,
+        end: u64,
         truncated: bool,
     },
     ActiveWorkspace(Vec<PathEntry>),
@@ -132,6 +143,8 @@ pub enum QueryResponse {
     /// replicates. `history` is empty and there is no cursor: it is a finished
     /// screen, not a session.
     TerminalFrame(Box<crate::terminal::TerminalFrame>),
+    ItemOutput(String),
+    ArchivedSessions(Vec<tcode_core::project::SessionMeta>),
 }
 
 /// One content match in a stored session, addressed by the folded timeline
@@ -253,7 +266,15 @@ pub struct RecentDir {
 
 /// Fresh history and backwards pages are bounded independently of live cursors.
 pub const SESSION_HISTORY_RECORDS: usize = 200;
+/// The most one history reply may carry: a single record larger than this is
+/// an error rather than a reply.
 pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+/// What one history reply aims for. A reply always carries at least one
+/// record, so a larger record still arrives alone.
+pub const SESSION_WINDOW_BYTES: usize = 512 * 1024;
+/// Tool and command output a history record carries; the rest is read with
+/// [`Query::ReadItemOutput`].
+pub const OUTPUT_PREVIEW_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]

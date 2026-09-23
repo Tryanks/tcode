@@ -420,7 +420,7 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
     drop(initiator);
 
     // Scan in arrival order: the finalized index must precede `Finished`.
-    let mut index_ready = false;
+    let mut imported_ids = std::collections::HashSet::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         assert!(
@@ -429,13 +429,10 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
         );
         let envelope = super::tests::next_event(&events, |_| true);
         match &envelope.event {
-            ServerEvent::IndexSnapshot(snapshot) => {
-                index_ready = snapshot
-                    .sessions
-                    .iter()
-                    .filter(|meta| meta.project_id.as_deref() == Some(project_id.as_str()))
-                    .count()
-                    == 2;
+            ServerEvent::IndexUpsertSession(meta)
+                if meta.project_id.as_deref() == Some(project_id.as_str()) =>
+            {
+                imported_ids.insert(meta.id.clone());
             }
             ServerEvent::ExternalImportStatusReplaced {
                 status: Some(status),
@@ -443,8 +440,9 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
             } => {
                 if let ExternalImportState::Finished { imported, skipped } = status.state {
                     assert_eq!((imported, skipped), (2, 0));
-                    assert!(
-                        index_ready,
+                    assert_eq!(
+                        imported_ids.len(),
+                        2,
                         "Finished reached a client before the finalized index"
                     );
                     break;

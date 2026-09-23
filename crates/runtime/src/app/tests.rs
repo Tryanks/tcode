@@ -1561,8 +1561,8 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         assert_eq!(context, expected_context);
         assert!(cx.drain_outgoing().iter().any(|message| matches!(
             message,
-            HostMessage::Event(EventEnvelope { event: ServerEvent::IndexSnapshot(snapshot), .. })
-                if snapshot.title_generating.contains(&id)
+            HostMessage::Event(EventEnvelope { event: ServerEvent::IndexSummaryReplaced(summary), .. })
+                if summary.title_generating.contains(&id)
         )), "pending state must reach other clients");
 
         match outcome {
@@ -1618,7 +1618,13 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             .unwrap();
         // Completion arrives after the scratch-cwd cleanup on the thread pool;
         // wait on the pending flag rather than a fixed idle window.
-        cx.run_until(|state| !state.index_snapshot().title_generating.contains(&id));
+        cx.run_until(|state| {
+            !state
+                .index_snapshot()
+                .summary
+                .title_generating
+                .contains(&id)
+        });
         state.read(|state| {
             let title = state
                 .sessions
@@ -1675,10 +1681,22 @@ fn title_regeneration_rejects_empty_history_without_calling_the_provider() {
             session_id: id.clone(),
         },
     );
-    cx.run_until(|state| !state.index_snapshot().title_generating.contains(&id));
+    cx.run_until(|state| {
+        !state
+            .index_snapshot()
+            .summary
+            .title_generating
+            .contains(&id)
+    });
     assert!(scripted.commands.try_recv().is_err());
     state.read(|state| {
-        assert!(!state.index_snapshot().title_generating.contains(&id));
+        assert!(
+            !state
+                .index_snapshot()
+                .summary
+                .title_generating
+                .contains(&id)
+        );
         assert_eq!(state.sessions[0].title, meta.title);
     });
     assert!(cx.drain_outgoing().iter().any(|message| matches!(
@@ -2396,6 +2414,7 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
     cx.run_until(|state| {
         !state
             .index_snapshot()
+            .summary
             .title_generating
             .contains("orchestrator-title")
     });
@@ -6961,6 +6980,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 event: AgentEvent::Warning {
                     message: format!("event {index}"),
                 },
+                elided: None,
             })
             .collect();
         state
@@ -6997,12 +7017,14 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             let QueryResponse::SessionHistoryPage {
                 records: page,
                 from,
+                end,
                 truncated,
             } = state.session_history_page("large", before, 200).unwrap()
             else {
                 panic!("page")
             };
             assert!(!truncated);
+            assert_eq!(end, before);
             assert_eq!(from + page.len() as u64, before);
             loaded.splice(0..0, page);
             before = from;
@@ -7055,12 +7077,14 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                         attachments: Vec::new(),
                     },
                 }),
+                elided: None,
             });
             records.push(SessionEventRecord {
                 ts: Some(turn * 1000 + 1),
                 event: AgentEvent::TurnStarted {
                     turn_id: format!("turn-{turn}"),
                 },
+                elided: None,
             });
             for delta in 0..300u64 {
                 records.push(SessionEventRecord {
@@ -7070,6 +7094,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                         kind: agent::DeltaKind::AssistantText,
                         text: "word ".into(),
                     },
+                    elided: None,
                 });
             }
             records.push(SessionEventRecord {
@@ -7079,6 +7104,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                     status: TurnStatus::Completed,
                     usage: None,
                 },
+                elided: None,
             });
         }
         assert_eq!(turn_starts, [0, 303, 606, 909, 1212]);
@@ -7104,6 +7130,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
 
         let QueryResponse::SessionHistoryPage {
             from: page_from,
+            end,
             records: page,
             truncated,
         } = state.session_history_page("streamed", from, 200).unwrap()
@@ -7111,10 +7138,20 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             panic!("page")
         };
         assert_eq!(
-            page_from, 606,
+            (page_from, end),
+            (606, 909),
             "a 200-record page grows back to its turn start"
         );
-        assert_eq!(page, records[606..909]);
+        let AgentEvent::Delta { text, .. } = &page[2].event else {
+            panic!("merged delta")
+        };
+        assert_eq!(
+            (page.len(), text.as_str()),
+            (4, "word ".repeat(300).as_str()),
+            "a turn's consecutive deltas cross the wire as one"
+        );
+        assert_eq!(page[..2], records[606..608]);
+        assert_eq!(page[3], records[908]);
         assert!(!truncated);
     });
 }
@@ -7207,16 +7244,21 @@ fn history_pages_of_an_opened_session_parse_the_log_once() {
             let QueryResponse::SessionHistoryPage {
                 records: page,
                 from,
+                end,
                 ..
             } = state.session_history_page("paged", before, 200).unwrap()
             else {
                 panic!("page")
             };
-            assert_eq!(from + page.len() as u64, before);
+            assert_eq!(end, before);
             loaded.splice(0..0, page);
             before = from;
         }
-        assert_eq!(loaded, records);
+        assert_eq!(
+            format!("{:?}", Timeline::fold_events(loaded).entries),
+            format!("{:?}", Timeline::fold_events(records).entries),
+            "merged deltas fold as the log does"
+        );
     });
     assert_eq!(
         store.event_reads() - reads_before_open,
@@ -7326,6 +7368,7 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
                 event: AgentEvent::Warning {
                     message: "x".repeat(1024 * 1024),
                 },
+                elided: None,
             })
             .collect();
         state
@@ -7367,6 +7410,7 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
             from,
             records: page,
             truncated,
+            ..
         } = response
         else {
             panic!("page")
@@ -7752,4 +7796,333 @@ fn history_paging_bench() {
         pages.len(),
         snapshot_elapsed + paged
     );
+}
+
+/// Opening or archiving one thread must cost that thread on the wire, not the
+/// whole index or every setting; archived threads leave the index and are
+/// read on demand.
+#[test]
+fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("index-deltas");
+    let project = Project::from_root(store.root().join("project"));
+    store.upsert_project(&project).unwrap();
+    for id in ["kept", "archived"] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, project.root.clone(), None);
+        meta.id = id.into();
+        meta.project_id = Some(project.id.clone());
+        store.upsert_meta(&meta).unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    cx.run_until_parked();
+    cx.drain_outgoing();
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::ArchiveSession {
+            session_id: "archived".into(),
+        },
+    );
+    cx.run_until_parked();
+    let events: Vec<_> = cx
+        .drain_outgoing()
+        .into_iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::Index,
+                event,
+                ..
+            }) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ServerEvent::IndexRemoveSession { session_id } if session_id == "archived"
+        )),
+        "{events:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ServerEvent::IndexSummaryReplaced(summary)
+            if summary.archived_counts.get(&project.id) == Some(&1)
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::IndexSnapshot(_))),
+        "a change never resends the whole index"
+    );
+    state.read(|state| {
+        let index = state.index_snapshot();
+        assert_eq!(
+            index
+                .sessions
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["kept"]
+        );
+        assert_eq!(
+            state
+                .archived_sessions()
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["archived"]
+        );
+    });
+
+    state.update(cx, |state, cx| state.mark_visited("kept", cx));
+    cx.run_until_parked();
+    let settings: Vec<_> = cx
+        .drain_outgoing()
+        .into_iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::Settings,
+                event,
+                ..
+            }) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(
+            settings.as_slice(),
+            [ServerEvent::LastVisitedChanged(visits)] if visits.keys().eq(["kept"])
+        ),
+        "{settings:?}"
+    );
+}
+
+fn tool_call(id: &str, output: String) -> SessionEventRecord {
+    SessionEventRecord {
+        ts: Some(1),
+        event: AgentEvent::ItemCompleted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::ToolCall {
+                name: "screenshot".into(),
+                input: serde_json::json!({}),
+                output: Some(output),
+                status: ItemStatus::Completed,
+            },
+        }),
+        elided: None,
+    }
+}
+
+/// A tool's screenshot or a long build log costs its preview when a thread
+/// opens; the rest stays on the host until the reader asks for it.
+#[test]
+fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-output-previews");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let preview = tcode_protocol::OUTPUT_PREVIEW_BYTES;
+    let tool_output = format!("{}{}", "a".repeat(preview), "é".repeat(50_000));
+    let command_output = format!("{}{}", "b".repeat(100_000), "z".repeat(preview));
+    let records = vec![
+        tool_call("tool", tool_output.clone()),
+        SessionEventRecord {
+            ts: Some(2),
+            event: AgentEvent::ItemCompleted(ThreadItem {
+                id: "command".into(),
+                parent_item_id: None,
+                content: ItemContent::CommandExecution {
+                    command: "make".into(),
+                    output: command_output.clone(),
+                    exit_code: Some(0),
+                    status: ItemStatus::Completed,
+                },
+            }),
+            elided: None,
+        },
+        tool_call("small", "ok".into()),
+    ];
+    state.update(cx, |state, _| {
+        state
+            .event_records
+            .insert("outputs".into(), SessionLog::from_records(records.clone()));
+        let snapshot = state
+            .subscription_snapshot(&tcode_protocol::Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "outputs".into(),
+                },
+                after: None,
+            })
+            .unwrap();
+        let ServerEvent::SessionSnapshot { records: sent, .. } = snapshot.event else {
+            panic!("snapshot")
+        };
+        let AgentEvent::ItemCompleted(ThreadItem {
+            content: ItemContent::ToolCall {
+                output: Some(head), ..
+            },
+            ..
+        }) = &sent[0].event
+        else {
+            panic!("tool call")
+        };
+        assert_eq!(head.as_str(), "a".repeat(preview));
+        assert_eq!(sent[0].elided, Some(tool_output.len() as u64));
+        let AgentEvent::ItemCompleted(ThreadItem {
+            content: ItemContent::CommandExecution { output: tail, .. },
+            ..
+        }) = &sent[1].event
+        else {
+            panic!("command")
+        };
+        assert_eq!(
+            tail.as_str(),
+            "z".repeat(preview),
+            "a command keeps its end"
+        );
+        assert_eq!(sent[1].elided, Some(command_output.len() as u64));
+        assert_eq!(sent[2], records[2], "a small output crosses whole");
+
+        let timeline = Timeline::fold_events(sent);
+        assert_eq!(
+            timeline.elided_outputs,
+            HashMap::from([
+                ("tool".to_string(), tool_output.len() as u64),
+                ("command".to_string(), command_output.len() as u64),
+            ])
+        );
+        assert_eq!(
+            state.item_output("outputs", "tool").unwrap(),
+            QueryResponse::ItemOutput(tool_output.clone())
+        );
+        assert_eq!(
+            state.item_output("outputs", "command").unwrap(),
+            QueryResponse::ItemOutput(command_output.clone())
+        );
+        assert_eq!(
+            state.item_output("outputs", "missing").unwrap_err().code,
+            "unknown_item_output"
+        );
+    });
+}
+
+/// Every update of a turn's changes carries the whole diff set; only the last
+/// one decides what the turn shows, so the earlier ones cross without diffs.
+#[test]
+fn superseded_turn_changes_cross_without_diffs() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-turn-changes");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let changes = |diff: &str| {
+        agent::file_changes_from_unified_diff(&format!(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-{diff}\n+{diff}!\n"
+        ))
+        .unwrap()
+    };
+    let update = |diff: &str| SessionEventRecord {
+        ts: Some(1),
+        event: AgentEvent::TurnChangesUpdated {
+            turn_id: "turn".into(),
+            changes: changes(diff),
+            completeness: agent::ChangeCompleteness::Exact,
+        },
+        elided: None,
+    };
+    let records = vec![
+        SessionEventRecord {
+            ts: Some(0),
+            event: AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            elided: None,
+        },
+        update("first"),
+        tool_call("between", "ok".into()),
+        update("last"),
+    ];
+    state.update(cx, |state, _| {
+        state
+            .event_records
+            .insert("changes".into(), SessionLog::from_records(records.clone()));
+        let QueryResponse::SessionHistoryPage { records: sent, .. } =
+            state.session_history_page("changes", 4, 200).unwrap()
+        else {
+            panic!("page")
+        };
+        let AgentEvent::TurnChangesUpdated { changes, .. } = &sent[1].event else {
+            panic!("first update")
+        };
+        assert!(changes.iter().all(|change| change.diff.is_none()));
+        assert_eq!(sent[3], records[3]);
+        assert_eq!(
+            format!("{:?}", Timeline::fold_events(sent).turns),
+            format!("{:?}", Timeline::fold_events(records).turns)
+        );
+    });
+}
+
+/// A thread opens with about half a megabyte of history however long its
+/// records are, and a single record larger than that still arrives alone.
+#[test]
+fn history_windows_are_byte_budgeted() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-window-bytes");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let records: Vec<SessionEventRecord> = (0..200)
+        .map(|index| SessionEventRecord {
+            ts: Some(index),
+            event: AgentEvent::Warning {
+                message: "w".repeat(10 * 1024),
+            },
+            elided: None,
+        })
+        .collect();
+    state.update(cx, |state, _| {
+        state
+            .event_records
+            .insert("wide".into(), SessionLog::from_records(records.clone()));
+        let mut snapshot = state
+            .subscription_snapshot(&tcode_protocol::Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "wide".into(),
+                },
+                after: None,
+            })
+            .unwrap();
+        snapshot.request_id = Some(u64::MAX);
+        let line = tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone())).unwrap();
+        assert!(line.len() <= tcode_protocol::SESSION_WINDOW_BYTES);
+        let ServerEvent::SessionSnapshot {
+            from,
+            end,
+            records: sent,
+            truncated,
+            ..
+        } = snapshot.event
+        else {
+            panic!("snapshot")
+        };
+        assert!(truncated);
+        assert_eq!(end, 200);
+        assert!(sent.len() > 40, "the budget is filled, not undershot");
+        assert_eq!(sent, records[from as usize..]);
+
+        let mut huge = records;
+        huge[199].event = AgentEvent::Warning {
+            message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
+        };
+        state
+            .event_records
+            .insert("wide".into(), SessionLog::from_records(huge));
+        let QueryResponse::SessionHistoryPage {
+            from,
+            records: sent,
+            ..
+        } = state.session_history_page("wide", 200, 200).unwrap()
+        else {
+            panic!("page")
+        };
+        assert_eq!((from, sent.len()), (199, 1));
+    });
 }

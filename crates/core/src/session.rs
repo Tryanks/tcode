@@ -137,11 +137,33 @@ pub fn append_review_comments_to_prompt(prompt: &str, comments: &[ReviewComment]
 pub struct StoredEvent {
     pub ts: Option<u64>,
     pub event: AgentEvent,
+    /// The byte length of an item output that a host shortened before sending
+    /// this record; the full output stays on the host. Never set on a record
+    /// read from the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elided: Option<u64>,
+}
+
+impl StoredEvent {
+    /// The item an event creates or continues.
+    pub fn item_id(&self) -> Option<&str> {
+        match &self.event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item) => Some(&item.id),
+            AgentEvent::Delta { item_id, .. } => Some(item_id),
+            _ => None,
+        }
+    }
 }
 
 impl From<AgentEvent> for StoredEvent {
     fn from(event: AgentEvent) -> Self {
-        StoredEvent { ts: None, event }
+        StoredEvent {
+            ts: None,
+            event,
+            elided: None,
+        }
     }
 }
 
@@ -503,6 +525,9 @@ pub struct Timeline {
     committed_file_change_items: HashSet<String>,
     /// Tool-time accounting for the open turn (see [`TurnMeta::timing`]).
     tool_clock: ToolClock,
+    /// Full output lengths of the items whose records arrived shortened
+    /// ([`StoredEvent::elided`]), keyed by item id.
+    pub elided_outputs: HashMap<String, u64>,
 }
 
 impl Timeline {
@@ -511,10 +536,19 @@ impl Timeline {
     pub fn fold_events(events: impl IntoIterator<Item = impl Into<StoredEvent>>) -> Self {
         let mut timeline = Self::default();
         for event in events {
-            let stored = event.into();
-            timeline.apply_at(stored.ts, &stored.event);
+            timeline.apply_stored(&event.into());
         }
         timeline
+    }
+
+    /// Fold one record, remembering whether it carried a shortened output.
+    pub fn apply_stored(&mut self, stored: &StoredEvent) {
+        if let Some(bytes) = stored.elided
+            && let Some(item_id) = stored.item_id()
+        {
+            self.elided_outputs.insert(item_id.to_owned(), bytes);
+        }
+        self.apply_at(stored.ts, &stored.event);
     }
 
     /// Clear any lingering "running" state (used after replaying a stored
@@ -2324,12 +2358,14 @@ mod tests {
             StoredEvent {
                 ts: Some(1_000_000),
                 event: user_msg("u1", "first"),
+                elided: None,
             },
             StoredEvent {
                 ts: Some(1_000_500),
                 event: AgentEvent::TurnStarted {
                     turn_id: "t1".into(),
                 },
+                elided: None,
             },
             StoredEvent {
                 ts: Some(1_002_000),
@@ -2338,6 +2374,7 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::AssistantMessage { text: "hi".into() },
                 }),
+                elided: None,
             },
             StoredEvent {
                 ts: Some(1_005_500),
@@ -2346,16 +2383,19 @@ mod tests {
                     status: TurnStatus::Completed,
                     usage: None,
                 },
+                elided: None,
             },
             StoredEvent {
                 ts: Some(2_000_000),
                 event: user_msg("u2", "second"),
+                elided: None,
             },
             StoredEvent {
                 ts: Some(2_000_400),
                 event: AgentEvent::TurnStarted {
                     turn_id: "t2".into(),
                 },
+                elided: None,
             },
         ];
         let timeline = Timeline::fold_events(stored);
@@ -2820,6 +2860,7 @@ mod tests {
         StoredEvent {
             ts: Some(ts),
             event,
+            elided: None,
         }
     }
 
@@ -3316,16 +3357,19 @@ mod tests {
                 StoredEvent {
                     ts: Some(n * 10),
                     event: user_msg(&format!("user-{n}"), "go"),
+                    elided: None,
                 },
                 StoredEvent {
                     ts: Some(n * 10 + 1),
                     event: AgentEvent::TurnStarted {
                         turn_id: format!("turn-{n}"),
                     },
+                    elided: None,
                 },
                 StoredEvent {
                     ts: Some(n * 10 + 2),
                     event: assistant_delta("pi-assistant-0:0", &format!("text {n}")),
+                    elided: None,
                 },
                 StoredEvent {
                     ts: Some(n * 10 + 3),
@@ -3334,6 +3378,7 @@ mod tests {
                         status: TurnStatus::Completed,
                         usage: None,
                     },
+                    elided: None,
                 },
             ]
         };
@@ -3381,11 +3426,13 @@ mod tests {
                 message: format!("boom {ts}"),
                 fatal: false,
             },
+            elided: None,
         };
         let log = [
             StoredEvent {
                 ts: Some(1),
                 event: user_msg("user-1", "go"),
+                elided: None,
             },
             error(2),
             StoredEvent {
@@ -3395,10 +3442,12 @@ mod tests {
                     status: TurnStatus::Failed,
                     usage: None,
                 },
+                elided: None,
             },
             StoredEvent {
                 ts: Some(4),
                 event: user_msg("user-2", "again"),
+                elided: None,
             },
             error(5),
             error(5),

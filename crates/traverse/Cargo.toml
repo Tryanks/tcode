@@ -31,6 +31,7 @@ browser = [
 tcode-client = { path = "../client" }
 tcode-protocol = { path = "../protocol", default-features = false }
 async-channel = "2"
+flate2 = "1"
 base64 = { version = "0.23", optional = true }
 dirs = { version = "7", optional = true }
 futures-lite = "2"

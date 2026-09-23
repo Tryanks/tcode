@@ -2704,8 +2704,7 @@ mod tests {
                     request_id: None,
                     topic: Topic::Index,
                     event: ServerEvent::IndexSnapshot(IndexSnapshot {
-                        title_generating: Default::default(),
-                        activity: Default::default(),
+                        summary: Default::default(),
                         sessions: if present { vec![meta] } else { Vec::new() },
                         projects: Vec::new(),
                     }),
@@ -2756,6 +2755,7 @@ mod tests {
                 },
                 ServerEvent::SessionSnapshot {
                     from: 0,
+                    end: 0,
                     records: Vec::new(),
                     total: 0,
                     total_turns: 0,
@@ -2892,6 +2892,7 @@ mod tests {
                 },
                 ServerEvent::SessionSnapshot {
                     from: 1800,
+                    end: 2000,
                     records: (0..200)
                         .map(|_| {
                             agent::AgentEvent::Warning {
@@ -3030,6 +3031,7 @@ mod tests {
                 },
                 ServerEvent::SessionSnapshot {
                     from: 0,
+                    end: 0,
                     records: Vec::new(),
                     total: 0,
                     total_turns: 0,
@@ -3328,6 +3330,7 @@ mod tests {
                     total_turns: 0,
                     truncated: false,
                     from: 0,
+                    end: 0,
                     records: vec![],
                 },
             ),
@@ -3498,6 +3501,7 @@ mod tests {
                         total_turns: 0,
                         truncated: false,
                         from: 0,
+                        end: 0,
                         records: vec![],
                     },
                 ),
@@ -3634,6 +3638,7 @@ mod tests {
                         total_turns: 0,
                         truncated: false,
                         from: 0,
+                        end: 0,
                         records: vec![],
                     },
                 }))
@@ -3879,8 +3884,7 @@ mod tests {
             (
                 Topic::Index,
                 ServerEvent::IndexSnapshot(IndexSnapshot {
-                    title_generating: Default::default(),
-                    activity: Default::default(),
+                    summary: Default::default(),
                     sessions: Vec::new(),
                     projects: Vec::new(),
                 }),
@@ -4398,8 +4402,7 @@ mod tests {
                     request_id: None,
                     topic: Topic::Index,
                     event: ServerEvent::IndexSnapshot(IndexSnapshot {
-                        title_generating: Default::default(),
-                        activity: Default::default(),
+                        summary: Default::default(),
                         sessions: Vec::new(),
                         projects: Vec::new(),
                     }),
@@ -4953,6 +4956,7 @@ mod tests {
                     total_turns: 0,
                     truncated: false,
                     from: 0,
+                    end: 2,
                     records: vec![
                         agent::AgentEvent::TurnStarted {
                             turn_id: "turn-1".into(),

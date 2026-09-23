@@ -333,6 +333,16 @@ struct PendingMarkdownBuild {
     turn: usize,
 }
 
+/// A whole tool output fetched on request.
+enum FullOutput {
+    /// Dropping the task cancels the fetch.
+    Loading {
+        _request: Task<()>,
+    },
+    Loaded(SharedString),
+    Failed(String),
+}
+
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -363,6 +373,8 @@ pub struct ChatView {
     expanded: HashSet<String>,
     auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
+    /// Whole tool outputs fetched for the open session, by item id.
+    full_outputs: HashMap<String, FullOutput>,
     session_key: Option<String>,
     /// Turn selected from a command-palette content hit.
     highlighted_turn: Option<usize>,
@@ -624,6 +636,7 @@ impl ChatView {
             expanded: HashSet::new(),
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
+            full_outputs: HashMap::new(),
             session_key: None,
             highlighted_turn: None,
             _tick: None,
@@ -707,6 +720,7 @@ impl ChatView {
             self.md_states.clear();
             self.pending_md_builds.clear();
             self.command_panels.borrow_mut().clear();
+            self.full_outputs.clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
             self.markdown_visible_turns = tail_turn_window(self.turn_items.len());
@@ -1825,6 +1839,15 @@ impl ChatView {
         } else {
             None
         };
+        let elided_output = if expanded
+            && matches!(
+                &entry.content,
+                EntryContent::Item(ItemContent::ToolCall { .. })
+            ) {
+            self.elided_output(&entry.id, turn, cx)
+        } else {
+            None
+        };
         let click_key = key;
         components::activity::activity_row(
             entry,
@@ -1832,11 +1855,72 @@ impl ChatView {
             live_reasoning,
             expanded,
             command_detail,
+            elided_output,
             cx.listener(move |this, _, _, cx| {
                 this.toggle_activity_expanded(turn, &click_key, expanded, cx);
             }),
             cx,
         )
+    }
+
+    /// How much of a shortened tool output the reader has, or `None` when the
+    /// record carried it whole.
+    fn elided_output(
+        &mut self,
+        item_id: &str,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<components::activity::ElidedOutput> {
+        use components::activity::ElidedOutput;
+        let full_bytes = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(|timeline| timeline.elided_outputs.get(item_id).copied())??;
+        let load = || -> components::subagent::ClickHandler {
+            let item_id = item_id.to_owned();
+            Box::new(cx.listener(move |this, _, _, cx| {
+                this.load_full_output(item_id.clone(), turn, cx);
+            }))
+        };
+        Some(match self.full_outputs.get(item_id) {
+            None => ElidedOutput::Preview {
+                full_bytes,
+                on_load: load(),
+            },
+            Some(FullOutput::Loading { .. }) => ElidedOutput::Loading,
+            Some(FullOutput::Loaded(output)) => ElidedOutput::Loaded(output.clone()),
+            Some(FullOutput::Failed(error)) => ElidedOutput::Failed {
+                error: error.clone(),
+                on_load: load(),
+            },
+        })
+    }
+
+    fn load_full_output(&mut self, item_id: String, turn: usize, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_key.clone() else {
+            return;
+        };
+        let request = self.workspace_store.update(cx, |store, cx| {
+            store.read_item_output(session_id.clone(), item_id.clone(), cx)
+        });
+        let id = item_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = request.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.session_key.as_deref() != Some(session_id.as_str()) {
+                    return;
+                }
+                let output = match result {
+                    Ok(output) => FullOutput::Loaded(output.into()),
+                    Err(error) => FullOutput::Failed(error),
+                };
+                this.full_outputs.insert(id, output);
+                this.remeasure_expanded(turn, cx);
+            });
+        });
+        self.full_outputs
+            .insert(item_id, FullOutput::Loading { _request: task });
+        self.remeasure_expanded(turn, cx);
     }
 
     /// Ask the host to render one stored command's output at `cols`.
