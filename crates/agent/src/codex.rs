@@ -2402,6 +2402,14 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
 /// desktop app's `JSON.stringify([tool, message id, index])`, which is what
 /// the reply envelope must echo back; the tool has no header. Questions with
 /// an empty title and options with an empty label are dropped.
+const ASYNC_QUESTION_TOOL: &str = "request_user_input_async";
+
+fn has_async_questions(item: &Value) -> bool {
+    item.get("questions")
+        .and_then(Value::as_array)
+        .is_some_and(|questions| !questions.is_empty())
+}
+
 fn parse_codex_async_questions(message_id: &str, item: &Value) -> Vec<UserInputQuestion> {
     let questions = match item.get("questions").and_then(Value::as_array) {
         Some(questions) => questions,
@@ -2426,7 +2434,7 @@ fn parse_codex_async_questions(message_id: &str, item: &Value) -> Vec<UserInputQ
                 })
                 .collect();
             Some(UserInputQuestion {
-                id: json!(["request_user_input_async", message_id, index]).to_string(),
+                id: json!([ASYNC_QUESTION_TOOL, message_id, index]).to_string(),
                 header: String::new(),
                 question: title.to_owned(),
                 options,
@@ -2493,6 +2501,14 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         return None;
     }
     let content = match provider_kind {
+        // `request_user_input_async` output: the text only lists the questions
+        // the input panel shows, so the transcript records the tool call.
+        "agentMessage" if has_async_questions(item) => ItemContent::ToolCall {
+            name: ASYNC_QUESTION_TOOL.into(),
+            input: json!({ "questions": item.get("questions").cloned().unwrap_or_default() }),
+            output: None,
+            status: ItemStatus::Completed,
+        },
         "agentMessage" => ItemContent::AssistantMessage {
             text: string_field(item, "text"),
         },
@@ -3064,12 +3080,14 @@ mod tests {
                     .to_string(),
                 )
                 .await;
+            // The listing text is not an answer; the transcript keeps the call.
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::AssistantMessage { .. },
+                    content: ItemContent::ToolCall { ref name, ref input, .. },
                     ..
-                })
+                }) if name == "request_user_input_async"
+                    && input["questions"][0]["title"] == "Which DB?"
             ));
             let AgentEvent::UserInputRequested {
                 request_id,
