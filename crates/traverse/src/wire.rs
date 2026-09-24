@@ -26,7 +26,7 @@ use std::{io, time::Duration};
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
 use iroh::endpoint::{QuicTransportConfig, RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader};
 
 pub const ALPN_PAIR: &[u8] = b"tcode/pair/1";
 pub const ALPN_MAIN: &[u8] = b"tcode/1";
@@ -244,20 +244,8 @@ impl LineWriter {
     }
 
     pub async fn write_line(&mut self, line: &str) -> io::Result<()> {
-        let line = line.trim_end_matches(['\n', '\r']);
         self.buffer.clear();
-        deflate(
-            &mut self.deflate,
-            line.as_bytes(),
-            &mut self.buffer,
-            FlushCompress::None,
-        )?;
-        deflate(
-            &mut self.deflate,
-            b"\n",
-            &mut self.buffer,
-            FlushCompress::Sync,
-        )?;
+        compress_line(&mut self.deflate, line, &mut self.buffer)?;
         self.send.write_all(&self.buffer).await?;
         Ok(())
     }
@@ -265,6 +253,12 @@ impl LineWriter {
     pub fn finish(&mut self) {
         let _ = self.send.finish();
     }
+}
+
+fn compress_line(deflate: &mut Compress, line: &str, output: &mut Vec<u8>) -> io::Result<()> {
+    let line = line.trim_end_matches(['\n', '\r']);
+    self::deflate(deflate, line.as_bytes(), output, FlushCompress::None)?;
+    self::deflate(deflate, b"\n", output, FlushCompress::Sync)
 }
 
 fn deflate(
@@ -288,18 +282,18 @@ fn deflate(
 }
 
 /// Reads the protocol lines of a main stream, decompressed.
-pub struct LineStream {
-    reader: LineReader,
+pub struct LineStream<R = LineReader> {
+    reader: R,
     inflate: Decompress,
     pending: Vec<u8>,
     /// How much of `pending` holds no newline.
     scanned: usize,
 }
 
-impl LineStream {
+impl<R: AsyncBufRead + Unpin> LineStream<R> {
     /// Continue `reader` after its control line; bytes it already buffered
     /// are the start of the compressed stream.
-    pub fn new(reader: LineReader) -> Self {
+    pub fn new(reader: R) -> Self {
         Self {
             reader,
             inflate: Decompress::new(false),
@@ -341,12 +335,20 @@ impl LineStream {
                     ))
                 };
             }
-            self.pending.reserve(compressed.len() * 4 + 1024);
-            let consumed = self.inflate.total_in();
-            self.inflate
-                .decompress_vec(compressed, &mut self.pending, FlushDecompress::None)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let consumed = (self.inflate.total_in() - consumed) as usize;
+            let start = self.inflate.total_in();
+            loop {
+                let input = &compressed[(self.inflate.total_in() - start) as usize..];
+                self.pending.reserve(input.len() * 4 + 1024);
+                self.inflate
+                    .decompress_vec(input, &mut self.pending, FlushDecompress::None)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                // A full buffer can leave output inside the inflater even with
+                // every input byte consumed; spare room means it holds none.
+                if self.pending.len() < self.pending.capacity() {
+                    break;
+                }
+            }
+            let consumed = (self.inflate.total_in() - start) as usize;
             self.reader.consume(consumed);
         }
     }
@@ -457,5 +459,28 @@ mod tests {
             }
             .is_valid()
         );
+    }
+
+    #[tokio::test]
+    async fn a_highly_compressible_line_arrives_without_waiting_for_the_next() {
+        let line = format!(
+            r#"{{"checking":false,"d":"{}"}}"#,
+            r#"{"k":1},"#.repeat(500)
+        );
+        let mut compressed = Vec::new();
+        compress_line(
+            &mut Compress::new(Compression::default(), false),
+            &line,
+            &mut compressed,
+        )
+        .unwrap();
+        // The peer keeps the stream open: nothing follows until its next line.
+        let (mut peer, local) = tokio::io::duplex(64 * 1024);
+        tokio::io::AsyncWriteExt::write_all(&mut peer, &compressed)
+            .await
+            .unwrap();
+        let mut stream = LineStream::new(BufReader::new(local));
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read_line(MAX_LINE)).await;
+        assert_eq!(read.expect("line held back").unwrap(), Some(line));
     }
 }
