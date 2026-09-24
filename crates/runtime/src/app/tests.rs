@@ -7634,7 +7634,11 @@ fn settling_rejects_busy_descendants_and_accepted_input_reactivates_ancestors() 
             child.turn_in_flight = busy == "turn";
             child.background_task_count = usize::from(busy == "background");
             child.timeline.pending_user_input =
-                (busy == "input").then(|| ("input".into(), Vec::new()));
+                (busy == "input").then(|| tcode_core::session::PendingUserInput {
+                    request_id: "input".into(),
+                    questions: Vec::new(),
+                    delivery: agent::UserInputDelivery::Blocking,
+                });
             child.timeline.pending_approvals.clear();
             if busy == "queued" {
                 child.push_queued("queued".into(), Vec::new());

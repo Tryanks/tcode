@@ -1,12 +1,10 @@
 use super::super::*;
 use crate::scroll::ScrollableElement as _;
+use tcode_core::session::PendingUserInput;
 
 impl Composer {
     /// The active session's pending user-input request, if any.
-    pub(in super::super) fn pending_user_input(
-        &self,
-        cx: &App,
-    ) -> Option<(String, Vec<UserInputQuestion>)> {
+    pub(in super::super) fn pending_user_input(&self, cx: &App) -> Option<PendingUserInput> {
         self.workspace_store
             .read(cx)
             .composer_state()
@@ -25,14 +23,15 @@ impl Composer {
             .read(cx)
             .composer_state()
             .pending_user_input;
-        let current_id = current.as_ref().map(|(id, _)| id.clone());
+        let current_id = current.as_ref().map(|pending| pending.request_id.clone());
         if current_id != self.ui_request_id {
             self.ui_request_id = current_id;
             self.ui_question_index = 0;
             self.ui_selections.clear();
+            self.ui_dismissed_request_id = None;
             let prefill = current
                 .as_ref()
-                .and_then(|(_, questions)| questions.first())
+                .and_then(|pending| pending.questions.first())
                 .and_then(|question| question.prefill.as_deref())
                 .unwrap_or_default();
             self.user_input_custom.update(cx, |state, cx| {
@@ -43,10 +42,12 @@ impl Composer {
 
     pub(in super::super) fn render_user_input_panel(
         &self,
-        request_id: String,
-        questions: Vec<UserInputQuestion>,
+        pending: &PendingUserInput,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let request_id = pending.request_id.clone();
+        let questions = pending.questions.clone();
+        let blocking = pending.delivery.is_blocking();
         let muted = cx.theme().muted_foreground;
         let primary = cx.theme().primary;
         let total = questions.len();
@@ -61,6 +62,12 @@ impl Composer {
             .cloned()
             .unwrap_or_default();
 
+        // Codex's non-blocking questions carry no header.
+        let header_text = if question.header.is_empty() {
+            crate::tr!("userinput.async_header").into_owned()
+        } else {
+            question.header.clone()
+        };
         let header = h_flex()
             .w_full()
             .gap_2()
@@ -70,7 +77,7 @@ impl Composer {
                     .flex_1()
                     .text_size(px(13.))
                     .font_medium()
-                    .child(question.header.clone()),
+                    .child(header_text),
             )
             .when(total > 1, |this| {
                 this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
@@ -78,6 +85,20 @@ impl Composer {
                     index = index + 1,
                     total = total
                 )))
+            })
+            .when(!blocking, |this| {
+                let request_dismiss = request_id.clone();
+                this.child(
+                    Button::new("ui-dismiss")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip(crate::tr!("userinput.dismiss"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.ui_dismissed_request_id = Some(request_dismiss.clone());
+                            cx.notify();
+                        })),
+                )
             });
 
         let mut options_content = v_flex().w_full().gap_1();
@@ -310,6 +331,14 @@ impl Composer {
             .shadow_sm()
             .child(header)
             .child(div().text_size(px(13.)).child(question.question.clone()))
+            .when(!blocking, |this| {
+                this.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child(crate::tr!("userinput.async_hint")),
+                )
+            })
             .child(options)
             .child(custom_answer)
             .when(multi, |this| {
@@ -326,9 +355,11 @@ impl Composer {
     }
 
     /// Number keys 1-9 pressed in the (empty) main composer input select the
-    /// matching option of the pending question. Returns true when consumed.
-    /// Deliberately NOT wired to the panel itself: the only focusable child
-    /// there is the custom-answer textarea, where digits must stay literal.
+    /// matching option of the pending blocking question. Returns true when
+    /// consumed. Deliberately NOT wired to the panel itself: the only focusable
+    /// child there is the custom-answer textarea, where digits must stay
+    /// literal. While a non-blocking question is open the composer still
+    /// writes ordinary messages, so digits stay literal there too.
     pub(in super::super) fn handle_user_input_digit(
         &mut self,
         ev: &gpui::KeyDownEvent,
@@ -338,9 +369,17 @@ impl Composer {
         if ev.keystroke.modifiers.modified() || !self.input.read(cx).value().is_empty() {
             return false;
         }
-        let Some((request_id, questions)) = self.pending_user_input(cx) else {
+        let Some(PendingUserInput {
+            request_id,
+            questions,
+            delivery,
+        }) = self.pending_user_input(cx)
+        else {
             return false;
         };
+        if !delivery.is_blocking() {
+            return false;
+        }
         let index = self
             .ui_question_index
             .min(questions.len().saturating_sub(1));
@@ -388,7 +427,12 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((request_id, questions)) = self.pending_user_input(cx) else {
+        let Some(PendingUserInput {
+            request_id,
+            questions,
+            ..
+        }) = self.pending_user_input(cx)
+        else {
             return;
         };
         let text = input.read(cx).value().trim().to_string();

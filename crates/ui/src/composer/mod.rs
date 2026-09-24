@@ -137,6 +137,10 @@ pub struct Composer {
     ui_request_id: Option<String>,
     ui_question_index: usize,
     ui_selections: std::collections::HashMap<String, Vec<String>>,
+    /// A non-blocking request the user closed on this client; its panel stays
+    /// hidden until a newer request replaces it. The agent keeps working and
+    /// the question text remains in the transcript.
+    ui_dismissed_request_id: Option<String>,
     /// The placeholder text last applied to the input (so it is only re-set —
     /// which notifies — when it actually changes).
     applied_placeholder: String,
@@ -406,6 +410,7 @@ impl Composer {
             ui_request_id: None,
             ui_question_index: 0,
             ui_selections: std::collections::HashMap::new(),
+            ui_dismissed_request_id: None,
             applied_placeholder: crate::tr!("composer.placeholder").into_owned(),
             model_picker_token: 0,
             control_width: Rc::new(Cell::new(None)),
@@ -541,9 +546,13 @@ impl Composer {
         {
             return;
         }
-        // Pending questions use this text as the current custom answer,
-        // advancing through the same path as an option click.
-        if self.pending_user_input(cx).is_some() {
+        // A blocking question uses this text as the current custom answer,
+        // advancing through the same path as an option click. A non-blocking
+        // one leaves the composer to ordinary sends and steers.
+        if self
+            .pending_user_input(cx)
+            .is_some_and(|pending| pending.delivery.is_blocking())
+        {
             self.submit_custom_user_input(input, window, cx);
             return;
         }
@@ -1104,7 +1113,9 @@ impl Render for Composer {
             });
         }
 
-        let user_input = self.pending_user_input(cx);
+        let user_input = self
+            .pending_user_input(cx)
+            .filter(|pending| self.ui_dismissed_request_id.as_ref() != Some(&pending.request_id));
         let fallback_block = self
             .workspace_store
             .read(cx)
@@ -1306,8 +1317,8 @@ impl Render for Composer {
                     .when_some(approval, |this, request| {
                         this.child(self.render_approval_panel(&request, approval_count, cx))
                     })
-                    .when_some(user_input, |this, (request_id, questions)| {
-                        this.child(self.render_user_input_panel(request_id, questions, cx))
+                    .when_some(user_input, |this, pending| {
+                        this.child(self.render_user_input_panel(&pending, cx))
                     })
                     .when_some(fallback_block, |this, block| {
                         this.child(self.render_fallback_panel(&block, cx))

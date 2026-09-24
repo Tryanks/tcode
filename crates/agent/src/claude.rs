@@ -42,7 +42,8 @@ use crate::{
     InteractionMode, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
-    TokenUsage, TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
+    TokenUsage, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool,
+    selection_str,
 };
 
 /// Denial returned to `ExitPlanMode` after the client captures the plan.
@@ -2715,6 +2716,7 @@ impl Mapper {
             return vec![AgentEvent::UserInputRequested {
                 request_id,
                 questions,
+                delivery: UserInputDelivery::Blocking,
             }];
         }
 
@@ -4984,6 +4986,7 @@ mod tests {
             AgentEvent::UserInputRequested {
                 request_id,
                 questions,
+                ..
             } => {
                 assert_eq!(request_id, "ctrl-9");
                 assert_eq!(questions.len(), 2);
