@@ -141,6 +141,9 @@ pub struct Composer {
     /// hidden until a newer request replaces it. The agent keeps working and
     /// the question text remains in the transcript.
     ui_dismissed_request_id: Option<String>,
+    /// Whether the non-blocking question strip is open for answering. It
+    /// arrives closed so it never takes focus from the composer.
+    ui_async_expanded: bool,
     /// The placeholder text last applied to the input (so it is only re-set —
     /// which notifies — when it actually changes).
     applied_placeholder: String,
@@ -411,6 +414,7 @@ impl Composer {
             ui_question_index: 0,
             ui_selections: std::collections::HashMap::new(),
             ui_dismissed_request_id: None,
+            ui_async_expanded: false,
             applied_placeholder: crate::tr!("composer.placeholder").into_owned(),
             model_picker_token: 0,
             control_width: Rc::new(Cell::new(None)),

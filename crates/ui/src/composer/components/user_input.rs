@@ -29,6 +29,7 @@ impl Composer {
             self.ui_question_index = 0;
             self.ui_selections.clear();
             self.ui_dismissed_request_id = None;
+            self.ui_async_expanded = false;
             let prefill = current
                 .as_ref()
                 .and_then(|pending| pending.questions.first())
@@ -45,9 +46,11 @@ impl Composer {
         pending: &PendingUserInput,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if !pending.delivery.is_blocking() {
+            return self.render_async_question(pending, cx);
+        }
         let request_id = pending.request_id.clone();
         let questions = pending.questions.clone();
-        let blocking = pending.delivery.is_blocking();
         let muted = cx.theme().muted_foreground;
         let primary = cx.theme().primary;
         let total = questions.len();
@@ -62,12 +65,6 @@ impl Composer {
             .cloned()
             .unwrap_or_default();
 
-        // Codex's non-blocking questions carry no header.
-        let header_text = if question.header.is_empty() {
-            crate::tr!("userinput.async_header").into_owned()
-        } else {
-            question.header.clone()
-        };
         let header = h_flex()
             .w_full()
             .gap_2()
@@ -77,7 +74,7 @@ impl Composer {
                     .flex_1()
                     .text_size(px(13.))
                     .font_medium()
-                    .child(header_text),
+                    .child(question.header.clone()),
             )
             .when(total > 1, |this| {
                 this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
@@ -85,20 +82,6 @@ impl Composer {
                     index = index + 1,
                     total = total
                 )))
-            })
-            .when(!blocking, |this| {
-                let request_dismiss = request_id.clone();
-                this.child(
-                    Button::new("ui-dismiss")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .tooltip(crate::tr!("userinput.dismiss"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.ui_dismissed_request_id = Some(request_dismiss.clone());
-                            cx.notify();
-                        })),
-                )
             });
 
         let mut options_content = v_flex().w_full().gap_1();
@@ -331,14 +314,6 @@ impl Composer {
             .shadow_sm()
             .child(header)
             .child(div().text_size(px(13.)).child(question.question.clone()))
-            .when(!blocking, |this| {
-                this.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .child(crate::tr!("userinput.async_hint")),
-                )
-            })
             .child(options)
             .child(custom_answer)
             .when(multi, |this| {
@@ -351,6 +326,203 @@ impl Composer {
             })
             .child(actions)
             .when(total > 1, |this| this.child(pager))
+            .into_any_element()
+    }
+
+    /// A non-blocking question: the agent keeps working, so it never takes
+    /// the composer's place. It arrives as a one-line strip and opens into a
+    /// light inline answer area on demand, as Codex's own clients do.
+    fn render_async_question(
+        &self,
+        pending: &PendingUserInput,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let request_id = pending.request_id.clone();
+        let questions = pending.questions.clone();
+        let total = questions.len();
+        let index = self.ui_question_index.min(total.saturating_sub(1));
+        let Some(question) = questions.get(index).cloned() else {
+            return div().into_any_element();
+        };
+        let muted = cx.theme().muted_foreground;
+        let expanded = self.ui_async_expanded;
+        let touch = if self.compact { 44. } else { 24. };
+
+        let toggle = Button::new("ui-async-toggle")
+            .ghost()
+            .xsmall()
+            .when(self.compact, |button| {
+                button.min_w(px(touch)).min_h(px(touch))
+            })
+            .icon(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronUp
+            })
+            .tooltip(if expanded {
+                crate::tr!("userinput.collapse")
+            } else {
+                crate::tr!("userinput.answer")
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ui_async_expanded = !this.ui_async_expanded;
+                cx.notify();
+            }));
+        let request_dismiss = request_id.clone();
+        let dismiss = Button::new("ui-dismiss")
+            .ghost()
+            .xsmall()
+            .when(self.compact, |button| {
+                button.min_w(px(touch)).min_h(px(touch))
+            })
+            .icon(IconName::Close)
+            .tooltip(crate::tr!("userinput.dismiss"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.ui_dismissed_request_id = Some(request_dismiss.clone());
+                cx.notify();
+            }));
+
+        let strip = h_flex()
+            .id("ui-async-strip")
+            .w_full()
+            .gap_2()
+            .items_center()
+            .cursor_pointer()
+            .child(
+                Icon::new(IconName::Info)
+                    .small()
+                    .text_color(cx.theme().primary),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.))
+                    .font_medium()
+                    .text_color(cx.theme().primary)
+                    .child(crate::tr!("userinput.async_header")),
+            )
+            .when(!expanded, |strip| {
+                strip.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.))
+                        .child(question.question.clone()),
+                )
+            })
+            .when(expanded, |strip| strip.child(div().flex_1()))
+            .when(total > 1, |strip| {
+                strip.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child(crate::tr!(
+                            "userinput.question_count",
+                            index = index + 1,
+                            total = total
+                        )),
+                )
+            })
+            .child(toggle)
+            .child(dismiss)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ui_async_expanded = !this.ui_async_expanded;
+                cx.notify();
+            }));
+
+        let container = v_flex()
+            .w_full()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded(crate::material::radius_card())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .child(strip);
+        if !expanded {
+            return container.into_any_element();
+        }
+
+        let selected = self
+            .ui_selections
+            .get(&question.id)
+            .cloned()
+            .unwrap_or_default();
+        let chips = h_flex().w_full().flex_wrap().gap_1p5().children(
+            question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(opt_index, option)| {
+                    let label = option.label.clone();
+                    let question_for_click = question.clone();
+                    let questions_for_click = questions.clone();
+                    let request_for_click = request_id.clone();
+                    let is_selected = selected.iter().any(|l| l == &option.label);
+                    Button::new(("ui-async-opt", opt_index))
+                        .small()
+                        .when(is_selected, |button| button.primary())
+                        .when(!is_selected, |button| button.outline())
+                        .when(self.compact, |button| button.min_h(px(touch)))
+                        .rounded(crate::material::radius_chip())
+                        .label(option.label.clone())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.ui_toggle_option(&question_for_click, label.clone(), cx);
+                            this.ui_advance_or_submit(
+                                &questions_for_click,
+                                request_for_click.clone(),
+                                window,
+                                cx,
+                            );
+                        }))
+                }),
+        );
+        let custom_input = self.user_input_custom.clone();
+        let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
+        let custom_answer = h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .pl_2()
+            .rounded(crate::material::radius_input())
+            .border_1()
+            .border_color(cx.theme().input)
+            .bg(cx.theme().background)
+            .child(
+                div().flex_1().min_w_0().child(
+                    Textarea::new(&self.user_input_custom)
+                        .appearance(false)
+                        .text_size(px(13.)),
+                ),
+            )
+            .child(
+                Button::new("ui-async-custom-submit")
+                    .ghost()
+                    .xsmall()
+                    .when(self.compact, |button| {
+                        button.min_w(px(touch)).min_h(px(touch))
+                    })
+                    .icon(IconName::ArrowUp)
+                    .disabled(!custom_has_text)
+                    .tooltip(crate::tr!("userinput.submit_custom"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.submit_custom_user_input(&custom_input, window, cx);
+                    })),
+            );
+
+        container
+            .child(div().text_size(px(13.)).child(question.question.clone()))
+            .when(!question.options.is_empty(), |this| this.child(chips))
+            .child(custom_answer)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(crate::tr!("userinput.async_hint")),
+            )
             .into_any_element()
     }
 

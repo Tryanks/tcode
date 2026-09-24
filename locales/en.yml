@@ -765,8 +765,10 @@ userinput:
   next_question: "Next question"
   done: "Done"
   async_header: "Question from the agent"
-  async_hint: "The agent keeps working. Answer whenever you like, or keep chatting."
+  async_hint: "The agent keeps working. Answer when ready, or keep chatting."
   dismiss: "Hide"
+  answer: "Answer"
+  collapse: "Collapse"
 fallback:
   model_changed_title: "Turn stopped after a model change"
   reason_model_changed: "The responding model differs from the selected model, %{model}. Tcode stopped the turn."
