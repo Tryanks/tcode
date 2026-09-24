@@ -352,6 +352,12 @@ pub(crate) fn tool_brief(input: &serde_json::Value) -> String {
             .or_else(|| map.get("path"))
             .or_else(|| map.get("command"))
             .or_else(|| map.get("summary"))
+            // Question tools: Claude `AskUserQuestion` items carry `question`,
+            // Codex `request_user_input_async` items carry `title`.
+            .or_else(|| {
+                let first = map.get("questions")?.get(0)?;
+                first.get("question").or_else(|| first.get("title"))
+            })
             .and_then(|v| v.as_str())
             .map(one_line)
             .unwrap_or_default(),

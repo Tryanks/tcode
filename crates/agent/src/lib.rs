@@ -614,6 +614,27 @@ fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
         .and_then(|selection| selection.value.as_bool())
 }
 
+/// Whether a [`AgentEvent::UserInputRequested`] holds the agent until it is
+/// answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInputDelivery {
+    /// The agent is blocked until a matching
+    /// [`SessionCommand::RespondUserInput`] arrives.
+    #[default]
+    Blocking,
+    /// The agent keeps working on the turn and reads the answer when it is
+    /// delivered (Codex `request_user_input_async`). The request stays open
+    /// until answered or the turn ends; the composer stays usable meanwhile.
+    Async,
+}
+
+impl UserInputDelivery {
+    pub fn is_blocking(&self) -> bool {
+        matches!(self, Self::Blocking)
+    }
+}
+
 /// A structured question the agent asks the user (Claude `AskUserQuestion`,
 /// Codex `item/tool/requestUserInput`). Rendered as a multiple-choice (or
 /// free-text) prompt; answers ride back through [`SessionCommand::RespondUserInput`].
@@ -805,9 +826,9 @@ pub enum SessionCommand {
         decision: ApprovalDecision,
     },
     /// Answer a pending user-input request (Claude `AskUserQuestion`, Codex
-    /// `item/tool/requestUserInput`). Each value is a string (single-select /
-    /// free text) or an array of strings (multi-select), keyed by the matching
-    /// [`UserInputQuestion::id`].
+    /// `item/tool/requestUserInput` and `request_user_input_async`). Each value
+    /// is a string (single-select / free text) or an array of strings
+    /// (multi-select), keyed by the matching [`UserInputQuestion::id`].
     RespondUserInput {
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
@@ -1077,11 +1098,14 @@ pub enum AgentEvent {
         request_id: String,
         decision: ApprovalDecision,
     },
-    /// The agent is asking the user one or more structured questions and is
-    /// blocked until a matching [`SessionCommand::RespondUserInput`] arrives.
+    /// The agent is asking the user one or more structured questions.
+    /// `delivery` says whether it waits for the matching
+    /// [`SessionCommand::RespondUserInput`] or keeps working meanwhile.
     UserInputRequested {
         request_id: String,
         questions: Vec<UserInputQuestion>,
+        #[serde(default, skip_serializing_if = "UserInputDelivery::is_blocking")]
+        delivery: UserInputDelivery,
     },
     /// A pending user-input request has been settled (answered, or cancelled on
     /// teardown — in which case `answers` is empty).
@@ -1855,6 +1879,27 @@ mod thread_item_serde_tests {
         assert!(
             matches!(serde_json::from_str::<AgentEvent>(legacy).unwrap(),
             AgentEvent::Error { message, fatal: true } if message == "boom")
+        );
+    }
+
+    #[test]
+    fn user_input_delivery_is_async_only_when_recorded() {
+        let legacy = r#"{"type":"user_input_requested","request_id":"q","questions":[]}"#;
+        assert!(matches!(
+            serde_json::from_str::<AgentEvent>(legacy).unwrap(),
+            AgentEvent::UserInputRequested {
+                delivery: UserInputDelivery::Blocking,
+                ..
+            }
+        ));
+        let event = AgentEvent::UserInputRequested {
+            request_id: "q".into(),
+            questions: Vec::new(),
+            delivery: UserInputDelivery::Async,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"user_input_requested","request_id":"q","questions":[],"delivery":"async"}"#
         );
     }
 

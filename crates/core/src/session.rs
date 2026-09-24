@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use agent::{
     AgentEvent, ApprovalRequest, ChangeCompleteness, DeltaKind, FileChange, ItemContent,
-    ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
+    ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputDelivery,
+    UserInputQuestion,
 };
 use serde::{Deserialize, Serialize};
 
@@ -482,6 +483,15 @@ pub struct ProposedPlan {
     pub turn: usize,
 }
 
+/// A structured question set the agent is waiting on, or working past, from
+/// [`AgentEvent::UserInputRequested`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingUserInput {
+    pub request_id: String,
+    pub questions: Vec<UserInputQuestion>,
+    pub delivery: UserInputDelivery,
+}
+
 /// Folded view of a session's event history.
 #[derive(Debug, Clone, Default)]
 pub struct Timeline {
@@ -505,10 +515,10 @@ pub struct Timeline {
     pub plan_steps: Vec<PlanStep>,
     /// The explanation string from the latest `PlanUpdated`, if any.
     pub plan_explanation: Option<String>,
-    /// The active user-input request (Claude `AskUserQuestion` / Codex
-    /// `requestUserInput`), if the agent is currently blocked on one. Cleared
-    /// when it resolves or the turn ends.
-    pub pending_user_input: Option<(String, Vec<UserInputQuestion>)>,
+    /// The open user-input request (Claude `AskUserQuestion`, Codex
+    /// `requestUserInput` / `request_user_input_async`), if any. Cleared when
+    /// it resolves or the turn ends.
+    pub pending_user_input: Option<PendingUserInput>,
     pub usage: Option<TokenUsage>,
     pub resume: Option<ResumeCursor>,
     pub provider_session_id: Option<String>,
@@ -821,14 +831,19 @@ impl Timeline {
             AgentEvent::UserInputRequested {
                 request_id,
                 questions,
+                delivery,
             } => {
-                self.pending_user_input = Some((request_id.clone(), questions.clone()));
+                self.pending_user_input = Some(PendingUserInput {
+                    request_id: request_id.clone(),
+                    questions: questions.clone(),
+                    delivery: *delivery,
+                });
             }
             AgentEvent::UserInputResolved { request_id, .. } => {
                 if self
                     .pending_user_input
                     .as_ref()
-                    .is_some_and(|(id, _)| id == request_id)
+                    .is_some_and(|pending| pending.request_id == *request_id)
                 {
                     self.pending_user_input = None;
                 }
@@ -1638,6 +1653,7 @@ mod tests {
                 multi_select: false,
                 prefill: None,
             }],
+            delivery: UserInputDelivery::Blocking,
         };
         let mut timeline = Timeline::default();
         timeline.apply_at(None, &request);
@@ -1645,7 +1661,7 @@ mod tests {
             timeline
                 .pending_user_input
                 .as_ref()
-                .map(|(request_id, _)| request_id.as_str()),
+                .map(|pending| pending.request_id.as_str()),
             Some("que_1")
         );
 

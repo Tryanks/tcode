@@ -21,7 +21,8 @@ use crate::{
     Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
     ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TokenUsage, UserInputOption, UserInputQuestion,
+    SessionHandle, SessionOptions, ThreadItem, TokenUsage, UserInputDelivery, UserInputOption,
+    UserInputQuestion,
 };
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -707,6 +708,7 @@ impl OpenCodeMapper {
                     mapped.events.push(AgentEvent::UserInputRequested {
                         request_id,
                         questions,
+                        delivery: UserInputDelivery::Blocking,
                     });
                 }
             }
@@ -1978,7 +1980,11 @@ mod tests {
         }));
         assert!(matches!(
             mapped.events.as_slice(),
-            [AgentEvent::UserInputRequested { request_id, questions }]
+            [AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+                ..
+            }]
                 if request_id == "que_1"
                     && questions.len() == 2
                     && questions[0].id == "que_1:0"

@@ -363,6 +363,7 @@ async fn run_probe(
             AgentEvent::UserInputRequested {
                 request_id,
                 questions,
+                ..
             } => {
                 let answers = questions
                     .iter()

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tcode_core::{
     project::WorktreeInfo,
-    session::Timeline,
+    session::{PendingUserInput, Timeline},
     settings::Settings,
     ui::{RightTab, WorkspaceMode},
 };
@@ -44,7 +44,7 @@ pub(crate) struct ComposerState {
     pub active_cwd: Option<PathBuf>,
     pub provider_commands: Vec<agent::ProviderCommand>,
     pub attachments_dir: Option<PathBuf>,
-    pub pending_user_input: Option<(String, Vec<agent::UserInputQuestion>)>,
+    pub pending_user_input: Option<PendingUserInput>,
     pub active_model: Option<ComposerActiveModel>,
     pub model_pending_restart: bool,
     pub active_model_spec: Option<agent::ModelSpec>,
