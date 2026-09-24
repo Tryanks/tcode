@@ -977,6 +977,9 @@ impl Timeline {
             AgentEvent::ContextCompacted(compaction) => {
                 let in_progress = compaction.in_progress;
                 let usage = self.usage.get_or_insert_with(Default::default);
+                if in_progress && usage.freshness == agent::ContextFreshness::Compacting {
+                    return;
+                }
                 usage.freshness = if in_progress {
                     agent::ContextFreshness::Compacting
                 } else {
@@ -1628,6 +1631,44 @@ mod tests {
             &timeline.entries[2].content,
             EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "after"
         ));
+    }
+
+    #[test]
+    fn repeated_compacting_status_announces_one_compaction() {
+        // Claude re-sends `status: compacting` per compaction phase and as a
+        // 30s keepalive while one compaction runs.
+        let compacting = || {
+            AgentEvent::ContextCompacted(agent::Compaction {
+                in_progress: true,
+                ..Default::default()
+            })
+        };
+        let compacted = || {
+            AgentEvent::ContextCompacted(agent::Compaction {
+                trigger: Some("auto".into()),
+                ..Default::default()
+            })
+        };
+        let timeline = Timeline::fold_events([
+            user_msg("u1", "go"),
+            compacting(),
+            compacting(),
+            compacting(),
+            compacted(),
+            compacting(),
+            compacting(),
+            compacted(),
+        ]);
+
+        let compactions: Vec<bool> = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::ContextCompacted(c) => Some(c.in_progress),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compactions, [true, false, true, false]);
     }
 
     #[test]
