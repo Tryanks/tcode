@@ -202,7 +202,7 @@ impl AppState {
                     .timeline
                     .pending_user_input
                     .as_ref()
-                    .is_none_or(|request| &request.0 != request_id) =>
+                    .is_none_or(|pending| pending.request_id != *request_id) =>
             {
                 return Err(error(
                     "unknown_user_input",
@@ -411,7 +411,11 @@ mod tests {
         let active = state.resident_mut(&id).unwrap();
         active.runtime = Runtime::Live(commands);
         active.turn_in_flight = true;
-        active.timeline.pending_user_input = Some(("question".into(), Vec::new()));
+        active.timeline.pending_user_input = Some(tcode_core::session::PendingUserInput {
+            request_id: "question".into(),
+            questions: Vec::new(),
+            delivery: agent::UserInputDelivery::Blocking,
+        });
         state.record_approval_event(
             &id,
             &AgentEvent::ApprovalRequested(agent::ApprovalRequest {

@@ -21,7 +21,7 @@ use crate::{
     Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
     LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
     ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, UserInputOption, UserInputQuestion,
+    ThreadItem, TokenUsage, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
 const PERMISSION_EXTENSION: &str = include_str!("../assets/pi/tcode-permissions.ts");
@@ -715,6 +715,7 @@ impl PiActor {
                 .emit(AgentEvent::UserInputRequested {
                     request_id: id,
                     questions: vec![question],
+                    delivery: UserInputDelivery::Blocking,
                 })
                 .await;
             return;

@@ -758,6 +758,9 @@ userinput:
   previous: "上一个"
   next_question: "下一个问题"
   done: "完成"
+  async_header: "来自代理的问题"
+  async_hint: "代理会继续工作。你可以随时回答，也可以继续对话。"
+  dismiss: "隐藏"
 fallback:
   model_changed_title: "本轮因模型更改而中止"
   reason_model_changed: "实际响应的模型与所选模型 %{model} 不同，Tcode 已中止本轮。"

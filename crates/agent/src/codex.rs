@@ -19,7 +19,8 @@ use crate::{
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
     PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption,
     SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
-    UserInputOption, UserInputQuestion, file_changes_from_unified_diff, selection_str,
+    UserInputDelivery, UserInputOption, UserInputQuestion, file_changes_from_unified_diff,
+    selection_str,
 };
 
 mod developer_instructions;
@@ -409,6 +410,11 @@ struct Actor {
     /// Pending `mcpServer/elicitation/request`s: canonical request_id → the
     /// JSON-RPC id and field typing needed to rebuild a typed response.
     elicitations: HashMap<String, PendingElicitation>,
+    /// Open `request_user_input_async` questions of the running turn, under
+    /// the request id of the latest asking message. The model keeps working;
+    /// answers go back as a `turn/steer` carrying Codex's reply envelope, and
+    /// the turn's end discards whatever is still unanswered.
+    async_questions: Option<(String, Vec<UserInputQuestion>)>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
@@ -485,6 +491,7 @@ async fn run_actor(
         approvals: HashMap::new(),
         user_inputs: HashMap::new(),
         elicitations: HashMap::new(),
+        async_questions: None,
         items: HashMap::new(),
         subagents: HashMap::new(),
         subagent_parent_by_thread: HashMap::new(),
@@ -638,6 +645,14 @@ impl SessionActor for Actor {
                         &json!({ "id": pending.rpc_id, "result": result }),
                     )
                     .map_err(|e| e.to_string())?;
+                } else if self
+                    .async_questions
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == request_id)
+                {
+                    let (_, questions) = self.async_questions.take().unwrap_or_default();
+                    self.steer_async_question_reply(&request_id, &questions, &answers)
+                        .await?;
                 } else {
                     self.events
                         .emit(AgentEvent::Warning {
@@ -1340,6 +1355,7 @@ impl Actor {
                 .emit(AgentEvent::UserInputRequested {
                     request_id: key,
                     questions,
+                    delivery: UserInputDelivery::Blocking,
                 })
                 .await;
             return;
@@ -1451,6 +1467,7 @@ impl Actor {
             .emit(AgentEvent::UserInputRequested {
                 request_id,
                 questions,
+                delivery: UserInputDelivery::Blocking,
             })
             .await;
     }
@@ -1510,6 +1527,7 @@ impl Actor {
                     _ => TurnStatus::Completed,
                 };
                 self.active_turn = None;
+                self.async_questions = None;
                 let usage = self.usage_by_turn.remove(&id);
                 self.events
                     .emit(AgentEvent::TurnCompleted {
@@ -1623,6 +1641,11 @@ impl Actor {
                         _ => AgentEvent::ItemCompleted(item),
                     };
                     self.events.emit(event).await;
+                }
+                if method == "item/completed"
+                    && let Some(item) = item_value
+                {
+                    self.request_async_questions(item).await;
                 }
             }
             "turn/plan/updated" => {
@@ -1920,6 +1943,82 @@ impl Actor {
             .emit(AgentEvent::ItemUpdated(parent.clone()))
             .await;
         self.events.emit(AgentEvent::ItemUpdated(child)).await;
+    }
+
+    /// Deliver `request_user_input_async` answers into the running turn. The
+    /// model reads them like any steer, so the reply is a `turn/steer` whose
+    /// text is Codex's own question-reply envelope; the timeline shows the
+    /// same plain rendering the Codex TUI uses for that envelope.
+    async fn steer_async_question_reply(
+        &mut self,
+        request_id: &str,
+        questions: &[UserInputQuestion],
+        answers: &serde_json::Map<String, Value>,
+    ) -> Result<(), String> {
+        let Some((wire, display)) = async_question_reply(questions, answers) else {
+            return Ok(());
+        };
+        let Some(turn_id) = self.active_turn.clone() else {
+            self.events
+                .emit(AgentEvent::Warning {
+                    message: "cannot answer: the Codex turn that asked has ended".into(),
+                })
+                .await;
+            return Ok(());
+        };
+        let steer_id = format!("codex-question-reply-{request_id}");
+        self.events
+            .emit(AgentEvent::SteerRequested {
+                request_id: steer_id.clone(),
+                text: display,
+                attachments: Vec::new(),
+            })
+            .await;
+        let thread_id = self.thread_id.clone();
+        self.request(
+            "turn/steer",
+            json!({
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": user_input(&wire, &[]),
+            }),
+            PendingRequest::Steer {
+                request_id: steer_id,
+                text: wire,
+            },
+        )
+    }
+
+    /// A completed `agentMessage` carrying `questions` is the
+    /// `request_user_input_async` tool's output: the message text already
+    /// lists the questions, and the turn keeps running. Open questions of the
+    /// turn accumulate under one request so a later ask does not hide an
+    /// earlier unanswered one.
+    async fn request_async_questions(&mut self, item: &Value) {
+        if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
+            return;
+        }
+        let Some(message_id) = item.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let questions = parse_codex_async_questions(message_id, item);
+        if questions.is_empty() {
+            return;
+        }
+        let mut open = self
+            .async_questions
+            .take()
+            .map(|(_, questions)| questions)
+            .unwrap_or_default();
+        open.extend(questions);
+        self.async_questions = Some((message_id.to_owned(), open.clone()));
+        self.events
+            .emit(AgentEvent::UserInputRequested {
+                request_id: message_id.to_owned(),
+                questions: open,
+                delivery: UserInputDelivery::Async,
+            })
+            .await;
     }
 
     /// Settle every outstanding native user-input request and MCP elicitation
@@ -2298,6 +2397,87 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
         .collect()
 }
 
+/// Map a completed `agentMessage`'s `questions` (the `request_user_input_async`
+/// tool's `{title, options?}` list) into canonical questions. The id is the
+/// desktop app's `JSON.stringify([tool, message id, index])`, which is what
+/// the reply envelope must echo back; the tool has no header. Questions with
+/// an empty title and options with an empty label are dropped.
+fn parse_codex_async_questions(message_id: &str, item: &Value) -> Vec<UserInputQuestion> {
+    let questions = match item.get("questions").and_then(Value::as_array) {
+        Some(questions) => questions,
+        None => return Vec::new(),
+    };
+    questions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, q)| {
+            let title = q
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())?;
+            let options = strings(q.get("options"))
+                .into_iter()
+                .map(|label| label.trim().to_owned())
+                .filter(|label| !label.is_empty())
+                .map(|label| UserInputOption {
+                    label,
+                    description: String::new(),
+                })
+                .collect();
+            Some(UserInputQuestion {
+                id: json!(["request_user_input_async", message_id, index]).to_string(),
+                header: String::new(),
+                question: title.to_owned(),
+                options,
+                multi_select: false,
+                prefill: None,
+            })
+        })
+        .collect()
+}
+
+/// Codex's `request_user_input_async` reply: the `<send_user_message_question_reply>`
+/// envelope the desktop app and TUI send, listing each answered question with
+/// its `questionItemId` so the model correlates the answer. Returns the wire
+/// text and the plain `> question` / answer rendering the timeline shows, or
+/// `None` when no question was answered. Question text is flattened to one
+/// line and capped at 512 characters, as the TUI does.
+fn async_question_reply(
+    questions: &[UserInputQuestion],
+    answers: &serde_json::Map<String, Value>,
+) -> Option<(String, String)> {
+    let mut replies = Vec::new();
+    let mut display = Vec::new();
+    for question in questions {
+        let answer = strings(answers.get(&question.id)).join(", ");
+        let answer = answer.trim();
+        if answer.is_empty() {
+            continue;
+        }
+        let title = question
+            .question
+            .chars()
+            .take(512)
+            .collect::<String>()
+            .replace(['\n', '\r'], " ");
+        replies.push(json!({
+            "answer": answer,
+            "question": title,
+            "questionItemId": question.id,
+        }));
+        display.push(format!("> {title}\n\n{answer}"));
+    }
+    if replies.is_empty() {
+        return None;
+    }
+    let wire = format!(
+        "<send_user_message_question_reply>\n{}\n</send_user_message_question_reply>",
+        Value::Array(replies)
+    );
+    Some((wire, display.join("\n\n")))
+}
+
 fn map_item(item: &Value) -> Option<ThreadItem> {
     let id = item.get("id").and_then(Value::as_str)?.to_owned();
     let provider_kind = item
@@ -2648,6 +2828,7 @@ mod tests {
                 approvals: HashMap::new(),
                 user_inputs: HashMap::new(),
                 elicitations: HashMap::new(),
+                async_questions: None,
                 items: HashMap::new(),
                 subagents: HashMap::new(),
                 subagent_parent_by_thread: HashMap::new(),
@@ -2862,6 +3043,146 @@ mod tests {
                 }
             }
             assert!(events.try_recv().is_err());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn async_question_answers_steer_the_running_turn_with_codex_reply_envelope() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.active_turn = Some("turn-1".into());
+            // Shape recorded from codex-cli 0.156 `request_user_input_async`.
+            actor
+                .handle_line(
+                    &json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{
+                        "type":"agentMessage","id":"call_q","text":"Which DB?\n- Postgres\n- SQLite",
+                        "phase":"final_answer","delivery":"async",
+                        "questions":[{"title":"Which DB?","options":["Postgres","SQLite"]},{"title":"  "}]
+                    }}})
+                    .to_string(),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::AssistantMessage { .. },
+                    ..
+                })
+            ));
+            let AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+                delivery,
+            } = events.recv().await.unwrap()
+            else {
+                panic!("expected UserInputRequested")
+            };
+            assert_eq!(request_id, "call_q");
+            assert_eq!(delivery, UserInputDelivery::Async);
+            assert_eq!(questions.len(), 1, "blank titles are dropped");
+            assert_eq!(
+                questions[0].id,
+                r#"["request_user_input_async","call_q",0]"#
+            );
+            assert_eq!(questions[0].question, "Which DB?");
+            assert_eq!(
+                questions[0]
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Postgres", "SQLite"]
+            );
+
+            let mut answers = serde_json::Map::new();
+            answers.insert(questions[0].id.clone(), json!("SQLite"));
+            actor
+                .handle_command(SessionCommand::RespondUserInput {
+                    request_id: "call_q".into(),
+                    answers,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::SteerRequested { ref request_id, ref text, .. }
+                    if request_id == "codex-question-reply-call_q"
+                        && text == "> Which DB?\n\nSQLite"
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "call_q"
+            ));
+            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed request")
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["method"], "turn/steer");
+            assert_eq!(request["params"]["expectedTurnId"], "turn-1");
+            let envelope = "<send_user_message_question_reply>\n\
+                [{\"answer\":\"SQLite\",\"question\":\"Which DB?\",\
+                \"questionItemId\":\"[\\\"request_user_input_async\\\",\\\"call_q\\\",0]\"}]\n\
+                </send_user_message_question_reply>";
+            assert_eq!(request["params"]["input"][0]["text"], envelope);
+
+            let id = request["id"].as_i64().unwrap();
+            actor
+                .handle_line(&json!({"id": id, "result": {"turnId": "turn-1"}}).to_string())
+                .await;
+            actor
+                .handle_line(
+                    &json!({"method":"item/completed","params":{"threadId":"thread-1","item":{
+                        "type":"userMessage","id":"u1","content":[{"type":"text","text":envelope}]
+                    }}})
+                    .to_string(),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::SteerAccepted { ref request_id } if request_id == "codex-question-reply-call_q"
+            ));
+
+            // Questions still open when the turn ends can no longer be answered.
+            actor
+                .handle_line(&json!({"method":"item/completed","params":{"threadId":"thread-1","item":{
+                    "type":"agentMessage","id":"call_r","text":"Later?","questions":[{"title":"Later?"}]
+                }}}).to_string())
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(_)
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::UserInputRequested { ref request_id, .. } if request_id == "call_r"
+            ));
+            actor
+                .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCompleted { .. }
+            ));
+            let mut answers = serde_json::Map::new();
+            answers.insert(
+                r#"["request_user_input_async","call_r",0]"#.into(),
+                json!("yes"),
+            );
+            actor
+                .handle_command(SessionCommand::RespondUserInput {
+                    request_id: "call_r".into(),
+                    answers,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::Warning { .. }
+            ));
+            assert!(events.try_recv().is_err());
+
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -3936,6 +4257,7 @@ mod tests {
                 AgentEvent::UserInputRequested {
                     request_id,
                     questions,
+                    ..
                 } => {
                     assert_eq!(request_id, "55");
                     assert_eq!(questions.len(), 2, "question missing id is dropped");
@@ -4032,6 +4354,7 @@ mod tests {
             let AgentEvent::UserInputRequested {
                 request_id,
                 questions,
+                ..
             } = events.recv().await.unwrap()
             else {
                 panic!("expected UserInputRequested")
