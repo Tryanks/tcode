@@ -1713,9 +1713,9 @@ dependencies = [
 
 [[package]]
 name = "corcovado"
-version = "0.5.27"
+version = "0.5.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "827f3f138247dad8789d88f58bbed344ff06c80dbcab48a3e4532f4db773e010"
+checksum = "aac575a85cf04f046f88f7daf6ef350ebf79545ae54fe9bb081efbb638ed3194"
 dependencies = [
  "libc",
  "miow 0.5.0",
@@ -3654,9 +3654,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-component-macros"
-version = "0.6.4"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3e98517401b8c41e359a302f55dd997d00dccd137f8915dd13ef7099f035ee7"
+checksum = "3867545508c7cf6a5f6da586f60d894a3f8e7cce94b7fe82df7fad5f868ec20e"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
@@ -4520,9 +4520,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
 dependencies = [
  "bytes",
  "itoa",
@@ -4574,9 +4574,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.10.1"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55281c53a1894c864990125767da440a4e630446785086f52523b20033b74498"
+checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -4966,9 +4966,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.12.0"
+version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 dependencies = [
  "serde",
 ]
@@ -8614,9 +8614,9 @@ dependencies = [
 
 [[package]]
 name = "rio-grapheme-width"
-version = "0.5.27"
+version = "0.5.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3d03598bb9bae51d4c91b67167b6e348adf893fa2ecc3466754d776109b8526"
+checksum = "5a901dda1fe16da68fbe8788db5f2b4525f95b43f064618d2bb6c7361c4e9150"
 dependencies = [
  "phf 0.13.1",
  "ucd-trie",
@@ -8624,9 +8624,9 @@ dependencies = [
 
 [[package]]
 name = "rio-graphics"
-version = "0.5.27"
+version = "0.5.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae16923db8d9ff3901f4077568a53ef6323beff12f8a18700eeae1abcf4ac03f"
+checksum = "40bdcb0a124c88c7e75a4f2b2953b158981bf541613b4b0146e21d07f4a104ac"
 dependencies = [
  "rustc-hash 2.1.3",
  "tracing",
@@ -8635,15 +8635,15 @@ dependencies = [
 
 [[package]]
 name = "rio-unicode"
-version = "0.5.27"
+version = "0.5.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e85bdb66b7d6c0c5bd80ec6dcfaadd45b3379a2439a43648b6bff2d7ecd2f8ba"
+checksum = "48266e8c525eb4fb8d3ad899e1a050404fb782f876cad2df800dd5455126a99b"
 
 [[package]]
 name = "rio-vt"
-version = "0.5.26"
+version = "0.5.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26e0107383748c79f096674a343953ff527d13eacafc581cc123e8888679c3fd"
+checksum = "3f80220ae32041e4cef8719cab57d3579cbe0dc26dd1cb1ca0693f85491e1696"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -10478,9 +10478,9 @@ dependencies = [
 
 [[package]]
 name = "teletypewriter"
-version = "0.5.27"
+version = "0.5.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "023e8f45440d8a7768f49511a128208d5899555d8c48df594552d70043e2b2fb"
+checksum = "edbf8e5a8f36cd22c3092b4895a1c5b41b9748e63ef92030b0353b1e05531e46"
 dependencies = [
  "corcovado",
  "dirs 6.0.0",
@@ -10729,9 +10729,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.4"
+version = "0.26.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
 dependencies = [
  "rustls",
  "tokio",
