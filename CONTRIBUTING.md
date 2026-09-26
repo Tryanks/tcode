@@ -227,18 +227,22 @@ path. Remove obsolete callers, conversions, fixtures and dependencies with the
 code they supported. Keep documentation with the behaviour it describes and
 link to the owner instead of copying values.
 
-**Tests earn their maintenance.** Each test identifies an observable contract
-or a realistic failure it would catch, with expected values derived from that
-contract, a recorded fixture or a known regression — not from the
-implementation. A serialization round trip alone cannot establish wire
-compatibility: assert literal messages or older persisted inputs. Use the
-smallest production entry point that exercises the behaviour; assertions
-exercise production logic, not an algorithm recreated in the test. Library and
-upstream behaviour, constant/getter wiring and repeated happy paths need a
+**Tests earn their maintenance.** Weigh a test before writing it: name the
+observable contract or realistic failure it would catch, and check that no
+existing test already catches it; extend an existing case or fixture before
+adding a near-duplicate. Expected values derive from that contract, a recorded
+fixture or a known regression — not from the implementation. A serialization
+round trip alone cannot establish wire compatibility: assert literal messages
+or older persisted inputs. Use the smallest production entry point that
+exercises the behaviour, never a seam only the test uses; assertions exercise
+production logic, not an algorithm recreated in the test. Library and upstream
+behaviour, constant/getter wiring and repeated happy paths need a
 project-specific reason to be tested. When removing or merging tests, say which
 coverage was redundant and where any remaining contract is still covered. For a
 bug fix, show the regression test fails without the fix when practical. Test
-counts and deleted line counts are not quality targets.
+counts and deleted line counts are not quality targets. When a test's value is
+in doubt, or when auditing or pruning tests, follow the
+[`test-audit` skill](.agents/skills/test-audit/SKILL.md).
 
 **Evidence in the pull request.** Describe the changed behaviour, why added
 abstractions are needed or removed ones redundant, and the contract protected
