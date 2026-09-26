@@ -1117,9 +1117,7 @@ impl Render for Composer {
             });
         }
 
-        let user_input = self
-            .pending_user_input(cx)
-            .filter(|pending| self.ui_dismissed_request_id.as_ref() != Some(&pending.request_id));
+        let user_input = self.pending_user_input(cx);
         let fallback_block = self
             .workspace_store
             .read(cx)
