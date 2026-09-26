@@ -338,6 +338,29 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let request_id = pending.request_id.clone();
+        let touch = if self.compact { 44. } else { 24. };
+        // Hiding is local to this client; the question stays open on the host,
+        // so a way back remains while the sidebar still asks for an answer.
+        if self.ui_dismissed_request_id.as_ref() == Some(&request_id) {
+            return h_flex()
+                .w_full()
+                .child(
+                    Button::new("ui-async-reveal")
+                        .debug_selector(|| "ui-async-reveal".into())
+                        .ghost()
+                        .xsmall()
+                        .when(self.compact, |button| button.min_h(px(touch)))
+                        .icon(IconName::Info)
+                        .label(crate::tr!("userinput.async_header"))
+                        .tooltip(crate::tr!("userinput.answer"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ui_dismissed_request_id = None;
+                            this.ui_async_expanded = true;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
         let questions = pending.questions.clone();
         let total = questions.len();
         let index = self.ui_question_index.min(total.saturating_sub(1));
@@ -346,7 +369,6 @@ impl Composer {
         };
         let muted = cx.theme().muted_foreground;
         let expanded = self.ui_async_expanded;
-        let touch = if self.compact { 44. } else { 24. };
 
         let toggle = Button::new("ui-async-toggle")
             .debug_selector(|| "ui-async-toggle".into())
@@ -372,6 +394,7 @@ impl Composer {
             }));
         let request_dismiss = request_id.clone();
         let dismiss = Button::new("ui-dismiss")
+            .debug_selector(|| "ui-dismiss".into())
             .ghost()
             .xsmall()
             .when(self.compact, |button| {
@@ -782,7 +805,7 @@ mod tests {
     /// The strip's own buttons sit inside a clickable strip; a click on one
     /// must act once, not also reach the strip underneath.
     #[gpui::test]
-    fn async_question_strip_buttons_toggle_and_page(cx: &mut TestAppContext) {
+    fn async_question_strip_controls(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
@@ -816,14 +839,21 @@ mod tests {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let bounds = cx.debug_bounds(selector).expect(selector);
             cx.simulate_click(bounds.center(), Default::default());
-            composer.read_with(cx, |composer, _| {
-                (composer.ui_async_expanded, composer.ui_question_index)
-            })
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            (
+                composer.read_with(cx, |composer, _| {
+                    (composer.ui_async_expanded, composer.ui_question_index)
+                }),
+                cx.debug_bounds("ui-async-toggle").is_some(),
+            )
         };
 
-        assert_eq!(click("ui-async-toggle"), (true, 0));
-        assert_eq!(click("ui-async-next"), (true, 1));
-        assert_eq!(click("ui-async-prev"), (true, 0));
-        assert_eq!(click("ui-async-toggle"), (false, 0));
+        assert_eq!(click("ui-async-toggle"), ((true, 0), true));
+        assert_eq!(click("ui-async-next"), ((true, 1), true));
+        assert_eq!(click("ui-async-prev"), ((true, 0), true));
+        assert_eq!(click("ui-async-toggle"), ((false, 0), true));
+        // Hidden, the still-open question keeps an entry that reopens it.
+        assert_eq!(click("ui-dismiss"), ((false, 0), false));
+        assert_eq!(click("ui-async-reveal"), ((true, 0), true));
     }
 }
