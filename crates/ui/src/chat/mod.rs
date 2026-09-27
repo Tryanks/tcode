@@ -51,15 +51,15 @@ use crate::window_state::WindowState;
 use self::components::assistant::MdState;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
-    ListSync, Segment, TimelineContinuity, TurnIndexCache, TurnListItem, TurnRenderArgs,
+    ListSync, RowRenderArgs, Segment, TimelineContinuity, TimelineRow, TurnIndexCache,
     activity_run_duration_ms, displayed_error_text, divergent_served_model,
-    format_elapsed_deciseconds, latest_message_ids, live_activity_segment, live_edit_counts,
-    live_edit_rows, partition_activity_run, plain_text_as_markdown, segment_entries,
+    format_elapsed_deciseconds, latest_message_ids, live_edit_counts, live_edit_rows,
+    partition_activity_run, plain_text_as_markdown, row_of_entry, rows_of_turn, segment_entries,
     start_hub_projects, timeline_overdraw, user_content, user_visible_text, work_log_capsule_label,
     work_log_counts, work_log_outcome,
 };
 use self::residency::{
-    MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_turn_window, viewport_turn_window,
+    MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_row_window, viewport_row_window,
 };
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
@@ -71,6 +71,8 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 32.;
+/// Vertical rhythm between the segments of one turn.
+const SEGMENT_GAP: f32 = 10.;
 /// Large documents are parsed away from the UI executor before becoming resident.
 const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
 /// Target minimum time for the latest activity and its immediate predecessor.
@@ -330,7 +332,6 @@ struct PendingMarkdownBuild {
     generation: u64,
     session_key: Option<String>,
     desired_text: String,
-    turn: usize,
 }
 
 /// A whole tool output fetched on request.
@@ -362,12 +363,12 @@ pub struct ChatView {
     /// scroll applied between two frames is either overwritten by the next
     /// packet or would have to give up when one arrived first.
     reservation_scroll_back: Option<ReservationScrollBack>,
-    turn_items: Vec<TurnListItem>,
+    rows: Vec<TimelineRow>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
     pending_md_builds: HashMap<String, PendingMarkdownBuild>,
     next_md_build_generation: u64,
-    markdown_visible_turns: Range<usize>,
+    markdown_visible_rows: Range<usize>,
     markdown_scroll_top: Option<usize>,
     /// Open/closed keys for collapsibles other than activity details.
     expanded: HashSet<String>,
@@ -394,7 +395,7 @@ pub struct ChatView {
     capture: Option<CaptureSession>,
     _subscriptions: Vec<Subscription>,
     #[cfg(test)]
-    markdown_remeasured_turns: Vec<usize>,
+    markdown_remeasured_rows: Vec<usize>,
 }
 
 // ListState retains measured row heights, so variable-height turns use the same
@@ -454,7 +455,7 @@ impl ChatView {
     /// The timeline's on-screen rectangle, when it has something to capture.
     pub(crate) fn capture_viewport(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
         let bounds = self.list_state.viewport_bounds();
-        (!self.turn_items.is_empty() && bounds.size.height > px(0.) && bounds.size.width > px(0.))
+        (!self.rows.is_empty() && bounds.size.height > px(0.) && bounds.size.width > px(0.))
             .then_some(bounds)
     }
 
@@ -583,11 +584,11 @@ impl ChatView {
         list_state.set_follow_mode(FollowMode::Tail);
         let chat = cx.entity().downgrade();
         list_state.set_scroll_handler(move |event, window, cx| {
-            let visible_turns = event.visible_range.clone();
+            let visible_rows = event.visible_range.clone();
             let chat = chat.clone();
             window.defer(cx, move |_, cx| {
                 let _ = chat.update(cx, |chat, cx| {
-                    chat.set_markdown_visible_turns(visible_turns, cx);
+                    chat.set_markdown_visible_rows(visible_rows, cx);
                 });
             });
         });
@@ -626,12 +627,12 @@ impl ChatView {
             timeline_stale: false,
             history_placeholder_height: px(0.),
             reservation_scroll_back: None,
-            turn_items: Vec::new(),
+            rows: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
             pending_md_builds: HashMap::new(),
             next_md_build_generation: 0,
-            markdown_visible_turns: 0..0,
+            markdown_visible_rows: 0..0,
             markdown_scroll_top: None,
             expanded: HashSet::new(),
             auto_activity_expansions: AutoActivityExpansions::default(),
@@ -647,7 +648,7 @@ impl ChatView {
             capture: None,
             _subscriptions: subscriptions,
             #[cfg(test)]
-            markdown_remeasured_turns: Vec::new(),
+            markdown_remeasured_rows: Vec::new(),
         };
         this.sync_markdown_states(cx);
         this
@@ -680,7 +681,7 @@ impl ChatView {
             .read(cx)
             .with_active_timeline(|timeline| {
                 let list_sync = self.turn_index_cache.sync(
-                    &mut self.turn_items,
+                    &mut self.rows,
                     &timeline.turns,
                     &timeline.entries,
                     timeline
@@ -696,7 +697,7 @@ impl ChatView {
             })
             .unwrap_or_else(|| {
                 let list_sync = self.turn_index_cache.sync(
-                    &mut self.turn_items,
+                    &mut self.rows,
                     &[],
                     &[],
                     None,
@@ -723,8 +724,8 @@ impl ChatView {
             self.full_outputs.clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
-            self.markdown_visible_turns = tail_turn_window(self.turn_items.len());
-            self.markdown_scroll_top = Some(self.turn_items.len());
+            self.markdown_visible_rows = tail_row_window(self.rows.len());
+            self.markdown_scroll_top = Some(self.rows.len());
         }
 
         match list_sync {
@@ -779,16 +780,16 @@ impl ChatView {
                     self.list_state.set_follow_mode(FollowMode::Tail);
                 }
             }
-            ListSync::Incremental { append, remeasure } => {
-                if let Some(range) = append {
-                    let count = range.len();
-                    // The former last turn hands its edge padding to the new
-                    // one; its cached height must not keep it.
+            ListSync::Incremental { splices, remeasure } => {
+                for (range, count) in splices.into_iter().rev() {
+                    // The row above a splice changes its padding (the former
+                    // last row hands its edge padding to the new one); its
+                    // cached height must not keep it.
                     if range.start > 0 {
                         self.list_state
                             .remeasure_items(range.start - 1..range.start);
                     }
-                    self.list_state.splice(range.start..range.start, count);
+                    self.list_state.splice(range, count);
                 }
                 for index in remeasure {
                     self.list_state.remeasure_items(index..index + 1);
@@ -797,20 +798,21 @@ impl ChatView {
         }
 
         if self.list_state.is_following_tail() {
-            self.markdown_visible_turns = tail_turn_window(self.turn_items.len());
-            self.markdown_scroll_top = Some(self.turn_items.len());
+            self.markdown_visible_rows = tail_row_window(self.rows.len());
+            self.markdown_scroll_top = Some(self.rows.len());
         }
 
-        if let Some(turn) = requested_turn.filter(|turn| *turn < self.turn_items.len()) {
+        let requested_row = requested_turn.and_then(|turn| rows_of_turn(&self.rows, turn).next());
+        if let (Some(turn), Some(row)) = (requested_turn, requested_row) {
             self.reservation_scroll_back = None;
             self.list_state.pause_following_tail();
             self.list_state.scroll_to(ListOffset {
-                item_ix: turn,
+                item_ix: row,
                 offset_in_item: px(0.),
             });
             self.highlighted_turn = Some(turn);
-            self.markdown_visible_turns = viewport_turn_window(turn, self.turn_items.len());
-            self.markdown_scroll_top = Some(turn);
+            self.markdown_visible_rows = viewport_row_window(row, self.rows.len());
+            self.markdown_scroll_top = Some(row);
             if let Some(session_id) = self.session_key.as_deref() {
                 self.workspace_store.update(cx, |store, _cx| {
                     store.take_pending_chat_turn(session_id, turn);
@@ -818,7 +820,7 @@ impl ChatView {
             }
         }
 
-        self.sync_markdown_residency(requested_turn, cx);
+        self.sync_markdown_residency(requested_row, cx);
 
         // Keep a 100ms ticker alive while a turn runs so the live elapsed timer
         // advances at decisecond precision; dropping it cancels the task.
@@ -876,10 +878,10 @@ impl ChatView {
 
     fn sync_markdown_residency(
         &mut self,
-        one_shot_turn_target: Option<usize>,
+        one_shot_row_target: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let turn_count = self.turn_items.len();
+        let row_count = self.rows.len();
         // Auto-scroll can move many rows during a drag. Do not retire any
         // participant until mouse-up; completed-selection participants remain
         // pinned individually below so copy keeps its full projection.
@@ -902,16 +904,16 @@ impl ChatView {
             .read(cx)
             .with_active_timeline(|timeline| {
                 let scope = ResidencyScope::new(
-                    turn_count,
-                    self.markdown_visible_turns.clone(),
-                    one_shot_turn_target,
+                    row_count,
+                    self.markdown_visible_rows.clone(),
+                    one_shot_row_target,
                     timeline.turn_running,
                 );
-                let entries = markdown_entries_for_residency(timeline, &scope).entries;
+                let entries = markdown_entries_for_residency(timeline, &self.rows, &scope).entries;
                 let decisions = decide(ResidencyInput {
-                    turn_count,
-                    visible_turns: self.markdown_visible_turns.clone(),
-                    one_shot_turn_target,
+                    row_count,
+                    visible_rows: self.markdown_visible_rows.clone(),
+                    one_shot_row_target,
                     entries: &entries,
                     stream_running: timeline.turn_running,
                     resident_ids: &resident_ids,
@@ -919,21 +921,22 @@ impl ChatView {
                     selection_drag_active,
                 });
                 let mut texts = Vec::new();
-                for entry in &timeline.entries {
+                for (index, entry) in timeline.entries.iter().enumerate() {
                     if !decisions.build.contains(&entry.id) {
                         continue;
                     }
+                    let row = row_of_entry(&self.rows, index, entry.turn);
                     match &entry.content {
                         EntryContent::Item(ItemContent::AssistantMessage { text })
                         | EntryContent::Item(ItemContent::Reasoning { text }) => {
-                            texts.push((entry.turn, entry.id.clone(), text.clone()));
+                            texts.push((row, entry.id.clone(), text.clone()));
                         }
                         content => {
                             let Some((text, _, context_len, _)) = user_content(content) else {
                                 continue;
                             };
                             texts.push((
-                                entry.turn,
+                                row,
                                 entry.id.clone(),
                                 plain_text_as_markdown(user_visible_text(text, context_len)),
                             ));
@@ -943,7 +946,11 @@ impl ChatView {
                 if let Some(plan) = &timeline.proposed_plan {
                     let id = format!("plan:{}", plan.item_id);
                     if decisions.build.contains(&id) {
-                        texts.push((plan.turn, id, plan.markdown.clone()));
+                        texts.push((
+                            rows_of_turn(&self.rows, plan.turn).last(),
+                            id,
+                            plan.markdown.clone(),
+                        ));
                     }
                 }
                 (texts, decisions)
@@ -953,8 +960,8 @@ impl ChatView {
         self.pending_md_builds
             .retain(|id, _| decisions.build.contains(id) && !decisions.evict.contains(id));
 
-        let mut rebuilt_turns = HashSet::new();
-        for (turn, id, text) in texts {
+        let mut rebuilt_rows = HashSet::new();
+        for (row, id, text) in texts {
             match self.md_states.get_mut(&id) {
                 Some(md) => md.sync(text, cx),
                 None if self.pending_md_builds.contains_key(&id) => {
@@ -963,47 +970,63 @@ impl ChatView {
                         .get_mut(&id)
                         .expect("pending Markdown build disappeared");
                     pending.desired_text = text;
-                    pending.turn = turn;
                 }
                 None if text.len() > ASYNC_MARKDOWN_THRESHOLD_BYTES => {
-                    self.spawn_markdown_build(turn, id, text, cx);
+                    self.spawn_markdown_build(id, text, cx);
                 }
                 None => {
                     self.md_states.insert(id, MdState::new(&text, cx));
-                    rebuilt_turns.insert(turn);
+                    rebuilt_rows.extend(row);
                 }
             }
         }
-        let mut rebuilt_turns = rebuilt_turns
+        let mut rebuilt_rows = rebuilt_rows
             .into_iter()
-            .filter(|turn| *turn < self.turn_items.len())
+            .filter(|row| *row < self.rows.len())
             .collect::<Vec<_>>();
-        rebuilt_turns.sort_unstable();
-        let Some((&first, rest)) = rebuilt_turns.split_first() else {
+        rebuilt_rows.sort_unstable();
+        let Some((&first, rest)) = rebuilt_rows.split_first() else {
             return;
         };
         let mut range = first..first + 1;
-        for &turn in rest {
-            if turn == range.end {
+        for &row in rest {
+            if row == range.end {
                 range.end += 1;
             } else {
                 // Eviction leaves this cache untouched. A lazy rebuild only
                 // invalidates rebuilt rows; ListState preserves the absolute
                 // scroll-top offset while it measures the parsed Markdown.
-                self.remeasure_markdown_turns(range);
-                range = turn..turn + 1;
+                self.remeasure_markdown_rows(range);
+                range = row..row + 1;
             }
         }
-        self.remeasure_markdown_turns(range);
+        self.remeasure_markdown_rows(range);
     }
 
-    fn spawn_markdown_build(
-        &mut self,
-        turn: usize,
-        id: String,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
+    /// The row rendering the Markdown document `id` (an entry id, or
+    /// `plan:<item>` for the proposed plan), looked up when it is needed:
+    /// rows shift while a build runs, so a build carries no row.
+    fn markdown_row(&self, id: &str, cx: &App) -> Option<usize> {
+        self.workspace_store
+            .read(cx)
+            .with_active_timeline(|timeline| {
+                if let Some(item_id) = id.strip_prefix("plan:") {
+                    return timeline
+                        .proposed_plan
+                        .as_ref()
+                        .filter(|plan| plan.item_id == item_id)
+                        .and_then(|plan| rows_of_turn(&self.rows, plan.turn).last());
+                }
+                timeline
+                    .entries
+                    .iter()
+                    .position(|entry| entry.id == id)
+                    .and_then(|index| row_of_entry(&self.rows, index, timeline.entries[index].turn))
+            })
+            .flatten()
+    }
+
+    fn spawn_markdown_build(&mut self, id: String, text: String, cx: &mut Context<Self>) {
         self.next_md_build_generation = self.next_md_build_generation.wrapping_add(1);
         let generation = self.next_md_build_generation;
         self.pending_md_builds.insert(
@@ -1012,7 +1035,6 @@ impl ChatView {
                 generation,
                 session_key: self.session_key.clone(),
                 desired_text: text.clone(),
-                turn,
             },
         );
         let parse_text = text;
@@ -1044,7 +1066,6 @@ impl ChatView {
             return;
         }
         let desired_text = pending.desired_text.clone();
-        let turn = pending.turn;
         self.pending_md_builds.remove(&id);
 
         if desired_text != parsed_text && !desired_text.starts_with(&parsed_text) {
@@ -1058,42 +1079,51 @@ impl ChatView {
         if desired_text != parsed_text {
             state.sync(desired_text, cx);
         }
+        let row = self.markdown_row(&id, cx);
         self.md_states.insert(id, state);
-        if turn < self.turn_items.len() {
-            self.remeasure_markdown_turns(turn..turn + 1);
+        if let Some(row) = row.filter(|row| *row < self.rows.len()) {
+            self.remeasure_markdown_rows(row..row + 1);
         }
         cx.notify();
     }
 
-    fn remeasure_markdown_turns(&mut self, range: Range<usize>) {
+    fn remeasure_markdown_rows(&mut self, range: Range<usize>) {
         #[cfg(test)]
-        self.markdown_remeasured_turns.extend(range.clone());
+        self.markdown_remeasured_rows.extend(range.clone());
         self.list_state.remeasure_items(range);
     }
 
-    fn set_markdown_visible_turns(&mut self, visible_turns: Range<usize>, cx: &mut Context<Self>) {
-        let turn_count = self.turn_items.len();
-        let visible_turns = visible_turns.start.min(turn_count)..visible_turns.end.min(turn_count);
-        self.markdown_scroll_top = Some(visible_turns.start);
-        if visible_turns == self.markdown_visible_turns {
+    /// Invalidate the measured heights of every row of `turn`.
+    fn remeasure_turn(&self, turn: usize) {
+        let rows = rows_of_turn(&self.rows, turn);
+        if !rows.is_empty() {
+            self.list_state.remeasure_items(rows);
+        }
+    }
+
+    fn set_markdown_visible_rows(&mut self, visible_rows: Range<usize>, cx: &mut Context<Self>) {
+        let row_count = self.rows.len();
+        let visible_rows = visible_rows.start.min(row_count)..visible_rows.end.min(row_count);
+        self.markdown_scroll_top = Some(visible_rows.start);
+        if visible_rows == self.markdown_visible_rows {
             return;
         }
-        self.markdown_visible_turns = visible_turns;
+        self.markdown_visible_rows = visible_rows;
         self.sync_markdown_residency(None, cx);
         cx.notify();
     }
 
     fn sync_markdown_scroll_position(&mut self, cx: &mut Context<Self>) {
-        let turn_count = self.turn_items.len();
-        let scroll_top = self.list_state.logical_scroll_top().item_ix.min(turn_count);
+        let row_count = self.rows.len();
+        let scroll_top = self.list_state.logical_scroll_top().item_ix.min(row_count);
         if self.markdown_scroll_top == Some(scroll_top) {
             return;
         }
         self.markdown_scroll_top = Some(scroll_top);
-        self.markdown_visible_turns = if scroll_top == turn_count {
-            tail_turn_window(turn_count)
+        self.markdown_visible_rows = if scroll_top == row_count {
+            tail_row_window(row_count)
         } else {
-            viewport_turn_window(scroll_top, turn_count)
+            viewport_row_window(scroll_top, row_count)
         };
         self.sync_markdown_residency(None, cx);
     }
@@ -1144,7 +1174,7 @@ impl ChatView {
         // remeasure covers collapsibles whose state is intentionally not
         // fingerprinted.
         self.timeline_stale = true;
-        self.list_state.remeasure_items(turn..turn + 1);
+        self.remeasure_turn(turn);
         cx.notify();
     }
 
@@ -1179,7 +1209,7 @@ impl ChatView {
                         generation,
                     ) && this.session_key.as_deref() == Some(collapse_session_key.as_str())
                     {
-                        this.list_state.remeasure_items(turn..turn + 1);
+                        this.remeasure_turn(turn);
                         cx.notify();
                     }
                 });
@@ -1189,30 +1219,30 @@ impl ChatView {
         auto.expanded
     }
 
-    /// Render one turn as chronological messages, errors, and Work Log runs.
+    /// Render one timeline row: the segment it spans (a message, an error, a
+    /// Work Log run) and, on the turn's last row, the turn's trailer.
     ///
-    /// `pinned` carries the ids of the last user / last assistant message in the
-    /// whole timeline: their action rows stay visible instead of waiting for a
-    /// hover, so Copy is never invisible-and-hover-only.
-    fn render_turn(
+    /// `entries` are the turn's entries; the row renders its own range of
+    /// them and the trailer reads the rest (pending steers, the last
+    /// timestamp). `pinned` carries the ids of the last user / last assistant
+    /// message in the whole timeline: their action rows stay visible instead
+    /// of waiting for a hover, so Copy is never invisible-and-hover-only.
+    fn render_row(
         &mut self,
-        args: TurnRenderArgs<'_>,
+        args: RowRenderArgs<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (index, turn, cwd, entries, pinned) = args;
-        let mut column = v_flex().w_full().gap(px(10.));
+        let (row, turn, cwd, entries, pinned) = args;
+        let index = row.turn;
+        let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
 
-        let segmented = segment_entries(entries, turn.running);
+        // A row's range re-segments to the one segment it was indexed from.
+        let own = entries.get(row.entry_range.clone()).unwrap_or(&[]);
+        let segmented = segment_entries(own, turn.running);
         let segments = &segmented.flow;
-        let last_activity_segment = live_activity_segment(segments, turn.running);
-        // Only the turn's final assistant text is the deliverable; interim
-        // notes between tool runs carry no action row.
-        let last_assistant_segment = segments
-            .iter()
-            .rposition(|segment| matches!(segment, Segment::Assistant(_)));
 
-        for (segment_index, segment) in segments.iter().enumerate() {
+        for segment in segments.iter() {
             match segment {
                 Segment::Relay(entry) => {
                     let EntryContent::ProviderRelay {
@@ -1263,14 +1293,7 @@ impl ChatView {
                 Segment::ActivityRun(activities) => {
                     let segment_id = activities[0].id.as_str();
                     column = column.child(self.compose_work_log(
-                        (
-                            index,
-                            segment_id,
-                            turn,
-                            cwd,
-                            activities,
-                            last_activity_segment == Some(segment_index),
-                        ),
+                        (index, segment_id, turn, cwd, activities, row.live_activity),
                         cx,
                     ));
                 }
@@ -1324,8 +1347,7 @@ impl ChatView {
                             markdown,
                             compact: self.window_state.read(cx).compact,
                             pinned: pinned.1 == Some(entry.id.as_str()),
-                            show_actions: !turn.running
-                                && last_assistant_segment == Some(segment_index),
+                            show_actions: !turn.running && row.last_assistant,
                             copied,
                         },
                         cx.listener(move |this, _, _, cx| {
@@ -1395,6 +1417,10 @@ impl ChatView {
                     ));
                 }
             }
+        }
+
+        if !row.last_in_turn {
+            return column.into_any_element();
         }
 
         if let Some((item_id, markdown)) = self
@@ -1481,9 +1507,10 @@ impl ChatView {
         }
 
         // Pending steers float below every live transcript/work-log element.
-        // Keeping them separate from `segments` preserves FIFO order without
-        // making their request-time position look model-visible.
-        for entry in segmented.pending_steers {
+        // They are read from the whole turn, not this row's segment, so FIFO
+        // order holds without making their request-time position look
+        // model-visible.
+        for entry in segment_entries(entries, turn.running).pending_steers {
             let EntryContent::Steer {
                 text,
                 status,
@@ -1958,7 +1985,7 @@ impl ChatView {
                     .borrow_mut()
                     .adopt(&id, generation, frame)
                 {
-                    this.list_state.remeasure_items(turn..turn + 1);
+                    this.remeasure_turn(turn);
                 }
                 cx.notify();
             });
@@ -2778,15 +2805,15 @@ struct ResidencyMarkdownEntries {
 
 fn markdown_entries_for_residency(
     timeline: &Timeline,
+    rows: &[TimelineRow],
     scope: &ResidencyScope,
 ) -> ResidencyMarkdownEntries {
     let mut entries = Vec::new();
-    for entry in &timeline.entries {
-        let turn_running = timeline
-            .turns
-            .get(entry.turn)
-            .is_some_and(|turn| turn.running);
-        if !scope.includes(entry.turn, turn_running) {
+    for (index, entry) in timeline.entries.iter().enumerate() {
+        let Some(row) = row_of_entry(rows, index, entry.turn) else {
+            continue;
+        };
+        if !scope.includes(row) {
             continue;
         }
         let markdown_bearing = matches!(
@@ -2797,23 +2824,18 @@ fn markdown_entries_for_residency(
         if markdown_bearing {
             entries.push(MarkdownEntry {
                 id: entry.id.clone(),
-                turn: entry.turn,
-                turn_running,
+                row,
             });
         }
     }
-    if let Some(plan) = &timeline.proposed_plan {
-        let turn_running = timeline
-            .turns
-            .get(plan.turn)
-            .is_some_and(|turn| turn.running);
-        if scope.includes(plan.turn, turn_running) {
-            entries.push(MarkdownEntry {
-                id: format!("plan:{}", plan.item_id),
-                turn: plan.turn,
-                turn_running,
-            });
-        }
+    if let Some(plan) = &timeline.proposed_plan
+        && let Some(row) = rows_of_turn(rows, plan.turn).last()
+        && scope.includes(row)
+    {
+        entries.push(MarkdownEntry {
+            id: format!("plan:{}", plan.item_id),
+            row,
+        });
     }
     ResidencyMarkdownEntries {
         #[cfg(test)]
@@ -2897,7 +2919,7 @@ impl Render for ChatView {
         } else {
             px(0.)
         };
-        if placeholder != self.history_placeholder_height && !self.turn_items.is_empty() {
+        if placeholder != self.history_placeholder_height && !self.rows.is_empty() {
             let anchor = self.list_state.logical_scroll_top();
             let following = self.list_state.is_following_tail();
             self.list_state.remeasure_items(0..1);
@@ -2968,30 +2990,37 @@ impl Render for ChatView {
             .with_active_timeline(|timeline| latest_message_ids(&timeline.entries))
             .unwrap_or_default();
 
-        let item_count = self.turn_items.len();
+        let item_count = self.rows.len();
         let item_cwd = cwd.clone();
         let timeline = list(
             self.list_state.clone(),
             cx.processor(move |this, index: usize, window, cx| {
-                let Some(item) = this.turn_items.get(index) else {
+                let Some(row) = this.rows.get(index).cloned() else {
                     return div().into_any_element();
                 };
-                // Clone only the handful of entries in this visible/overdrawn
-                // turn. The full history remains behind the store and is never
-                // cloned by the render path.
+                // Clone only the entries of this row's turn: the row renders
+                // its own segment and the turn's last row its trailer. The
+                // full history remains behind the store and is never cloned
+                // by the render path.
+                let turn_entries = {
+                    let rows = rows_of_turn(&this.rows, row.turn);
+                    let start = this.rows[rows.start].entry_range.start;
+                    let end = this.rows[rows.end - 1].entry_range.end;
+                    start.min(end)..end
+                };
                 let Some((turn, entries)) =
                     this.workspace_store
                         .read(cx)
                         .with_active_timeline(|timeline| {
                             (
-                                timeline.turns.get(index).cloned().unwrap_or_default(),
-                                // `entry_range` comes from `turn_items`, a snapshot
-                                // that can trail the live timeline by a frame (e.g.
-                                // adopting a running background thread whose timeline
-                                // is being re-folded), so it must not index blindly.
+                                timeline.turns.get(row.turn).cloned().unwrap_or_default(),
+                                // The rows are a snapshot that can trail the live
+                                // timeline by a frame (e.g. adopting a running
+                                // background thread whose timeline is being
+                                // re-folded), so they must not index blindly.
                                 timeline
                                     .entries
-                                    .get(item.entry_range.clone())
+                                    .get(turn_entries.clone())
                                     .map(<[_]>::to_vec)
                                     .unwrap_or_default(),
                             )
@@ -2999,9 +3028,15 @@ impl Render for ChatView {
                 else {
                     return div().into_any_element();
                 };
-                let rendered = this.render_turn(
+                // The row's range, relative to the turn's entries.
+                let row = TimelineRow {
+                    entry_range: row.entry_range.start - turn_entries.start
+                        ..row.entry_range.end - turn_entries.start,
+                    ..row
+                };
+                let rendered = this.render_row(
                     (
-                        index,
+                        &row,
                         &turn,
                         &item_cwd,
                         &entries,
@@ -3019,15 +3054,17 @@ impl Render for ChatView {
                     } else {
                         CONTENT_MIN_PADDING
                     }))
-                    .when(this.highlighted_turn == Some(index), |item| {
+                    .when(this.highlighted_turn == Some(row.turn), |item| {
                         item.rounded(crate::material::radius_card())
                             .bg(cx.theme().list_active)
                     })
                     .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
-                    .pb(px(if index + 1 < item_count {
+                    .pb(px(if index + 1 == item_count {
+                        TIMELINE_EDGE_PADDING
+                    } else if row.last_in_turn {
                         TURN_GAP
                     } else {
-                        TIMELINE_EDGE_PADDING
+                        SEGMENT_GAP
                     }))
                     // `min_w_0`: a turn holds nowrap content (diff rows, command
                     // output). Without it this flex item grows to that content
@@ -3905,14 +3942,34 @@ mod tests {
         let mut timeline = synthetic_markdown_timeline(200);
         timeline.turns[5].running = true;
         timeline.turn_running = true;
-        let scope = ResidencyScope::new(200, 40..48, None, true);
+        // Three rows per synthetic turn: the user bubble, the reasoning
+        // run and the assistant message.
+        let rows = super::model::index_rows(
+            &timeline.turns,
+            &timeline.entries,
+            None,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(rows.len(), 600);
+        let scope = ResidencyScope::new(600, 120..144, None, true);
 
-        let candidates = markdown_entries_for_residency(&timeline, &scope);
+        let candidates = markdown_entries_for_residency(&timeline, &rows, &scope);
 
-        assert_eq!(candidates.constructions, 177);
+        assert_eq!(candidates.constructions, 172);
         assert!(candidates.constructions < timeline.entries.len());
-        assert!(candidates.entries.iter().any(|entry| entry.turn == 5));
-        assert!(candidates.entries.iter().any(|entry| entry.turn == 199));
+        // A running turn far from the viewport is history like any other.
+        assert!(
+            !candidates
+                .entries
+                .iter()
+                .any(|entry| entry.id == "assistant-5")
+        );
+        assert!(
+            candidates
+                .entries
+                .iter()
+                .any(|entry| entry.id == "assistant-199")
+        );
     }
 
     #[gpui::test]
@@ -4291,7 +4348,7 @@ mod tests {
                     let _ = window.draw(cx);
                 });
                 let last = cx
-                    .debug_bounds("timeline-row-29")
+                    .debug_bounds("timeline-row-89")
                     .expect("last timeline row");
                 assert!(
                     f32::from(last.bottom() - list.viewport_bounds().bottom()).abs() <= 1.,
@@ -4482,17 +4539,19 @@ mod tests {
         });
         draw(cx);
 
-        let after = list.logical_scroll_top();
+        // The row the reader was on sits 60 rows lower and exactly 40px
+        // further down the viewport: both the page and the pan applied.
+        let row_top = list
+            .bounds_for_item(before.item_ix + 60)
+            .expect("the reader's row stays on screen")
+            .top();
         assert_eq!(
-            after.item_ix,
-            before.item_ix + 20,
-            "a 40px pan moved the reader off turn {} to turn {} (offset {:?} -> {:?})",
-            before.item_ix + 20,
-            after.item_ix,
+            row_top - list.viewport_bounds().top(),
+            px(40.) - before.offset_in_item,
+            "a 40px pan and a 60-row page both apply (offset {:?} -> {:?})",
             before.offset_in_item,
-            after.offset_in_item
+            list.logical_scroll_top().offset_in_item
         );
-        assert_eq!(after.offset_in_item, before.offset_in_item - px(40.));
         assert_eq!(list.scroll_px_offset_for_scrollbar().y, before_px + px(40.));
     }
 
@@ -4637,7 +4696,7 @@ mod tests {
             cx.debug_bounds("scroll-to-end").is_some(),
             "prepend hides jump"
         );
-        assert_eq!(list.logical_scroll_top().item_ix, before.item_ix + 20);
+        assert_eq!(list.logical_scroll_top().item_ix, before.item_ix + 60);
         assert_eq!(
             list.logical_scroll_top().offset_in_item,
             before.offset_in_item
@@ -4798,8 +4857,8 @@ mod tests {
         });
         let anchor = list.logical_scroll_top();
         assert_eq!(
-            anchor.item_ix, 30,
-            "the same turn must remain visible after 20 earlier turns"
+            anchor.item_ix, 70,
+            "the same row must remain visible after 20 earlier turns of three rows"
         );
         assert_eq!(anchor.offset_in_item, px(7.));
         assert!(!list.is_following_tail());
@@ -4864,8 +4923,8 @@ mod tests {
         );
         assert_eq!(settle(px(-400.), cx), px(-400.));
         assert!(
-            list.logical_scroll_top().item_ix < 56,
-            "a screen above the last turns"
+            list.logical_scroll_top().item_ix < 176,
+            "a screen above the last rows"
         );
         assert_eq!(
             settle(px(400.), cx),
@@ -4957,9 +5016,11 @@ mod tests {
             let _ = window.draw(cx);
         });
         let anchor = list.logical_scroll_top();
+        // The page adds the earlier turn's three rows and the user bubble
+        // above the answer.
         assert_eq!(
             (anchor.item_ix, anchor.offset_in_item),
-            (1, px(20.)),
+            (5, px(20.)),
             "the completed turn keeps its reader at the same content offset"
         );
         assert!(
@@ -5027,11 +5088,11 @@ mod tests {
         }
         let anchor = list.logical_scroll_top();
         assert!(
-            anchor.item_ix < 20 && anchor.offset_in_item >= px(0.),
+            anchor.item_ix < 60 && anchor.offset_in_item >= px(0.),
             "the viewport top sits inside the measured page, not above its row: {anchor:?}"
         );
         let after = list
-            .bounds_for_item(20)
+            .bounds_for_item(60)
             .expect("previous first turn remains on screen")
             .top();
         assert!(
@@ -5096,7 +5157,7 @@ mod tests {
             let _ = window.draw(cx);
         });
         let after = list
-            .bounds_for_item(20)
+            .bounds_for_item(60)
             .expect("previous first turn remains on screen")
             .top();
         assert!(
@@ -5169,7 +5230,8 @@ mod tests {
     fn chat_view_applies_markdown_residency_decisions(cx: &mut TestAppContext) {
         use gpui::{FollowMode, ListOffset, VisualTestContext, px, size};
 
-        const TARGET: usize = 40;
+        // The user bubble of turn 40: three rows per synthetic turn.
+        const TARGET: usize = 120;
         let timeline = synthetic_markdown_timeline(240);
         let (workspace_store, window_state, _) = seed_chat(cx, timeline);
         let (view, cx) = cx
@@ -5181,7 +5243,7 @@ mod tests {
         });
         assert_eq!(
             view.read_with(cx, |chat, _| chat.resident_markdown_state_count()),
-            48
+            36
         );
         let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(!view.read_with(cx, |chat, _| {
@@ -5224,7 +5286,7 @@ mod tests {
             resident <= 96,
             "old-turn window retained {resident} MarkdownStates; expected at most 96"
         );
-        assert_eq!(resident, 78);
+        assert_eq!(resident, 64);
         let scroll_top = list_state.logical_scroll_top();
         assert_eq!(scroll_top.item_ix, TARGET);
         assert_eq!(
@@ -5245,7 +5307,7 @@ mod tests {
 
         view.read_with(cx, |chat, _| {
             assert!(!chat.has_resident_markdown_state("large"));
-            assert!(!chat.markdown_remeasured_turns.contains(&0));
+            assert!(!chat.markdown_remeasured_rows.contains(&0));
         });
         cx.run_until_parked();
         view.read_with(cx, |chat, cx| {
@@ -5259,7 +5321,7 @@ mod tests {
                 .read(cx)
                 .rendered_text();
             assert!(rendered.contains("async content"));
-            assert!(chat.markdown_remeasured_turns.contains(&0));
+            assert!(chat.markdown_remeasured_rows.contains(&0));
         });
     }
 
@@ -5331,6 +5393,46 @@ mod tests {
             assert!(!chat.has_resident_markdown_state("large"));
             assert!(!chat.pending_md_builds.contains_key("large"));
         });
+    }
+
+    /// A single running turn holding hundreds of interim messages opens
+    /// with the Markdown of the rows near the tail parsed, not the whole
+    /// turn's.
+    #[gpui::test]
+    fn a_long_running_turn_parses_only_the_markdown_near_the_viewport(cx: &mut TestAppContext) {
+        use gpui::px;
+        let mut timeline = Timeline::default();
+        timeline.turn_running = true;
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..Default::default()
+        }];
+        timeline.entries.push(entry("user", user_item("go")));
+        for step in 0..150 {
+            timeline.entries.push(command(&format!("cmd-{step}")));
+            timeline
+                .entries
+                .push(entry(&format!("note-{step}"), assistant("interim note")));
+        }
+        let (store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        let (rows, resident) = view.read_with(cx, |chat, _| {
+            (chat.rows.len(), chat.resident_markdown_state_count())
+        });
+        assert_eq!(rows, 1 + 2 * 150);
+        assert!(
+            resident < 60,
+            "{resident} Markdown documents resident for a 150-note turn; the rows near the tail suffice"
+        );
+        assert!(view.read_with(cx, |chat, _| chat.has_resident_markdown_state("note-149")));
+        assert!(!view.read_with(cx, |chat, _| chat.has_resident_markdown_state("note-0")));
+        assert!(cx.debug_bounds("timeline-row-300").is_some());
     }
 
     #[gpui::test]
@@ -5541,6 +5643,18 @@ This begins after the hard break."#;
 
     fn reasoning(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::Reasoning { text: text.into() })
+    }
+
+    fn command(id: &str) -> Arc<TimelineEntry> {
+        entry(
+            id,
+            EntryContent::Item(ItemContent::CommandExecution {
+                command: id.to_string(),
+                output: String::new(),
+                exit_code: Some(0),
+                status: agent::ItemStatus::Completed,
+            }),
+        )
     }
 
     fn at_turn(mut entry: Arc<TimelineEntry>, turn: usize) -> Arc<TimelineEntry> {

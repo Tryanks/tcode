@@ -101,7 +101,7 @@ impl WorkspaceStore {
                         let held = store.session_records.entry(session_id.clone()).or_default();
                         held.splice(0..0, records);
                         store.session_from.insert(session_id.clone(), from);
-                        let mut timeline = Timeline::fold_events(held.iter().cloned());
+                        let mut timeline = Timeline::fold_stored(held.iter());
                         if !store
                             .session_status_replica
                             .as_ref()

@@ -551,6 +551,17 @@ impl Timeline {
         timeline
     }
 
+    /// Fold records a client already holds, without cloning their payloads:
+    /// a history page refolds the whole held log, whose tool outputs and
+    /// diffs are the bulk of it.
+    pub fn fold_stored<'a>(records: impl IntoIterator<Item = &'a StoredEvent>) -> Self {
+        let mut timeline = Self::default();
+        for record in records {
+            timeline.apply_stored(record);
+        }
+        timeline
+    }
+
     /// Fold one record, remembering whether it carried a shortened output.
     pub fn apply_stored(&mut self, stored: &StoredEvent) {
         if let Some(bytes) = stored.elided
