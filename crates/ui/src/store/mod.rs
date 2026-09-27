@@ -1033,7 +1033,7 @@ impl WorkspaceStore {
                 if self.session_catching_up {
                     return;
                 }
-                let mut timeline = Timeline::fold_events(held.iter().cloned());
+                let mut timeline = Timeline::fold_stored(held.iter());
                 if !self
                     .session_status_replica
                     .as_ref()
