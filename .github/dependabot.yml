@@ -3,9 +3,9 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
     open-pull-requests-limit: 10
-    # One weekly pull request for routine bumps; majors stay separate so a
+    # One grouped pull request for routine bumps; majors stay separate so a
     # breaking update is reviewed on its own.
     groups:
       cargo-minor-and-patch:
@@ -22,7 +22,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
     open-pull-requests-limit: 10
     groups:
       github-actions:
