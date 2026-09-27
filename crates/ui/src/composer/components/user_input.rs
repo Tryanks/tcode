@@ -338,6 +338,29 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let request_id = pending.request_id.clone();
+        let touch = if self.compact { 44. } else { 24. };
+        // Hiding is local to this client; the question stays open on the host,
+        // so a way back remains while the sidebar still asks for an answer.
+        if self.ui_dismissed_request_id.as_ref() == Some(&request_id) {
+            return h_flex()
+                .w_full()
+                .child(
+                    Button::new("ui-async-reveal")
+                        .debug_selector(|| "ui-async-reveal".into())
+                        .ghost()
+                        .xsmall()
+                        .when(self.compact, |button| button.min_h(px(touch)))
+                        .icon(IconName::Info)
+                        .label(crate::tr!("userinput.async_header"))
+                        .tooltip(crate::tr!("userinput.answer"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ui_dismissed_request_id = None;
+                            this.ui_async_expanded = true;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
         let questions = pending.questions.clone();
         let total = questions.len();
         let index = self.ui_question_index.min(total.saturating_sub(1));
@@ -346,9 +369,9 @@ impl Composer {
         };
         let muted = cx.theme().muted_foreground;
         let expanded = self.ui_async_expanded;
-        let touch = if self.compact { 44. } else { 24. };
 
         let toggle = Button::new("ui-async-toggle")
+            .debug_selector(|| "ui-async-toggle".into())
             .ghost()
             .xsmall()
             .when(self.compact, |button| {
@@ -365,11 +388,13 @@ impl Composer {
                 crate::tr!("userinput.answer")
             })
             .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
                 this.ui_async_expanded = !this.ui_async_expanded;
                 cx.notify();
             }));
         let request_dismiss = request_id.clone();
         let dismiss = Button::new("ui-dismiss")
+            .debug_selector(|| "ui-dismiss".into())
             .ghost()
             .xsmall()
             .when(self.compact, |button| {
@@ -378,6 +403,7 @@ impl Composer {
             .icon(IconName::Close)
             .tooltip(crate::tr!("userinput.dismiss"))
             .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
                 this.ui_dismissed_request_id = Some(request_dismiss.clone());
                 cx.notify();
             }));
@@ -413,17 +439,52 @@ impl Composer {
             })
             .when(expanded, |strip| strip.child(div().flex_1()))
             .when(total > 1, |strip| {
-                strip.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .child(crate::tr!(
-                            "userinput.question_count",
-                            index = index + 1,
-                            total = total
-                        )),
-                )
+                let questions_previous = questions.clone();
+                let questions_next = questions.clone();
+                strip
+                    .child(
+                        Button::new("ui-async-prev")
+                            .debug_selector(|| "ui-async-prev".into())
+                            .ghost()
+                            .xsmall()
+                            .when(self.compact, |button| {
+                                button.min_w(px(touch)).min_h(px(touch))
+                            })
+                            .icon(IconName::ChevronLeft)
+                            .disabled(index == 0)
+                            .tooltip(crate::tr!("userinput.previous"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.ui_go(-1, &questions_previous, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(crate::tr!(
+                                "userinput.question_count",
+                                index = index + 1,
+                                total = total
+                            )),
+                    )
+                    .child(
+                        Button::new("ui-async-next")
+                            .debug_selector(|| "ui-async-next".into())
+                            .ghost()
+                            .xsmall()
+                            .when(self.compact, |button| {
+                                button.min_w(px(touch)).min_h(px(touch))
+                            })
+                            .icon(IconName::ChevronRight)
+                            .disabled(index + 1 >= total)
+                            .tooltip(crate::tr!("userinput.next_question"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.ui_go(1, &questions_next, window, cx);
+                            })),
+                    )
             })
             .child(toggle)
             .child(dismiss)
@@ -719,5 +780,80 @@ impl Composer {
             store.respond_user_input(request_id, answers)
         });
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, size};
+
+    fn question(id: &str) -> UserInputQuestion {
+        UserInputQuestion {
+            id: id.into(),
+            header: id.into(),
+            question: format!("{id}?"),
+            options: vec![agent::UserInputOption {
+                label: "Yes".into(),
+                description: String::new(),
+            }],
+            multi_select: false,
+            prefill: None,
+        }
+    }
+
+    /// The strip's own buttons sit inside a clickable strip; a click on one
+    /// must act once, not also reach the strip underneath.
+    #[gpui::test]
+    fn async_question_strip_controls(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
+                "tcode-async-question-test-{}-{}",
+                std::process::id(),
+                tcode_services::store::now_millis()
+            )))
+            .unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("async-question".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).unwrap();
+            active.timeline.pending_user_input = Some(PendingUserInput {
+                request_id: "ask".into(),
+                questions: vec![question("first"), question("second")],
+                delivery: agent::UserInputDelivery::Async,
+            });
+            (id, active.timeline.clone())
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(size(px(800.), px(600.)));
+        let mut click = |selector: &'static str| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = cx.debug_bounds(selector).expect(selector);
+            cx.simulate_click(bounds.center(), Default::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            (
+                composer.read_with(cx, |composer, _| {
+                    (composer.ui_async_expanded, composer.ui_question_index)
+                }),
+                cx.debug_bounds("ui-async-toggle").is_some(),
+            )
+        };
+
+        assert_eq!(click("ui-async-toggle"), ((true, 0), true));
+        assert_eq!(click("ui-async-next"), ((true, 1), true));
+        assert_eq!(click("ui-async-prev"), ((true, 0), true));
+        assert_eq!(click("ui-async-toggle"), ((false, 0), true));
+        // Hidden, the still-open question keeps an entry that reopens it.
+        assert_eq!(click("ui-dismiss"), ((false, 0), false));
+        assert_eq!(click("ui-async-reveal"), ((true, 0), true));
     }
 }
