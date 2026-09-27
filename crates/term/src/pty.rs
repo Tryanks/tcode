@@ -463,7 +463,7 @@ impl RawPtyEventLoop {
                     let _ = self.pty.set_winsize(WinsizeBuilder::from(size));
                 }
                 Ok(PtyCommand::Kill) => {
-                    let _ = terminate_pty(&self.pty);
+                    let _ = self.pty.child.terminate();
                 }
                 Ok(PtyCommand::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => return false,
                 Err(mpsc::TryRecvError::Empty) => return true,
@@ -563,12 +563,6 @@ impl PendingWrite {
     fn remaining(&self) -> &[u8] {
         &self.bytes[self.written..]
     }
-}
-
-#[cfg(unix)]
-fn terminate_pty(pty: &tty::Pty) -> io::Result<()> {
-    tty::kill_pid(*pty.child.pid);
-    Ok(())
 }
 
 fn refresh_process_info(

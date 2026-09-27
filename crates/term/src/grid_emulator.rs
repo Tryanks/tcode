@@ -142,7 +142,7 @@ struct GridListener {
 impl EventListener for GridListener {
     fn send_event(&self, event: RioEvent, _window_id: WindowId) {
         match event {
-            RioEvent::Title(title) => {
+            RioEvent::Title(_, title) => {
                 *self.osc_title.lock_recover() = Some(title.clone());
                 let _ = self
                     .notifications
@@ -157,7 +157,7 @@ impl EventListener for GridListener {
                     .notifications
                     .try_send(GridEvent::CursorBlinkingChanged);
             }
-            RioEvent::Bell => {
+            RioEvent::Bell(_) => {
                 let _ = self.notifications.try_send(GridEvent::Bell);
             }
             RioEvent::Render
