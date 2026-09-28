@@ -555,6 +555,65 @@ impl Composer {
 
     /// The "⋯" overflow button + popover holding the context / permission /
     /// mode controls when the control row is too narrow to show them inline.
+    /// The phone composer's "+" : a sheet of ways to add to the message.
+    /// Only the photo library for now; more rows go here, not in the row.
+    pub(in super::super) fn render_attach_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let composer = cx.entity();
+        let trigger = Button::new("attach-menu")
+            .debug_selector(|| "attach-menu".into())
+            .min_w(px(44.))
+            .min_h(px(44.))
+            .ghost()
+            .compact()
+            .aria_label(crate::tr!("attach.add").into_owned())
+            .child(Icon::new(IconName::Plus).small().text_color(muted));
+
+        crate::material::overlay_popover("attach-popover")
+            .anchor(Anchor::BottomLeft)
+            .bottom_sheet(crate::tr!("attach.add"))
+            .trigger(trigger)
+            .content(move |_, _window, cx| {
+                let composer = composer.clone();
+                let popover = cx.entity();
+                let muted = cx.theme().muted_foreground;
+                v_flex()
+                    .w_full()
+                    .p_1()
+                    .gap_0p5()
+                    .child(
+                        h_flex()
+                            .id("attach-photo-library")
+                            .w_full()
+                            .min_h(px(44.))
+                            .px_2()
+                            .py_1p5()
+                            .gap_1p5()
+                            .items_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .text_color(muted)
+                            .hover(|style| style.bg(cx.theme().muted))
+                            .child(
+                                Icon::empty()
+                                    .path("icons/image.svg")
+                                    .small()
+                                    .text_color(muted),
+                            )
+                            .child(crate::tr!("attach.photo_library"))
+                            .on_click(move |_, window, cx| {
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                composer.update(cx, |composer, cx| {
+                                    composer.pick_images_from_library(window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
     pub(in super::super) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = self.workspace_store.read(cx).composer_state();
         let usage = composer.token_usage;

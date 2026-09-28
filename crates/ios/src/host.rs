@@ -12,13 +12,20 @@ use std::{
     },
 };
 
-use tcode_client::host::HostFuture;
+use tcode_client::host::{HostFuture, PickedImage};
 use tcode_traverse::{NativeClientHost, lan::SystemBrowser};
 
 type ScanDone = Box<dyn FnOnce(Result<String, String>)>;
 
+/// A photo-picker request in flight: what arrived so far and who awaits it.
+struct PickRequest {
+    images: Vec<PickedImage>,
+    done: async_channel::Sender<Result<Vec<PickedImage>, String>>,
+}
+
 thread_local! {
     static CAMERA_CALLBACKS: RefCell<HashMap<u64, ScanDone>> = RefCell::new(HashMap::new());
+    static PICK_REQUESTS: RefCell<HashMap<u64, PickRequest>> = RefCell::new(HashMap::new());
     /// The shell owns the host; scene callbacks reach it while it lives.
     static HOST: RefCell<Weak<NativeClientHost>> = const { RefCell::new(Weak::new()) };
 }
@@ -34,6 +41,7 @@ unsafe extern "C" {
     fn tcode_ios_host_device_platform(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_start_camera_scan(request_id: u64);
+    fn tcode_ios_host_pick_images(request_id: u64, limit: usize);
     fn tcode_ios_host_browse_start(request: u64);
     fn tcode_ios_host_browse_stop(request: u64);
 }
@@ -100,7 +108,30 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
                     .await
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
-        });
+        })
+        .with_image_picker(
+            |limit| -> HostFuture<'static, Result<Vec<PickedImage>, String>> {
+                let (done, receiver) = async_channel::bounded(1);
+                let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                PICK_REQUESTS.with(|requests| {
+                    requests.borrow_mut().insert(
+                        request_id,
+                        PickRequest {
+                            images: Vec::new(),
+                            done,
+                        },
+                    );
+                });
+                // SAFETY: UIKit retains the id and finishes the request exactly once.
+                unsafe { tcode_ios_host_pick_images(request_id, limit) };
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .unwrap_or_else(|error| Err(error.to_string()))
+                })
+            },
+        );
     let host = Rc::new(host);
     HOST.with(|slot| *slot.borrow_mut() = Rc::downgrade(&host));
     (host, system_locale)
@@ -169,6 +200,59 @@ pub extern "C" fn tcode_ios_camera_scan_completed(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| error.unwrap_or_else(|| "此设备没有可用的相机".to_string()));
     callback(result);
+}
+
+/// One image the PHPicker loaded for request `request_id`; more may follow
+/// before [`tcode_ios_image_pick_finished`]. Called on the main queue.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcode_ios_image_picked(
+    request_id: u64,
+    name_bytes: *const u8,
+    name_length: usize,
+    mime_bytes: *const u8,
+    mime_length: usize,
+    data: *const u8,
+    data_length: usize,
+) {
+    // SAFETY: Swift keeps all three temporary buffers alive through this call.
+    let name = unsafe { ffi_string(name_bytes, name_length) }.unwrap_or_else(|| "image".into());
+    // SAFETY: same as above.
+    let mime =
+        unsafe { ffi_string(mime_bytes, mime_length) }.unwrap_or_else(|| "image/jpeg".into());
+    let bytes = if data.is_null() || data_length == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: same as above.
+        unsafe { slice::from_raw_parts(data, data_length) }.to_vec()
+    };
+    PICK_REQUESTS.with(|requests| {
+        if let Some(request) = requests.borrow_mut().get_mut(&request_id) {
+            request.images.push(PickedImage { name, mime, bytes });
+        } else {
+            log::warn!("image for unknown iOS picker request {request_id}");
+        }
+    });
+}
+
+/// The PHPicker is done with request `request_id`: dismissed, or every
+/// selected image was delivered, or it failed with `error`.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcode_ios_image_pick_finished(
+    request_id: u64,
+    error_bytes: *const u8,
+    error_length: usize,
+) {
+    let request = PICK_REQUESTS.with(|requests| requests.borrow_mut().remove(&request_id));
+    let Some(request) = request else {
+        log::warn!("unknown iOS picker request {request_id}");
+        return;
+    };
+    // SAFETY: Swift keeps the temporary buffer alive through this call.
+    let error = unsafe { ffi_string(error_bytes, error_length) };
+    let _ = request.done.try_send(match error {
+        Some(error) => Err(error),
+        None => Ok(request.images),
+    });
 }
 
 fn read_native_string(read: impl Fn(*mut u8, usize) -> usize) -> Option<String> {

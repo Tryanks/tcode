@@ -273,6 +273,9 @@ settings:
     title: "设备名称"
     description: "这台设备连接主机时显示的名称。"
     placeholder: "我的设备"
+  remote_attachment_limit:
+    title: "互联网传输附件上限 (MB)"
+    description: "超过此大小的图片在互联网直连时会先询问，经中继时不会发送。局域网连接不受限制。"
   word_wrap:
     title: "diff 自动换行"
     description: "默认在 diff 面板中自动换行过长内容。"
@@ -894,6 +897,13 @@ attach:
   unsupported_type: "'%{name}' 的文件类型不受支持。请仅附加图片文件。"
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"
   too_many: "每条消息最多只能附加 8 张图片。"
+  add: "添加"
+  photo_library: "相册"
+  pick_failed: "无法打开相册：%{error}"
+  relay_rejected: "'%{name}' 大小为 %{size}。当前设备经中继连接主机，超过 %{limit} 的附件不会经中继发送；请缩小图片或在同一网络下连接。"
+  tunnel_title: "附件较大"
+  tunnel_body: "'%{name}' 大小为 %{size}，当前设备通过互联网直连主机，发送可能需要一些时间。"
+  tunnel_confirm: "仍然发送"
 preview:
   external_unavailable: "请先在预览中打开远程页面。转发后的浏览器链接仅在此预览保持打开时有效。"
   remote_forwarding: "远程回环地址通过转发访问，其他地址从此 Mac 直接访问。"

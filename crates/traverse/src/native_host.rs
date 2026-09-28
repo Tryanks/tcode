@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, Transport};
+use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, PickedImage, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
 
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
 };
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
+type ImagePicker = dyn Fn(usize) -> HostFuture<'static, Result<Vec<PickedImage>, String>>;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
 type MulticastLock = dyn Fn(bool) + Send + Sync;
 
@@ -26,6 +27,7 @@ pub struct NativeClientHost {
     default_device_name: String,
     platform: Option<String>,
     qr_scanner: Option<Box<QrScanner>>,
+    image_picker: Option<Box<ImagePicker>>,
     editor: Option<Box<EditorOpener>>,
     multicast_lock: Option<Arc<MulticastLock>>,
     system_browser: Option<Arc<SystemBrowser>>,
@@ -41,6 +43,7 @@ impl NativeClientHost {
             default_device_name: device_name.into(),
             platform: default_device_platform(),
             qr_scanner: None,
+            image_picker: None,
             editor: None,
             multicast_lock: None,
             system_browser: None,
@@ -115,6 +118,15 @@ impl NativeClientHost {
         scanner: impl Fn() -> HostFuture<'static, Result<String, String>> + 'static,
     ) -> Self {
         self.qr_scanner = Some(Box::new(scanner));
+        self
+    }
+
+    /// The platform's own media picker; see [`ClientHost::pick_images`].
+    pub fn with_image_picker(
+        mut self,
+        picker: impl Fn(usize) -> HostFuture<'static, Result<Vec<PickedImage>, String>> + 'static,
+    ) -> Self {
+        self.image_picker = Some(Box::new(picker));
         self
     }
 
@@ -200,6 +212,10 @@ impl ClientHost for NativeClientHost {
                 .get("navigation")
                 .filter(|value| !value.is_null())
                 .cloned(),
+            remote_attachment_limit_mib: prefs
+                .get("remote_attachment_limit_mib")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|limit| u32::try_from(limit).ok()),
         }
     }
 
@@ -209,6 +225,8 @@ impl ClientHost for NativeClientHost {
         prefs["language"] = serde_json::json!(preferences.language);
         prefs["device_name"] = serde_json::json!(preferences.device_name);
         prefs["navigation"] = serde_json::json!(preferences.navigation);
+        prefs["remote_attachment_limit_mib"] =
+            serde_json::json!(preferences.remote_attachment_limit_mib);
         self.write_prefs(&prefs);
     }
 
@@ -338,6 +356,17 @@ impl ClientHost for NativeClientHost {
         self.qr_scanner.as_ref().map_or_else(
             || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
             |scanner| scanner(),
+        )
+    }
+
+    fn supports_image_picker(&self) -> bool {
+        self.image_picker.is_some()
+    }
+
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedImage>, String>> {
+        self.image_picker.as_ref().map_or_else(
+            || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
+            |picker| picker(limit),
         )
     }
 }
@@ -740,6 +769,7 @@ mod tests {
             language: None,
             device_name: Some("Renamed".into()),
             navigation: Some(serde_json::json!({"history": ["hosts", "threads"]})),
+            remote_attachment_limit_mib: Some(4),
         });
 
         let saved: serde_json::Value =
@@ -752,6 +782,8 @@ mod tests {
             serde_json::json!(["hosts", "threads"])
         );
         assert!(saved["language"].is_null());
+        assert_eq!(saved["remote_attachment_limit_mib"], 4);
+        assert_eq!(host.load_preferences().remote_attachment_limit_mib, Some(4));
 
         host.set_last_host_id(Some("next-host"));
         assert_eq!(host.last_host_id().as_deref(), Some("next-host"));
