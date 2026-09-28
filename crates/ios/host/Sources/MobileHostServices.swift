@@ -1,5 +1,7 @@
 import AVFoundation
+import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
 
 private struct MobileHostServiceError: LocalizedError {
     let message: String
@@ -115,6 +117,139 @@ public func tcodeIosHostStartCameraScan(_ requestId: UInt64) {
             requestId,
             result: .failure(MobileHostServiceError("相机权限被拒绝"))
         )
+    }
+}
+
+/// Delegates of pickers on screen, keyed by request; a PHPicker does not
+/// retain its delegate.
+private var imagePickers: [UInt64: ImagePickerDelegate] = [:]
+
+@_cdecl("tcode_ios_host_pick_images")
+public func tcodeIosHostPickImages(_ requestId: UInt64, _ limit: Int) {
+    guard let presenter = topPresenter() else {
+        finishImagePick(requestId, error: "无法显示相册")
+        return
+    }
+    var configuration = PHPickerConfiguration(photoLibrary: .shared())
+    configuration.filter = .images
+    configuration.selectionLimit = max(1, limit)
+    // HEIC and other formats the machine cannot decode arrive as JPEG.
+    configuration.preferredAssetRepresentationMode = .compatible
+    let delegate = ImagePickerDelegate(requestId: requestId)
+    imagePickers[requestId] = delegate
+    let picker = PHPickerViewController(configuration: configuration)
+    picker.delegate = delegate
+    presenter.present(picker, animated: true)
+}
+
+private func finishImagePick(_ requestId: UInt64, error: String?) {
+    imagePickers[requestId] = nil
+    if let error {
+        withUTF8(error) { bytes, length in
+            tcode_ios_image_pick_finished(requestId, bytes, length)
+        }
+    } else {
+        tcode_ios_image_pick_finished(requestId, nil, 0)
+    }
+}
+
+private final class ImagePickerDelegate: NSObject, PHPickerViewControllerDelegate {
+    private let requestId: UInt64
+    /// Formats delivered as they are; anything else loads as a UIImage and
+    /// leaves as JPEG.
+    private static let passthrough: [(UTType, String, String)] = [
+        (.png, "image/png", "png"),
+        (.jpeg, "image/jpeg", "jpg"),
+        (.gif, "image/gif", "gif"),
+        (.webP, "image/webp", "webp"),
+    ]
+
+    init(requestId: UInt64) {
+        self.requestId = requestId
+    }
+
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: true)
+        let requestId = self.requestId
+        let providers = results.map(\.itemProvider)
+        // Loads complete on arbitrary queues; deliver in selection order from
+        // the main queue, as every other host callback does.
+        DispatchQueue.global(qos: .userInitiated).async {
+            var loaded: [(String, String, Data)] = []
+            var failure: String?
+            for (index, provider) in providers.enumerated() {
+                let stem = provider.suggestedName ?? "photo-\(index + 1)"
+                switch Self.load(provider) {
+                case .success(let (mime, ext, data)):
+                    loaded.append(("\(stem).\(ext)", mime, data))
+                case .failure(let error):
+                    failure = error.localizedDescription
+                }
+            }
+            DispatchQueue.main.async {
+                for (name, mime, data) in loaded {
+                    withUTF8(name) { nameBytes, nameLength in
+                        withUTF8(mime) { mimeBytes, mimeLength in
+                            data.withUnsafeBytes { buffer in
+                                tcode_ios_image_picked(
+                                    requestId,
+                                    nameBytes,
+                                    nameLength,
+                                    mimeBytes,
+                                    mimeLength,
+                                    buffer.bindMemory(to: UInt8.self).baseAddress,
+                                    buffer.count
+                                )
+                            }
+                        }
+                    }
+                }
+                finishImagePick(requestId, error: loaded.isEmpty ? failure : nil)
+            }
+        }
+    }
+
+    private static func load(_ provider: NSItemProvider) -> Result<(String, String, Data), Error> {
+        for (type, mime, ext) in passthrough
+        where provider.hasItemConformingToTypeIdentifier(type.identifier) {
+            return loadData(provider, type: type).map { (mime, ext, $0) }
+        }
+        return loadObject(provider).flatMap { image in
+            guard let data = image.jpegData(compressionQuality: 0.9) else {
+                return .failure(MobileHostServiceError("无法编码所选图片"))
+            }
+            return .success(("image/jpeg", "jpg", data))
+        }
+    }
+
+    private static func loadData(_ provider: NSItemProvider, type: UTType) -> Result<Data, Error> {
+        let done = DispatchSemaphore(value: 0)
+        var result: Result<Data, Error> = .failure(MobileHostServiceError("无法读取所选图片"))
+        provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, error in
+            if let data {
+                result = .success(data)
+            } else if let error {
+                result = .failure(error)
+            }
+            done.signal()
+        }
+        done.wait()
+        return result
+    }
+
+    private static func loadObject(_ provider: NSItemProvider) -> Result<UIImage, Error> {
+        let done = DispatchSemaphore(value: 0)
+        var result: Result<UIImage, Error> = .failure(MobileHostServiceError("无法读取所选图片"))
+        provider.loadObject(ofClass: UIImage.self) { object, error in
+            if let image = object as? UIImage {
+                result = .success(image)
+            } else if let error {
+                result = .failure(error)
+            }
+            done.signal()
+        }
+        done.wait()
+        return result
     }
 }
 

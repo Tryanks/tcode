@@ -8,7 +8,8 @@ use std::{
 };
 
 pub const MAX_LINES: usize = 256;
-pub const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// The queue must admit one line of the protocol's maximum size on its own.
+pub const MAX_BYTES: usize = tcode_protocol::MAX_LINE_BYTES;
 
 #[derive(Default)]
 struct Queue {

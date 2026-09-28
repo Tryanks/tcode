@@ -179,8 +179,29 @@ fn attachments_mux_uses_host_session_directory_and_returns_identical_bytes() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(
         smol::block_on(link.query(Query::ReadFileBytes { path })).unwrap(),
-        QueryResponse::FileBytes(bytes)
+        QueryResponse::FileBytes(bytes.clone())
     );
+    // A client cannot write outside the attachments root, escape it, name
+    // the file into another directory, or exceed the per-image limit.
+    let outside = dir.parent().unwrap().parent().unwrap().to_path_buf();
+    for (dir, bytes, ext) in [
+        (outside, bytes.clone(), "png".to_string()),
+        (
+            dir.join("..").join("elsewhere"),
+            bytes.clone(),
+            "png".to_string(),
+        ),
+        (dir.clone(), bytes.clone(), "png/../../x".to_string()),
+        (
+            dir.clone(),
+            vec![0; tcode_core::attachments::MAX_BYTES as usize + 1],
+            "png".to_string(),
+        ),
+    ] {
+        let error = smol::block_on(link.query(Query::SaveAttachment { dir, bytes, ext }))
+            .expect_err("rejected");
+        assert_eq!(error.code, "invalid_attachment");
+    }
     link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
 

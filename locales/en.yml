@@ -273,6 +273,9 @@ settings:
     title: "Device name"
     description: "The name this device shows to machines it connects to."
     placeholder: "My device"
+  remote_attachment_limit:
+    title: "Attachment limit over the internet (MB)"
+    description: "Images larger than this ask before going over a direct internet path and are never sent through a relay. Local network connections are not limited."
   word_wrap:
     title: "Word wrap in diffs"
     description: "Wrap long lines in the diff panel by default."
@@ -900,6 +903,13 @@ attach:
   unsupported_type: "Unsupported file type for '%{name}'. Please attach image files only."
   too_large: "'%{name}' exceeds the 10MB attachment limit."
   too_many: "You can attach up to 8 images per message."
+  add: "Add"
+  photo_library: "Photo library"
+  pick_failed: "Could not open the photo library: %{error}"
+  relay_rejected: "'%{name}' is %{size}. This device reaches the machine through a relay, which does not carry attachments over %{limit}; reduce the image or connect on the same network."
+  tunnel_title: "Large attachment"
+  tunnel_body: "'%{name}' is %{size} and this device reaches the machine across the internet, so sending it may take a while."
+  tunnel_confirm: "Send anyway"
 preview:
   external_unavailable: "Open the remote page in Preview first. Its forwarded browser link works only while this preview stays open."
   remote_forwarding: "Remote loopback URLs are forwarded. Other addresses open from this Mac."

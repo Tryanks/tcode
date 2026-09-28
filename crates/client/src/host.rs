@@ -128,6 +128,19 @@ pub struct ClientPreferences {
     /// Opaque, client-local UI restoration state. The shell owns its schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub navigation: Option<serde_json::Value>,
+    /// Per-image ceiling, in MiB, this device applies to attachments it sends
+    /// across the internet; `None` is
+    /// [`tcode_core::attachments::DEFAULT_REMOTE_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_attachment_limit_mib: Option<u32>,
+}
+
+/// One image the platform's own picker handed back, already read into memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickedImage {
+    pub name: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Persistence, pairing, transport, and platform facilities for a tcode client.
@@ -211,6 +224,20 @@ pub trait ClientHost: 'static {
     }
 
     fn scan_qr(&self) -> HostFuture<'_, Result<String, String>> {
+        Box::pin(async { Err("unsupported".into()) })
+    }
+
+    /// Whether [`pick_images`](Self::pick_images) opens the platform's own
+    /// media picker. Desktops attach by paste and drop instead.
+    fn supports_image_picker(&self) -> bool {
+        false
+    }
+
+    /// Let the user choose up to `limit` images in the platform's media
+    /// picker. Dismissing the picker resolves to an empty list; `Err` is a
+    /// real failure to show.
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedImage>, String>> {
+        let _ = limit;
         Box::pin(async { Err("unsupported".into()) })
     }
 

@@ -298,6 +298,16 @@ data directory for `--pair` and `--connect`.
 4. Open a thread from the list, or use **+** to start one. Read replies, send or
    queue a message, steer a running turn, stop it, and answer approvals — the
    same views the desktop shows, laid out for the width.
+   The **+** at the left of the message field opens **Photo library**, the
+   system picker (PHPicker on iOS, the photo picker on Android 13 and later,
+   the document picker below that). Images are fitted on the device before
+   they leave it: no longer than 2048 pixels on either side, HEIC converted to
+   JPEG, then stored in the thread's attachments directory on the machine.
+   Over a LAN there is no further limit. Across the internet the device
+   applies **Attachment limit over the internet** from its own settings
+   (2 MB unless changed): a larger image asks before going over a direct
+   path, and is refused over a relay, because a relay is shared with everyone
+   on the service and the connection's other messages would wait behind it.
 5. **Settings** is the full settings page, not a reduced copy. **Back** returns
    list → machines, which disconnects; leaving a thread keeps the connection.
    You connect to one machine at a time.
@@ -352,7 +362,8 @@ the page's scheme, so `https://` pages use `wss://`.
 
 ### Device preferences
 
-Appearance, language and device name belong to this device, not the machine:
+Appearance, language, device name and the internet attachment limit belong to
+this device, not the machine:
 an explicit choice on this device overrides the connected machine's replicated
 setting, and restoring that row reveals the machine's setting again. Native apps
 keep these preferences in `mobile.json` next to `hosts.json` in their own data

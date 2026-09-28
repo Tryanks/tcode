@@ -573,6 +573,17 @@ impl AppState {
         user_files::attachment_dir(self.store.root(), session_id)
     }
 
+    /// Whether a client may save an attachment into `dir` with extension
+    /// `ext`: only a directory below this host's attachments root, named
+    /// without traversal, and only a plain extension for the generated name.
+    pub(crate) fn accepts_attachment(&self, dir: &Path, ext: &str) -> bool {
+        dir.starts_with(user_files::attachments_root(self.store.root()))
+            && !dir
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+            && tcode_core::attachments::is_safe_extension(ext)
+    }
+
     /// Persist attachment bytes to a previously captured active-session target.
     /// Callers run this blocking helper on the background executor.
     pub fn save_attachment_to_dir(dir: &Path, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
