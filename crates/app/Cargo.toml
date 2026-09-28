@@ -23,8 +23,8 @@ preview-mcp = { path = "../preview-mcp" }
 orchestrate-mcp = { path = "../orchestrate-mcp" }
 computer-use-mcp = { path = "../computer-use-mcp" }
 mcp-host = { path = "../mcp-host" }
-gpui = { package = "gpui-pre", version = "0.3.6" }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.6", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-pre", version = "0.3.7" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.7", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 env_logger = "0.11"
 log = "0.4"
 smol = "2"

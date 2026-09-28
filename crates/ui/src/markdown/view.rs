@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::touch_selection::SelectAllTouched;
-use crate::widgets::input::{Copy, SelectAll};
+use crate::widgets::input::SelectAll;
 use crate::widgets::menu::ContextMenuExt as _;
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId,
@@ -146,16 +146,6 @@ impl Element for MarkdownView {
             .track_focus(&focus_handle)
             .w_full()
             .relative()
-            .on_action(move |_: &Copy, window, cx| {
-                let text = gpui_base::TextSelection::selected_text(window, cx)
-                    .trim()
-                    .to_string();
-                if text.is_empty() {
-                    cx.propagate();
-                } else {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-            })
             .on_action({
                 let state = state.clone();
                 move |_: &SelectAll, window, cx| {

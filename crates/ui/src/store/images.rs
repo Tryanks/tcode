@@ -321,7 +321,7 @@ mod tests {
                 cwd: cwd.clone(),
             });
             message = Some(view.clone());
-            crate::overlay::OverlayHost::new(view, window, cx)
+            gpui_base::Root::new(view, window, cx)
         });
         let view = message.unwrap();
         for inline in [false, true] {

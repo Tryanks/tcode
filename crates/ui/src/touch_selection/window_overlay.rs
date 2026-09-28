@@ -10,7 +10,7 @@ use super::{EditMenuItem, SelectAllTouched, TouchSelectionOverlay};
 
 /// Draws the edit menu of the window text selection — the one a
 /// [`crate::markdown::MarkdownView`] takes part in.
-/// [`crate::overlay::OverlayHost`] mounts one per window, after the content,
+/// [`crate::overlay`] mounts one per window, after the content,
 /// so the menu floats above whatever was selected.
 ///
 /// Read-only text offers Copy and Select All.
@@ -84,7 +84,6 @@ mod tests {
 
     use crate::{
         markdown::{MarkdownState, MarkdownView},
-        overlay::OverlayHost,
         widgets::input::{Textarea, TextareaState},
     };
 
@@ -169,7 +168,7 @@ mod tests {
                     markdown,
                     textarea: state,
                 });
-                OverlayHost::new(page, window, cx)
+                gpui_base::Root::new(page, window, cx)
             }
         });
         let textarea = textarea.get().unwrap().clone();
@@ -236,7 +235,7 @@ mod tests {
                 let state = cx.new(|cx| MarkdownState::new(&text, cx));
                 markdown.set(state.clone()).ok().unwrap();
                 let body = cx.new(|_| Body { markdown: state });
-                OverlayHost::new(body, window, cx)
+                gpui_base::Root::new(body, window, cx)
             }
         });
         let markdown = markdown.get().unwrap().clone();

@@ -187,6 +187,8 @@ impl SelectionDrag {
     }
 }
 
+pub(crate) const CONTEXT: &str = "Terminal";
+
 #[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tcode_terminal, no_json)]
 struct TerminalCopy(u64);
@@ -1725,6 +1727,7 @@ impl Render for TerminalDrawer {
                     crate::tr!("terminal.content"),
                     cx,
                 )
+                .key_context(CONTEXT)
                 .track_focus(&self.focus_handle)
                 .on_key_down(cx.listener(Self::on_key_down))
                 // The accessibility focus ring is painted as a shadow behind this

@@ -606,6 +606,7 @@ mod tests {
     /// against its own path rules.
     #[gpui::test]
     fn a_remote_project_root_is_judged_by_the_host(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-add-project-remote-{}",
             tcode_services::store::now_millis()
@@ -638,7 +639,7 @@ mod tests {
         let (_root, cx) = cx.add_window_view(move |window, cx| {
             let dialog = cx.new(|cx| AddProjectDialog::new(store_for_view.clone(), window, cx));
             *capture.borrow_mut() = Some(dialog.clone());
-            crate::overlay::OverlayHost::new(dialog, window, cx)
+            gpui_base::Root::new(dialog, window, cx)
         });
         let cx: &mut VisualTestContext = cx;
         let dialog = built.borrow().clone().expect("dialog was built");

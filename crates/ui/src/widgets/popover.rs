@@ -101,8 +101,8 @@ impl Popover {
         T: gpui_base::Selectable + IntoElement + 'static,
     {
         self.trigger = Some(Box::new(move |open, _, _| {
-            let selected = trigger.is_selected();
-            trigger.selected(selected || open).into_any_element()
+            let is_open = trigger.is_open();
+            trigger.open(is_open || open).into_any_element()
         }));
         self
     }
