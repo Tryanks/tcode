@@ -398,15 +398,20 @@ fn worktrees_root() -> PathBuf {
         })
 }
 
-/// Remove old app-owned worktrees whose directory names are not known session ids.
+/// Remove old, clean app-owned worktrees that no known session owns or works in.
 ///
 /// Tests and isolated processes may set `TCODE_WORKTREES_DIR`; production falls
 /// back to `~/.tcode/worktrees`. Fresh unknown entries are presumed live and
-/// preserved for at least [`ORPHAN_MIN_AGE`].
-pub fn cleanup_orphans(known_session_ids: &HashSet<String>) -> CleanupSummary {
+/// preserved for at least [`ORPHAN_MIN_AGE`]. Removal is never forced: a
+/// worktree the user kept on delete may hold uncommitted work.
+pub fn cleanup_orphans(
+    known_session_ids: &HashSet<String>,
+    session_cwds: &[PathBuf],
+) -> CleanupSummary {
     cleanup_orphans_at(
         &worktrees_root(),
         known_session_ids,
+        session_cwds,
         SystemTime::now(),
         ORPHAN_MIN_AGE,
     )
@@ -415,6 +420,7 @@ pub fn cleanup_orphans(known_session_ids: &HashSet<String>) -> CleanupSummary {
 fn cleanup_orphans_at(
     worktrees: &Path,
     known_session_ids: &HashSet<String>,
+    session_cwds: &[PathBuf],
     now: SystemTime,
     minimum_age: Duration,
 ) -> CleanupSummary {
@@ -436,7 +442,10 @@ fn cleanup_orphans_at(
         let is_directory = entry
             .file_type()
             .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink());
-        if known_session_ids.contains(&session_id) || !is_directory {
+        if known_session_ids.contains(&session_id)
+            || session_cwds.iter().any(|cwd| cwd.starts_with(&path))
+            || !is_directory
+        {
             continue;
         }
         let modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
@@ -481,12 +490,7 @@ fn cleanup_orphans_at(
         };
         let output = crate::process::command("git")
             .current_dir(&removal_root)
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                &registered.to_string_lossy(),
-            ])
+            .args(["worktree", "remove", &registered.to_string_lossy()])
             .output();
         match output {
             Ok(output) if output.status.success() => {
@@ -994,34 +998,48 @@ mod tests {
         let orphan = provision_for_test(&root, "orphan", &worktrees).path;
         let modified = std::fs::metadata(&orphan).unwrap().modified().unwrap();
         let kept = provision_for_test(&root, "kept", &worktrees).path;
+        // A deleted source whose fork still runs in its worktree.
+        let forked = provision_for_test(&root, "deleted-source", &worktrees).path;
+        // Deleted with "Keep worktree" while holding uncommitted work.
+        let dirty = provision_for_test(&root, "kept-on-delete", &worktrees).path;
+        std::fs::write(dirty.join("notes.txt"), "uncommitted\n").unwrap();
         let known = HashSet::from(["kept".to_string()]);
+        let cwds = [forked.clone()];
 
-        let fresh = cleanup_orphans_at(&worktrees, &known, modified, ORPHAN_MIN_AGE);
+        let fresh = cleanup_orphans_at(&worktrees, &known, &cwds, modified, ORPHAN_MIN_AGE);
         assert!(fresh.removed.is_empty());
-        assert_eq!(fresh.skipped.as_slice(), std::slice::from_ref(&orphan));
+        let mut skipped = fresh.skipped;
+        skipped.sort();
+        assert_eq!(skipped, [dirty.clone(), orphan.clone()]);
         assert!(orphan.exists());
 
         let old = cleanup_orphans_at(
             &worktrees,
             &known,
+            &cwds,
             modified + ORPHAN_MIN_AGE + Duration::from_secs(1),
             ORPHAN_MIN_AGE,
         );
         assert_eq!(old.removed.as_slice(), std::slice::from_ref(&orphan));
-        assert!(old.skipped.is_empty());
+        assert_eq!(old.skipped.as_slice(), std::slice::from_ref(&dirty));
         assert!(!orphan.exists());
         assert!(kept.join("tracked.txt").exists());
+        assert!(forked.join("tracked.txt").exists());
+        assert!(dirty.join("notes.txt").exists());
         let unrelated = worktrees.join("unregistered");
         std::fs::create_dir(&unrelated).unwrap();
         let modified = std::fs::metadata(&unrelated).unwrap().modified().unwrap();
         let summary = cleanup_orphans_at(
             &worktrees,
             &known,
+            &cwds,
             modified + ORPHAN_MIN_AGE + Duration::from_secs(1),
             ORPHAN_MIN_AGE,
         );
         assert!(summary.removed.is_empty());
-        assert_eq!(summary.skipped.as_slice(), std::slice::from_ref(&unrelated));
+        let mut skipped = summary.skipped;
+        skipped.sort();
+        assert_eq!(skipped, [dirty, unrelated.clone()]);
         assert!(unrelated.exists());
         let _ = std::fs::remove_dir_all(temp);
     }
