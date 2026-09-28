@@ -25,6 +25,13 @@ void tcode_ios_camera_scan_completed(uint64_t request_id,
                                      size_t value_length,
                                      const uint8_t *error_bytes,
                                      size_t error_length);
+void tcode_ios_image_picked(uint64_t request_id, const uint8_t *name_bytes,
+                            size_t name_length, const uint8_t *mime_bytes,
+                            size_t mime_length, const uint8_t *data,
+                            size_t data_length);
+void tcode_ios_image_pick_finished(uint64_t request_id,
+                                   const uint8_t *error_bytes,
+                                   size_t error_length);
 
 void gpui_ios_init(void);
 uint8_t gpui_ios_attach_view(void *view, float width, float height, float scale,

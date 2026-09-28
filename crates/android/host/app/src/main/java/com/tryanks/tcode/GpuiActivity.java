@@ -41,6 +41,7 @@ import java.util.Locale;
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
     private static final int REQUEST_CAMERA = 6102;
+    private static final int REQUEST_IMAGES = 6103;
     private static final int HOST_OK = 0;
     private static final int HOST_CANCELLED = 1;
     private static final int HOST_ERROR = 2;
@@ -53,6 +54,8 @@ public final class GpuiActivity extends NativeActivity {
     private boolean keyboardVisible;
     private boolean keyboardShowPending;
     private long cameraRequest;
+    private long imageRequest;
+    private int imageLimit;
     private ConnectivityManager.NetworkCallback networkCallback;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
@@ -144,6 +147,8 @@ public final class GpuiActivity extends NativeActivity {
     private native void nativeOnInsets(int left, int top, int right, int bottom, int imeBottom);
     private native void nativeOnBack(boolean enabled);
     private native void nativeQrScanCompleted(long requestId, int status, String value);
+    private native void nativeImagePicked(long requestId, String name, String mime, byte[] bytes);
+    private native void nativeImagePickFinished(long requestId, int status, String error);
     private native void nativeNetworkChanged();
     private native void nativeScrollCaptureSearch(long request);
     private native void nativeScrollCaptureStart();
@@ -418,9 +423,106 @@ public final class GpuiActivity extends NativeActivity {
         }
     }
 
+    /**
+     * The system photo picker (Android 13+, no permission) or the document
+     * picker below it, limited to {@code limit} images. Results arrive through
+     * {@link #nativeImagePicked} per image and {@link #nativeImagePickFinished}
+     * once, in that order; a dismissed picker finishes with no images.
+     */
+    public void gpuiPickImages(long requestId, int limit) {
+        if (imageRequest != 0) {
+            nativeImagePickFinished(requestId, HOST_ERROR, "图片选择正在进行");
+            return;
+        }
+        imageRequest = requestId;
+        imageLimit = Math.max(1, limit);
+        try {
+            Intent intent;
+            if (Build.VERSION.SDK_INT >= 33) {
+                intent = new Intent(android.provider.MediaStore.ACTION_PICK_IMAGES);
+                if (limit > 1) {
+                    int max = Math.min(limit, android.provider.MediaStore.getPickImagesMaxLimit());
+                    intent.putExtra(android.provider.MediaStore.EXTRA_PICK_IMAGES_MAX, max);
+                }
+            } else {
+                intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, limit > 1);
+            }
+            intent.setType("image/*");
+            startActivityForResult(intent, REQUEST_IMAGES);
+        } catch (RuntimeException error) {
+            imageRequest = 0;
+            nativeImagePickFinished(requestId, HOST_ERROR, errorMessage(error));
+        }
+    }
+
+    private void deliverPickedImages(long request, int resultCode, Intent data, int limit) {
+        java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            ClipData clip = data.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount() && uris.size() < limit; i++) {
+                    Uri uri = clip.getItemAt(i).getUri();
+                    if (uri != null) uris.add(uri);
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+        }
+        if (uris.isEmpty()) {
+            nativeImagePickFinished(request, HOST_CANCELLED, null);
+            return;
+        }
+        // Reading a content URI blocks; the picker's own thread is gone by now.
+        new Thread(() -> {
+            try {
+                for (Uri uri : uris) {
+                    byte[] bytes = readAll(uri);
+                    String mime = getContentResolver().getType(uri);
+                    nativeImagePicked(request, displayName(uri), mime, bytes);
+                }
+                nativeImagePickFinished(request, HOST_OK, null);
+            } catch (Exception error) {
+                nativeImagePickFinished(request, HOST_ERROR, errorMessage(error));
+            }
+        }, "tcode-image-pick").start();
+    }
+
+    private byte[] readAll(Uri uri) throws java.io.IOException {
+        try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input == null) throw new java.io.IOException("cannot open " + uri);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) out.write(buffer, 0, read);
+            return out.toByteArray();
+        }
+    }
+
+    private String displayName(Uri uri) {
+        try (android.database.Cursor cursor = getContentResolver().query(
+                uri, new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                String name = cursor.getString(0);
+                if (name != null && !name.isEmpty()) return name;
+            }
+        } catch (RuntimeException ignored) {
+            // Some providers refuse metadata queries; the segment below still names the file.
+        }
+        String segment = uri.getLastPathSegment();
+        return segment == null || segment.isEmpty() ? "image" : segment;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_IMAGES) {
+            long request = imageRequest;
+            imageRequest = 0;
+            if (request != 0) deliverPickedImages(request, resultCode, data, imageLimit);
+            return;
+        }
         if (requestCode != REQUEST_CAMERA) {
             return;
         }

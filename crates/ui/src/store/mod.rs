@@ -1683,6 +1683,44 @@ impl WorkspaceStore {
         self.save_client_preferences();
     }
 
+    /// The device's own per-image ceiling for attachments sent across the
+    /// internet, in bytes.
+    pub fn client_remote_attachment_limit_bytes(&self) -> u64 {
+        self.client_preferences
+            .remote_attachment_limit_mib
+            .map_or(tcode_core::attachments::DEFAULT_REMOTE_BYTES, |mib| {
+                u64::from(mib) * 1024 * 1024
+            })
+    }
+
+    pub fn client_remote_attachment_limit_override(&self) -> Option<u32> {
+        self.client_preferences.remote_attachment_limit_mib
+    }
+
+    pub fn set_client_remote_attachment_limit_mib(&mut self, limit: Option<u32>) {
+        self.client_preferences.remote_attachment_limit_mib = limit.filter(|limit| *limit > 0);
+        self.save_client_preferences();
+    }
+
+    /// How an attachment from this client would reach the machine right now.
+    pub fn attachment_link(&self) -> crate::attachments::TransferLink {
+        use crate::attachments::TransferLink;
+        if !self.is_remote() {
+            return TransferLink::Local;
+        }
+        match self.connection_state() {
+            tcode_client::ConnectionState::Connected { path }
+            | tcode_client::ConnectionState::Syncing { path } => {
+                path.map_or(TransferLink::Unknown, |path| match path.kind() {
+                    tcode_protocol::PathKind::Lan => TransferLink::Lan,
+                    tcode_protocol::PathKind::Tunnel => TransferLink::Tunnel,
+                    tcode_protocol::PathKind::Relay { .. } => TransferLink::Relay,
+                })
+            }
+            _ => TransferLink::Unknown,
+        }
+    }
+
     pub fn reset_client_preferences(&mut self) {
         self.client_preferences = ClientPreferences::default();
         self.save_client_preferences();

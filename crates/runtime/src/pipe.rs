@@ -684,6 +684,17 @@ fn dispatch_query(
             })
         }
         Query::SaveAttachment { dir, bytes, ext } => {
+            if bytes.len() as u64 > tcode_core::attachments::MAX_BYTES
+                || !app.accepts_attachment(&dir, &ext)
+            {
+                return cx.spawn_background(async {
+                    Err(ProtocolError {
+                        code: "invalid_attachment".into(),
+                        message: "attachment too large or outside the host's attachments directory"
+                            .into(),
+                    })
+                });
+            }
             let task = cx.unblock(move || AppState::save_attachment_to_dir(&dir, &bytes, &ext));
             cx.spawn_background(async move {
                 task.await

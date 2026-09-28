@@ -30,8 +30,8 @@ pub use query::{
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
-    ClientMessage, ClientPayload, HostMessage, ProtocolError, Subscription, decode_client_line,
-    decode_host_line, encode_line,
+    ClientMessage, ClientPayload, HostMessage, MAX_LINE_BYTES, ProtocolError, Subscription,
+    decode_client_line, decode_host_line, encode_line,
 };
 
 // Version 4 adds client-generated command deduplication keys; version 5 moves
