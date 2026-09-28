@@ -166,7 +166,7 @@ sidebar:
   make_active: "恢复为活跃"
   archive: "归档对话"
   archive_title: "归档对话？"
-  archive_description: "要归档“%{title}”及其已保存的对话吗？此操作无法撤销。"
+  archive_description: "要归档“%{title}”吗？它的智能体会停止运行，对话会移到“设置 → 已归档对话”，可随时在那里恢复。"
   archive_action: "归档"
   archive_all: "归档全部对话"
   archive_all_title: "归档全部对话？"

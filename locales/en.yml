@@ -166,7 +166,7 @@ sidebar:
   make_active: "Make active"
   archive: "Archive thread"
   archive_title: "Archive thread?"
-  archive_description: 'Archive "%{title}" and its saved conversation? This cannot be undone.'
+  archive_description: 'Archive "%{title}"? Its agent stops, and the thread moves to Settings → Archived Threads, where you can restore it.'
   archive_action: "Archive"
   archive_all: "Archive all threads"
   archive_all_title: "Archive all threads?"
