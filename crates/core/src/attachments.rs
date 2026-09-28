@@ -4,8 +4,21 @@ use std::path::Path;
 
 /// Maximum images per message.
 pub const MAX_IMAGES: usize = 8;
-/// Maximum bytes per image (10 MiB).
+/// Maximum bytes per image as stored on the host and sent to the model.
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Largest source file a client decodes before fitting it to the limits.
+pub const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// Longest edge a client keeps when fitting an image before upload; models
+/// gain nothing from more pixels and phone photos start far larger.
+pub const MAX_EDGE_PX: u32 = 2048;
+/// Default per-image ceiling a device applies when it reaches the machine
+/// across the internet (tunnel or relay). Adjustable on the device.
+pub const DEFAULT_REMOTE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Whether `ext` is safe to append to a generated attachment file name.
+pub fn is_safe_extension(ext: &str) -> bool {
+    !ext.is_empty() && ext.len() <= 8 && ext.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
 
 /// Best-effort MIME type from a file extension.
 pub fn mime_from_path(path: &Path) -> String {
@@ -102,6 +115,15 @@ mod tests {
                 validate_attachment(name, &mime_from_path(Path::new(name)), 10, 0),
                 Err(AttachError::UnsupportedType { name: name.into() })
             );
+        }
+    }
+
+    #[test]
+    fn generated_file_names_take_only_plain_extensions() {
+        assert!(is_safe_extension("png"));
+        assert!(is_safe_extension("JPG"));
+        for ext in ["", "../x", "png/", "png.exe", "a-b", "toolongext"] {
+            assert!(!is_safe_extension(ext), "{ext:?}");
         }
     }
 }

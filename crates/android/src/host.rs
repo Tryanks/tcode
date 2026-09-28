@@ -19,7 +19,7 @@ use jni::{
     objects::{JObject, JString, JValue},
     refs::Global,
 };
-use tcode_client::host::HostFuture;
+use tcode_client::host::{HostFuture, PickedImage};
 use tcode_traverse::NativeClientHost;
 
 const RESULT_OK: i32 = 0;
@@ -36,7 +36,23 @@ enum BridgeEvent {
         status: i32,
         value: Option<String>,
     },
+    /// One image the picker returned; more may follow before `ImagesPicked`.
+    ImagePicked {
+        request_id: u64,
+        image: PickedImage,
+    },
+    ImagesPicked {
+        request_id: u64,
+        status: i32,
+        error: Option<String>,
+    },
     NetworkChanged,
+}
+
+/// A picker request in flight: what arrived so far and who awaits it.
+struct PickRequest {
+    images: Vec<PickedImage>,
+    done: async_channel::Sender<Result<Vec<PickedImage>, String>>,
 }
 
 #[derive(Clone)]
@@ -123,6 +139,27 @@ impl JavaBridge {
         }));
     }
 
+    fn pick_images(&self, request_id: u64, limit: usize) {
+        let object = self.object.clone();
+        self.app.run_on_java_main_thread(Box::new(move || {
+            if let Err(error) = object.with_env(|env, activity| {
+                env.call_method(
+                    activity,
+                    jni_str!("gpuiPickImages"),
+                    jni_sig!("(JI)V"),
+                    &[
+                        JValue::Long(request_id as i64),
+                        JValue::Int(i32::try_from(limit).unwrap_or(i32::MAX)),
+                    ],
+                )?;
+                Ok(())
+            }) {
+                log::error!("Android image picker JNI call failed: {error}");
+                deliver_images_picked(request_id, 2, Some(error));
+            }
+        }));
+    }
+
     fn start_camera(&self, request_id: u64) {
         let object = self.object.clone();
         self.app.run_on_java_main_thread(Box::new(move || {
@@ -179,8 +216,11 @@ pub(crate) fn native_host(
         async_channel::Sender<Result<String, String>>,
     >::new()));
     let pending = callbacks.clone();
+    let picks = Rc::new(RefCell::new(HashMap::<u64, PickRequest>::new()));
+    let pending_picks = picks.clone();
     let multicast = bridge.object.clone();
     let camera = bridge.clone();
+    let picker = bridge.clone();
     let host = NativeClientHost::new(data_dir, device_name)
         .with_platform(platform)
         .with_multicast_lock(move |acquire| {
@@ -207,7 +247,27 @@ pub(crate) fn native_host(
                     .await
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
-        });
+        })
+        .with_image_picker(
+            move |limit| -> HostFuture<'static, Result<Vec<PickedImage>, String>> {
+                let (done, receiver) = async_channel::bounded(1);
+                let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                picks.borrow_mut().insert(
+                    request_id,
+                    PickRequest {
+                        images: Vec::new(),
+                        done,
+                    },
+                );
+                picker.pick_images(request_id, limit);
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .unwrap_or_else(|error| Err(error.to_string()))
+                })
+            },
+        );
     let host = Rc::new(host);
 
     let (sender, mut receiver) = mpsc::unbounded();
@@ -216,9 +276,33 @@ pub(crate) fn native_host(
     cx.spawn(async move |cx| {
         while let Some(event) = receiver.next().await {
             let pending = pending.clone();
+            let picks = pending_picks.clone();
             let host = events_host.clone();
             cx.update(move |_cx| match event {
                 BridgeEvent::NetworkChanged => host.network_changed(),
+                BridgeEvent::ImagePicked { request_id, image } => {
+                    if let Some(request) = picks.borrow_mut().get_mut(&request_id) {
+                        request.images.push(image);
+                    } else {
+                        log::warn!("image for unknown Android picker request {request_id}");
+                    }
+                }
+                BridgeEvent::ImagesPicked {
+                    request_id,
+                    status,
+                    error,
+                } => {
+                    let request = picks.borrow_mut().remove(&request_id);
+                    let Some(request) = request else {
+                        log::warn!("result for unknown Android picker request {request_id}");
+                        return;
+                    };
+                    let result = match status {
+                        RESULT_OK | RESULT_CANCELLED => Ok(request.images),
+                        _ => Err(error.unwrap_or_else(|| "Android image picker failed".into())),
+                    };
+                    let _ = request.done.try_send(result);
+                }
                 BridgeEvent::CameraResult {
                     request_id,
                     status,
@@ -257,6 +341,24 @@ fn send_event(event: BridgeEvent, dropped: &str) {
     } else {
         log::warn!("dropping Android {dropped} before host initialization");
     }
+}
+
+pub(crate) fn deliver_image_picked(request_id: u64, image: PickedImage) {
+    send_event(
+        BridgeEvent::ImagePicked { request_id, image },
+        "picked image",
+    );
+}
+
+pub(crate) fn deliver_images_picked(request_id: u64, status: i32, error: Option<String>) {
+    send_event(
+        BridgeEvent::ImagesPicked {
+            request_id,
+            status,
+            error,
+        },
+        "image picker result",
+    );
 }
 
 pub(crate) fn deliver_result(request_id: u64, status: i32, value: Option<String>) {

@@ -1052,8 +1052,18 @@ impl Render for Composer {
         #[cfg(not(all(feature = "voice", target_os = "macos")))]
         let mic: Option<AnyElement> = None;
 
+        // The platform picker is the phone's only way in; desktops paste and
+        // drop, and the readonly and offline states have nothing to add to.
+        let attach_menu = (self.compact && !readonly && self.interactive(cx))
+            .then(|| {
+                cx.try_global::<crate::remote::ClientAttachment>()
+                    .is_some_and(|client| client.host().supports_image_picker())
+                    .then(|| self.render_attach_menu(cx))
+            })
+            .flatten();
         let control_row = if self.compact || (readonly && compact) {
             control_row_base
+                .children(attach_menu)
                 .child(div().flex_1().min_w_0().child(self.render_model_picker(cx)))
                 .child(self.render_traits_picker(cx))
                 .child(self.render_primary_action(turn_running, cx))

@@ -1,4 +1,9 @@
 use super::super::*;
+use crate::attachments::{TransferVerdict, transfer_verdict};
+use crate::thread_export::format_size;
+use image::GenericImageView as _;
+use std::cell::RefCell;
+use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_IMAGES, MAX_SOURCE_BYTES};
 
 #[derive(Clone)]
 /// A pending image attachment: validated, persisted to the session attachments
@@ -15,8 +20,15 @@ pub(in super::super) enum PendingImageSource {
 }
 
 pub(in super::super) enum AddImageError {
-    Attachment(tcode_core::attachments::AttachError),
+    Attachment(AttachError),
     Persist(std::io::Error),
+}
+
+/// Fitted bytes waiting for the host to store them.
+struct PreparedImage {
+    dir: PathBuf,
+    bytes: Vec<u8>,
+    ext: String,
 }
 
 /// Guess a file extension for a persisted attachment from its MIME type,
@@ -46,11 +58,39 @@ fn is_wire_ready_image(mime: &str) -> bool {
     )
 }
 
-pub(in super::super) fn transcode_image_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
-    let image = image::load_from_memory(bytes)?;
-    let mut png = std::io::Cursor::new(Vec::new());
-    image.write_to(&mut png, image::ImageFormat::Png)?;
-    Ok(png.into_inner())
+/// Bring an image to what the wire and the model take: a format every
+/// provider accepts, no longer than [`MAX_EDGE_PX`] on either side. Bytes
+/// that already qualify pass through untouched so nothing is recompressed;
+/// GIFs always do, since re-encoding keeps only their first frame.
+pub(crate) fn fit_for_upload(mime: &str, bytes: Vec<u8>) -> image::ImageResult<(String, Vec<u8>)> {
+    if mime == "image/gif" {
+        return Ok((mime.to_string(), bytes));
+    }
+    let decoded = image::load_from_memory(&bytes)?;
+    let (width, height) = decoded.dimensions();
+    let oversized = width.max(height) > MAX_EDGE_PX;
+    if is_wire_ready_image(mime) && !oversized {
+        return Ok((mime.to_string(), bytes));
+    }
+    let image = if oversized {
+        decoded.resize(
+            MAX_EDGE_PX,
+            MAX_EDGE_PX,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        decoded
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    // Photos stay JPEG; anything else becomes PNG, which keeps transparency.
+    if mime == "image/jpeg" {
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+        image.to_rgb8().write_with_encoder(encoder)?;
+        Ok(("image/jpeg".to_string(), out.into_inner()))
+    } else {
+        image.write_to(&mut out, image::ImageFormat::Png)?;
+        Ok(("image/png".to_string(), out.into_inner()))
+    }
 }
 
 impl Composer {
@@ -66,8 +106,8 @@ impl Composer {
         }
     }
 
-    /// Validate, decode/transcode, and persist an image off the main thread.
-    /// Completion appends only while the same session still owns the strip.
+    /// Validate, fit, and persist an image off the main thread. Completion
+    /// appends only while the same session still owns the strip.
     pub(in super::super) fn add_image(
         &mut self,
         name: String,
@@ -77,59 +117,49 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> bool {
         self.sync_images_session(cx);
-        let initial_size = match &source {
-            PendingImageSource::Bytes(bytes) => bytes.len() as u64,
-            PendingImageSource::Path(_) => 0,
-        };
-        if let Err(err) = validate_attachment(
-            &name,
-            &mime,
-            initial_size,
-            self.pending_images.len() + self.pending_image_loads,
-        ) {
+        let current_count = self.pending_images.len() + self.pending_image_loads;
+        // Type and count are known now; the size is checked once the image is
+        // fitted, since a phone photo starts far larger than it is sent.
+        if let Err(err) = validate_attachment(&name, &mime, 0, current_count) {
             window.push_notification(Notification::error(attach_error_message(&err)), cx);
             return false;
         }
-        let session_id = self.workspace_store.read(cx).active_session_id();
-        let attachments_dir = self
-            .workspace_store
-            .read(cx)
-            .composer_state()
-            .attachments_dir;
-        let current_count = self.pending_images.len() + self.pending_image_loads;
+        let store = self.workspace_store.read(cx);
+        let session_id = store.active_session_id();
+        let attachments_dir = store.composer_state().attachments_dir;
+        let link = store.attachment_link();
+        let remote_limit = store.client_remote_attachment_limit_bytes();
         self.pending_image_loads += 1;
         let generation = self.image_load_generation;
         let result_name = name.clone();
-        let workspace_store = self.workspace_store.clone();
         cx.spawn_in(window, async move |this, cx| {
             let prepared = cx
                 .background_executor()
                 .spawn(async move {
+                    let too_large =
+                        || AddImageError::Attachment(AttachError::TooLarge { name: name.clone() });
                     let bytes = match source {
                         PendingImageSource::Bytes(bytes) => bytes,
                         PendingImageSource::Path(path) => {
                             let size = std::fs::metadata(&path)
                                 .map_err(AddImageError::Persist)?
                                 .len();
-                            validate_attachment(&name, &mime, size, current_count)
-                                .map_err(AddImageError::Attachment)?;
+                            if size > MAX_SOURCE_BYTES {
+                                return Err(too_large());
+                            }
                             std::fs::read(path).map_err(AddImageError::Persist)?
                         }
                     };
+                    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+                        return Err(too_large());
+                    }
+                    let (mime, bytes) = fit_for_upload(&mime, bytes).map_err(|_| {
+                        AddImageError::Attachment(AttachError::UnsupportedType {
+                            name: name.clone(),
+                        })
+                    })?;
                     validate_attachment(&name, &mime, bytes.len() as u64, current_count)
                         .map_err(AddImageError::Attachment)?;
-                    let (mime, bytes) = if is_wire_ready_image(&mime) {
-                        (mime, bytes)
-                    } else {
-                        let bytes = transcode_image_to_png(&bytes).map_err(|_| {
-                            AddImageError::Attachment(
-                                tcode_core::attachments::AttachError::UnsupportedType {
-                                    name: name.clone(),
-                                },
-                            )
-                        })?;
-                        ("image/png".to_string(), bytes)
-                    };
                     let dir = attachments_dir.ok_or_else(|| {
                         AddImageError::Persist(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -137,47 +167,210 @@ impl Composer {
                         ))
                     })?;
                     let ext = image_extension(&mime, &name);
-                    Ok::<_, AddImageError>((dir, bytes, ext))
+                    Ok::<_, AddImageError>(PreparedImage { dir, bytes, ext })
                 })
                 .await;
-            let result = match prepared {
-                Ok((dir, bytes, ext)) => workspace_store
-                    .update(cx, |store, cx| {
-                        store.save_attachment_to_dir(dir, bytes, ext, cx)
-                    })
-                    .await
-                    .map_err(AddImageError::Persist),
-                Err(error) => Err(error),
-            };
             let _ = this.update_in(cx, |composer, window, cx| {
-                if composer.image_load_generation != generation
-                    || composer.images_session != session_id
-                    || composer.workspace_store.read(cx).active_session_id() != session_id
-                {
+                if !composer.owns_image_load(generation, &session_id, cx) {
                     return;
                 }
-                composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
-                match result {
-                    Ok(path) => {
-                        composer.pending_images.push(PendingImage {
-                            path,
-                            name: result_name,
-                        });
-                        cx.notify();
+                let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        composer.pending_image_loads =
+                            composer.pending_image_loads.saturating_sub(1);
+                        composer.notify_add_image_error(error, window, cx);
+                        return;
                     }
-                    Err(AddImageError::Attachment(err)) => window
-                        .push_notification(Notification::error(attach_error_message(&err)), cx),
-                    Err(AddImageError::Persist(err)) => window.push_notification(
-                        Notification::error(
-                            crate::tr!("errors.persist_event", error = err).into_owned(),
-                        ),
+                };
+                let size = prepared.bytes.len() as u64;
+                match transfer_verdict(link, size, remote_limit) {
+                    TransferVerdict::Send => composer.persist_image(
+                        session_id,
+                        generation,
+                        result_name,
+                        prepared,
+                        window,
                         cx,
                     ),
+                    TransferVerdict::Reject => {
+                        composer.pending_image_loads =
+                            composer.pending_image_loads.saturating_sub(1);
+                        window.push_notification(
+                            Notification::error(
+                                crate::tr!(
+                                    "attach.relay_rejected",
+                                    name = result_name,
+                                    size = format_size(size as usize),
+                                    limit = format_size(remote_limit as usize)
+                                )
+                                .into_owned(),
+                            ),
+                            cx,
+                        );
+                    }
+                    TransferVerdict::Confirm => {
+                        let composer_entity = cx.entity();
+                        // Taken by whichever button fires; a dialog closed
+                        // by Escape or the backdrop releases the slot too.
+                        let prepared = Rc::new(RefCell::new(Some(prepared)));
+                        let session_id = session_id.clone();
+                        window.open_alert_dialog(cx, move |alert, _, cx| {
+                            let composer = composer_entity.clone();
+                            let release_entity = composer_entity.clone();
+                            let prepared = prepared.clone();
+                            let dropped = prepared.clone();
+                            let session_id = session_id.clone();
+                            let result_name = result_name.clone();
+                            let release = move |cx: &mut App| {
+                                if dropped.borrow_mut().take().is_some() {
+                                    release_entity.update(cx, |composer, _cx| {
+                                        composer.pending_image_loads =
+                                            composer.pending_image_loads.saturating_sub(1);
+                                    });
+                                }
+                            };
+                            let on_cancel = release.clone();
+                            alert
+                                .bg(cx.theme().popover)
+                                .title(crate::tr!("attach.tunnel_title"))
+                                .description(crate::tr!(
+                                    "attach.tunnel_body",
+                                    name = result_name,
+                                    size = format_size(size as usize)
+                                ))
+                                .button_props(
+                                    DialogButtons::default()
+                                        .ok_text(crate::tr!("attach.tunnel_confirm"))
+                                        .cancel_text(crate::tr!("mobile.cancel"))
+                                        .show_cancel(true),
+                                )
+                                .on_ok(move |_, window, cx| {
+                                    if let Some(prepared) = prepared.borrow_mut().take() {
+                                        composer.update(cx, |composer, cx| {
+                                            composer.persist_image(
+                                                session_id.clone(),
+                                                generation,
+                                                result_name.clone(),
+                                                prepared,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                    true
+                                })
+                                .on_cancel(move |_, _, cx| {
+                                    on_cancel(cx);
+                                    true
+                                })
+                                .on_close(move |_, _, cx| release(cx))
+                        });
+                    }
                 }
             });
         })
         .detach();
         true
+    }
+
+    /// Whether a load started under `generation` for `session_id` still
+    /// belongs to the strip on screen.
+    fn owns_image_load(&self, generation: u64, session_id: &Option<String>, cx: &App) -> bool {
+        self.image_load_generation == generation
+            && &self.images_session == session_id
+            && &self.workspace_store.read(cx).active_session_id() == session_id
+    }
+
+    fn notify_add_image_error(
+        &self,
+        error: AddImageError,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = match error {
+            AddImageError::Attachment(err) => attach_error_message(&err),
+            AddImageError::Persist(err) => {
+                crate::tr!("errors.persist_event", error = err).into_owned()
+            }
+        };
+        window.push_notification(Notification::error(message), cx);
+    }
+
+    /// Send fitted bytes to the host and, once saved, show the thumbnail.
+    fn persist_image(
+        &mut self,
+        session_id: Option<String>,
+        generation: u64,
+        name: String,
+        prepared: PreparedImage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let PreparedImage { dir, bytes, ext } = prepared;
+        let task = self.workspace_store.update(cx, |store, cx| {
+            store.save_attachment_to_dir(dir, bytes, ext, cx)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |composer, window, cx| {
+                if !composer.owns_image_load(generation, &session_id, cx) {
+                    return;
+                }
+                composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
+                match result {
+                    Ok(path) => {
+                        composer.pending_images.push(PendingImage { path, name });
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        composer.notify_add_image_error(AddImageError::Persist(err), window, cx)
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Open the platform's media picker (phones) and add what it returns.
+    pub(in super::super) fn pick_images_from_library(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = cx
+            .try_global::<crate::remote::ClientAttachment>()
+            .map(crate::remote::ClientAttachment::host)
+        else {
+            return;
+        };
+        self.sync_images_session(cx);
+        let remaining =
+            MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_loads);
+        if remaining == 0 {
+            window.push_notification(
+                Notification::error(attach_error_message(&AttachError::TooMany)),
+                cx,
+            );
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = host.pick_images(remaining).await;
+            let _ = this.update_in(cx, |composer, window, cx| match picked {
+                Ok(images) => {
+                    for image in images {
+                        composer.add_image_bytes(image.name, image.mime, image.bytes, window, cx);
+                    }
+                }
+                Err(error) => window.push_notification(
+                    Notification::error(
+                        crate::tr!("attach.pick_failed", error = error).into_owned(),
+                    ),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     pub(in super::super) fn add_image_bytes(
@@ -340,5 +533,70 @@ impl Composer {
             window,
             cx,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encoded(image: image::DynamicImage, format: image::ImageFormat) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn fitting_bounds_the_long_edge_and_keeps_qualifying_bytes() {
+        let wide = image::DynamicImage::new_rgb8(MAX_EDGE_PX * 2, 100);
+        let (mime, bytes) =
+            fit_for_upload("image/png", encoded(wide, image::ImageFormat::Png)).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(
+            image::load_from_memory(&bytes).unwrap().dimensions(),
+            (MAX_EDGE_PX, 50)
+        );
+
+        let photo = encoded(
+            image::DynamicImage::new_rgb8(MAX_EDGE_PX + 1, MAX_EDGE_PX + 1),
+            image::ImageFormat::Jpeg,
+        );
+        let (mime, bytes) = fit_for_upload("image/jpeg", photo).unwrap();
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(
+            image::load_from_memory(&bytes).unwrap().dimensions(),
+            (MAX_EDGE_PX, MAX_EDGE_PX)
+        );
+
+        let small = encoded(
+            image::DynamicImage::new_rgba8(10, 10),
+            image::ImageFormat::Png,
+        );
+        assert_eq!(
+            fit_for_upload("image/png", small.clone()).unwrap(),
+            ("image/png".to_string(), small)
+        );
+
+        let bmp = encoded(
+            image::DynamicImage::new_rgb8(10, 10),
+            image::ImageFormat::Bmp,
+        );
+        let (mime, bytes) = fit_for_upload("image/bmp", bmp).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(
+            image::guess_format(&bytes).unwrap(),
+            image::ImageFormat::Png
+        );
+
+        let gif = encoded(
+            image::DynamicImage::new_rgba8(MAX_EDGE_PX * 2, 10),
+            image::ImageFormat::Gif,
+        );
+        assert_eq!(
+            fit_for_upload("image/gif", gif.clone()).unwrap(),
+            ("image/gif".to_string(), gif)
+        );
+
+        assert!(fit_for_upload("image/png", b"not an image".to_vec()).is_err());
     }
 }

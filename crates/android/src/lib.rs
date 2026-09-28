@@ -126,9 +126,21 @@ mod jni_exports {
     use jni::{
         EnvUnowned,
         errors::LogErrorAndDefault,
-        objects::{JObject, JString},
+        objects::{JByteArray, JObject, JString},
         sys::{jboolean, jint, jlong},
     };
+
+    fn optional_string<'local>(
+        env: &mut jni::Env<'local>,
+        value: JObject<'local>,
+    ) -> jni::errors::Result<Option<String>> {
+        if value.is_null() {
+            return Ok(None);
+        }
+        JString::cast_local(env, value)
+            .and_then(|value| value.try_to_string(env))
+            .map(Some)
+    }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFirstFrameRendered(
@@ -297,6 +309,44 @@ mod jni_exports {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeImagePicked<'local>(
+        mut env: EnvUnowned<'local>,
+        _activity: JObject<'local>,
+        request_id: jlong,
+        name: JObject<'local>,
+        mime: JObject<'local>,
+        bytes: JByteArray<'local>,
+    ) {
+        env.with_env(|env| -> jni::errors::Result<()> {
+            let name = optional_string(env, name)?.unwrap_or_else(|| "image".into());
+            let mime = optional_string(env, mime)?.unwrap_or_else(|| "image/jpeg".into());
+            let bytes = env.convert_byte_array(&bytes)?;
+            crate::host::deliver_image_picked(
+                request_id as u64,
+                tcode_client::host::PickedImage { name, mime, bytes },
+            );
+            Ok(())
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeImagePickFinished<'local>(
+        mut env: EnvUnowned<'local>,
+        _activity: JObject<'local>,
+        request_id: jlong,
+        status: jint,
+        error: JObject<'local>,
+    ) {
+        env.with_env(|env| -> jni::errors::Result<()> {
+            let error = optional_string(env, error)?;
+            crate::host::deliver_images_picked(request_id as u64, status, error);
+            Ok(())
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeQrScanCompleted<'local>(
         mut env: EnvUnowned<'local>,
         _activity: JObject<'local>,
@@ -305,14 +355,10 @@ mod jni_exports {
         value: JObject<'local>,
     ) {
         env.with_env(|env| -> jni::errors::Result<()> {
-            let value = if value.is_null() {
-                None
-            } else {
-                JString::cast_local(env, value)
-                    .and_then(|value| value.try_to_string(env))
-                    .map_err(|error| log::error!("failed reading QR result: {error}"))
-                    .ok()
-            };
+            let value = optional_string(env, value)
+                .map_err(|error| log::error!("failed reading QR result: {error}"))
+                .ok()
+                .flatten();
             crate::host::deliver_result(request_id as u64, status, value);
             Ok(())
         })

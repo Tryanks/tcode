@@ -36,7 +36,7 @@ pub const MAX_CONTROL_LINE: usize = 4096;
 /// How long a peer has to send a stream's first line.
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bound on one NDJSON line after hello, in either direction.
-pub const MAX_LINE: usize = 16 * 1024 * 1024;
+pub const MAX_LINE: usize = tcode_protocol::MAX_LINE_BYTES;
 /// Bi streams one connection may hold open at once.
 pub const MAX_STREAMS: u32 = 64;
 /// Preview tunnels one connection may hold open at once, leaving streams for

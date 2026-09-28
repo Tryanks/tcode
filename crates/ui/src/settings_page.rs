@@ -235,6 +235,11 @@ impl Section {
 /// change event can be told apart from a real edit; `dirty` then freezes the
 /// field against later snapshots so a host update cannot overwrite what the
 /// user is in the middle of typing.
+/// The remote attachment ceiling as the settings field shows it, in MiB.
+fn remote_attachment_limit_value(store: &WorkspaceStore) -> String {
+    (store.client_remote_attachment_limit_bytes() / (1024 * 1024)).to_string()
+}
+
 struct SettingsInput {
     state: Entity<InputState>,
     pushed: String,
@@ -319,6 +324,7 @@ pub struct SettingsPage {
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: SettingsInput,
     auto_archive_idle_input: SettingsInput,
+    remote_attachment_limit_input: SettingsInput,
     auto_archive_keep_input: SettingsInput,
     /// Zero-based page shown by the Archived Threads list.
     archived_page: usize,
@@ -493,6 +499,9 @@ impl SettingsPage {
         });
         let auto_archive_idle_input = cx.new(|cx| InputState::new(window, cx));
         let auto_archive_keep_input = cx.new(|cx| InputState::new(window, cx));
+        let remote_attachment_limit = remote_attachment_limit_value(store.read(cx));
+        let remote_attachment_limit_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(remote_attachment_limit.clone()));
         #[cfg(all(feature = "local-permissions", target_os = "macos"))]
         let local_permissions = capabilities.can_manage_local_permissions().then(|| {
             let store = store.clone();
@@ -520,6 +529,11 @@ impl SettingsPage {
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
             auto_archive_idle_input: SettingsInput::new(auto_archive_idle_input.clone()),
+            remote_attachment_limit_input: SettingsInput {
+                state: remote_attachment_limit_input.clone(),
+                pushed: remote_attachment_limit,
+                dirty: false,
+            },
             auto_archive_keep_input: SettingsInput::new(auto_archive_keep_input.clone()),
             archived_page: 0,
             hydrated: false,
@@ -549,6 +563,17 @@ impl SettingsPage {
                     }
                 }
             }));
+        page._subscriptions.push(cx.subscribe(
+            &remote_attachment_limit_input,
+            |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if this.remote_attachment_limit_input.is_user_edit(&value) {
+                        this.commit_remote_attachment_limit(cx);
+                    }
+                }
+            },
+        ));
         page._subscriptions.push(cx.subscribe(
             &auto_archive_idle_input,
             |this, input, event, cx| {
@@ -630,6 +655,24 @@ impl SettingsPage {
             .to_string();
         let name = (!value.is_empty()).then_some(value);
         self.dispatch_settings(move |store| store.set_client_device_name(name), cx);
+    }
+
+    fn commit_remote_attachment_limit(&self, cx: &mut Context<Self>) {
+        let Some(limit) = self
+            .remote_attachment_limit_input
+            .state
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u32>()
+            .ok()
+        else {
+            return;
+        };
+        self.dispatch_settings(
+            move |store| store.set_client_remote_attachment_limit_mib(Some(limit)),
+            cx,
+        );
     }
 
     fn commit_auto_archive_idle_days(&self, cx: &mut Context<Self>) {
@@ -1184,6 +1227,8 @@ impl SettingsPage {
                         page.home_url_input.push(home_url, window, cx);
                         let device_name = page.store.read(cx).client_device_name();
                         page.device_name_input.push(device_name, window, cx);
+                        let limit = remote_attachment_limit_value(page.store.read(cx));
+                        page.remote_attachment_limit_input.push(limit, window, cx);
                         page.auto_archive_idle_input.push(
                             DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(),
                             window,
@@ -1259,6 +1304,7 @@ impl SettingsPage {
         let language_overridden = store.client_language_override().is_some();
         let theme_overridden = store.client_theme_override().is_some();
         let device_name_overridden = store.client_device_name_override().is_some();
+        let attachment_limit_overridden = store.client_remote_attachment_limit_override().is_some();
         let provider_marks_reset = self.reset_action(
             "reset-sidebar-provider-marks",
             settings.sidebar_provider_marks,
@@ -1280,6 +1326,7 @@ impl SettingsPage {
                 WorkspaceStore::set_sidebar_provider_marks,
             ),
             self.device_name_row(device_name_overridden, cx),
+            self.remote_attachment_limit_row(attachment_limit_overridden, cx),
         ];
         let delete_confirm_reset = self.reset_action(
             "reset-delete-confirm",
@@ -1570,6 +1617,36 @@ impl SettingsPage {
                             .small()
                             .rounded(crate::material::radius_input()),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn remote_attachment_limit_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
+        let reset = self.reset_action(
+            "reset-remote-attachment-limit",
+            overridden,
+            cx,
+            |this, window, cx| {
+                this.dispatch_settings(
+                    |store| store.set_client_remote_attachment_limit_mib(None),
+                    cx,
+                );
+                let limit = remote_attachment_limit_value(this.store.read(cx));
+                this.remote_attachment_limit_input.push(limit, window, cx);
+            },
+        );
+        self.row_frame(cx)
+            .debug_selector(|| "settings-remote-attachment-limit-row".into())
+            .child(self.row_labels(
+                crate::tr!("settings.remote_attachment_limit.title"),
+                crate::tr!("settings.remote_attachment_limit.description"),
+                reset,
+                cx,
+            ))
+            .child(
+                Input::new(&self.remote_attachment_limit_input.state)
+                    .w(px(72.))
+                    .rounded(crate::material::radius_input()),
             )
             .into_any_element()
     }
