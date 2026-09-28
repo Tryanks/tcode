@@ -5,8 +5,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use gpui::{AsyncApp, Entity, WindowHandle, px, size};
-use tcode_ui::{AppShell, overlay::OverlayHost};
+use gpui::{AnyWindowHandle, AsyncApp, Entity, px, size};
+use tcode_ui::AppShell;
 
 const STEP_DELAY: Duration = Duration::from_millis(20);
 const RAPID_DELAY: Duration = Duration::from_millis(5);
@@ -85,7 +85,7 @@ async fn yield_for(cx: &AsyncApp, delay: Duration) {
 
 fn create_once(
     shell: &Entity<AppShell>,
-    window: WindowHandle<OverlayHost>,
+    window: AnyWindowHandle,
     key: &str,
     url: &str,
     cx: &mut AsyncApp,
@@ -128,7 +128,7 @@ fn creation_is_pending(error: &str) -> bool {
 
 async fn create_and_wait(
     shell: &Entity<AppShell>,
-    window: WindowHandle<OverlayHost>,
+    window: AnyWindowHandle,
     key: &str,
     url: &str,
     cx: &mut AsyncApp,
@@ -154,7 +154,7 @@ async fn create_and_wait(
 #[cfg(target_os = "windows")]
 async fn start_and_wait_until_in_flight(
     shell: &Entity<AppShell>,
-    window: WindowHandle<OverlayHost>,
+    window: AnyWindowHandle,
     key: &str,
     url: &str,
     cx: &mut AsyncApp,
@@ -178,7 +178,7 @@ async fn start_and_wait_until_in_flight(
 pub async fn run(
     watchdog: Watchdog,
     shell: Entity<AppShell>,
-    window: WindowHandle<OverlayHost>,
+    window: AnyWindowHandle,
     cx: &mut AsyncApp,
 ) {
     watchdog.start_phase("create-first");

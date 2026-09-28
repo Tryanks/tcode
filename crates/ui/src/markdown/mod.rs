@@ -17,7 +17,7 @@ mod utils;
 mod view;
 
 use gpui::{App, KeyBinding};
-use gpui_base::input::{Copy, SelectAll};
+use gpui_base::input::SelectAll;
 
 #[cfg(test)]
 pub(crate) use parse::parse;
@@ -26,13 +26,10 @@ pub use view::MarkdownView;
 
 pub(super) const CONTEXT: &str = "MarkdownView";
 
-/// Register Markdown copy/select-all bindings.
+/// Register Markdown select-all bindings. Copying the window selection is
+/// the window root's.
 pub fn init(cx: &mut App) {
     cx.bind_keys(vec![
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-c", Copy, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]

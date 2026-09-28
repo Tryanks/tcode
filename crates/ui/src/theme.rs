@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc, sync::LazyLock};
 
 use gpui::{App, Global, Hsla, Pixels, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
-    ColorTokens, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarStyles, ScrollbarTheme,
-    SemanticThemeTokens, ThemeAppearance, TypographyTokens,
+    ColorTokens, PlotTheme, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarStyles,
+    ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
 };
 use serde::Deserialize;
 
@@ -305,6 +305,7 @@ pub fn init(cx: &mut App) {
 /// the platform window is opaque.
 pub fn init_with_json(theme_json: &str, cx: &mut App) {
     gpui_base::init(cx);
+    crate::overlay::init(cx);
     crate::widgets::menu::init(cx);
     let themes = parse_theme_file(theme_json).expect("embedded themes/tcode.json must be valid");
 
@@ -344,6 +345,7 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
             handle: Some(theme.border),
             active_handle: Some(theme.ring),
         },
+        plot: PlotTheme::default(),
     };
     cx.set_global(base_theme);
     cx.set_global(theme);

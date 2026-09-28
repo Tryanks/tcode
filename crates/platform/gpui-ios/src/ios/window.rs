@@ -689,7 +689,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        Some(self.renderer.borrow().gpu_specs())
+        self.renderer.borrow().gpu_specs()
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}

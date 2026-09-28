@@ -586,7 +586,7 @@ mod tests {
         });
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| EmptyView);
-            crate::overlay::OverlayHost::new(view, window, cx)
+            gpui_base::Root::new(view, window, cx)
         });
         cx.simulate_resize(size(px(390.), px(700.)));
         cx.update(|window, cx| open(store.clone(), project, window, cx));

@@ -312,13 +312,16 @@ where
             }
             menu_state.update(cx, |state, _| state.menu = Some(menu.clone()));
             menu.focus_handle(cx).focus(window, cx);
-            let popover = cx.entity();
+            // Weak: `menu_state` owns the menu this subscription lives as long
+            // as, so strong captures would keep both alive after the trigger
+            // unmounts, with the popover's deferred registration.
+            let popover = cx.entity().downgrade();
             window
                 .subscribe(&menu, cx, {
-                    let menu_state = menu_state.clone();
+                    let menu_state = menu_state.downgrade();
                     move |_, _: &DismissEvent, window, cx| {
-                        popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        menu_state.update(cx, |state, _| state.menu = None);
+                        let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        let _ = menu_state.update(cx, |state, _| state.menu = None);
                     }
                 })
                 .detach();
@@ -407,10 +410,13 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     let previous_focus = window.focused(cx);
                     let menu_focus = menu.focus_handle(cx);
                     let deferred = gpui_base::GlobalState::register_deferred_popover(cx);
+                    // Weak: the subscription is stored on `state`, so a strong
+                    // capture would keep it, and its deferred registration,
+                    // alive after the trigger unmounts.
                     let subscription = window.subscribe(&menu, cx, {
-                        let state = state.clone();
+                        let state = state.downgrade();
                         move |_, _: &DismissEvent, window, cx| {
-                            state.update(cx, |state, _| {
+                            let _ = state.update(cx, |state, _| {
                                 state.menu = None;
                                 state._subscription = None;
                                 state._deferred = None;
