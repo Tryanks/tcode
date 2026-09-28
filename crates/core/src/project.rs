@@ -140,6 +140,21 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// Whether `other` works in the worktree this session owns. A fork keeps
+    /// the source's cwd without the `worktree` ownership marker, so the cwd
+    /// decides as well as the branch.
+    pub fn shares_worktree_with(&self, other: &SessionMeta) -> bool {
+        let Some(worktree) = &self.worktree else {
+            return false;
+        };
+        other.id != self.id
+            && (other.cwd.starts_with(&self.cwd)
+                || other
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|other| other.branch == worktree.branch))
+    }
+
     /// The key [`Settings::provider_color`] resolves this thread's color from:
     /// a user profile id, an ACP agent (`acp:<id>`), or the built-in
     /// [`provider_key`]. A user profile is its own provider to the user even
@@ -538,6 +553,30 @@ mod tests {
         let mut acp = SessionMeta::new(ProviderKind::Acp, PathBuf::from("/x"), None);
         acp.acp_agent_id = Some("gemini".into());
         assert_eq!(acp.provider_color_key(), "acp:gemini");
+    }
+
+    #[test]
+    fn worktree_is_shared_by_a_fork_in_its_cwd_but_not_by_a_sibling_directory() {
+        let mut owner = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt/source"), None);
+        owner.worktree = Some(WorktreeInfo {
+            root_project_path: PathBuf::from("/repo"),
+            base: "main".into(),
+            branch: "tcode/source".into(),
+        });
+        let fork = SessionMeta::new(ProviderKind::Codex, owner.cwd.clone(), None);
+        let nested = SessionMeta::new(ProviderKind::Codex, owner.cwd.join("crates/core"), None);
+        let sibling = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt/source-2"), None);
+        let checkout = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/repo"), None);
+
+        assert!(owner.shares_worktree_with(&fork));
+        assert!(owner.shares_worktree_with(&nested));
+        assert!(!owner.shares_worktree_with(&sibling));
+        assert!(!owner.shares_worktree_with(&checkout));
+        assert!(!owner.shares_worktree_with(&owner));
+        assert!(
+            !fork.shares_worktree_with(&owner),
+            "a fork owns no worktree"
+        );
     }
 
     fn candidates(

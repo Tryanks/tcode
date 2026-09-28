@@ -974,10 +974,20 @@ impl AppState {
         }
         self.close_orchestrator_children(session_id, cx);
         let worktree_remove = meta.as_ref().and_then(|meta| {
-            (remove_worktree && meta.worktree.is_some()).then(|| {
-                let worktree = meta.worktree.as_ref().unwrap();
-                (worktree.root_project_path.clone(), meta.cwd.clone())
-            })
+            let worktree = meta.worktree.as_ref().filter(|_| remove_worktree)?;
+            let shared = self
+                .sessions
+                .iter()
+                .chain(self.residents.live.values().map(|session| &session.meta))
+                .any(|other| meta.shares_worktree_with(other));
+            if shared {
+                log::info!(
+                    "keeping worktree {} in use by another thread",
+                    meta.cwd.display()
+                );
+                return None;
+            }
+            Some((worktree.root_project_path.clone(), meta.cwd.clone()))
         });
         self.settings.last_visited.remove(session_id);
         self.settings
@@ -1110,16 +1120,24 @@ impl AppState {
             .is_some_and(|&visited| meta.updated_at > visited)
     }
 
-    /// Remove app-owned worktrees whose session is absent from the loaded store.
+    /// Remove app-owned worktrees that no session in the loaded store owns or
+    /// works in.
     pub(crate) fn recover_orphaned_worktrees(&self, cx: &mut HostCx) {
         let known_ids = self
             .sessions
             .iter()
             .map(|session| session.id.clone())
             .collect();
+        let cwds: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|session| session.cwd.clone())
+            .collect();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let summary = host_cx.unblock(move || cleanup_orphans(&known_ids)).await;
+            let summary = host_cx
+                .unblock(move || cleanup_orphans(&known_ids, &cwds))
+                .await;
             if !summary.removed.is_empty() || !summary.skipped.is_empty() {
                 log::info!(
                     "worktree orphan recovery removed {}, left {}",
