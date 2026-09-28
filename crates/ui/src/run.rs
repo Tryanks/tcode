@@ -10,10 +10,11 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Entity, KeyBinding, SharedString, WindowHandle, WindowOptions};
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, Entity, KeyBinding, SharedString, WindowOptions,
+};
 use tcode_client::host::ClientHost;
 
-use crate::overlay::OverlayHost;
 use crate::remote::{AttachmentTarget, ClientAttachment};
 use crate::shell::{AppShell, ShellSetup, TogglePalette};
 use crate::theme;
@@ -106,7 +107,7 @@ pub fn run_shell(
     cx: &mut App,
     host: Rc<dyn ClientHost>,
     options: ShellOptions,
-) -> (WindowHandle<OverlayHost>, Entity<AppShell>) {
+) -> (AnyWindowHandle, Entity<AppShell>) {
     // Browser bootstrap supplies its Fetch client; native image URLs need an HTTP client too.
     #[cfg(not(target_family = "wasm"))]
     {
@@ -164,7 +165,7 @@ pub fn run_shell(
     let captured = mounted.clone();
     #[cfg(target_os = "macos")]
     let window_background = options.window.window_background;
-    let window = cx
+    let window: AnyWindowHandle = cx
         .open_window(options.window, move |window, cx| {
             window.set_window_title(&title);
             theme::sync_system_appearance(Some(window), cx);
@@ -178,9 +179,10 @@ pub fn run_shell(
                 )
             });
             *captured.borrow_mut() = Some(shell.clone());
-            cx.new(|cx| OverlayHost::new(shell, window, cx))
+            cx.new(|cx| gpui_base::Root::new(shell, window, cx))
         })
-        .expect("failed to open the tcode window");
+        .expect("failed to open the tcode window")
+        .into();
     // A transparent macOS window gets its blur from a stock semantic material
     // rather than GPUI's `Blurred` path; see `macos_backdrop`.
     #[cfg(target_os = "macos")]
@@ -195,7 +197,7 @@ pub fn run_shell(
         .borrow_mut()
         .take()
         .expect("the shell is built while the window opens");
-    crate::shell::set_back_target(window.into(), &shell, cx);
+    crate::shell::set_back_target(window, &shell, cx);
     if let Some(wakes) = options.lifecycle.as_deref().map(lifecycle_wakes) {
         let shell = shell.downgrade();
         cx.spawn(async move |cx| {
