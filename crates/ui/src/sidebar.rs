@@ -1356,7 +1356,6 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.archive_all_description", count = count))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.archive_all_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -1465,7 +1464,6 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.archive_description", title = title))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.archive_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
