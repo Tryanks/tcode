@@ -7,9 +7,9 @@ pub use notification::{Notification, NotificationType};
 use std::rc::Rc;
 
 use gpui::{
-    AnyView, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Window, div, prelude::FluentBuilder as _,
-    px,
+    App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Refineable as _, Render, Stateful, StyleRefinement, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 
 use crate::theme::ActiveTheme as _;
@@ -55,30 +55,23 @@ impl OutsideDismissal {
     }
 }
 
-/// Window root that owns tcode's modal and toast layers, and the window text
-/// selection with the touch surfaces it leaves behind.
-pub struct OverlayHost {
-    view: AnyView,
+/// tcode's per-window presentation on the Base [`gpui_base::Root`]: the
+/// modal and toast layers, and the touch surfaces the window text selection
+/// leaves behind.
+pub(crate) struct Overlays {
     dialogs: Vec<ActiveDialog>,
     notifications: Entity<NotificationList>,
     touch_selection: Entity<WindowTouchSelectionOverlay>,
 }
 
-struct DetachedView;
-
-impl Render for DetachedView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full()
-    }
+/// Register the overlays every window root mounts. Call before opening windows.
+pub(crate) fn init(cx: &mut App) {
+    gpui_base::Root::register_plugin(cx, Overlays::new);
 }
 
-impl OverlayHost {
-    pub fn new(view: impl Into<AnyView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        #[cfg(all(target_os = "macos", not(test)))]
-        gpui_base::install_window_hit_test_forwarder(window);
-
+impl Overlays {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
-            view: view.into(),
             dialogs: Vec::new(),
             notifications: cx.new(|cx| NotificationList::new(window, cx)),
             touch_selection: cx.new(|cx| WindowTouchSelectionOverlay::new(window, cx)),
@@ -90,11 +83,10 @@ impl OverlayHost {
         cx: &mut App,
         f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> R,
     ) -> R {
-        let root = window
-            .root::<Self>()
-            .flatten()
-            .expect("window root must be tcode_ui::overlay::OverlayHost");
-        root.update(cx, |root, cx| f(root, window, cx))
+        let overlays = gpui_base::Root::read(window, cx)
+            .plugin::<Self>()
+            .expect("tcode_ui::overlay::init must run before the window opens");
+        overlays.update(cx, |overlays, cx| f(overlays, window, cx))
     }
 
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -124,7 +116,18 @@ impl OverlayHost {
     }
 }
 
-impl Render for OverlayHost {
+impl gpui_base::RootPlugin for Overlays {
+    fn style(&self, surface: &mut Stateful<Div>, _window: &mut Window, cx: &mut App) {
+        surface.style().refine(
+            &StyleRefinement::default()
+                .bg(crate::material::canvas(cx))
+                .text_color(cx.theme().foreground)
+                .font_family(cx.theme().font_family.clone()),
+        );
+    }
+}
+
+impl Render for Overlays {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dialog_count = self.dialogs.len();
         let dialogs = self
@@ -145,52 +148,9 @@ impl Render for OverlayHost {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let seam = crate::window_seam::content_insets(window);
         div()
-            .relative()
-            .size_full()
-            .on_key_down(|event, window, cx| {
-                let modifiers = event.keystroke.modifiers;
-                if event.keystroke.key == "tab"
-                    && !modifiers.control
-                    && !modifiers.alt
-                    && !modifiers.platform
-                    && !modifiers.function
-                {
-                    let step = |window: &mut Window, cx: &mut App| {
-                        if modifiers.shift {
-                            window.focus_prev(cx);
-                        } else {
-                            window.focus_next(cx);
-                        }
-                    };
-                    let before = window.focused(cx);
-                    let trap = gpui_base::active_focus_trap(window, cx);
-                    step(window, cx);
-                    if let Some(trap) = trap {
-                        let first = window.focused(cx);
-                        while !trap.contains_focused(window, cx) {
-                            step(window, cx);
-                            if window.focused(cx) == first {
-                                if let Some(before) = before {
-                                    before.focus(window, cx);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    cx.stop_propagation();
-                }
-            })
-            .bg(crate::material::canvas(cx))
-            .text_color(cx.theme().foreground)
-            .font_family(cx.theme().font_family.clone())
-            // The window selection layer is the first child of the window: its
-            // bubble-phase handlers then run after every control's, owning a
-            // press only when it propagates, and its capture-phase scroll
-            // handler runs before the touch pan capture below it, so the edit
-            // menu steps aside while a finger scrolls.
-            .child(gpui_base::TextSelectionLayer)
-            .child(self.view.clone())
-            // After the content, so the edit menu floats above what was selected.
+            .absolute()
+            .inset_0()
+            // The edit menu floats above what was selected, under any dialog.
             .child(self.touch_selection.clone())
             .when(!dialogs.is_empty(), |root| {
                 root.child(
@@ -240,9 +200,6 @@ fn open_notification_dialog(note: Entity<Notification>, window: &mut Window, cx:
 
 /// Imperative overlay operations used by application views.
 pub trait OverlayExt {
-    /// Release the current view graph while its replacement is constructed.
-    fn detach_view(&mut self, cx: &mut App);
-    fn replace_view(&mut self, view: impl Into<AnyView>, cx: &mut App);
     fn open_dialog<F>(&mut self, cx: &mut App, build: F)
     where
         F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static;
@@ -258,33 +215,11 @@ pub trait OverlayExt {
 }
 
 impl OverlayExt for Window {
-    fn detach_view(&mut self, cx: &mut App) {
-        let view = cx.new(|_| DetachedView).into();
-        OverlayHost::update(self, cx, move |host, window, cx| {
-            host.close_all_dialogs(window, cx);
-            host.notifications
-                .update(cx, |list, cx| list.clear(window, cx));
-            host.view = view;
-            cx.notify();
-        });
-    }
-
-    fn replace_view(&mut self, view: impl Into<AnyView>, cx: &mut App) {
-        let view = view.into();
-        OverlayHost::update(self, cx, move |host, window, cx| {
-            host.close_all_dialogs(window, cx);
-            host.notifications
-                .update(cx, |list, cx| list.clear(window, cx));
-            host.view = view;
-            cx.notify();
-        });
-    }
-
     fn open_dialog<F>(&mut self, cx: &mut App, build: F)
     where
         F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
     {
-        OverlayHost::update(self, cx, move |host, window, cx| {
+        Overlays::update(self, cx, move |host, window, cx| {
             let focus_handle = cx.focus_handle();
             let previous_focus_handle = window.focused(cx).map(|focus| focus.downgrade());
             focus_handle.focus(window, cx);
@@ -307,11 +242,11 @@ impl OverlayExt for Window {
     }
 
     fn close_dialog(&mut self, cx: &mut App) {
-        OverlayHost::update(self, cx, |host, window, cx| host.close_dialog(window, cx));
+        Overlays::update(self, cx, |host, window, cx| host.close_dialog(window, cx));
     }
 
     fn close_all_dialogs(&mut self, cx: &mut App) {
-        OverlayHost::update(self, cx, |host, window, cx| {
+        Overlays::update(self, cx, |host, window, cx| {
             host.close_all_dialogs(window, cx)
         });
     }
@@ -323,14 +258,14 @@ impl OverlayExt for Window {
             open_notification_dialog(note, self, cx);
             return;
         }
-        OverlayHost::update(self, cx, |host, window, cx| {
+        Overlays::update(self, cx, |host, window, cx| {
             host.notifications
                 .update(cx, |list, cx| list.push(note, window, cx));
         });
     }
 
     fn remove_notification<T: Sized + 'static>(&mut self, cx: &mut App) {
-        OverlayHost::update(self, cx, |host, window, cx| {
+        Overlays::update(self, cx, |host, window, cx| {
             host.notifications.update(cx, |list, cx| {
                 list.close_by_type(std::any::TypeId::of::<T>(), window, cx)
             });
@@ -343,7 +278,7 @@ impl OverlayExt for Window {
         cx: &mut App,
     ) {
         let key = key.into();
-        OverlayHost::update(self, cx, |host, window, cx| {
+        Overlays::update(self, cx, |host, window, cx| {
             host.notifications.update(cx, |list, cx| {
                 list.close((std::any::TypeId::of::<T>(), key), window, cx)
             });
@@ -351,7 +286,7 @@ impl OverlayExt for Window {
     }
 
     fn clear_notifications(&mut self, cx: &mut App) {
-        OverlayHost::update(self, cx, |host, window, cx| {
+        Overlays::update(self, cx, |host, window, cx| {
             host.notifications
                 .update(cx, |list, cx| list.clear(window, cx));
         });
@@ -362,6 +297,18 @@ impl OverlayExt for Window {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext, size};
+
+    struct Body;
+
+    impl Render for Body {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    fn overlays(root: &Entity<gpui_base::Root>, cx: &mut VisualTestContext) -> Entity<Overlays> {
+        root.read_with(cx, |root, _| root.plugin::<Overlays>().unwrap())
+    }
 
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
@@ -375,8 +322,8 @@ mod tests {
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (root, cx) = cx.add_window_view(|window, cx| {
-            let body = cx.new(|_| DetachedView);
-            OverlayHost::new(body, window, cx)
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         crate::window_seam::occlude_for_test(
@@ -402,7 +349,7 @@ mod tests {
         assert!(bounds.size.width <= px(361.));
         assert!(bounds.size.height >= px(44.));
         cx.update(|window, cx| window.push_notification("Second", cx));
-        root.read_with(cx, |root, cx| {
+        overlays(&root, cx).read_with(cx, |root, cx| {
             root.notifications.read(cx).assert_messages(cx, &["Second"]);
         });
         cx.simulate_resize(size(px(1200.), px(800.)));
@@ -424,8 +371,8 @@ mod tests {
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (root, cx) = cx.add_window_view(|window, cx| {
-            let body = cx.new(|_| DetachedView);
-            OverlayHost::new(body, window, cx)
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.update(|window, cx| window.push_notification("Copied", cx));
@@ -460,7 +407,7 @@ mod tests {
             window.push_notification(Notification::error("Repair required").autohide(false), cx)
         });
         draw(cx);
-        root.read_with(cx, |root, cx| {
+        overlays(&root, cx).read_with(cx, |root, cx| {
             assert_eq!(root.dialogs.len(), 1);
             root.notifications.read(cx).assert_messages(cx, &[]);
         });
@@ -473,7 +420,7 @@ mod tests {
         assert!(cx.debug_bounds("wide-toast").is_some());
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        root.read_with(cx, |root, cx| {
+        overlays(&root, cx).read_with(cx, |root, cx| {
             assert_eq!(root.dialogs.len(), 1);
             root.notifications.read(cx).assert_messages(cx, &[]);
         });

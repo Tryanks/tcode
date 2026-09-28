@@ -276,7 +276,8 @@ impl MarkdownSelectionAdapter {
             let registration = TextSelectionRegistration::new(hitbox, bounds)
                 .with_scroll_offset(scroll_offset)
                 .with_document_order(document_order)
-                .with_text_bounds(frame.text_bounds.clone());
+                .with_text_bounds(frame.text_bounds.clone())
+                .with_rendered_element(&self.selection, window, cx);
             match frame.selection_edges {
                 Some((start, end)) => registration.with_selection_edges(start, end),
                 None => registration,

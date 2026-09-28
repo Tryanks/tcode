@@ -38,6 +38,10 @@ use gpui::{
     Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::PopoverState;
+
+pub(crate) const CONTEXT: &str = "Composer";
+
+gpui::actions!(tcode_composer, [ToggleInteractionMode]);
 use gpui_base::{ElementExt as _, StyledExt as _, h_flex, v_flex};
 
 use crate::attachments::attach_error_message;
@@ -1303,13 +1307,15 @@ impl Render for Composer {
                 crate::chat::CONTENT_MIN_PADDING
             }))
             .pb_2()
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                if this.interactive(cx) && ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift
-                {
-                    this.workspace_store
-                        .update(cx, |store, _cx| store.toggle_interaction_mode());
-                    cx.notify();
+            .key_context(CONTEXT)
+            .on_action(cx.listener(|this, _: &ToggleInteractionMode, _, cx| {
+                if !this.interactive(cx) {
+                    cx.propagate();
+                    return;
                 }
+                this.workspace_store
+                    .update(cx, |store, _cx| store.toggle_interaction_mode());
+                cx.notify();
             }))
             .child(
                 v_flex()

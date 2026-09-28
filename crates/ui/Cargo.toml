@@ -58,10 +58,10 @@ tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false }
-gpui = { package = "gpui-pre", version = "0.3.6" }
-gpui-base = "0.6.6"
-gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.6" }
-gpui-component-macros = "0.6.6"
+gpui = { package = "gpui-pre", version = "0.3.7" }
+gpui-base = "0.7.0"
+gpui-component-assets = { package = "gpui-kit-assets", version = "0.7.0" }
+gpui-component-macros = "0.7.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 async-channel = "2"
@@ -88,14 +88,14 @@ web-time = "1"
 # iOS off), so it is left to the composition roots.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tcode-traverse = { path = "../traverse", default-features = false, optional = true }
-reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.6" }
+reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.7" }
 # Android apps do not have the Unix certificate files used by native-roots discovery.
 reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls-webpki-roots"] }
 
 # The preview backend exists only where a system webview can be embedded as a
 # child of the GPUI window, so its whole dependency set is target-scoped.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-gpui-wry = { version = "0.6.6", optional = true }
+gpui-wry = { version = "0.7.0", optional = true }
 wry = { version = "0.53.3", package = "lb-wry", features = ["mac-proxy"], optional = true }
 raw-window-handle = { version = "0.6", features = ["std"] }
 # Only the Windows WebContext needs it, but Cargo has no per-feature target
@@ -135,8 +135,8 @@ windows-core = { version = "0.61", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
-gpui = { package = "gpui-pre", version = "0.3.6", features = ["test-support"] }
-gpui_platform = { package = "gpui-pre-platform", version = "0.3.6", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-pre", version = "0.3.7", features = ["test-support"] }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.7", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 smol = "2"
 tcode-runtime = { path = "../runtime", features = ["test-support"] }
 # dump-create is only needed by examples/sanitize_syntaxes.rs and the syntax-set

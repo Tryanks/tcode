@@ -3071,7 +3071,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|window, cx| {
             let page = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
             page_handle = Some(page.clone());
-            crate::overlay::OverlayHost::new(page, window, cx)
+            gpui_base::Root::new(page, window, cx)
         });
         cx.update(|window, cx| {
             page_handle
