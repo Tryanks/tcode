@@ -239,8 +239,10 @@ pub(crate) fn user_bubble(
         .items_end()
         .gap(px(2.))
         .when_some(steering, |column, steering| {
+            let selector = format!("steering-{entry_id}");
             column.child(
                 div()
+                    .debug_selector(move || selector)
                     .h(px(18.))
                     .px(px(6.))
                     .mb(px(-2.))
