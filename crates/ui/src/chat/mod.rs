@@ -3001,37 +3001,32 @@ impl Render for ChatView {
                 // Clone only the entries of this row's turn: the row renders
                 // its own segment and the turn's last row its trailer. The
                 // full history remains behind the store and is never cloned
-                // by the render path.
-                let turn_entries = {
-                    let rows = rows_of_turn(&this.rows, row.turn);
-                    let start = this.rows[rows.start].entry_range.start;
-                    let end = this.rows[rows.end - 1].entry_range.end;
-                    start.min(end)..end
-                };
-                let Some((turn, entries)) =
-                    this.workspace_store
-                        .read(cx)
-                        .with_active_timeline(|timeline| {
-                            (
-                                timeline.turns.get(row.turn).cloned().unwrap_or_default(),
-                                // The rows are a snapshot that can trail the live
-                                // timeline by a frame (e.g. adopting a running
-                                // background thread whose timeline is being
-                                // re-folded), so they must not index blindly.
-                                timeline
-                                    .entries
-                                    .get(turn_entries.clone())
-                                    .map(<[_]>::to_vec)
-                                    .unwrap_or_default(),
-                            )
-                        })
+                // by the render path. The turn's span comes from the
+                // timeline, not its rows: a pending steer after a message
+                // belongs to no row but renders in the trailer.
+                let Some((turn, entries, turn_start)) = this
+                    .workspace_store
+                    .read(cx)
+                    .with_active_timeline(|timeline| {
+                        let entries = &timeline.entries;
+                        let start = entries.partition_point(|entry| entry.turn < row.turn);
+                        let len = entries[start..].partition_point(|entry| entry.turn == row.turn);
+                        (
+                            timeline.turns.get(row.turn).cloned().unwrap_or_default(),
+                            entries[start..start + len].to_vec(),
+                            start,
+                        )
+                    })
                 else {
                     return div().into_any_element();
                 };
-                // The row's range, relative to the turn's entries.
+                // The row's range, relative to the turn's entries. The rows
+                // are a snapshot that can trail the live timeline by a frame
+                // (e.g. adopting a running background thread whose timeline
+                // is being re-folded); `render_row` bounds-checks the range.
                 let row = TimelineRow {
-                    entry_range: row.entry_range.start - turn_entries.start
-                        ..row.entry_range.end - turn_entries.start,
+                    entry_range: row.entry_range.start.saturating_sub(turn_start)
+                        ..row.entry_range.end.saturating_sub(turn_start),
                     ..row
                 };
                 let rendered = this.render_row(
@@ -3702,6 +3697,42 @@ mod tests {
             states[4],
             Some(AutoActivityExpansion::Expanded { .. })
         ));
+    }
+
+    #[gpui::test]
+    fn pending_steer_after_the_last_segment_renders_in_the_trailer(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+        use tcode_core::session::SteeringStatus;
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries.extend([
+            entry("user", user_item("go")),
+            entry("assistant", assistant("On it.")),
+            entry(
+                "steer",
+                EntryContent::Steer {
+                    text: "also do this".into(),
+                    status: SteeringStatus::Pending,
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            ),
+        ]);
+
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (_view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("steering-steer").is_some());
     }
 
     #[test]
