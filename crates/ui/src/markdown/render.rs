@@ -141,16 +141,28 @@ pub(super) fn push_root_items(blocks: &[BlockNode], first_block: usize, items: &
 }
 
 /// Whether `item` of block `new` paints exactly as the same item of `old`
-/// did, so the height measured for it still holds.
-pub(super) fn item_renders_alike(old: &BlockNode, new: &BlockNode, item: &RootItem) -> bool {
+/// did, so the height measured for it still holds. `old_is_last` and
+/// `new_is_last` say whether each block ends its document: the gap below a
+/// block's final item depends on it.
+pub(super) fn item_renders_alike(
+    old: &BlockNode,
+    old_is_last: bool,
+    new: &BlockNode,
+    new_is_last: bool,
+    item: &RootItem,
+) -> bool {
     let Some(span) = item.span.clone() else {
-        return old == new;
+        return old == new && old_is_last == new_is_last;
+    };
+    let same_end = |old_len: usize, new_len: usize| {
+        let (old_final, new_final) = (span.end == old_len, span.end == new_len);
+        old_final == new_final && (!old_final || old_is_last == new_is_last)
     };
     match (old, new) {
         (BlockNode::CodeBlock(old), BlockNode::CodeBlock(new)) => {
             let (old_lines, new_lines) = (code_lines(&old.code), code_lines(&new.code));
             old.lang == new.lang
-                && (span.end == old_lines.len()) == (span.end == new_lines.len())
+                && same_end(old_lines.len(), new_lines.len())
                 && old_lines.get(span.clone()) == new_lines.get(span)
         }
         (
@@ -167,7 +179,7 @@ pub(super) fn item_renders_alike(old: &BlockNode, new: &BlockNode, item: &RootIt
         ) => {
             old_ordered == new_ordered
                 && old_start == new_start
-                && (span.end == old_items.len()) == (span.end == new_items.len())
+                && same_end(old_items.len(), new_items.len())
                 && old_items.get(span.clone()) == new_items.get(span)
         }
         _ => false,
@@ -861,7 +873,18 @@ fn render_list_item(
         };
         match child {
             BlockNode::Paragraph(_) if ix == 0 => {
-                let content = render_block(child, child_options, state, window, cx);
+                let content = div().flex_1().min_w_0().child(render_block(
+                    child,
+                    child_options,
+                    state,
+                    window,
+                    cx,
+                ));
+                #[cfg(test)]
+                let content = {
+                    let path = options.path.clone();
+                    content.debug_selector(move || format!("markdown-list-item-text-{path}"))
+                };
                 rows.push(
                     h_flex()
                         .w_full()
@@ -895,7 +918,7 @@ fn render_list_item(
                                     }),
                             )
                         })
-                        .child(div().flex_1().min_w_0().child(content)),
+                        .child(content),
                 );
             }
             BlockNode::List { .. } => rows.push(div().ml(rems(1.)).child(render_block(
