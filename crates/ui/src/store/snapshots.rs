@@ -176,7 +176,7 @@ pub(crate) fn composer_state(
             .map(|status| status.provider_commands.clone())
             .unwrap_or_default(),
         attachments_dir: status.map(|status| status.attachments_dir.clone()),
-        pending_user_input: timeline.and_then(|timeline| timeline.pending_user_input.clone()),
+        pending_user_input: status.and_then(|status| status.pending_user_input.clone()),
         active_model: status.map(|status| ComposerActiveModel {
             provider: status.provider,
             model: status.requested_model.clone(),
@@ -215,8 +215,8 @@ pub(crate) fn composer_state(
         checkout,
         turn_running: status.is_some_and(|status| status.turn_running),
         stopping: status.is_some_and(|status| status.stopping),
-        pending_approval: timeline.and_then(|timeline| timeline.pending_approvals.first().cloned()),
-        pending_approval_count: timeline.map_or(0, |timeline| timeline.pending_approvals.len()),
+        pending_approval: status.and_then(|status| status.pending_approvals.first().cloned()),
+        pending_approval_count: status.map_or(0, |status| status.pending_approvals.len()),
     }
 }
 
@@ -241,7 +241,7 @@ pub(crate) fn panel_state(
         right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
         terminal_open: ui.is_some_and(|ui| ui.terminal_open),
         terminal_height: ui.map_or(240., |ui| ui.terminal_height),
-        plan_tab_active: timeline.is_some_and(|timeline| timeline.proposed_plan.is_some())
+        plan_tab_active: timeline.is_some_and(|timeline| timeline.shown_proposed_plan().is_some())
             || status.is_some_and(|status| status.interaction_mode == agent::InteractionMode::Plan),
     }
 }
@@ -275,8 +275,9 @@ mod tests {
             turn_running: false,
             stopping: false,
             working: false,
-            pending_approval: false,
-            pending_user_input: false,
+            running_turn: None,
+            pending_approvals: Vec::new(),
+            pending_user_input: None,
             steering_supported: true,
             provider_option_descriptors: Vec::new(),
             provider_option_selections: Vec::new(),

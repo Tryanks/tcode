@@ -170,12 +170,13 @@ impl AppState {
                 .ids()
                 .filter_map(|id| {
                     let session = self.resident(id)?;
+                    let (approvals, user_input) = self.open_requests(id, session);
                     Some((
                         id.to_string(),
                         (
                             session.has_work(),
-                            self.has_approval(id),
-                            session.timeline.pending_user_input.is_some(),
+                            !approvals.is_empty(),
+                            user_input.is_some(),
                             session.background_task_count > 0
                                 && !session.turn_in_flight
                                 && session.queue.is_empty(),
@@ -301,6 +302,25 @@ impl AppState {
         })
     }
 
+    /// The requests a session waits on. A provider shut down without a closing
+    /// record leaves them open in the timeline; only an in-flight turn waits.
+    fn open_requests<'a>(
+        &'a self,
+        session_id: &str,
+        session: &'a ActiveSession,
+    ) -> (
+        &'a [agent::ApprovalRequest],
+        Option<&'a tcode_core::session::PendingUserInput>,
+    ) {
+        if !session.turn_in_flight {
+            return (&[], None);
+        }
+        (
+            self.approval_requests(session_id),
+            session.timeline.pending_user_input.as_ref(),
+        )
+    }
+
     /// Build the complete non-event-stream status projection for one resident
     /// session. This is the sole constructor for the replicated status domain.
     pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
@@ -330,8 +350,8 @@ impl AppState {
                 )
             })
         });
-        let pending_approval = self.has_approval(session_id);
         let terminal_preferences = self.terminal_preferences_for(session);
+        let (approvals, user_input) = self.open_requests(session_id, session);
         Some(SessionStatus {
             session_id: session_id.to_string(),
             title: meta.title.clone(),
@@ -384,8 +404,14 @@ impl AppState {
             turn_running: session.turn_in_flight,
             stopping: session.interrupt_requested,
             working: session.has_work(),
-            pending_approval,
-            pending_user_input: session.timeline.pending_user_input.is_some(),
+            // A provider shut down without a closing record leaves its turn
+            // running in the timeline; only an in-flight turn is live.
+            running_turn: session
+                .turn_in_flight
+                .then(|| session.timeline.running_turn())
+                .flatten(),
+            pending_approvals: approvals.to_vec(),
+            pending_user_input: user_input.cloned(),
             steering_supported: session.can_steer(),
             provider_option_descriptors,
             provider_option_selections: meta.option_selections.clone(),
