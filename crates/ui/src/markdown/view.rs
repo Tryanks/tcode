@@ -662,9 +662,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         // A long streaming code block keeps the items of its settled lines.
+        // A block that stops being the last gains a gap below its last item.
         for (source, append, settled) in [
             ("stable block\n\nstreaming block".to_string(), " delta", 0),
             (format!("```text\n{code}"), "\nline 100", 2),
+            (
+                "stable block\n\nsettled block".to_string(),
+                "\n\nnew block",
+                0,
+            ),
+            (format!("```text\n{code}\n```"), "\n\nnew block", 2),
         ] {
             let (view, cx) = cx.add_window_view(|_, cx| TestRoot::new(&source, cx));
             let cx: &mut VisualTestContext = cx;

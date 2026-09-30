@@ -253,12 +253,16 @@ impl MarkdownState {
         else {
             unreachable!("parsed markdown tail must have a root")
         };
+        let old_block_count = old_blocks.len();
         let (blocks, unchanged, old_suffix) = if reparse_start == 0 {
+            // The old last block is compared even when it is unchanged: a
+            // block after it changes the gap below it.
             let unchanged = old_blocks
                 .iter()
                 .zip(&tail_children)
                 .take_while(|(old, new)| old == new)
-                .count();
+                .count()
+                .min(old_block_count.saturating_sub(1));
             self.root_block_starts = parsed_document.root_starts;
             let old_suffix = old_blocks.split_off(unchanged);
             (tail_children, unchanged, old_suffix)
@@ -294,7 +298,9 @@ impl MarkdownState {
                 old == new
                     && render::item_renders_alike(
                         &old_suffix[old.block - unchanged],
+                        old.block + 1 == old_block_count,
                         &blocks[new.block],
+                        new.block + 1 == blocks.len(),
                         new,
                     )
             })
