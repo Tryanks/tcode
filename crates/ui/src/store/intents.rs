@@ -236,8 +236,8 @@ impl WorkspaceStore {
                 status.session_id.clone(),
                 (
                     status.working,
-                    status.pending_approval,
-                    status.pending_user_input,
+                    !status.pending_approvals.is_empty(),
+                    status.pending_user_input.is_some(),
                     Self::status_background_only(status),
                 ),
             );

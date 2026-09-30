@@ -961,12 +961,16 @@ impl WorkspaceStore {
                 self.session_statuses
                     .insert(session_id.clone(), status.clone());
                 if self.selected_session_id.as_ref() == Some(session_id) {
-                    let was_running = self.active_turn_running();
                     let mut status = status.clone();
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(session_id);
                     self.session_status_replica = Some(status);
-                    self.reconcile_replica_liveness(session_id, was_running);
+                    if let Some((replica_id, mut timeline)) = self.session_replica.take() {
+                        if replica_id == *session_id {
+                            self.settle_running_turn(&mut timeline);
+                        }
+                        self.session_replica = Some((replica_id, timeline));
+                    }
                     self.sync_terminal_topics();
                     self.sync_active_conversation_ui();
                     self.background_session_flags.remove(session_id);
@@ -975,8 +979,8 @@ impl WorkspaceStore {
                         session_id.clone(),
                         (
                             status.working,
-                            status.pending_approval,
-                            status.pending_user_input,
+                            !status.pending_approvals.is_empty(),
+                            status.pending_user_input.is_some(),
                             Self::status_background_only(status),
                         ),
                     );
@@ -1035,11 +1039,12 @@ impl WorkspaceStore {
                 if self.session_catching_up {
                     return;
                 }
-                let timeline = self.fold_held_records(session_id);
+                let mut timeline = self.fold_held_records(session_id);
                 self.baseline_topics.insert(envelope.topic.clone());
                 self.hydrated_sessions.insert(session_id.clone());
                 self.session_turn_offset =
                     (*total_turns as usize).saturating_sub(timeline.turns.len());
+                self.settle_running_turn(&mut timeline);
                 self.session_replica = Some((session_id.clone(), timeline));
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
@@ -1332,37 +1337,27 @@ impl WorkspaceStore {
             .is_some_and(|status| status.turn_running)
     }
 
-    /// The host's status, not the held records, decides whether a turn is
-    /// live: records folded after their provider stopped still end running.
     fn fold_held_records(&self, session_id: &str) -> Timeline {
-        let mut timeline =
-            Timeline::fold_stored(self.session_records.get(session_id).into_iter().flatten());
-        if !self.active_turn_running() {
-            timeline.mark_idle();
-        }
-        timeline
+        Timeline::fold_stored(self.session_records.get(session_id).into_iter().flatten())
     }
 
-    /// Status and events are separate topics, so the status that settles a
-    /// fold can arrive after it. Idling is cheap to apply in place; reviving
-    /// needs a refold because `mark_idle` discarded the live turn's state.
-    fn reconcile_replica_liveness(&mut self, session_id: &str, was_running: bool) {
-        let running = self.active_turn_running();
-        if running == was_running {
-            return;
-        }
-        let Some((replica_id, timeline)) = self.session_replica.as_mut() else {
-            return;
-        };
-        if replica_id != session_id {
-            return;
-        }
-        if !running {
-            timeline.mark_idle();
-        } else if !timeline.turn_running {
-            let timeline = self.fold_held_records(session_id);
-            self.session_replica = Some((session_id.to_owned(), timeline));
-        }
+    /// Records folded after their provider stopped still end running, and a
+    /// window cut inside the running turn misses its start: the host's status
+    /// places the running turn among the held ones. Status and events are
+    /// separate topics, so each settles the replica whenever it changes.
+    fn settle_running_turn(&self, timeline: &mut Timeline) {
+        let running = self
+            .session_status_replica
+            .as_ref()
+            .and_then(|status| status.running_turn);
+        timeline.settle_running_turn(
+            running.and_then(|running| {
+                usize::try_from(running.turn)
+                    .ok()?
+                    .checked_sub(self.session_turn_offset)
+            }),
+            running.and_then(|running| running.started_at),
+        );
     }
 
     fn suppress_task_auto_open_if_running(&mut self) {
@@ -1908,7 +1903,7 @@ impl WorkspaceStore {
         self.session_status_replica
             .as_ref()
             .filter(|status| status.session_id == session_id)
-            .map(|status| status.pending_approval)
+            .map(|status| !status.pending_approvals.is_empty())
             .or_else(|| {
                 self.background_session_flags
                     .get(session_id)
@@ -1921,7 +1916,7 @@ impl WorkspaceStore {
         self.session_status_replica
             .as_ref()
             .filter(|status| status.session_id == session_id)
-            .map(|status| status.pending_user_input)
+            .map(|status| status.pending_user_input.is_some())
             .or_else(|| {
                 self.background_session_flags
                     .get(session_id)
@@ -2874,8 +2869,7 @@ impl WorkspaceStore {
         self.with_active_timeline(|timeline| {
             (
                 timeline
-                    .proposed_plan
-                    .as_ref()
+                    .shown_proposed_plan()
                     .map(|plan| plan.markdown.clone()),
                 timeline.plan_steps.clone(),
             )
@@ -3720,14 +3714,32 @@ mod tests {
         status
     }
 
-    fn with_turn_running(
+    fn with_running_turn(
         status: &tcode_protocol::SessionStatus,
-        running: bool,
+        running: Option<tcode_core::session::RunningTurn>,
+        question: Option<tcode_core::session::PendingUserInput>,
     ) -> tcode_protocol::SessionStatus {
         let mut status = status.clone();
-        status.turn_running = running;
-        status.working = running;
+        status.turn_running = running.is_some();
+        status.working = running.is_some();
+        status.running_turn = running;
+        status.pending_user_input = question;
         status
+    }
+
+    fn question() -> tcode_core::session::PendingUserInput {
+        tcode_core::session::PendingUserInput {
+            request_id: "ask".into(),
+            questions: vec![agent::UserInputQuestion {
+                id: "which".into(),
+                header: "Next".into(),
+                question: "Which way?".into(),
+                options: Vec::new(),
+                multi_select: false,
+                prefill: None,
+            }],
+            delivery: agent::UserInputDelivery::Blocking,
+        }
     }
 
     fn recorded(ts: u64, event: AgentEvent) -> SessionEventRecord {
@@ -3787,66 +3799,110 @@ mod tests {
     }
 
     #[gpui::test]
-    fn status_arriving_after_the_snapshot_settles_the_running_turn(cx: &mut TestAppContext) {
+    fn the_status_settles_the_running_turn_whichever_topic_arrives_first(cx: &mut TestAppContext) {
         let status = draft_status();
         let id = status.session_id.clone();
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (_incoming, from_host) = async_channel::unbounded();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
-        });
-        let status_event = |running| EventEnvelope {
+        let status_event = |running: Option<u64>, question| EventEnvelope {
             request_id: None,
             topic: Topic::SessionStatus {
                 session_id: id.clone(),
             },
-            event: ServerEvent::SessionStatusReplaced(with_turn_running(&status, running)),
+            event: ServerEvent::SessionStatusReplaced(with_running_turn(
+                &status,
+                running.map(|turn| tcode_core::session::RunningTurn {
+                    turn,
+                    started_at: Some(1_000),
+                }),
+                question,
+            )),
         };
-        workspace.update(cx, |store, cx| {
-            store.selected_session_id = Some(id.clone());
-            // The status cached from the last visit, before this turn began.
-            store.session_status_replica = Some(with_turn_running(&status, false));
-            store.apply_domain_event(
-                &session_snapshot(
-                    &id,
-                    0,
-                    vec![
-                        recorded(
-                            1_000,
-                            AgentEvent::TurnStarted {
-                                turn_id: "turn".into(),
-                            },
-                        ),
-                        reply(2_000),
-                    ],
+        let snapshot = session_snapshot(
+            &id,
+            0,
+            vec![
+                recorded(
+                    1_000,
+                    AgentEvent::TurnStarted {
+                        turn_id: "turn".into(),
+                    },
                 ),
-                cx,
-            );
-            store.apply_domain_event(&status_event(true), cx);
-        });
-        assert_eq!(live_turn(&workspace, cx), Some(1_000));
+                reply(2_000),
+                recorded(
+                    3_000,
+                    AgentEvent::UserInputRequested {
+                        request_id: "ask".into(),
+                        questions: question().questions,
+                        delivery: agent::UserInputDelivery::Blocking,
+                    },
+                ),
+            ],
+        );
+        for status_first in [false, true] {
+            let (to_host, _outgoing) = async_channel::unbounded();
+            let (_incoming, from_host) = async_channel::unbounded();
+            let link = tcode_client::HostLink::new(to_host, from_host);
+            let workspace = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    link,
+                    WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            let open_question = |cx: &TestAppContext| {
+                workspace.read_with(cx, |store, _| {
+                    store
+                        .composer_state()
+                        .pending_user_input
+                        .map(|pending| pending.request_id)
+                })
+            };
+            workspace.update(cx, |store, cx| {
+                store.selected_session_id = Some(id.clone());
+                // The status cached from the last visit, before this turn began.
+                store.session_status_replica = Some(status.clone());
+                if status_first {
+                    store.apply_domain_event(&status_event(Some(0), Some(question())), cx);
+                    store.apply_domain_event(&snapshot, cx);
+                } else {
+                    store.apply_domain_event(&snapshot, cx);
+                    assert_eq!(store.with_active_timeline(|t| t.turn_running), Some(false));
+                    store.apply_domain_event(&status_event(Some(0), Some(question())), cx);
+                }
+            });
+            assert_eq!(live_turn(&workspace, cx), Some(1_000));
+            assert_eq!(open_question(cx).as_deref(), Some("ask"));
 
-        workspace.update(cx, |store, cx| {
-            store.apply_domain_event(&status_event(false), cx)
-        });
-        assert_eq!(live_turn(&workspace, cx), None);
+            // The next turn runs before its opening record arrives.
+            workspace.update(cx, |store, cx| {
+                store.apply_domain_event(&status_event(Some(1), None), cx)
+            });
+            assert_eq!(live_turn(&workspace, cx), None);
+
+            workspace.update(cx, |store, cx| {
+                store.apply_domain_event(&status_event(None, None), cx)
+            });
+            assert_eq!(live_turn(&workspace, cx), None);
+            assert_eq!(open_question(cx), None);
+        }
     }
 
     #[gpui::test]
-    fn a_window_cut_inside_the_running_turn_loads_back_to_its_start(cx: &mut TestAppContext) {
-        let status = with_turn_running(&draft_status(), true);
+    fn a_window_cut_inside_the_running_turn_is_timed_from_the_host(cx: &mut TestAppContext) {
+        let status = with_running_turn(
+            &draft_status(),
+            Some(tcode_core::session::RunningTurn {
+                turn: 0,
+                started_at: Some(1_000),
+            }),
+            None,
+        );
         let id = status.session_id.clone();
         let (to_host, outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
-        });
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
@@ -3856,46 +3912,18 @@ mod tests {
             store.apply_domain_event(&session_snapshot(&id, 3, vec![reply(4_000)]), cx);
         });
         cx.run_until_parked();
-        assert_eq!(live_turn(&workspace, cx), None);
-
-        let request = std::iter::from_fn(|| outgoing.try_recv().ok())
-            .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
-            .find(|request| {
-                matches!(
+        assert_eq!(live_turn(&workspace, cx), Some(1_000));
+        assert!(
+            !std::iter::from_fn(|| outgoing.try_recv().ok())
+                .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+                .any(|request| matches!(
                     request.payload,
                     tcode_protocol::ClientPayload::Query(
-                        tcode_protocol::Query::SessionHistoryPage { before: 3, .. }
+                        tcode_protocol::Query::SessionHistoryPage { .. }
                     )
-                )
-            })
-            .expect("the page holding the turn's start");
-        incoming
-            .try_send(
-                tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
-                    id: request.id,
-                    result: Ok(tcode_protocol::QueryResponse::SessionHistoryPage {
-                        records: vec![
-                            recorded(
-                                1_000,
-                                AgentEvent::TurnStarted {
-                                    turn_id: "turn".into(),
-                                },
-                            ),
-                            reply(2_000),
-                            reply(3_000),
-                        ],
-                        from: 0,
-                        end: 3,
-                        truncated: false,
-                    }),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-        wait_until(cx, &workspace, "the turn's start applied", |cx| {
-            live_turn(&workspace, cx).is_some()
-        });
-        assert_eq!(live_turn(&workspace, cx), Some(1_000));
+                )),
+            "the turn's start comes with the status, not from earlier pages"
+        );
     }
 
     fn test_host(store: SessionStore) -> SpawnedHost {
@@ -4814,8 +4842,19 @@ mod tests {
                 .expect("first session status");
             parked.turn_running = true;
             parked.working = true;
-            parked.pending_user_input = true;
-            parked.pending_approval = true;
+            parked.pending_user_input = Some(tcode_core::session::PendingUserInput {
+                request_id: "ask".into(),
+                questions: Vec::new(),
+                delivery: agent::UserInputDelivery::Blocking,
+            });
+            parked.pending_approvals = vec![agent::ApprovalRequest {
+                id: "approve".into(),
+                turn_id: None,
+                kind: agent::ApprovalKind::FileRead {
+                    detail: "Cargo.toml".into(),
+                },
+                options: Vec::new(),
+            }];
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -4832,8 +4871,8 @@ mod tests {
             next.cwd = second.cwd.clone();
             next.turn_running = false;
             next.working = false;
-            next.pending_user_input = false;
-            next.pending_approval = false;
+            next.pending_user_input = None;
+            next.pending_approvals.clear();
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -4870,8 +4909,8 @@ mod tests {
             let mut finished = store.session_statuses[&first.id].clone();
             finished.turn_running = false;
             finished.working = false;
-            finished.pending_user_input = false;
-            finished.pending_approval = false;
+            finished.pending_user_input = None;
+            finished.pending_approvals.clear();
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
