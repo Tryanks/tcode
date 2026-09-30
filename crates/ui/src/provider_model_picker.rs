@@ -5,7 +5,8 @@
 //! live here so Orchestrate and other settings do not grow subtly different
 //! pickers.
 
-use crate::scroll::ScrollableElement as _;
+use std::rc::Rc;
+
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::{
@@ -13,11 +14,11 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_core::settings::Settings;
@@ -125,23 +126,30 @@ impl ProviderModelPicker {
         }
     }
 
-    fn options(&self, cx: &App) -> Vec<ModelOption> {
-        let mut options = Vec::new();
-        // Only enabled profiles are offered for new selections; a disabled
-        // profile stays configurable in Settings but never reaches the picker.
-        for profile in self.store.read(cx).enabled_profiles() {
-            let profile_id =
-                (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
-            for model in self.store.read(cx).picker_models_for_profile(&profile.id) {
-                options.push(ModelOption {
-                    provider: profile.kind,
-                    id: model.id,
-                    name: model.name,
-                    profile_id: profile_id.clone(),
-                });
-            }
-        }
-        options
+    /// The models a profile tab offers. Only enabled profiles are offered for
+    /// new selections; a disabled profile stays configurable in Settings but
+    /// never reaches the picker.
+    fn profile_options(&self, profile_id: &str, cx: &App) -> Vec<ModelOption> {
+        let store = self.store.read(cx);
+        let Some(profile) = store
+            .enabled_profiles()
+            .into_iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Vec::new();
+        };
+        let option_profile =
+            (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
+        store
+            .picker_models_for_profile(&profile.id)
+            .into_iter()
+            .map(|model| ModelOption {
+                provider: profile.kind,
+                id: model.id,
+                name: model.name,
+                profile_id: option_profile.clone(),
+            })
+            .collect()
     }
 
     pub(crate) fn display_name(
@@ -151,7 +159,7 @@ impl ProviderModelPicker {
         profile_id: Option<&str>,
         cx: &App,
     ) -> String {
-        self.options(cx)
+        self.profile_options(&selection_profile_id(provider, profile_id), cx)
             .into_iter()
             .find(|option| {
                 option.provider == provider
@@ -214,10 +222,9 @@ impl Render for ProviderModelPicker {
         crate::material::overlay_popover(self.popover_id)
             .trigger(self.trigger(cx))
             .content(move |_, window, cx| {
-                let (options, profiles, selected_profile, selected, excluded) = {
+                let (profiles, selected_profile, selected, excluded) = {
                     let picker = picker.read(cx);
                     (
-                        picker.options(cx),
                         picker.store.read(cx).enabled_profiles(),
                         picker.selected_profile.clone(),
                         picker.selected.clone(),
@@ -232,93 +239,73 @@ impl Render for ProviderModelPicker {
                 } else {
                     profiles.first().map(|p| p.id.clone()).unwrap_or_default()
                 };
-                let available: Vec<_> = options
+                let available: Rc<[ModelOption]> = picker
+                    .read(cx)
+                    .profile_options(&current_profile, cx)
                     .into_iter()
                     .filter(|option| {
-                        option_profile_id(option) == current_profile
-                            && !excluded.iter().any(|(provider, model)| {
-                                *provider == option.provider && model == &option.id
-                            })
+                        !excluded.iter().any(|(provider, model)| {
+                            *provider == option.provider && model == &option.id
+                        })
                     })
                     .collect();
 
-                let mut rows = v_flex().w_full().p_1().gap_0p5();
-                if available.is_empty() {
-                    rows = rows.child(
-                        div()
-                            .flex_none()
-                            .p_4()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("model_picker.no_models")),
-                    );
+                // The catalog is a viewport of its own; cap it against the
+                // window so a short one scrolls instead of overflowing it.
+                let catalog = crate::sizing::fit_viewport(300., window.viewport_size().height);
+                let rows = if available.is_empty() {
+                    div()
+                        .w_full()
+                        .h(catalog)
+                        .p_1()
+                        .child(
+                            div()
+                                .p_4()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(crate::tr!("model_picker.no_models")),
+                        )
+                        .into_any_element()
                 } else {
-                    for (index, option) in available.into_iter().enumerate() {
-                        let is_selected =
-                            selected
-                                .as_ref()
-                                .is_some_and(|(provider, model, profile_id)| {
-                                    *provider == option.provider
-                                        && model == &option.id
-                                        && profile_id == &option.profile_id
-                                });
-                        let picker = picker.clone();
-                        let popover = cx.entity();
-                        rows = rows.child(
-                            h_flex()
-                                .id(("settings-model-option", index))
-                                .flex_none()
-                                .w_full()
-                                .px_2()
-                                .py_1p5()
-                                .gap_2()
-                                .items_center()
-                                .rounded(crate::material::radius_button())
-                                .cursor_pointer()
-                                .hover(|style| style.bg(cx.theme().accent))
-                                .child(
-                                    tinted_glyph(
+                    let picker = picker.clone();
+                    let store = store.clone();
+                    let popover = cx.entity();
+                    crate::scroll::VirtualList::uniform(
+                        "settings-model-options",
+                        available.len(),
+                        move |range, _, cx| {
+                            range
+                                .map(|index| {
+                                    let option = &available[index];
+                                    let is_selected = selected.as_ref().is_some_and(
+                                        |(provider, model, profile_id)| {
+                                            *provider == option.provider
+                                                && model == &option.id
+                                                && profile_id == &option.profile_id
+                                        },
+                                    );
+                                    div().pb_0p5().child(option_row(
+                                        index,
+                                        option,
+                                        is_selected,
+                                        &picker,
                                         &store,
-                                        option.provider,
-                                        option.profile_id.as_deref(),
+                                        &popover,
                                         cx,
-                                    )
-                                    .small(),
-                                )
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(div().text_size(px(13.)).child(option.name.clone()))
-                                        .child(
-                                            div()
-                                                .font_family("monospace")
-                                                .text_size(px(11.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(option.id.clone()),
-                                        ),
-                                )
-                                .when(is_selected, |row| {
-                                    row.child(Icon::new(IconName::Check).xsmall())
+                                    ))
                                 })
-                                .on_click(move |_, window, cx| {
-                                    let selected = option.clone();
-                                    picker.update(cx, |picker, cx| {
-                                        picker.selected_profile = option_profile_id(&selected);
-                                        if matches!(picker.trigger_kind, TriggerKind::Selection) {
-                                            picker.selected = Some((
-                                                selected.provider,
-                                                selected.id.clone(),
-                                                selected.profile_id.clone(),
-                                            ));
-                                        }
-                                        cx.emit(ModelSelected(selected));
-                                    });
-                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                }),
-                        );
-                    }
-                }
+                                .collect()
+                        },
+                    )
+                    .scrollbar()
+                    .w_full()
+                    .h(catalog)
+                    .pt_1()
+                    .px_1()
+                    // The last row carries its gap.
+                    .pb(px(2.))
+                    .into_any_element()
+                };
 
                 // Keep profile tabs in the same order as the settings cards.
                 let mut tabs = h_flex().w_full().p_1().gap_1();
@@ -364,9 +351,6 @@ impl Render for ProviderModelPicker {
                     );
                 }
 
-                // The catalog is a viewport of its own; cap it against the
-                // window so a short one scrolls instead of overflowing it.
-                let catalog = crate::sizing::fit_viewport(300., window.viewport_size().height);
                 v_flex()
                     .w(crate::sizing::fit_viewport(
                         390.,
@@ -374,15 +358,66 @@ impl Render for ProviderModelPicker {
                     ))
                     .child(tabs)
                     .child(crate::material::faded_hairline(cx))
-                    .child(
-                        div()
-                            .w_full()
-                            .h(catalog)
-                            .overflow_y_scrollbar()
-                            .child(div().size_full().child(rows)),
-                    )
+                    .child(rows)
             })
     }
+}
+
+fn option_row(
+    index: usize,
+    option: &ModelOption,
+    is_selected: bool,
+    picker: &Entity<ProviderModelPicker>,
+    store: &Entity<WorkspaceStore>,
+    popover: &Entity<PopoverState>,
+    cx: &App,
+) -> AnyElement {
+    let picker = picker.clone();
+    let popover = popover.clone();
+    let selected = option.clone();
+    h_flex()
+        .id(("settings-model-option", index))
+        .flex_none()
+        .w_full()
+        .px_2()
+        .py_1p5()
+        .gap_2()
+        .items_center()
+        .rounded(crate::material::radius_button())
+        .cursor_pointer()
+        .hover(|style| style.bg(cx.theme().accent))
+        .child(tinted_glyph(store, option.provider, option.profile_id.as_deref(), cx).small())
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_size(px(13.)).child(option.name.clone()))
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(option.id.clone()),
+                ),
+        )
+        .when(is_selected, |row| {
+            row.child(Icon::new(IconName::Check).xsmall())
+        })
+        .on_click(move |_, window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.selected_profile = option_profile_id(&selected);
+                if matches!(picker.trigger_kind, TriggerKind::Selection) {
+                    picker.selected = Some((
+                        selected.provider,
+                        selected.id.clone(),
+                        selected.profile_id.clone(),
+                    ));
+                }
+                cx.emit(ModelSelected(selected.clone()));
+            });
+            popover.update(cx, |state, cx| state.dismiss(window, cx));
+        })
+        .into_any_element()
 }
 
 /// The provider glyph tinted with the profile's own accent (falling back to the
