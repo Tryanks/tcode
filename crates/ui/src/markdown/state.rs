@@ -15,7 +15,7 @@ use gpui_base::{ElementExt as _, v_flex};
 
 use super::{
     link_target::{LinkTarget, LinkTargetCache},
-    nodes::BlockNode,
+    nodes::{BlockNode, TextPosition},
     render::{self, RootItem},
     selection_adapter::MarkdownSelectionAdapter,
 };
@@ -253,12 +253,16 @@ impl MarkdownState {
         else {
             unreachable!("parsed markdown tail must have a root")
         };
+        let old_block_count = old_blocks.len();
         let (blocks, unchanged, old_suffix) = if reparse_start == 0 {
+            // The old last block is compared even when it is unchanged: a
+            // block after it changes the gap below it.
             let unchanged = old_blocks
                 .iter()
                 .zip(&tail_children)
                 .take_while(|(old, new)| old == new)
-                .count();
+                .count()
+                .min(old_block_count.saturating_sub(1));
             self.root_block_starts = parsed_document.root_starts;
             let old_suffix = old_blocks.split_off(unchanged);
             (tail_children, unchanged, old_suffix)
@@ -294,7 +298,9 @@ impl MarkdownState {
                 old == new
                     && render::item_renders_alike(
                         &old_suffix[old.block - unchanged],
+                        old.block + 1 == old_block_count,
                         &blocks[new.block],
+                        new.block + 1 == blocks.len(),
                         new,
                     )
             })
@@ -341,6 +347,10 @@ impl MarkdownState {
             self.last_reparse_bytes = self.text.len();
         }
         self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.selection_adapter
+            .virtual_blocks
+            .borrow_mut()
+            .forget_positions();
         // Even an edit that preserves the number of root blocks can change
         // their heights, so every reparse must invalidate the cached sizes.
         self.list_state.reset(self.items.len());
@@ -362,8 +372,14 @@ impl MarkdownState {
     }
 
     /// The selected text in the root list's `items`, or in the whole
-    /// document when the selection is not bounded to them.
-    pub(super) fn selected_text_in(&self, items: Option<RangeInclusive<usize>>) -> String {
+    /// document when the selection is not bounded to them. A block holding
+    /// the selection's `start` or `end` is read from those positions.
+    pub(super) fn selected_text_in(
+        &self,
+        items: Option<RangeInclusive<usize>>,
+        start: Option<TextPosition>,
+        end: Option<TextPosition>,
+    ) -> String {
         let (BlockNode::Root { children }, Some(items)) = (&*self.parsed, items) else {
             return self.parsed.selected_text();
         };
@@ -374,16 +390,40 @@ impl MarkdownState {
         };
         let children = (first.block..=last.block)
             .map(|block| {
-                let start = (block == first.block)
+                let from = start.filter(|position| position.block == block);
+                let to = end.filter(|position| position.block == block);
+                if from.is_some() || to.is_some() {
+                    return children[block].selected_between(from, to);
+                }
+                let span_start = (block == first.block)
                     .then(|| first.span.as_ref().map(|span| span.start))
                     .flatten();
-                let end = (block == last.block)
+                let span_end = (block == last.block)
                     .then(|| last.span.as_ref().map(|span| span.end))
                     .flatten();
-                render::block_span(&children[block], start, end)
+                render::block_span(&children[block], span_start, span_end)
             })
             .collect();
         BlockNode::Root { children }.selected_text()
+    }
+
+    /// The text position under a content point, from the text painted in
+    /// the last frame.
+    pub(super) fn text_position_at(&self, content_point: Point<Pixels>) -> Option<TextPosition> {
+        let BlockNode::Root { children } = &*self.parsed else {
+            return None;
+        };
+        let window_point =
+            content_point + self.list_state.scroll_px_offset_for_scrollbar() + self.bounds.origin;
+        self.selection_adapter
+            .runs_at(window_point)
+            .into_iter()
+            .find_map(|(state, offset)| {
+                children
+                    .iter()
+                    .enumerate()
+                    .find_map(|(block, node)| node.position_of(block, &state, offset))
+            })
     }
 
     pub(super) fn item_ix_at(&self, content_y: Pixels) -> Option<usize> {
@@ -413,6 +453,10 @@ impl MarkdownState {
 
         if width_changed {
             self.measured_content_height = None;
+            self.selection_adapter
+                .virtual_blocks
+                .borrow_mut()
+                .forget_positions();
             if had_measured_height {
                 // The custom warm-frame list only measures its visible slice.
                 // Throw away every old-width item size, then run one complete,
