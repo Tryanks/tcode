@@ -391,9 +391,15 @@ fn option_row(
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .child(div().text_size(px(13.)).child(option.name.clone()))
                 .child(
                     div()
+                        .truncate()
+                        .text_size(px(13.))
+                        .child(option.name.clone()),
+                )
+                .child(
+                    div()
+                        .truncate()
                         .font_family("monospace")
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)

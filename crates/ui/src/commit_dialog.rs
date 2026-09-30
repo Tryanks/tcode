@@ -177,8 +177,7 @@ impl CommitDialog {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .text_size(px(13.))
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(path),
