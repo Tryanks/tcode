@@ -899,6 +899,15 @@ mod tests {
         }
     }
 
+    /// Draws a full frame. A frame that reuses any view keeps every debug
+    /// bound of the previous one, so a row scrolled away would still be found.
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.refresh();
+            _ = window.draw(cx);
+        });
+    }
+
     fn dispatch_palette_key(
         palette: &Entity<CommandPalette>,
         cx: &mut VisualTestContext,
@@ -1098,7 +1107,7 @@ mod tests {
         let palette = sheet.read_with(cx, |sheet, _| sheet.palette.clone());
         cx.update(|window, cx| palette.update(cx, |palette, cx| palette.open(false, window, cx)));
         cx.run_until_parked();
-        cx.update(|window, cx| _ = window.draw(cx));
+        draw(cx);
         assert!(cx.debug_bounds("palette-row-5").is_some());
         assert!(
             cx.debug_bounds("palette-row-250").is_none(),
@@ -1113,7 +1122,7 @@ mod tests {
                 touch_phase: gpui::TouchPhase::Moved,
                 ..Default::default()
             });
-            cx.update(|window, cx| _ = window.draw(cx));
+            draw(cx);
         }
         let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
         assert_eq!(last, 309);
@@ -1123,7 +1132,7 @@ mod tests {
         for _ in 0..5 {
             dispatch_palette_key(&palette, cx, "down");
         }
-        cx.update(|window, cx| _ = window.draw(cx));
+        draw(cx);
         assert!(
             cx.debug_bounds("palette-row-5").is_some(),
             "the keyboard selection scrolls into view"

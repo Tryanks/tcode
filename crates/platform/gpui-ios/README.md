@@ -1,6 +1,6 @@
 # gpui-ios
 
-`gpui-ios` is the UIKit platform backend for `gpui-pre` 0.3.5 used by the
+`gpui-ios` is the UIKit platform backend for the gpui-fast GPUI used by the
 tcode iOS host. It is deliberately an embedded backend: `UIApplication` owns
 the process and run loop, Swift supplies a `UIView`, and
 `Application::run_embedded` keeps GPUI alive while UIKit drives frames and
@@ -22,7 +22,7 @@ The Swift host creates a `GPUIHostView` whose backing layer is
 `CAMetalLayer`, then passes the unretained `UIView` pointer and its logical
 geometry through `gpui_ios_attach_view`. `IosWindow` wraps that pointer in
 `raw-window-handle`'s UIKit handle, creates a Metal-only `wgpu::Instance`, and
-hands its context to the published `gpui-pre-wgpu::WgpuRenderer`. Logical
+hands its context to gpui-fast's `gpui_wgpu::WgpuRenderer`. Logical
 resizes are converted to device pixels before `update_drawable_size`. The
 UIKit content scale is also applied to the renderer at creation, on every
 scale change, and immediately after a detached surface is replaced so glass
@@ -74,7 +74,7 @@ begins and sends all changed contacts in a single C array. Rust emits one raw
 included for latency compensation, while actual coordinates remain the source
 of hit testing and velocity.
 
-`gpui-pre` 0.3.5 contains the gesture arena, so this backend intentionally does
+GPUI contains the gesture arena, so this backend intentionally does
 not also synthesize mouse events. GPUI selects the primary touch, defers the
 mouse-down/up click pair until the tap wins, emits drag scrolling as
 `ScrollWheelEvent { delta: ScrollDelta::Pixels(..) }`, advances iOS-style fling
