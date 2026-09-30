@@ -756,6 +756,7 @@ impl Render for CommandPalette {
                     .aria_label(crate::tr!("palette.results"))
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .px(px(if compact { 16. } else { 8. }))
                     .py_2()
                     .child(
@@ -766,7 +767,11 @@ impl Render for CommandPalette {
                             }),
                         )
                         .size_full(),
-                    ),
+                    )
+                    .child(crate::scroll::list_height_hint(
+                        &self.list_state,
+                        px(if compact { 52. } else { 42. }),
+                    )),
             )
             .into_any_element()
         };
@@ -1094,22 +1099,19 @@ mod tests {
             "a phone sheet must not lay out all 300 thread rows"
         );
 
-        palette.update(cx, |palette, cx| {
-            let results = palette.results(cx);
-            let row = results
-                .rows
-                .iter()
-                .position(|row| matches!(row, Row::Item(250)))
-                .unwrap();
-            palette.list_state.scroll_to(gpui::ListOffset {
-                item_ix: row,
-                offset_in_item: px(0.),
+        let position = cx.debug_bounds("palette-row-5").unwrap().center();
+        for _ in 0..30 {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-1000.))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
             });
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| _ = window.draw(cx));
-        assert!(cx.debug_bounds("palette-row-250").is_some());
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
+        assert_eq!(last, 309);
+        assert!(cx.debug_bounds("palette-row-309").is_some());
         assert!(cx.debug_bounds("palette-row-5").is_none());
     }
 
