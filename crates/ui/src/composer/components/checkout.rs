@@ -297,13 +297,7 @@ fn branch_row(
                 .cursor_pointer()
                 .text_size(px(13.))
                 .hover(|s| s.bg(cx.theme().muted))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(name.to_string()),
-                )
+                .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
                 .when(is_current, |this| {
                     this.child(
                         Icon::new(IconName::Check)

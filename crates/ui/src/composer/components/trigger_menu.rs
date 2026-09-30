@@ -311,6 +311,7 @@ impl Composer {
                     )
                 }),
             )
+            .reveal(Some(highlight))
             .w_full()
             // The menu's border sits outside this cap.
             .max_h(px(286.))
@@ -361,6 +362,7 @@ fn render_menu_row(
     .into_owned();
     h_flex()
         .id(("menu-row", index))
+        .debug_selector(move || format!("menu-row-{index}"))
         .role(Role::ListBoxOption)
         .aria_label(accessible_label)
         .aria_selected(is_active)
@@ -404,4 +406,63 @@ fn render_menu_row(
         .on_click(cx.listener(move |this, _, window, cx| {
             this.accept_menu(index, window, cx);
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, size};
+
+    #[gpui::test]
+    fn arrow_keys_keep_the_highlighted_mention_laid_out(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
+                "tcode-trigger-menu-test-{}-{}",
+                std::process::id(),
+                tcode_services::store::now_millis()
+            )))
+            .unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("trigger-menu".into(), std::env::temp_dir(), cx);
+            let timeline = state.residents.live.get(&id).unwrap().timeline.clone();
+            (id, timeline)
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(size(px(800.), px(600.)));
+        composer.update_in(cx, |composer, window, cx| {
+            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            let entries = (0..FILE_MENU_ROW_CAP)
+                .map(|index| PathEntry::from_rel(format!("file-{index:02}.rs"), false))
+                .collect();
+            composer.workspace = Some((cwd, entries));
+            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        });
+        cx.simulate_input("@");
+        cx.update(|window, cx| _ = window.draw(cx));
+        let last = FILE_MENU_ROW_CAP - 1;
+        let last_row: &'static str = format!("menu-row-{last}").leak();
+        assert!(cx.debug_bounds("menu-row-0").is_some());
+        assert!(cx.debug_bounds(last_row).is_none());
+
+        for _ in 0..last {
+            cx.simulate_keystrokes("down");
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        assert!(cx.debug_bounds(last_row).is_some());
+        for _ in 0..last {
+            cx.simulate_keystrokes("up");
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        assert!(cx.debug_bounds("menu-row-0").is_some());
+    }
 }
