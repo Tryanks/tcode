@@ -3,14 +3,15 @@ use std::rc::Rc;
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, DismissEvent, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, RenderOnce, Role, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, anchored, deferred, div,
-    prelude::FluentBuilder, px,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, RenderOnce, Role, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, anchored,
+    deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 
 use crate::{
     icon::{Icon, IconName},
+    scroll::ScrollableElement as _,
     sizing::Sizable as _,
     theme::ActiveTheme as _,
 };
@@ -42,6 +43,7 @@ pub struct PopupMenu {
     focus: FocusHandle,
     items: Vec<MenuItem>,
     selected: Option<usize>,
+    scroll: ScrollHandle,
 }
 impl FluentBuilder for PopupMenu {}
 
@@ -52,6 +54,7 @@ impl PopupMenu {
             focus: cx.focus_handle(),
             items: Vec::new(),
             selected: None,
+            scroll: ScrollHandle::new(),
         }
     }
     fn build(
@@ -165,8 +168,7 @@ impl PopupMenu {
                 .selected
                 .and_then(|selected| items.iter().position(|i| *i == selected))
                 .unwrap_or(0);
-            self.selected = Some(items[(position + items.len() - 1) % items.len()]);
-            cx.notify();
+            self.select(items[(position + items.len() - 1) % items.len()], cx);
         }
     }
     fn down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
@@ -177,9 +179,13 @@ impl PopupMenu {
                 .and_then(|selected| items.iter().position(|i| *i == selected))
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            self.selected = Some(items[position % items.len()]);
-            cx.notify();
+            self.select(items[position % items.len()], cx);
         }
+    }
+    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.selected = Some(index);
+        self.scroll.scroll_to_item(index);
+        cx.notify();
     }
 }
 
@@ -197,7 +203,7 @@ impl Render for PopupMenu {
             // rather than a bare strip for its final frame.
             return div().id("tcode-popup-menu");
         }
-        let mut root = div()
+        let root = div()
             .id("tcode-popup-menu")
             .debug_selector(|| "tcode-popup-menu".into())
             .key_context(CONTEXT)
@@ -210,17 +216,27 @@ impl Render for PopupMenu {
             .flex_col()
             .min_w(px(160.))
             .max_w(px(420.))
-            .p_1()
             .rounded(crate::material::radius_overlay())
             .bg(cx.theme().popover)
             .border_1()
             .border_color(cx.theme().border)
             .shadow_xl()
             .occlude();
+        let insets = crate::window_seam::content_insets(window);
+        // Both anchors keep up to 8px from each window edge; the border is
+        // outside the scrolled items.
+        let max_height =
+            (window.viewport_size().height - insets.top - insets.bottom - px(18.)).max(px(0.));
+        let mut items = div()
+            .id("tcode-popup-menu-items")
+            .flex()
+            .flex_col()
+            .max_h(max_height)
+            .p_1();
         for (index, item) in self.items.iter().enumerate() {
             match item {
                 MenuItem::Separator => {
-                    root = root.child(div().h(px(1.)).mx_1().my_1().bg(cx.theme().border))
+                    items = items.child(div().h(px(1.)).mx_1().my_1().bg(cx.theme().border))
                 }
                 MenuItem::Item {
                     label,
@@ -232,9 +248,10 @@ impl Render for PopupMenu {
                     let selected = self.selected == Some(index);
                     let disabled = *disabled;
                     let content = render.as_ref().map(|render| render(window, cx));
-                    root = root.child(
+                    items = items.child(
                         div()
                             .id(("menu-item", index))
+                            .debug_selector(move || format!("menu-item-{index}"))
                             .role(Role::MenuItem)
                             .flex()
                             .items_center()
@@ -260,7 +277,7 @@ impl Render for PopupMenu {
                 }
             }
         }
-        root
+        root.child(items.overflow_y_scroll_area().track_scroll(&self.scroll))
     }
 }
 
@@ -620,5 +637,54 @@ mod tests {
         touch(cx, 3, TouchPhase::Started, b);
         touch(cx, 3, TouchPhase::Ended, b);
         assert_eq!(clicks.get(), 1, "the second tap activates B");
+    }
+
+    /// A menu fed one row per project, like the sidebar's project filter.
+    struct ProjectMenu;
+    impl Render for ProjectMenu {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().pt(px(200.)).child(
+                crate::widgets::Button::new("filter")
+                    .label("Filter")
+                    .debug_selector(|| "filter-trigger".into())
+                    .dropdown_menu(|menu, _, _| {
+                        (0..60).fold(menu, |menu, index| {
+                            menu.menu_with_check(
+                                format!("project-{index}"),
+                                false,
+                                Box::new(Cancel),
+                            )
+                        })
+                    }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_long_menu_stays_in_the_window_and_scrolls_to_its_last_item(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| ProjectMenu);
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("filter-trigger").unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let menu = cx.debug_bounds("tcode-popup-menu").unwrap();
+        assert!(
+            menu.top() >= px(0.) && menu.bottom() <= px(852.),
+            "menu {menu:?} leaves the window"
+        );
+        assert!(cx.debug_bounds("menu-item-59").unwrap().top() > menu.bottom());
+
+        // Up from no selection wraps to the last item.
+        cx.simulate_keystrokes("up");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let last = cx.debug_bounds("menu-item-59").unwrap();
+        assert!(
+            last.top() >= menu.top() && last.bottom() <= menu.bottom(),
+            "last item {last:?} is outside the menu {menu:?}"
+        );
+        assert_eq!(cx.debug_bounds("tcode-popup-menu").unwrap(), menu);
     }
 }
