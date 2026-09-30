@@ -3603,6 +3603,17 @@ mod tests {
     const AUTO_ACTIVITY_TEST_SESSION: &str = "session-a";
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
+    /// Draws a full frame. A frame that reuses any view keeps every debug
+    /// bound of the previous one, so an element no longer painted would still
+    /// be found.
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+    }
+
     #[test]
     fn activity_visibility_tracks_successors_and_the_remaining_minimum_window() {
         let first_seen = Instant::now();
@@ -3967,12 +3978,6 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw(cx);
         view.update(cx, |chat, cx| {
@@ -4054,12 +4059,6 @@ mod tests {
         let (view, cx) = cx
             .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw(cx);
 
@@ -4149,12 +4148,6 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         cx.simulate_resize(size(px(600.), px(900.)));
         draw(cx);
 
@@ -4250,12 +4243,6 @@ mod tests {
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
         let cx: &mut VisualTestContext = cx;
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw(cx);
         assert!(cx.debug_bounds("file-edit-diff").is_some());
@@ -4377,14 +4364,8 @@ mod tests {
 
     #[gpui::test]
     fn manually_collapsed_activity_stays_closed_while_new_activity_opens(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
+        use gpui::{px, size};
 
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         let command = ItemContent::CommandExecution {
             command: "echo hello".into(),
             output: "hello\n".into(),
@@ -5116,12 +5097,6 @@ mod tests {
                 self.0.clone()
             }
         }
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         let full = synthetic_markdown_timeline(120);
         let mut tail = full.clone();
         tail.turns.drain(..20);
@@ -5201,12 +5176,6 @@ mod tests {
                 self.0.clone()
             }
         }
-        let draw = |cx: &mut gpui::VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Moved] {
             let mut timeline = synthetic_markdown_timeline(30);
             timeline.mark_idle();
@@ -5277,12 +5246,6 @@ mod tests {
                 self.0.clone()
             }
         }
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        };
         let full = synthetic_markdown_timeline(120);
         let mut tail = full.clone();
         tail.turns.drain(..20);
