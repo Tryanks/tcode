@@ -4092,6 +4092,9 @@ mod tests {
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {
+            // Deliver the frame callbacks the platform would, so views that
+            // requested an animation frame are drawn again.
+            window.simulate_next_frame(cx);
             _ = window.draw(cx);
         });
     }
