@@ -419,17 +419,23 @@ mod tests {
             .collect();
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
             let id = state.start_draft("approval-list".into(), std::env::temp_dir(), cx);
-            let active = state.residents.live.get_mut(&id).unwrap();
-            active.timeline.pending_approvals.push(ApprovalRequest {
-                id: "patch".into(),
-                turn_id: None,
-                kind: ApprovalKind::FileChange {
-                    changes,
-                    reason: None,
+            for event in [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: "turn".into(),
                 },
-                options: Vec::new(),
-            });
-            (id, active.timeline.clone())
+                agent::AgentEvent::ApprovalRequested(ApprovalRequest {
+                    id: "patch".into(),
+                    turn_id: None,
+                    kind: ApprovalKind::FileChange {
+                        changes,
+                        reason: None,
+                    },
+                    options: Vec::new(),
+                }),
+            ] {
+                state.provider_event_for_test(&id, event, cx);
+            }
+            (id.clone(), state.residents.live[&id].timeline.clone())
         }))
         .unwrap();
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
