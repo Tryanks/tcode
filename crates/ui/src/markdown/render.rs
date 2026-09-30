@@ -873,7 +873,18 @@ fn render_list_item(
         };
         match child {
             BlockNode::Paragraph(_) if ix == 0 => {
-                let content = render_block(child, child_options, state, window, cx);
+                let content = div().flex_1().min_w_0().child(render_block(
+                    child,
+                    child_options,
+                    state,
+                    window,
+                    cx,
+                ));
+                #[cfg(test)]
+                let content = {
+                    let path = options.path.clone();
+                    content.debug_selector(move || format!("markdown-list-item-text-{path}"))
+                };
                 rows.push(
                     h_flex()
                         .w_full()
@@ -907,7 +918,7 @@ fn render_list_item(
                                     }),
                             )
                         })
-                        .child(div().flex_1().min_w_0().child(content)),
+                        .child(content),
                 );
             }
             BlockNode::List { .. } => rows.push(div().ml(rems(1.)).child(render_block(
