@@ -8,12 +8,13 @@
 //! events its viewport can use in the capture phase and lets the rest bubble
 //! to the ancestor scroller.
 
-use std::{panic::Location, rc::Rc};
+use std::{ops::Range, panic::Location, rc::Rc};
 
 use gpui::{
-    App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _,
+    AnyElement, App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ListAlignment,
+    ListSizingBehavior, ListState, ParentElement, RenderOnce, ScrollHandle, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, UniformListScrollHandle, Window, div,
+    list, prelude::FluentBuilder as _, uniform_list,
 };
 use gpui_base::{
     InteractiveElementExt as _, ScrollBounce, ScrollableMask, Scrollbar, ScrollbarHandle,
@@ -125,7 +126,7 @@ where
             .use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::default())
             .read(cx)
             .clone();
-        let root_style = root_style_from(&mut self.element);
+        let root_style = root_style_from(self.element.style());
         let content = self
             .element
             .id((self.id.clone(), "content"))
@@ -243,7 +244,7 @@ where
                 .read(cx)
                 .clone()
         });
-        let root_style = root_style_from(&mut self.element);
+        let root_style = root_style_from(self.element.style());
         // The wrapper takes the element's place in its parent's layout; the
         // viewport fills it unless a maximum height of its own bounds it.
         let bounded = self.element.style().max_size.height.is_some();
@@ -275,6 +276,177 @@ where
     }
 }
 
+type RenderRows = Box<dyn Fn(Range<usize>, &mut Window, &mut App) -> Vec<AnyElement>>;
+type RenderRow = Box<dyn FnMut(usize, &mut Window, &mut App) -> AnyElement>;
+
+enum Rows {
+    /// Every row is as tall as row `measure`, which also sets the width.
+    Uniform { render: RenderRows, measure: usize },
+    /// Rows are measured as they come into view.
+    Measured(RenderRow),
+}
+
+/// A bounded vertical viewport that lays out only the rows in view, for
+/// lists that can grow to hundreds of rows. It scrolls like
+/// [`ScrollableElement::overflow_y_scroll_area`], keeps its position while it
+/// stays rendered, and without a definite height shrinks to its rows up to its
+/// maximum height. Row gaps belong to the rows.
+#[derive(IntoElement)]
+pub(crate) struct VirtualList {
+    id: ElementId,
+    count: usize,
+    rows: Rows,
+    style: StyleRefinement,
+    scrollbar: bool,
+}
+
+impl VirtualList {
+    pub(crate) fn uniform<R: IntoElement>(
+        id: impl Into<ElementId>,
+        count: usize,
+        render: impl Fn(Range<usize>, &mut Window, &mut App) -> Vec<R> + 'static,
+    ) -> Self {
+        Self::new(
+            id,
+            count,
+            Rows::Uniform {
+                render: Box::new(move |range, window, cx| {
+                    render(range, window, cx)
+                        .into_iter()
+                        .map(IntoElement::into_any_element)
+                        .collect()
+                }),
+                measure: 0,
+            },
+        )
+    }
+
+    pub(crate) fn measured<R: IntoElement>(
+        id: impl Into<ElementId>,
+        count: usize,
+        mut render: impl FnMut(usize, &mut Window, &mut App) -> R + 'static,
+    ) -> Self {
+        Self::new(
+            id,
+            count,
+            Rows::Measured(Box::new(move |index, window, cx| {
+                render(index, window, cx).into_any_element()
+            })),
+        )
+    }
+
+    fn new(id: impl Into<ElementId>, count: usize, rows: Rows) -> Self {
+        Self {
+            id: id.into(),
+            count,
+            rows,
+            style: StyleRefinement::default(),
+            scrollbar: false,
+        }
+    }
+
+    /// Size uniform rows, and a list without a definite width, by row `index`.
+    pub(crate) fn width_from_row(mut self, index: usize) -> Self {
+        if let Rows::Uniform { measure, .. } = &mut self.rows {
+            *measure = index;
+        }
+        self
+    }
+
+    /// Overlay Tcode's scrollbar, as [`ScrollableElement::overflow_y_scrollbar`] does.
+    pub(crate) fn scrollbar(mut self) -> Self {
+        self.scrollbar = true;
+        self
+    }
+}
+
+impl Styled for VirtualList {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl RenderOnce for VirtualList {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let root_style = root_style_from(&self.style);
+        // A viewport under a cap it shares with pinned siblings shrinks to
+        // what they leave.
+        let (viewport, handle) = match self.rows {
+            Rows::Uniform { render, measure } => {
+                let scroll = window
+                    .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| {
+                        UniformListScrollHandle::new()
+                    })
+                    .read(cx)
+                    .clone();
+                let viewport = uniform_list(self.id.clone(), self.count, render)
+                    .with_sizing_behavior(ListSizingBehavior::Infer)
+                    .with_width_from_item(Some(measure))
+                    .track_scroll(&scroll)
+                    .min_h_0()
+                    .refine_style(&self.style);
+                let base = scroll.0.borrow().base_handle.clone();
+                (viewport.into_any_element(), Handle::Scroll(base))
+            }
+            Rows::Measured(render) => {
+                let count = self.count;
+                // A list that shrinks to its rows sizes itself from the rows
+                // it measured; measuring a viewport past its last height lets
+                // a longer list always reach its cap.
+                let state = window
+                    .use_keyed_state((self.id.clone(), "list"), cx, |window, _| {
+                        ListState::new(count, ListAlignment::Top, window.viewport_size().height)
+                    })
+                    .read(cx)
+                    .clone();
+                if state.item_count() != count {
+                    state.reset(count);
+                }
+                let viewport = list(state.clone(), render)
+                    .with_sizing_behavior(ListSizingBehavior::Infer)
+                    .min_h_0()
+                    .refine_style(&self.style);
+                (viewport.into_any_element(), Handle::List(state))
+            }
+        };
+        let (mask, scrollbar) = match &handle {
+            Handle::Scroll(scroll) => overlays(&self.id, scroll, self.scrollbar),
+            Handle::List(state) => overlays(&self.id, state, self.scrollbar),
+        };
+        wheel_easing::register(
+            div()
+                .id((self.id, "area"))
+                .relative()
+                .flex()
+                .flex_col()
+                .refine_style(&root_style)
+                .child(viewport)
+                .child(mask)
+                .children(scrollbar),
+            handle,
+        )
+    }
+}
+
+/// The mask that routes wheel input to a virtual list, and its scrollbar.
+fn overlays<H: ScrollbarHandle + Clone>(
+    id: &ElementId,
+    handle: &H,
+    scrollbar: bool,
+) -> (AnyElement, Option<AnyElement>) {
+    let mask = ScrollableMask::new(Axis::Vertical, handle)
+        .id((id.clone(), "mask"))
+        .into_any_element();
+    let scrollbar = scrollbar.then(|| {
+        ScrollbarLayer {
+            id: (id.clone(), "scrollbar").into(),
+            scroll_handle: Rc::new(handle.clone()),
+        }
+        .into_any_element()
+    });
+    (mask, scrollbar)
+}
+
 #[derive(IntoElement)]
 struct ScrollbarLayer<H: ScrollbarHandle + Clone> {
     id: ElementId,
@@ -302,8 +474,7 @@ fn caller_id() -> ElementId {
     ElementId::CodeLocation(*Location::caller())
 }
 
-fn root_style_from<E: Styled>(element: &mut E) -> StyleRefinement {
-    let style = element.style();
+fn root_style_from(style: &StyleRefinement) -> StyleRefinement {
     StyleRefinement {
         size: style.size.clone(),
         min_size: style.min_size.clone(),
@@ -365,6 +536,99 @@ mod tests {
                 .w_full()
                 .h_full(),
             )
+        }
+    }
+
+    struct VirtualLists(usize);
+
+    impl Render for VirtualLists {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let count = self.0;
+            let row = |kind: &'static str, index: usize, height: f32| {
+                div()
+                    .debug_selector(move || format!("{kind}-{index}"))
+                    .h(px(height))
+                    .flex_none()
+            };
+            div()
+                .w(px(200.))
+                .h(px(600.))
+                .child(
+                    div().debug_selector(|| "uniform".into()).child(
+                        VirtualList::uniform("uniform-list", count, move |range, _, _| {
+                            range.map(|index| row("uniform", index, 20.)).collect()
+                        })
+                        .w_full()
+                        .max_h(px(100.))
+                        .py(px(4.)),
+                    ),
+                )
+                .child(
+                    div().debug_selector(|| "measured".into()).child(
+                        VirtualList::measured("measured-list", count, move |index, _, _| {
+                            row("measured", index, if index % 2 == 0 { 20. } else { 30. })
+                        })
+                        .w_full()
+                        .max_h(px(100.))
+                        .py(px(4.)),
+                    ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "capped".into())
+                        .flex()
+                        .flex_col()
+                        .max_h(px(100.))
+                        .child(div().h(px(20.)).flex_none())
+                        .child(
+                            VirtualList::uniform("capped-list", count, move |range, _, _| {
+                                range.map(|index| row("capped", index, 20.)).collect()
+                            })
+                            .w_full()
+                            .min_h_0(),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .h(px(150.))
+                        .child(div().h(px(50.)).flex_none())
+                        .child(
+                            div().flex().flex_col().flex_1().min_h_0().child(
+                                VirtualList::measured("flexed-list", count, move |index, _, _| {
+                                    row("flexed", index, 20.)
+                                })
+                                .flex_1()
+                                .min_h_0(),
+                            ),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn virtual_lists_shrink_to_short_lists_and_cap_long_ones(cx: &mut TestAppContext) {
+        // A capped column shares its cap with a pinned caption; a flexed
+        // slot takes a definite height from its column.
+        for (count, uniform, measured, capped) in [(3, 68., 78., 80.), (300, 100., 100., 100.)] {
+            let (_, cx) = cx.add_window_view(|_, _| VirtualLists(count));
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(cx.debug_bounds("uniform").unwrap().size.height, px(uniform));
+            assert_eq!(
+                cx.debug_bounds("measured").unwrap().size.height,
+                px(measured)
+            );
+            assert_eq!(cx.debug_bounds("capped").unwrap().size.height, px(capped));
+            assert!(cx.debug_bounds("uniform-0").is_some());
+            assert!(cx.debug_bounds("measured-0").is_some());
+            assert!(cx.debug_bounds("uniform-250").is_none());
+            assert!(cx.debug_bounds("measured-250").is_none());
+            assert!(cx.debug_bounds("capped-250").is_none());
+            assert!(cx.debug_bounds("flexed-0").is_some());
+            assert!(cx.debug_bounds("flexed-250").is_none());
         }
     }
 
