@@ -1,5 +1,4 @@
 use super::super::*;
-use crate::scroll::ScrollableElement as _;
 
 impl Composer {
     pub(in super::super) fn render_checkout_row(
@@ -8,7 +7,7 @@ impl Composer {
     ) -> Option<AnyElement> {
         let checkout = self.workspace_store.read(cx).composer_state().checkout?;
         let branch = checkout.branch;
-        let branches = checkout.branches;
+        let branches: Rc<[String]> = checkout.branches.into();
         let turn_running = checkout.turn_running;
         let is_draft = checkout.is_draft;
         let worktree_base = checkout.worktree_base;
@@ -40,7 +39,7 @@ impl Composer {
         } else {
             let store_open = self.workspace_store.clone();
             let store_content = self.workspace_store.clone();
-            let current = picker_current.clone();
+            let current: Rc<str> = picker_current.as_str().into();
             let trigger = Button::new("branch-picker")
                 .ghost()
                 .outline()
@@ -64,11 +63,15 @@ impl Composer {
                     }
                 })
                 .content(move |_state, _window, cx| {
-                    let branches = branches.clone();
-                    let current = current.clone();
-                    let popover = cx.entity();
                     let muted = cx.theme().muted_foreground;
-                    let mut col = v_flex().w_full().p_1().gap_0p5();
+                    let mut col = v_flex()
+                        .w(px(220.))
+                        .max_h(px(280.))
+                        .pt_1()
+                        .px_1()
+                        // The last branch row carries its gap.
+                        .pb(px(if branches.is_empty() { 4. } else { 2. }))
+                        .gap_0p5();
                     if worktree_mode {
                         col = col.child(
                             div()
@@ -82,73 +85,46 @@ impl Composer {
                         );
                     }
                     if branches.is_empty() {
-                        col = col.child(
-                            div()
-                                .flex_none()
-                                .px_2()
-                                .py_1p5()
-                                .text_size(px(13.))
-                                .text_color(muted)
-                                .child(crate::tr!("composer.loading")),
-                        );
-                    } else {
-                        for (index, name) in branches.iter().enumerate() {
-                            let is_current = *name == current;
-                            let branch_name = name.clone();
-                            let store_pick = store_content.clone();
-                            let pop = popover.clone();
-                            col = col.child(
-                                h_flex()
-                                    .id(("branch-row", index))
+                        return col
+                            .child(
+                                div()
                                     .flex_none()
-                                    .w_full()
                                     .px_2()
                                     .py_1p5()
-                                    .gap_2()
-                                    .items_center()
-                                    .rounded(px(6.))
-                                    .cursor_pointer()
                                     .text_size(px(13.))
-                                    .hover(|s| s.bg(cx.theme().muted))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .child(name.clone()),
-                                    )
-                                    .when(is_current, |this| {
-                                        this.child(
-                                            Icon::new(IconName::Check)
-                                                .xsmall()
-                                                .text_color(cx.theme().primary),
+                                    .text_color(muted)
+                                    .child(crate::tr!("composer.loading")),
+                            )
+                            .into_any_element();
+                    }
+                    let branches = branches.clone();
+                    let current = current.clone();
+                    let store = store_content.clone();
+                    let popover = cx.entity();
+                    col.child(
+                        crate::scroll::VirtualList::uniform(
+                            "branch-list",
+                            branches.len(),
+                            move |range, _, cx| {
+                                range
+                                    .map(|index| {
+                                        branch_row(
+                                            index,
+                                            &branches[index],
+                                            branches[index] == *current,
+                                            worktree_mode,
+                                            &store,
+                                            &popover,
+                                            cx,
                                         )
                                     })
-                                    .on_click(move |_, window, cx| {
-                                        let branch_name = branch_name.clone();
-                                        store_pick.update(cx, |store, _cx| {
-                                            if worktree_mode {
-                                                store.set_draft_workspace(
-                                                    WorkspaceMode::NewWorktree {
-                                                        base: branch_name,
-                                                    },
-                                                );
-                                            } else {
-                                                store.checkout_branch(branch_name);
-                                            }
-                                        });
-                                        pop.update(cx, |st, cx| st.dismiss(window, cx));
-                                    }),
-                            );
-                        }
-                    }
-                    div()
-                        .id("branch-list")
-                        .w(px(220.))
-                        .max_h(px(280.))
-                        .overflow_y_scroll_area()
-                        .child(col)
-                        .into_any_element()
+                                    .collect()
+                            },
+                        )
+                        .w_full()
+                        .min_h_0(),
+                    )
+                    .into_any_element()
                 })
                 .into_any_element()
         };
@@ -292,4 +268,56 @@ impl Composer {
             })
             .into_any_element()
     }
+}
+
+fn branch_row(
+    index: usize,
+    name: &str,
+    is_current: bool,
+    worktree_mode: bool,
+    store: &Entity<WorkspaceStore>,
+    popover: &Entity<PopoverState>,
+    cx: &App,
+) -> AnyElement {
+    let branch_name = name.to_string();
+    let store = store.clone();
+    let popover = popover.clone();
+    div()
+        .pb_0p5()
+        .child(
+            h_flex()
+                .id(("branch-row", index))
+                .flex_none()
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .gap_2()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .hover(|s| s.bg(cx.theme().muted))
+                .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
+                .when(is_current, |this| {
+                    this.child(
+                        Icon::new(IconName::Check)
+                            .xsmall()
+                            .text_color(cx.theme().primary),
+                    )
+                })
+                .on_click(move |_, window, cx| {
+                    let branch_name = branch_name.clone();
+                    store.update(cx, |store, _cx| {
+                        if worktree_mode {
+                            store.set_draft_workspace(WorkspaceMode::NewWorktree {
+                                base: branch_name,
+                            });
+                        } else {
+                            store.checkout_branch(branch_name);
+                        }
+                    });
+                    popover.update(cx, |st, cx| st.dismiss(window, cx));
+                }),
+        )
+        .into_any_element()
 }

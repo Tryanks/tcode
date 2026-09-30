@@ -4,6 +4,7 @@
 use std::{
     ops::RangeInclusive,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use gpui::{
@@ -14,8 +15,8 @@ use gpui_base::{ElementExt as _, v_flex};
 
 use super::{
     link_target::{LinkTarget, LinkTargetCache},
-    nodes::BlockNode,
-    render,
+    nodes::{BlockNode, TextPosition},
+    render::{self, RootItem},
     selection_adapter::MarkdownSelectionAdapter,
 };
 
@@ -40,7 +41,8 @@ pub struct MarkdownState {
     pub(super) link_press_origin: Option<Point<Pixels>>,
     pub(super) is_selecting: bool,
     text: String,
-    parsed: BlockNode,
+    parsed: Rc<BlockNode>,
+    items: Rc<[RootItem]>,
     root_block_starts: Option<Vec<usize>>,
     has_potential_link_reference_definition: bool,
     pub(super) list_state: ListState,
@@ -65,7 +67,7 @@ impl MarkdownState {
         cx: &mut Context<Self>,
     ) -> Self {
         let parsed = parsed_document.root;
-        let block_count = root_block_count(&parsed);
+        let items = root_items(&parsed);
         let selection_adapter = MarkdownSelectionAdapter::new(cx.entity().downgrade(), cx);
         Self {
             focus_handle: cx.focus_handle(),
@@ -78,14 +80,15 @@ impl MarkdownState {
             link_press_origin: None,
             is_selecting: false,
             text: text.to_string(),
-            parsed,
+            parsed: Rc::new(parsed),
             root_block_starts: parsed_document.root_starts,
             has_potential_link_reference_definition: contains_potential_link_reference_definition(
                 text,
             ),
-            // Measure every block once so the list has a stable total height,
-            // then construct/layout/paint only the visible blocks on warm frames.
-            list_state: ListState::new(block_count, ListAlignment::Top, px(1000.)).measure_all(),
+            // Measure every item once so the list has a stable total height,
+            // then construct/layout/paint only the visible items on warm frames.
+            list_state: ListState::new(items.len(), ListAlignment::Top, px(1000.)).measure_all(),
+            items,
             measured_content_height: None,
             selection_revision: 0,
             selection_adapter,
@@ -235,34 +238,39 @@ impl MarkdownState {
             self.last_reparse_bytes = self.text.len() - reparse_start;
         }
 
-        let old_count = root_block_count(&self.parsed);
-        let (parsed, unchanged, new_count) = if reparse_start == 0 {
-            let old_blocks = root_blocks(&self.parsed);
-            let new_blocks = root_blocks(&parsed_document.root);
+        let BlockNode::Root {
+            children: mut old_blocks,
+        } = Rc::unwrap_or_clone(std::mem::replace(
+            &mut self.parsed,
+            Rc::new(BlockNode::Unknown),
+        ))
+        else {
+            unreachable!("parsed markdown document must have a root")
+        };
+        let BlockNode::Root {
+            children: tail_children,
+        } = parsed_document.root
+        else {
+            unreachable!("parsed markdown tail must have a root")
+        };
+        let old_block_count = old_blocks.len();
+        let (blocks, unchanged, old_suffix) = if reparse_start == 0 {
+            // The old last block is compared even when it is unchanged: a
+            // block after it changes the gap below it.
             let unchanged = old_blocks
                 .iter()
-                .zip(new_blocks)
+                .zip(&tail_children)
                 .take_while(|(old, new)| old == new)
-                .count();
-            let new_count = new_blocks.len();
+                .count()
+                .min(old_block_count.saturating_sub(1));
             self.root_block_starts = parsed_document.root_starts;
-            (parsed_document.root, unchanged, new_count)
+            let old_suffix = old_blocks.split_off(unchanged);
+            (tail_children, unchanged, old_suffix)
         } else {
-            let old_prefix_count = old_count - 1;
-            let BlockNode::Root { mut children } =
-                std::mem::replace(&mut self.parsed, BlockNode::Unknown)
-            else {
-                unreachable!("parsed markdown document must have a root")
-            };
-            children.truncate(old_prefix_count);
-            let BlockNode::Root {
-                children: tail_children,
-            } = parsed_document.root
-            else {
-                unreachable!("parsed markdown tail must have a root")
-            };
-            let new_count = old_prefix_count + tail_children.len();
-            children.extend(tail_children);
+            let old_prefix_count = old_blocks.len() - 1;
+            let old_suffix = old_blocks.split_off(old_prefix_count);
+            let mut blocks = old_blocks;
+            blocks.extend(tail_children);
 
             self.root_block_starts =
                 match (self.root_block_starts.take(), parsed_document.root_starts) {
@@ -274,18 +282,40 @@ impl MarkdownState {
                     }
                     _ => None,
                 };
-            (BlockNode::Root { children }, old_prefix_count, new_count)
+            (blocks, old_prefix_count, old_suffix)
         };
-        self.parsed = parsed;
+
+        // An append can only affect the old trailing block and blocks added
+        // after it. Keep the measured items before it, and those of its items
+        // that paint as they did.
+        let first_changed = self.items.partition_point(|item| item.block < unchanged);
+        let mut items = self.items[..first_changed].to_vec();
+        render::push_root_items(&blocks[unchanged..], unchanged, &mut items);
+        let kept = self.items[first_changed..]
+            .iter()
+            .zip(&items[first_changed..])
+            .take_while(|(old, new)| {
+                old == new
+                    && render::item_renders_alike(
+                        &old_suffix[old.block - unchanged],
+                        old.block + 1 == old_block_count,
+                        &blocks[new.block],
+                        new.block + 1 == blocks.len(),
+                        new,
+                    )
+            })
+            .count();
+        let invalid = first_changed + kept;
+        let old_item_count = self.items.len();
+        self.parsed = Rc::new(BlockNode::Root { children: blocks });
+        self.items = items.into();
         self.selection_revision = self.selection_revision.wrapping_add(1);
 
-        if unchanged < old_count || unchanged < new_count {
-            // An append can only affect the old trailing block and blocks added
-            // after it. Preserve the measured prefix and invalidate that suffix.
+        if invalid < old_item_count || invalid < self.items.len() {
             self.list_state
-                .splice(unchanged..old_count, new_count - unchanged);
+                .splice(invalid..old_item_count, self.items.len() - invalid);
             // `splice` creates unmeasured items but does not re-arm measure_all.
-            self.list_state.remeasure_items(unchanged..new_count);
+            self.list_state.remeasure_items(invalid..self.items.len());
             self.measured_content_height = None;
         }
         cx.notify();
@@ -295,7 +325,10 @@ impl MarkdownState {
         if self.has_potential_link_reference_definition {
             return 0;
         }
-        let block_count = root_block_count(&self.parsed);
+        let block_count = match &*self.parsed {
+            BlockNode::Root { children } => children.len(),
+            _ => 1,
+        };
         self.root_block_starts
             .as_ref()
             .filter(|starts| starts.len() == block_count)
@@ -306,17 +339,21 @@ impl MarkdownState {
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
         self.prepare_reparse(cx);
         let parsed_document = super::parse::parse_document(&self.text);
-        self.parsed = parsed_document.root;
+        self.items = root_items(&parsed_document.root);
+        self.parsed = Rc::new(parsed_document.root);
         self.root_block_starts = parsed_document.root_starts;
         #[cfg(test)]
         {
             self.last_reparse_bytes = self.text.len();
         }
         self.selection_revision = self.selection_revision.wrapping_add(1);
-        let block_count = root_block_count(&self.parsed);
+        self.selection_adapter
+            .virtual_blocks
+            .borrow_mut()
+            .forget_positions();
         // Even an edit that preserves the number of root blocks can change
         // their heights, so every reparse must invalidate the cached sizes.
-        self.list_state.reset(block_count);
+        self.list_state.reset(self.items.len());
         self.measured_content_height = None;
         cx.notify();
     }
@@ -330,23 +367,66 @@ impl MarkdownState {
         self.selectable
     }
 
-    pub(super) fn block_count(&self) -> usize {
-        root_block_count(&self.parsed)
+    pub(super) fn item_count(&self) -> usize {
+        self.items.len()
     }
 
-    pub(super) fn selected_text_in(&self, blocks: Option<RangeInclusive<usize>>) -> String {
-        match (&self.parsed, blocks) {
-            (BlockNode::Root { children }, Some(blocks)) => {
-                let children = children
-                    .get(blocks)
-                    .map_or_else(Vec::new, |children| children.to_vec());
-                BlockNode::Root { children }.selected_text()
-            }
-            _ => self.parsed.selected_text(),
-        }
+    /// The selected text in the root list's `items`, or in the whole
+    /// document when the selection is not bounded to them. A block holding
+    /// the selection's `start` or `end` is read from those positions.
+    pub(super) fn selected_text_in(
+        &self,
+        items: Option<RangeInclusive<usize>>,
+        start: Option<TextPosition>,
+        end: Option<TextPosition>,
+    ) -> String {
+        let (BlockNode::Root { children }, Some(items)) = (&*self.parsed, items) else {
+            return self.parsed.selected_text();
+        };
+        let (Some(first), Some(last)) =
+            (self.items.get(*items.start()), self.items.get(*items.end()))
+        else {
+            return String::new();
+        };
+        let children = (first.block..=last.block)
+            .map(|block| {
+                let from = start.filter(|position| position.block == block);
+                let to = end.filter(|position| position.block == block);
+                if from.is_some() || to.is_some() {
+                    return children[block].selected_between(from, to);
+                }
+                let span_start = (block == first.block)
+                    .then(|| first.span.as_ref().map(|span| span.start))
+                    .flatten();
+                let span_end = (block == last.block)
+                    .then(|| last.span.as_ref().map(|span| span.end))
+                    .flatten();
+                render::block_span(&children[block], span_start, span_end)
+            })
+            .collect();
+        BlockNode::Root { children }.selected_text()
     }
 
-    pub(super) fn block_ix_at(&self, content_y: Pixels) -> Option<usize> {
+    /// The text position under a content point, from the text painted in
+    /// the last frame.
+    pub(super) fn text_position_at(&self, content_point: Point<Pixels>) -> Option<TextPosition> {
+        let BlockNode::Root { children } = &*self.parsed else {
+            return None;
+        };
+        let window_point =
+            content_point + self.list_state.scroll_px_offset_for_scrollbar() + self.bounds.origin;
+        self.selection_adapter
+            .runs_at(window_point)
+            .into_iter()
+            .find_map(|(state, offset)| {
+                children
+                    .iter()
+                    .enumerate()
+                    .find_map(|(block, node)| node.position_of(block, &state, offset))
+            })
+    }
+
+    pub(super) fn item_ix_at(&self, content_y: Pixels) -> Option<usize> {
         let origin = self.bounds.origin.y + self.list_state.scroll_px_offset_for_scrollbar().y;
         let count = self.list_state.item_count();
         let mut ix = self.list_state.logical_scroll_top().item_ix;
@@ -373,6 +453,10 @@ impl MarkdownState {
 
         if width_changed {
             self.measured_content_height = None;
+            self.selection_adapter
+                .virtual_blocks
+                .borrow_mut()
+                .forget_positions();
             if had_measured_height {
                 // The custom warm-frame list only measures its visible slice.
                 // Throw away every old-width item size, then run one complete,
@@ -411,7 +495,7 @@ impl MarkdownState {
     }
 
     #[cfg(test)]
-    pub(super) fn has_measured_block(&self, index: usize) -> bool {
+    pub(super) fn has_measured_item(&self, index: usize) -> bool {
         self.list_state.bounds_for_item(index).is_some()
     }
 
@@ -428,18 +512,12 @@ fn with_trailing_newline(mut text: String) -> String {
     text
 }
 
-fn root_block_count(node: &BlockNode) -> usize {
-    match node {
-        BlockNode::Root { children, .. } => children.len(),
-        _ => 1,
+fn root_items(root: &BlockNode) -> Rc<[RootItem]> {
+    let mut items = Vec::new();
+    if let BlockNode::Root { children } = root {
+        render::push_root_items(children, 0, &mut items);
     }
-}
-
-fn root_blocks(node: &BlockNode) -> &[BlockNode] {
-    match node {
-        BlockNode::Root { children, .. } => children,
-        _ => std::slice::from_ref(node),
-    }
+    items.into()
 }
 
 fn contains_potential_link_reference_definition(source: &str) -> bool {
@@ -449,12 +527,12 @@ fn contains_potential_link_reference_definition(source: &str) -> bool {
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = cx.entity();
-        let parsed = self.parsed.clone();
         let measured_content_height = self.measured_content_height;
         v_flex()
             .w_full()
             .child(render::render_root(
-                &parsed,
+                self.parsed.clone(),
+                self.items.clone(),
                 self.list_state.clone(),
                 measured_content_height,
                 &state,
@@ -604,7 +682,7 @@ mod tests {
         state.update(cx, |state, cx| state.push_str(" grows", cx));
         state.read_with(cx, |state, _| {
             assert_eq!(state.last_reparse_bytes(), state.text.len());
-            assert_eq!(state.parsed, super::super::parse(&state.text));
+            assert_eq!(*state.parsed, super::super::parse(&state.text));
         });
     }
 

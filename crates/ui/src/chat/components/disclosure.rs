@@ -106,20 +106,6 @@ pub(crate) fn disclosure(
 
 fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
-    let lines: Vec<AnyElement> = full_text
-        .split('\n')
-        .map(|line| {
-            div()
-                .w_full()
-                .line_height(px(DISCLOSURE_LINE_HEIGHT))
-                .child(if line.is_empty() {
-                    " ".to_string()
-                } else {
-                    line.to_string()
-                })
-                .into_any_element()
-        })
-        .collect();
     div()
         .w_full()
         .rounded(crate::material::radius_card())
@@ -135,11 +121,12 @@ fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
                 .max_h(px(DISCLOSURE_CARD_MAX_HEIGHT))
                 .overflow_y_scroll_area()
                 .child(
-                    v_flex()
+                    div()
                         .w_full()
                         .text_size(px(13.))
+                        .line_height(px(DISCLOSURE_LINE_HEIGHT))
                         .text_color(muted)
-                        .children(lines),
+                        .child(full_text.to_string()),
                 ),
         )
 }

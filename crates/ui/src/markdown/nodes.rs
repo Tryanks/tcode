@@ -12,6 +12,16 @@ use gpui::{SharedString, SharedUri};
 
 use super::inline::InlineState;
 
+/// A text offset in a leaf of a root block: its index among the block's text
+/// leaves and, in a code block, the line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct TextPosition {
+    pub(super) block: usize,
+    pub(super) leaf: usize,
+    pub(super) line: usize,
+    pub(super) offset: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BlockNode {
     Root {
@@ -102,6 +112,166 @@ impl BlockNode {
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The position in this block of `state`, painted at `offset`, when it is
+    /// the whole text of a paragraph, heading or code line of the block.
+    pub(super) fn position_of(
+        &self,
+        block: usize,
+        state: &Arc<Mutex<InlineState>>,
+        offset: usize,
+    ) -> Option<TextPosition> {
+        let mut leaves = Vec::new();
+        self.collect_text_leaves(&mut leaves);
+        leaves.iter().enumerate().find_map(|(leaf, node)| {
+            let line = match node {
+                Self::Paragraph(paragraph)
+                | Self::Heading {
+                    children: paragraph,
+                    ..
+                } => Arc::ptr_eq(&paragraph.state, state).then_some(0)?,
+                Self::CodeBlock(code) => code
+                    .line_states
+                    .lock()
+                    .ok()?
+                    .iter()
+                    .position(|line| Arc::ptr_eq(line, state))?,
+                _ => return None,
+            };
+            Some(TextPosition {
+                block,
+                leaf,
+                line,
+                offset,
+            })
+        })
+    }
+
+    /// A copy of this block with fresh selection state holding exactly the
+    /// text from `start` to `end`; a missing end is the block's own. The
+    /// copy's text does not depend on which of its leaves were painted.
+    pub(super) fn selected_between(
+        &self,
+        start: Option<TextPosition>,
+        end: Option<TextPosition>,
+    ) -> BlockNode {
+        let detached = self.detached();
+        let mut leaves = Vec::new();
+        detached.collect_text_leaves(&mut leaves);
+        for (ix, leaf) in leaves.into_iter().enumerate() {
+            if start.is_some_and(|start| ix < start.leaf) || end.is_some_and(|end| ix > end.leaf) {
+                continue;
+            }
+            let at = |position: Option<TextPosition>| {
+                position
+                    .filter(|position| position.leaf == ix)
+                    .map(|position| (position.line, position.offset))
+            };
+            leaf.select_leaf(at(start), at(end));
+        }
+        detached
+    }
+
+    fn detached(&self) -> BlockNode {
+        let children = |children: &[BlockNode]| children.iter().map(Self::detached).collect();
+        match self {
+            Self::Root { children: nodes } => Self::Root {
+                children: children(nodes),
+            },
+            Self::Blockquote { children: nodes } => Self::Blockquote {
+                children: children(nodes),
+            },
+            Self::List {
+                children: nodes,
+                ordered,
+                start,
+            } => Self::List {
+                children: children(nodes),
+                ordered: *ordered,
+                start: *start,
+            },
+            Self::ListItem {
+                children: nodes,
+                spread,
+                checked,
+            } => Self::ListItem {
+                children: children(nodes),
+                spread: *spread,
+                checked: *checked,
+            },
+            Self::Paragraph(paragraph) => Self::Paragraph(paragraph.detached()),
+            Self::Heading { level, children } => Self::Heading {
+                level: *level,
+                children: children.detached(),
+            },
+            Self::CodeBlock(code) => Self::CodeBlock(CodeBlock {
+                code: code.code.clone(),
+                lang: code.lang.clone(),
+                line_states: Arc::new(Mutex::new(
+                    rendered_code_text(&code.code)
+                        .split('\n')
+                        .map(|line| InlineState::shared(line.to_string().into()))
+                        .collect(),
+                )),
+            }),
+            Self::Table(table) => Self::Table(Table {
+                children: table
+                    .children
+                    .iter()
+                    .map(|row| TableRow {
+                        children: row
+                            .children
+                            .iter()
+                            .map(|cell| TableCell {
+                                children: cell.children.detached(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                column_aligns: table.column_aligns.clone(),
+            }),
+            Self::HorizontalRule => Self::HorizontalRule,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+
+    /// Select a detached leaf from `(line, offset)` `from` to `to`, or from
+    /// its start or to its end when they are missing.
+    fn select_leaf(&self, from: Option<(usize, usize)>, to: Option<(usize, usize)>) {
+        match self {
+            Self::Paragraph(paragraph)
+            | Self::Heading {
+                children: paragraph,
+                ..
+            } => {
+                select_inline(&paragraph.state, from.map(|from| from.1), to.map(|to| to.1));
+            }
+            Self::CodeBlock(code) => {
+                let Ok(states) = code.line_states.lock() else {
+                    return;
+                };
+                let (first, last) = (
+                    from.map_or(0, |from| from.0),
+                    to.map_or(states.len(), |to| to.0),
+                );
+                for (ix, state) in states.iter().enumerate() {
+                    if (first..=last).contains(&ix) {
+                        select_inline(
+                            state,
+                            from.filter(|from| from.0 == ix).map(|from| from.1),
+                            to.filter(|to| to.0 == ix).map(|to| to.1),
+                        );
+                    }
+                }
+            }
+            Self::Table(table) => {
+                for cell in table.children.iter().flat_map(|row| &row.children) {
+                    select_inline(&cell.children.state, None, None);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn collect_text_leaves<'a>(&'a self, leaves: &mut Vec<&'a BlockNode>) {
@@ -303,6 +473,21 @@ impl PartialEq for Paragraph {
 }
 
 impl Paragraph {
+    /// A copy with fresh selection state, the whole text in `state`.
+    fn detached(&self) -> Self {
+        Self {
+            children: self
+                .children
+                .iter()
+                .map(|child| InlineNode {
+                    state: InlineState::shared(child.text.clone()),
+                    ..child.clone()
+                })
+                .collect(),
+            state: InlineState::shared(self.text().into()),
+        }
+    }
+
     pub(crate) fn text(&self) -> String {
         self.children
             .iter()
@@ -341,9 +526,14 @@ impl PartialEq for CodeBlock {
 }
 
 impl CodeBlock {
-    pub(super) fn states_for_lines(&self, lines: &[&str]) -> Vec<Arc<Mutex<InlineState>>> {
+    /// The selection states of `lines[span]`, the lines one list item paints.
+    pub(super) fn states_for_lines(
+        &self,
+        lines: &[&str],
+        span: Range<usize>,
+    ) -> Vec<Arc<Mutex<InlineState>>> {
         let Ok(mut states) = self.line_states.lock() else {
-            return lines
+            return lines[span]
                 .iter()
                 .map(|line| InlineState::shared((*line).into()))
                 .collect();
@@ -354,33 +544,43 @@ impl CodeBlock {
                 .map(|line| InlineState::shared((*line).into()))
                 .collect();
         } else {
-            for (state, line) in states.iter().zip(lines) {
+            for (state, line) in states[span.clone()].iter().zip(&lines[span.clone()]) {
                 if let Ok(mut state) = state.lock() {
                     state.set_text((*line).into());
                 }
             }
         }
-        states.clone()
+        states[span].to_vec()
     }
 
     fn selected_text(&self) -> String {
         let Ok(states) = self.line_states.lock() else {
             return String::new();
         };
-        let selected = states
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, state)| selected_inline_text(state).map(|text| (ix, text)))
-            .collect::<Vec<_>>();
-        let (Some((first, _)), Some((last, _))) = (selected.first(), selected.last()) else {
+        let (Some(first), Some(last)) = (
+            states
+                .iter()
+                .position(|state| selected_inline_text(state).is_some()),
+            states
+                .iter()
+                .rposition(|state| selected_inline_text(state).is_some()),
+        ) else {
             return String::new();
         };
-        let (first, last) = (*first, *last);
-        let mut lines = vec![String::new(); last - first + 1];
-        for (ix, text) in selected {
-            lines[ix - first] = text;
-        }
-        lines.join("\n")
+        // A selection is contiguous, so the lines between its ends are whole,
+        // including lines that were not painted while it grew.
+        (first..=last)
+            .map(|ix| {
+                if ix == first || ix == last {
+                    selected_inline_text(&states[ix]).unwrap_or_default()
+                } else {
+                    states[ix]
+                        .lock()
+                        .map_or_else(|_| String::new(), |state| state.text.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn clear_selection(&self) {
@@ -439,6 +639,14 @@ fn append_selection(text: &mut String, state: &Arc<Mutex<InlineState>>) {
 fn clear_inline_selection(state: &Arc<Mutex<InlineState>>) {
     if let Ok(mut state) = state.lock() {
         state.selection = None;
+    }
+}
+
+fn select_inline(state: &Arc<Mutex<InlineState>>, from: Option<usize>, to: Option<usize>) {
+    if let Ok(mut state) = state.lock() {
+        let len = state.text.len();
+        let from = from.unwrap_or(0).min(len);
+        state.selection = Some(from..to.unwrap_or(len).clamp(from, len));
     }
 }
 
@@ -504,7 +712,7 @@ mod tests {
         let BlockNode::CodeBlock(code) = leaves[1] else {
             panic!("expected code block");
         };
-        let states = code.states_for_lines(&["first code line", "second code line"]);
+        let states = code.states_for_lines(&["first code line", "second code line"], 0..2);
         select(&states[0], 6..10);
         select(&states[1], 0..6);
 
