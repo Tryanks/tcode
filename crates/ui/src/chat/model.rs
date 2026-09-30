@@ -11,10 +11,14 @@ use tcode_core::session::{
     EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming, parse_orchestrate_callback,
 };
 
+/// The row, its turn, the entries it renders (a Work Log header's whole run),
+/// the turn's entries for the trailer (empty unless the row is the turn's
+/// last), and the pinned message ids.
 pub(crate) type RowRenderArgs<'a> = (
     &'a TimelineRow,
     &'a TurnMeta,
     &'a Path,
+    &'a [Arc<TimelineEntry>],
     &'a [Arc<TimelineEntry>],
     (Option<&'a str>, Option<&'a str>),
 );
@@ -768,15 +772,17 @@ pub(crate) fn plain_text_as_markdown(text: &str) -> String {
 /// One virtualized timeline row: a segment of a turn, plus the turn's trailer
 /// (plan card, changed files, liveness, pending steers) on its last row.
 ///
-/// The list virtualizes segments rather than turns so a turn with hundreds of
-/// tool runs and interim messages costs the rows on screen, not the whole
-/// turn, every frame. A turn without segments still owns one empty row for
-/// its trailer.
+/// The list virtualizes segments rather than turns, and an expanded Work Log's
+/// activities rather than its run, so a turn with hundreds of tool calls and
+/// interim messages costs the rows on screen, not the whole turn, every
+/// frame. A turn without segments still owns one empty row for its trailer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TimelineRow {
     pub(crate) turn: usize,
+    /// The entries the row renders, in timeline order across rows.
     pub(crate) entry_range: Range<usize>,
     pub(crate) entry_count: usize,
+    pub(crate) part: RowPart,
     pub(crate) first_in_turn: bool,
     pub(crate) last_in_turn: bool,
     /// The turn's live work log: the run that opens on its own while the
@@ -792,6 +798,21 @@ pub(crate) struct TimelineRow {
     /// while `identity` does not.
     pub(crate) tail_identity: u64,
     pub(crate) content: u64,
+}
+
+/// Which part of its segment a row renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RowPart {
+    Segment,
+    /// The header of an expanded Work Log. It renders no entry of its own
+    /// but reads the whole run, `run`, for its summary.
+    WorkLogHeader {
+        run: Range<usize>,
+    },
+    /// One folded activity under an expanded Work Log header.
+    WorkLogActivity,
+    /// The live window below an expanded Work Log's folded activities.
+    WorkLogLive,
 }
 
 /// The rows of `turn` within `rows`, which are sorted by turn.
@@ -1046,84 +1067,165 @@ fn index_rows_from(
             segment_ranges.push(turn_range.end..turn_range.end);
         }
         let last_segment = segment_ranges.len() - 1;
-        for (segment, entry_range) in segment_ranges.into_iter().enumerate() {
-            let first_in_turn = segment == 0;
-            let last_in_turn = segment == last_segment;
+        for (segment, segment_range) in segment_ranges.into_iter().enumerate() {
             let live = live_activity == Some(segment);
             let final_assistant = last_assistant == Some(segment);
-            let mut identity = DefaultHasher::new();
-            let mut tail_identity = DefaultHasher::new();
-            let mut content = DefaultHasher::new();
-            if let Some(entry) = entries[entry_range.clone()].last() {
-                entry.id.hash(&mut tail_identity);
-            }
-            if let Some(entry) = entries[entry_range.clone()].first() {
-                entry.id.hash(&mut identity);
-            }
-            for entry in &entries[entry_range.clone()] {
-                std::mem::discriminant(&entry.content).hash(&mut content);
-                entry.ts.hash(&mut content);
-                hash_entry_shape(&entry.content, &mut content);
-                // A disclosure row (orchestrate context / callback) grows a tall
-                // scroll card when expanded, so its toggle state must change the
-                // row fingerprint or the list keeps the collapsed measurement.
-                if let Some(key) = disclosure_key(&entry.content, &entry.id) {
-                    expanded.contains(&key).hash(&mut content);
+            let parts = segment_parts(
+                entries,
+                segmented.flow.get(segment),
+                segment_range.clone(),
+                expanded,
+                index,
+                live && running,
+            );
+            let last_part = parts.len() - 1;
+            for (part_index, (part, entry_range)) in parts.into_iter().enumerate() {
+                let first_in_turn = segment == 0 && part_index == 0;
+                let last_in_turn = segment == last_segment && part_index == last_part;
+                // A header renders its whole run, and a run is known by its
+                // first entry whether or not its Work Log is expanded.
+                let shape_range = match &part {
+                    RowPart::WorkLogHeader { run } => run.clone(),
+                    _ => entry_range.clone(),
+                };
+                let mut identity = DefaultHasher::new();
+                let mut tail_identity = DefaultHasher::new();
+                let mut content = DefaultHasher::new();
+                if let Some(entry) = entries[shape_range.clone()].last() {
+                    entry.id.hash(&mut tail_identity);
                 }
-            }
-            if entry_range.is_empty() {
-                // An empty turn's only row has no entry to be known by.
-                ("empty-turn", index).hash(&mut identity);
-            }
-            (first_in_turn, last_in_turn, live, final_assistant).hash(&mut content);
-            running.hash(&mut content);
-            if last_in_turn {
-                // The trailer: pending steers float here while the turn
-                // runs, and the finished turn renders its breakdown.
-                for entry in &entries[turn_range.clone()] {
-                    if let EntryContent::Steer { text, status, .. } = &entry.content {
-                        entry.id.hash(&mut content);
-                        text.len().hash(&mut content);
-                        status.hash(&mut content);
+                match &part {
+                    RowPart::WorkLogActivity => {
+                        ("worklog-activity", &entries[entry_range.end - 1].id).hash(&mut identity);
+                    }
+                    RowPart::WorkLogLive => {
+                        ("worklog-live", &entries[segment_range.start].id).hash(&mut identity);
+                        // The window slides over activities of the same shape.
+                        entries[entry_range.start].id.hash(&mut content);
+                    }
+                    RowPart::Segment | RowPart::WorkLogHeader { .. } => {
+                        if let Some(entry) = entries[shape_range.clone()].first() {
+                            entry.id.hash(&mut identity);
+                        }
                     }
                 }
-                entries[turn_range.clone()]
-                    .last()
-                    .and_then(|entry| entry.ts)
-                    .hash(&mut content);
-                if let Some(turn) = turn {
-                    turn.start_ts.hash(&mut content);
-                    turn.end_ts.hash(&mut content);
-                    turn.timing.hash(&mut content);
-                    turn.served_model.hash(&mut content);
-                    turn.cost_usd.map(f64::to_bits).hash(&mut content);
-                    turn.status
-                        .as_ref()
-                        .map(std::mem::discriminant)
+                std::mem::discriminant(&part).hash(&mut content);
+                for entry in &entries[shape_range.clone()] {
+                    std::mem::discriminant(&entry.content).hash(&mut content);
+                    entry.ts.hash(&mut content);
+                    hash_entry_shape(&entry.content, &mut content);
+                    // A disclosure row (orchestrate context / callback) grows a tall
+                    // scroll card when expanded, so its toggle state must change the
+                    // row fingerprint or the list keeps the collapsed measurement.
+                    if let Some(key) = disclosure_key(&entry.content, &entry.id) {
+                        expanded.contains(&key).hash(&mut content);
+                    }
+                }
+                if shape_range.is_empty() {
+                    // An empty turn's only row has no entry to be known by.
+                    ("empty-turn", index).hash(&mut identity);
+                }
+                (first_in_turn, last_in_turn, live, final_assistant).hash(&mut content);
+                running.hash(&mut content);
+                if last_in_turn {
+                    // The trailer: pending steers float here while the turn
+                    // runs, and the finished turn renders its breakdown.
+                    for entry in &entries[turn_range.clone()] {
+                        if let EntryContent::Steer { text, status, .. } = &entry.content {
+                            entry.id.hash(&mut content);
+                            text.len().hash(&mut content);
+                            status.hash(&mut content);
+                        }
+                    }
+                    entries[turn_range.clone()]
+                        .last()
+                        .and_then(|entry| entry.ts)
                         .hash(&mut content);
+                    if let Some(turn) = turn {
+                        turn.start_ts.hash(&mut content);
+                        turn.end_ts.hash(&mut content);
+                        turn.timing.hash(&mut content);
+                        turn.served_model.hash(&mut content);
+                        turn.cost_usd.map(f64::to_bits).hash(&mut content);
+                        turn.status
+                            .as_ref()
+                            .map(std::mem::discriminant)
+                            .hash(&mut content);
+                    }
+                    if let Some((turn, item_id, markdown)) = proposed_plan
+                        && turn == index
+                    {
+                        item_id.hash(&mut content);
+                        markdown.len().hash(&mut content);
+                    }
                 }
-                if let Some((turn, item_id, markdown)) = proposed_plan
-                    && turn == index
-                {
-                    item_id.hash(&mut content);
-                    markdown.len().hash(&mut content);
-                }
+                rows.push(TimelineRow {
+                    turn: index,
+                    entry_count: entry_range.len(),
+                    entry_range,
+                    part,
+                    first_in_turn,
+                    last_in_turn,
+                    live_activity: live,
+                    last_assistant: final_assistant,
+                    identity: identity.finish(),
+                    tail_identity: tail_identity.finish(),
+                    content: content.finish(),
+                });
             }
-            rows.push(TimelineRow {
-                turn: index,
-                entry_count: entry_range.len(),
-                entry_range,
-                first_in_turn,
-                last_in_turn,
-                live_activity: live,
-                last_assistant: final_assistant,
-                identity: identity.finish(),
-                tail_identity: tail_identity.finish(),
-                content: content.finish(),
-            });
         }
     }
     rows
+}
+
+/// The rows one segment spanning `range` renders as. An expanded Work Log
+/// with folded activities becomes its header, one row per folded activity and
+/// the live window; every other segment is one row. Each folded activity
+/// ends its part's entry range.
+fn segment_parts(
+    entries: &[Arc<TimelineEntry>],
+    segment: Option<&Segment<'_>>,
+    range: Range<usize>,
+    expanded: &HashSet<String>,
+    turn: usize,
+    live_window: bool,
+) -> Vec<(RowPart, Range<usize>)> {
+    let whole = || vec![(RowPart::Segment, range.clone())];
+    let Some(Segment::ActivityRun(activities)) = segment else {
+        return whole();
+    };
+    if !expanded.contains(&work_log_key(turn, &activities[0].id)) {
+        return whole();
+    }
+    let (folded, visible) = partition_activity_run(activities, live_window);
+    if folded.is_empty() {
+        return whole();
+    }
+    let mut parts = vec![(
+        RowPart::WorkLogHeader { run: range.clone() },
+        range.start..range.start,
+    )];
+    let mut start = range.start;
+    for activity in folded {
+        let end = start
+            + entries[start..range.end]
+                .iter()
+                .position(|entry| std::ptr::eq(entry.as_ref(), *activity))
+                .expect("a folded activity lies in its run")
+            + 1;
+        parts.push((RowPart::WorkLogActivity, start..end));
+        start = end;
+    }
+    if !visible.is_empty() {
+        parts.push((RowPart::WorkLogLive, start..range.end));
+    }
+    parts
+}
+
+/// The expansion key of the Work Log folding a run whose first activity is
+/// `segment_id`.
+pub(crate) fn work_log_key(turn: usize, segment_id: &str) -> String {
+    format!("worklog-{turn}-{segment_id}")
 }
 
 /// The per-entry expansion key for a user message that renders as a disclosure
@@ -1368,9 +1470,14 @@ fn list_sync_with<'a>(
                 continue;
             }
             // An empty turn's row goes when the turn gains entries; the
-            // partial first turn's rows may merge as their records arrive.
-            let replaceable =
-                |row: &TimelineRow| row.entry_count == 0 || partial_first_turn && row.turn == 0;
+            // partial first turn's rows may merge as their records arrive;
+            // an expanded Work Log's rows go when it collapses or its live
+            // window settles.
+            let replaceable = |row: &TimelineRow| {
+                row.entry_count == 0
+                    || partial_first_turn && row.turn == 0
+                    || row.part != RowPart::Segment
+            };
             if !replaceable(&old[i]) {
                 return ListSync::Reset { count: new_len };
             }
@@ -2167,6 +2274,69 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![],
                 remeasure: vec![rows.len() - 1],
+            }
+        );
+    }
+
+    /// An expanded Work Log of a long turn gives each folded activity its own
+    /// row, and growing, settling or collapsing it moves rows in place
+    /// instead of resetting the reader's scroll position.
+    #[test]
+    fn an_expanded_work_log_gives_each_folded_activity_a_row() {
+        let running = vec![TurnMeta {
+            running: true,
+            ..Default::default()
+        }];
+        let mut entries = vec![entry("user", user_item("go"))];
+        entries.extend((0..8).map(|step| command(&format!("cmd-{step}"))));
+        let expanded = HashSet::from([work_log_key(0, "cmd-0")]);
+        let rows = index_rows(&running, &entries, None, &expanded);
+        let parts = rows.iter().map(|row| row.part.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            parts,
+            [
+                RowPart::Segment,
+                RowPart::WorkLogHeader { run: 1..9 },
+                RowPart::WorkLogActivity,
+                RowPart::WorkLogActivity,
+                RowPart::WorkLogActivity,
+                RowPart::WorkLogLive,
+            ]
+        );
+        assert_eq!(rows[2].entry_range, 1..2);
+        assert_eq!(rows[4].entry_range, 3..4);
+        assert_eq!(rows[5].entry_range, 4..9, "the live window keeps five");
+        assert!(rows[5].last_in_turn && rows[5].live_activity);
+        assert_eq!(row_of_entry(&rows, 3, 0), Some(4));
+
+        // The oldest live activity folds into a row of its own above the
+        // live window.
+        entries.push(command("cmd-8"));
+        let grown = index_rows(&running, &entries, None, &expanded);
+        assert_eq!(
+            list_sync(&rows, &grown, TimelineContinuity::Complete),
+            ListSync::Incremental {
+                splices: vec![(5..5, 1)],
+                remeasure: vec![1, 6],
+            }
+        );
+
+        // Once the turn ends every activity is folded.
+        let finished = index_rows(&[TurnMeta::default()], &entries, None, &expanded);
+        assert_eq!(finished.len(), 2 + 9);
+        assert!(matches!(
+            list_sync(&grown, &finished, TimelineContinuity::Complete),
+            ListSync::Incremental { splices, .. } if splices == [(6..7, 5)]
+        ));
+
+        let collapsed = index_rows(&[TurnMeta::default()], &entries, None, &HashSet::new());
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(collapsed[1].identity, finished[1].identity);
+        assert_eq!(
+            list_sync(&finished, &collapsed, TimelineContinuity::Complete),
+            ListSync::Incremental {
+                splices: vec![(2..11, 0)],
+                remeasure: vec![1],
             }
         );
     }
