@@ -1863,12 +1863,8 @@ impl ChatView {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
                     let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx);
-                    let inline_diff = if expanded && row.counts.is_some() {
-                        Some(self.inline_diffs.render(&key, row, cx))
-                    } else {
-                        self.inline_diffs.forget(&key);
-                        None
-                    };
+                    let inline_diff = (expanded && row.counts.is_some())
+                        .then(|| self.inline_diffs.render(&key, row, cx));
                     let toggle_key = key.clone();
                     rows.push(components::changed_files::file_edit_row(
                         &key,
@@ -2978,6 +2974,7 @@ impl Render for ChatView {
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
+        self.inline_diffs.sweep();
         if self.carried_anchor {
             self.carried_anchor = !settle_carried_anchor(&self.list_state);
             if self.carried_anchor {
@@ -4110,6 +4107,59 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("file-edit-diff-line-1").is_some());
         assert!(cx.debug_bounds("file-edit-diff-line-2").is_none());
+    }
+
+    #[gpui::test]
+    fn a_built_inline_diff_goes_once_its_row_leaves_the_screen(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![
+            entry("user", user_item("go")),
+            entry(
+                "edit",
+                EntryContent::Item(ItemContent::FileChange {
+                    changes: vec![agent::FileChange {
+                        path: "src/lib.rs".into(),
+                        kind: agent::FileChangeKind::Modify,
+                        diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                }),
+            ),
+        ];
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw(cx);
+        assert!(cx.debug_bounds("file-edit-diff").is_some());
+        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 1);
+
+        // Newer activities fold the open edit into the collapsed Work Log,
+        // so its row never renders again.
+        for index in 0..6 {
+            timeline.entries.push(command(&format!("command-{index}")));
+        }
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+            cx.notify();
+        });
+        draw(cx);
+        draw(cx);
+        assert!(cx.debug_bounds("file-edit-diff").is_none());
+        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 0);
     }
 
     #[test]
