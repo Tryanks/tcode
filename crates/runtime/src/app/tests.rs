@@ -3882,7 +3882,7 @@ fn child_approval_policy_distinguishes_report_tools_and_deduplicates_notices() {
                         "{provider:?} {mode:?} {tool:?}"
                     );
                     assert!(parent_receiver.try_recv().is_err());
-                    assert!(!state.has_approval("child"));
+                    assert!(state.approval_requests("child").is_empty());
                 } else {
                     assert!(
                         child_receiver.try_recv().is_err(),
@@ -7736,6 +7736,67 @@ fn interrupt_reports_stopping_until_the_turn_completes() {
     let status = state.session_status_snapshot(&id).unwrap();
     assert!(!status.stopping);
     assert!(!status.turn_running);
+}
+
+#[test]
+fn status_carries_the_running_turn_and_its_question_only_while_in_flight() {
+    let store = TestStore::new("status-running-turn");
+    let mut state = AppState::new((*store).clone());
+    let context = TestAppContext::default();
+    let mut cx = context.host_cx();
+    let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+    let (commands, _receiver) = smol::channel::unbounded();
+    state.resident_mut(&id).unwrap().runtime = Runtime::Live(commands);
+    for turn in ["turn-1", "turn-2"] {
+        state.on_event(
+            &id,
+            AgentEvent::TurnStarted {
+                turn_id: turn.into(),
+            },
+            &mut cx,
+        );
+        if turn == "turn-1" {
+            state.on_event(
+                &id,
+                AgentEvent::TurnCompleted {
+                    turn_id: turn.into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                &mut cx,
+            );
+        }
+    }
+    state.on_event(
+        &id,
+        AgentEvent::UserInputRequested {
+            request_id: "ask".into(),
+            questions: Vec::new(),
+            delivery: agent::UserInputDelivery::Blocking,
+        },
+        &mut cx,
+    );
+    let status = state.session_status_snapshot(&id).unwrap();
+    let started_at = state.resident(&id).unwrap().timeline.turns[1].start_ts;
+    assert!(started_at.is_some());
+    assert_eq!(
+        status.running_turn,
+        Some(tcode_core::session::RunningTurn {
+            turn: 1,
+            started_at
+        })
+    );
+    assert_eq!(
+        status.pending_user_input.map(|pending| pending.request_id),
+        Some("ask".into())
+    );
+
+    // Shut down without a closing record: the timeline still holds both.
+    state.resident_mut(&id).unwrap().shutdown_to_idle();
+    assert!(state.resident(&id).unwrap().timeline.turn_running);
+    let status = state.session_status_snapshot(&id).unwrap();
+    assert_eq!(status.running_turn, None);
+    assert_eq!(status.pending_user_input, None);
 }
 
 /// Times the initial snapshot plus the pages a client fetches while scrolling

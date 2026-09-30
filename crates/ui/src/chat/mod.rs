@@ -688,8 +688,7 @@ impl ChatView {
                     &timeline.turns,
                     &timeline.entries,
                     timeline
-                        .proposed_plan
-                        .as_ref()
+                        .shown_proposed_plan()
                         .map(|plan| (plan.turn, plan.item_id.as_str(), plan.markdown.as_str())),
                     &self.expanded,
                     continuity,
@@ -947,7 +946,7 @@ impl ChatView {
                         }
                     }
                 }
-                if let Some(plan) = &timeline.proposed_plan {
+                if let Some(plan) = timeline.shown_proposed_plan() {
                     let id = format!("plan:{}", plan.item_id);
                     if decisions.build.contains(&id) {
                         texts.push((
@@ -1016,8 +1015,7 @@ impl ChatView {
             .with_active_timeline(|timeline| {
                 if let Some(item_id) = id.strip_prefix("plan:") {
                     return timeline
-                        .proposed_plan
-                        .as_ref()
+                        .shown_proposed_plan()
                         .filter(|plan| plan.item_id == item_id)
                         .and_then(|plan| rows_of_turn(&self.rows, plan.turn).last());
                 }
@@ -1430,8 +1428,7 @@ impl ChatView {
             .read(cx)
             .with_active_timeline(|timeline| {
                 timeline
-                    .proposed_plan
-                    .as_ref()
+                    .shown_proposed_plan()
                     .filter(|plan| plan.turn == index)
                     .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
             })
@@ -2860,7 +2857,7 @@ fn markdown_entries_for_residency(
             });
         }
     }
-    if let Some(plan) = &timeline.proposed_plan
+    if let Some(plan) = timeline.shown_proposed_plan()
         && let Some(row) = rows_of_turn(rows, plan.turn).last()
         && scope.includes(row)
     {
