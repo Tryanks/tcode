@@ -77,6 +77,7 @@ impl Composer {
                 let changes = Rc::new(changes.clone());
                 let last = changes.len().saturating_sub(1);
                 div()
+                    .debug_selector(|| "approval-detail".into())
                     .w_full()
                     .rounded(px(8.))
                     .bg(detail_bg)
@@ -391,10 +392,13 @@ impl Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point, size};
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, size};
 
-    #[gpui::test]
-    fn a_long_file_change_request_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
+    /// A phone composer whose session awaits approval of a patch to `paths`.
+    fn phone_composer_with_patch(
+        cx: &mut TestAppContext,
+        paths: impl Iterator<Item = String>,
+    ) -> &mut VisualTestContext {
         cx.update(crate::theme::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
@@ -406,6 +410,13 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
+        let changes = paths
+            .map(|path| agent::FileChange {
+                path,
+                kind: agent::FileChangeKind::Modify,
+                diff: None,
+            })
+            .collect();
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
             let id = state.start_draft("approval-list".into(), std::env::temp_dir(), cx);
             let active = state.residents.live.get_mut(&id).unwrap();
@@ -413,13 +424,7 @@ mod tests {
                 id: "patch".into(),
                 turn_id: None,
                 kind: ApprovalKind::FileChange {
-                    changes: (0..300)
-                        .map(|index| agent::FileChange {
-                            path: format!("src/file-{index}.rs"),
-                            kind: agent::FileChangeKind::Modify,
-                            diff: None,
-                        })
-                        .collect(),
+                    changes,
                     reason: None,
                 },
                 options: Vec::new(),
@@ -436,6 +441,19 @@ mod tests {
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.update(|window, cx| _ = window.draw(cx));
+        // The first layout finds the list's width; the next frame lays out
+        // rows at it.
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            _ = window.draw(cx);
+        });
+        cx
+    }
+
+    #[gpui::test]
+    fn a_long_file_change_request_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
+        let cx =
+            phone_composer_with_patch(cx, (0..300).map(|index| format!("src/file-{index}.rs")));
         let first = cx
             .debug_bounds("approval-change-0")
             .expect("first change row");
@@ -456,5 +474,22 @@ mod tests {
         }
         assert!(cx.debug_bounds("approval-change-299").is_some());
         assert!(cx.debug_bounds("approval-change-0").is_none());
+    }
+
+    #[gpui::test]
+    fn a_short_request_shows_every_wrapped_path(cx: &mut TestAppContext) {
+        let cx = phone_composer_with_patch(
+            cx,
+            (0..2).map(|index| format!("src/{}file-{index}.rs", "deeply/nested/".repeat(6))),
+        );
+        let detail = cx.debug_bounds("approval-detail").expect("detail box");
+        let first = cx.debug_bounds("approval-change-0").expect("first path");
+        let second = cx.debug_bounds("approval-change-1").expect("second path");
+        assert!(first.size.height > px(30.), "a long path wraps on a phone");
+        assert!(second.top() >= first.bottom());
+        assert!(
+            second.bottom() <= detail.bottom(),
+            "a short list grows to show every path"
+        );
     }
 }
