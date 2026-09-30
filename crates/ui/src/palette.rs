@@ -148,7 +148,10 @@ impl CommandPalette {
 
         let subscriptions = vec![
             cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
-                if matches!(change.topic, TopicKind::Index | TopicKind::Settings) {
+                if matches!(
+                    change.topic,
+                    TopicKind::Index | TopicKind::Settings | TopicKind::ActiveSession
+                ) {
                     this.invalidate_results(false, cx);
                 }
             }),
@@ -573,26 +576,29 @@ impl CommandPalette {
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let total = self.results(cx).items.len();
-        match ev.keystroke.key.as_str() {
+        let results = self.results(cx);
+        let total = results.items.len();
+        let selected = match ev.keystroke.key.as_str() {
             "escape" => {
                 self.close(cx);
                 cx.stop_propagation();
+                return;
             }
-            "down" => {
-                if total > 0 {
-                    self.selected = (self.selected + 1).min(total - 1);
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }
-            "up" => {
-                self.selected = self.selected.saturating_sub(1);
-                cx.notify();
-                cx.stop_propagation();
-            }
-            _ => {}
+            "down" if total > 0 => (self.selected + 1).min(total - 1),
+            "down" => self.selected,
+            "up" => self.selected.saturating_sub(1),
+            _ => return,
+        };
+        cx.stop_propagation();
+        self.selected = selected;
+        if let Some(row) = results
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::Item(index) if *index == selected))
+        {
+            self.list_state.scroll_to_reveal_item(row);
         }
+        cx.notify();
     }
 }
 
@@ -1113,6 +1119,15 @@ mod tests {
         assert_eq!(last, 309);
         assert!(cx.debug_bounds("palette-row-309").is_some());
         assert!(cx.debug_bounds("palette-row-5").is_none());
+
+        for _ in 0..5 {
+            dispatch_palette_key(&palette, cx, "down");
+        }
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(
+            cx.debug_bounds("palette-row-5").is_some(),
+            "the keyboard selection scrolls into view"
+        );
     }
 
     #[gpui::test]
