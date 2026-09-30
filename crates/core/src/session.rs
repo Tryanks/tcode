@@ -485,11 +485,21 @@ pub struct ProposedPlan {
 
 /// A structured question set the agent is waiting on, or working past, from
 /// [`AgentEvent::UserInputRequested`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingUserInput {
     pub request_id: String,
     pub questions: Vec<UserInputQuestion>,
     pub delivery: UserInputDelivery,
+}
+
+/// The turn a live provider is running, located in the session's whole log so
+/// a fold of any window of it can find the turn among its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningTurn {
+    /// Index of the turn among every turn the whole log folds to.
+    pub turn: u64,
+    /// When the turn began, if the record that opened it carried a time.
+    pub started_at: Option<u64>,
 }
 
 /// Folded view of a session's event history.
@@ -582,6 +592,39 @@ impl Timeline {
         for turn in &mut self.turns {
             turn.running = false;
         }
+    }
+
+    /// The running turn of a fold that holds the whole log.
+    pub fn running_turn(&self) -> Option<RunningTurn> {
+        let turn = self.turns.len().checked_sub(1)?;
+        (self.turn_running && self.turns[turn].running).then(|| RunningTurn {
+            turn: turn as u64,
+            started_at: self.turns[turn].start_ts,
+        })
+    }
+
+    /// Take liveness from the host instead of the records: only the turn at
+    /// `running` runs, timed from `started_at` when given. A fold of a window
+    /// cannot tell a live turn from one whose provider stopped without a
+    /// record, and a window cut inside the turn misses its start. Nothing the
+    /// records built is discarded, so a later settle can revive the turn.
+    pub fn settle_running_turn(&mut self, running: Option<usize>, started_at: Option<u64>) {
+        let running = running.filter(|turn| *turn < self.turns.len());
+        self.turn_running = running.is_some();
+        for (index, turn) in self.turns.iter_mut().enumerate() {
+            turn.running = running == Some(index);
+        }
+        if let (Some(turn), Some(started_at)) = (running, started_at) {
+            self.turns[turn].start_ts = Some(started_at);
+        }
+    }
+
+    /// The proposed plan to show: a streamed plan stays display-only while
+    /// its turn runs and is dropped once the turn stops without finalizing it.
+    pub fn shown_proposed_plan(&self) -> Option<&ProposedPlan> {
+        self.proposed_plan
+            .as_ref()
+            .filter(|plan| plan.ready || self.turns.get(plan.turn).is_some_and(|turn| turn.running))
     }
 
     /// The latest finalized plan, unless that exact provider item has already
@@ -2539,6 +2582,15 @@ mod tests {
         interrupted = timeline.clone();
         interrupted.mark_idle();
         assert!(interrupted.proposed_plan.is_none());
+        // A client settled idle hides the streamed plan but can revive it.
+        let mut settled = timeline.clone();
+        settled.settle_running_turn(None, None);
+        assert!(settled.shown_proposed_plan().is_none());
+        settled.settle_running_turn(Some(0), None);
+        assert_eq!(
+            settled.shown_proposed_plan().unwrap().markdown,
+            "# Plan\nstep one"
+        );
 
         timeline.apply_at(
             None,
@@ -2550,6 +2602,10 @@ mod tests {
         timeline.apply_at(None, &turn_completed());
         timeline.mark_idle();
         assert_eq!(timeline.plan_ready().unwrap().markdown, "# Final plan");
+        assert_eq!(
+            timeline.shown_proposed_plan().unwrap().markdown,
+            "# Final plan"
+        );
         for resolution in [
             agent::PlanResolution::Implemented,
             agent::PlanResolution::Dismissed,
