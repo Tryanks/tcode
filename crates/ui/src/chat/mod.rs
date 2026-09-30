@@ -1164,6 +1164,29 @@ impl ChatView {
         }
     }
 
+    /// Invalidate the measured height of the row that renders the activity
+    /// `entry_id`; an expanded Work Log gives each activity a row of its own.
+    fn remeasure_activity(&self, turn: usize, entry_id: &str, cx: &App) {
+        let row = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(|timeline| {
+                let entries = &timeline.entries;
+                let start = entries.partition_point(|entry| entry.turn < turn);
+                let index = start
+                    + entries[start..]
+                        .iter()
+                        .take_while(|entry| entry.turn == turn)
+                        .position(|entry| entry.id == entry_id)?;
+                row_of_entry(&self.rows, index, turn)
+            })
+            .flatten();
+        match row {
+            Some(row) => self.list_state.remeasure_items(row..row + 1),
+            None => self.remeasure_turn(turn),
+        }
+    }
+
     fn set_markdown_visible_rows(&mut self, visible_rows: Range<usize>, cx: &mut Context<Self>) {
         self.painted_tail_start = None;
         let row_count = self.rows.len();
@@ -1244,7 +1267,7 @@ impl ChatView {
 
     fn toggle_activity_expanded(
         &mut self,
-        turn: usize,
+        (turn, entry_id): (usize, &str),
         key: &str,
         expanded: bool,
         cx: &mut Context<Self>,
@@ -1258,7 +1281,8 @@ impl ChatView {
                 },
             );
         }
-        self.remeasure_expanded(turn, cx);
+        self.remeasure_activity(turn, entry_id, cx);
+        cx.notify();
     }
 
     fn remeasure_expanded(&mut self, turn: usize, cx: &mut Context<Self>) {
@@ -1272,7 +1296,7 @@ impl ChatView {
 
     fn auto_activity_expanded(
         &mut self,
-        turn: usize,
+        (turn, entry_id): (usize, &str),
         key: &str,
         enabled: bool,
         recency: AutoActivityRecency,
@@ -1290,6 +1314,7 @@ impl ChatView {
         );
         if let Some((generation, delay)) = auto.collapse {
             let collapse_key = key.to_string();
+            let collapse_entry_id = entry_id.to_string();
             let collapse_session_key = session_key.clone();
             let timer = cx.background_executor().timer(delay);
             cx.spawn(async move |this, cx| {
@@ -1301,7 +1326,7 @@ impl ChatView {
                         generation,
                     ) && this.session_key.as_deref() == Some(collapse_session_key.as_str())
                     {
-                        this.remeasure_turn(turn);
+                        this.remeasure_activity(turn, &collapse_entry_id, cx);
                         cx.notify();
                     }
                 });
@@ -1900,17 +1925,24 @@ impl ChatView {
                 for (file_index, row) in live_edit_rows(changes, cwd).iter().enumerate() {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
-                    let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx);
+                    let expanded =
+                        self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
                     let inline_diff = (expanded && row.counts.is_some())
                         .then(|| self.inline_diffs.render(&key, row, cx));
                     let toggle_key = key.clone();
+                    let entry_id = entry.id.clone();
                     rows.push(components::changed_files::file_edit_row(
                         &key,
                         row,
                         expanded,
                         inline_diff,
                         cx.listener(move |this, _, _, cx| {
-                            this.toggle_activity_expanded(turn, &toggle_key, expanded, cx);
+                            this.toggle_activity_expanded(
+                                (turn, &entry_id),
+                                &toggle_key,
+                                expanded,
+                                cx,
+                            );
                         }),
                         cx,
                     ));
@@ -1953,7 +1985,8 @@ impl ChatView {
         );
         let auto_enabled =
             auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
-        let expanded = self.auto_activity_expanded(turn, &key, auto_enabled, recency, cx);
+        let expanded =
+            self.auto_activity_expanded((turn, &entry.id), &key, auto_enabled, recency, cx);
         let command_detail = if expanded {
             match &entry.content {
                 EntryContent::Item(ItemContent::CommandExecution {
@@ -1992,6 +2025,7 @@ impl ChatView {
             None
         };
         let click_key = key;
+        let entry_id = entry.id.clone();
         components::activity::activity_row(
             entry,
             compact,
@@ -2000,7 +2034,7 @@ impl ChatView {
             command_detail,
             elided_output,
             cx.listener(move |this, _, _, cx| {
-                this.toggle_activity_expanded(turn, &click_key, expanded, cx);
+                this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
             }),
             cx,
         )
@@ -2057,13 +2091,15 @@ impl ChatView {
                     Ok(output) => FullOutput::Loaded(output.into()),
                     Err(error) => FullOutput::Failed(error),
                 };
+                this.remeasure_activity(turn, &id, cx);
                 this.full_outputs.insert(id, output);
-                this.remeasure_expanded(turn, cx);
+                cx.notify();
             });
         });
+        self.remeasure_activity(turn, &item_id, cx);
         self.full_outputs
             .insert(item_id, FullOutput::Loading { _request: task });
-        self.remeasure_expanded(turn, cx);
+        cx.notify();
     }
 
     /// Ask the host to render one stored command's output at `cols`.
@@ -2101,7 +2137,7 @@ impl ChatView {
                     .borrow_mut()
                     .adopt(&id, generation, frame)
                 {
-                    this.remeasure_turn(turn);
+                    this.remeasure_activity(turn, &id, cx);
                 }
                 cx.notify();
             });
@@ -4053,6 +4089,31 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("activity-row-command-399").is_some());
         assert!(cx.debug_bounds("activity-row-command-0").is_none());
+
+        // Opening one activity keeps the measured heights of the turn's
+        // other rows, however far away.
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw(cx);
+        let last = view.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let measured = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |chat, _| {
+                chat.list_state.bounds_for_item(last).is_some()
+            })
+        };
+        assert!(measured(cx));
+        let row = cx
+            .debug_bounds("activity-row-command-0")
+            .expect("the first activity");
+        cx.simulate_click(row.center(), Modifiers::default());
+        draw(cx);
+        assert!(cx.debug_bounds("activity-detail").is_some());
+        assert!(
+            measured(cx),
+            "opening one activity remeasured the whole turn"
+        );
     }
 
     #[gpui::test]
