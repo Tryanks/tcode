@@ -4059,6 +4059,9 @@ mod tests {
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
         };
         cx.update(crate::theme::init);
+        // Row springs run on the wall clock, which the test executor does not
+        // advance; the displayed order is read once they have settled.
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let mut project = Project::from_root(PathBuf::from("/project"));

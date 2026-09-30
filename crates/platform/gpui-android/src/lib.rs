@@ -1,4 +1,4 @@
-//! Android platform backend for `gpui-pre`.
+//! Android platform backend for gpui-fast.
 //!
 //! Android owns the activity and window lifecycle, so [`init_platform`] must
 //! be called from `android_main` before constructing a GPUI [`gpui::Application`].
