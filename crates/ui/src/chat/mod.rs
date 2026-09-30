@@ -364,6 +364,8 @@ pub struct ChatView {
     /// scroll applied between two frames is either overwritten by the next
     /// packet or would have to give up when one arrived first.
     reservation_scroll_back: Option<ReservationScrollBack>,
+    /// The anchor was carried into rows not yet measured.
+    carried_anchor: bool,
     rows: Vec<TimelineRow>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
@@ -417,6 +419,34 @@ fn jump_to_latest_visible(list: &ListState) -> bool {
     // been measured. Prepending shifts the extent and offset together.
     height > px(0.)
         && list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y > height
+}
+
+/// Move an anchor whose offset passes the end of its row onto the row that
+/// offset lands in. A remeasure of the anchor row would otherwise clamp the
+/// offset to that row's height. False while a row it passes is unmeasured.
+fn settle_carried_anchor(list: &ListState) -> bool {
+    if list.is_following_tail() {
+        return true;
+    }
+    let mut anchor = list.logical_scroll_top();
+    let start = anchor.item_ix;
+    let settled = loop {
+        if anchor.item_ix + 1 >= list.item_count() {
+            break true;
+        }
+        let Some(bounds) = list.bounds_for_item(anchor.item_ix) else {
+            break false;
+        };
+        if anchor.offset_in_item < bounds.size.height {
+            break true;
+        }
+        anchor.offset_in_item -= bounds.size.height;
+        anchor.item_ix += 1;
+    };
+    if anchor.item_ix != start {
+        list.scroll_to(anchor);
+    }
+    settled
 }
 
 /// Pixels between the top of the content and the top of the viewport. A list
@@ -629,6 +659,7 @@ impl ChatView {
             timeline_stale: false,
             history_placeholder_height: px(0.),
             reservation_scroll_back: None,
+            carried_anchor: false,
             rows: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
@@ -784,7 +815,15 @@ impl ChatView {
                     self.list_state.set_follow_mode(FollowMode::Tail);
                 }
             }
-            ListSync::Incremental { splices, remeasure } => {
+            ListSync::Incremental {
+                splices,
+                remeasure,
+                carried,
+            } => {
+                let anchor = self.list_state.logical_scroll_top();
+                let carried_offset = (!self.list_state.is_following_tail()
+                    && carried.iter().any(|range| range.contains(&anchor.item_ix)))
+                .then_some(anchor.offset_in_item);
                 for (range, count) in splices.into_iter().rev() {
                     // The row above a splice changes its padding (the former
                     // last row hands its edge padding to the new one); its
@@ -797,6 +836,17 @@ impl ChatView {
                 }
                 for index in remeasure {
                     self.list_state.remeasure_items(index..index + 1);
+                }
+                // A splice over the anchor moves it to the first new row at
+                // offset zero; the carried content starts where the old row
+                // did, so the old offset still names the same pixel. It may
+                // pass that row's end until `settle_carried_anchor` measures it.
+                if let Some(offset) = carried_offset {
+                    self.list_state.scroll_to(ListOffset {
+                        item_ix: self.list_state.logical_scroll_top().item_ix,
+                        offset_in_item: offset,
+                    });
+                    self.carried_anchor = true;
                 }
             }
         }
@@ -2928,6 +2978,16 @@ impl Render for ChatView {
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
+        if self.carried_anchor {
+            self.carried_anchor = !settle_carried_anchor(&self.list_state);
+            if self.carried_anchor {
+                // The next frame may be idle otherwise; make it render.
+                let chat = cx.entity().downgrade();
+                window.on_next_frame(move |_, cx| {
+                    let _ = chat.update(cx, |_, cx| cx.notify());
+                });
+            }
+        }
         let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
         self.sync_markdown_scroll_position(cx);
         self.apply_reservation_scroll_back(window, cx);
@@ -3441,7 +3501,7 @@ mod tests {
         ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansion,
         AutoActivityExpansions,
         AutoActivityRecency::{ImmediatelySuperseded, Latest, Older},
-        ChatView, ResidencyScope, markdown_entries_for_residency,
+        ChatView, ResidencyScope, RowPart, markdown_entries_for_residency,
     };
     use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
@@ -3777,6 +3837,117 @@ mod tests {
         });
 
         assert!(cx.debug_bounds("steering-steer").is_some());
+    }
+
+    #[gpui::test]
+    fn a_paused_reader_on_the_live_window_stays_put_as_it_folds(cx: &mut TestAppContext) {
+        use gpui::{ListOffset, Modifiers, VisualTestContext, px, size};
+        use tcode_core::session::SteeringStatus;
+
+        let tool = |id: &str| {
+            entry(
+                id,
+                EntryContent::Item(ItemContent::ToolCall {
+                    name: "read".into(),
+                    input: serde_json::json!({ "path": id }),
+                    output: None,
+                    status: ItemStatus::Completed,
+                }),
+            )
+        };
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries.push(entry("user", user_item("go")));
+        for index in 0..20 {
+            timeline.entries.push(tool(&format!("tool-{index}")));
+        }
+        // Steers queued behind the live window keep content below it.
+        for index in 0..12 {
+            timeline.entries.push(entry(
+                &format!("steer-{index}"),
+                EntryContent::Steer {
+                    text: format!("queued steer {index}"),
+                    status: SteeringStatus::Pending,
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            ));
+        }
+
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw(cx);
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw(cx);
+        let header = cx
+            .debug_bounds("worklog-header-0-tool-0")
+            .expect("collapsed work log");
+        cx.simulate_click(header.center(), Modifiers::default());
+        draw(cx);
+        // The reader rests two activities into the live window.
+        view.update(cx, |chat, cx| {
+            let live = chat
+                .rows
+                .iter()
+                .position(|row| row.part == RowPart::WorkLogLive)
+                .expect("an expanded live work log");
+            chat.list_state.scroll_to(ListOffset {
+                item_ix: live,
+                offset_in_item: px(70.),
+            });
+            cx.notify();
+        });
+        draw(cx);
+        let reading = cx
+            .debug_bounds("activity-row-tool-18")
+            .expect("the activity under the reader")
+            .top();
+        let top = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("activity-row-tool-18")
+                .map(|bounds| bounds.top())
+        };
+
+        let update = |timeline: &Timeline, cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw(cx);
+            draw(cx);
+        };
+        timeline.entries.push(tool("tool-20"));
+        timeline.entries.push(tool("tool-21"));
+        update(&timeline, cx);
+        assert_eq!(
+            top(cx),
+            Some(reading),
+            "new activities folding the live window moved the reader"
+        );
+
+        timeline.turns[0].running = false;
+        update(&timeline, cx);
+        // Settled, the activity takes the folded rows' indent but keeps its
+        // line.
+        assert_eq!(
+            top(cx),
+            Some(reading),
+            "the live window settling moved the reader"
+        );
     }
 
     #[gpui::test]
