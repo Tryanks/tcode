@@ -313,6 +313,9 @@ mod tests {
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {
+            // A frame that reuses any view keeps every debug bound of the
+            // previous one, so a dismissed toast would still be found.
+            window.refresh();
             _ = window.draw(cx);
         });
     }
