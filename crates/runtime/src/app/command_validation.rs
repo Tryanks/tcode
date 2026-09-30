@@ -461,7 +461,7 @@ mod tests {
             )));
         }
         assert!(
-            state.has_approval(&id),
+            !state.approval_requests(&id).is_empty(),
             "failed delivery must leave the approval pending"
         );
     }

@@ -544,6 +544,17 @@ impl AppState {
         self.record_event_at(session_id, ts, event, cx);
     }
 
+    /// Deliver an event as a session's provider would.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn provider_event_for_test(
+        &mut self,
+        session_id: &str,
+        event: AgentEvent,
+        cx: &mut HostCx,
+    ) {
+        self.on_event(session_id, event, cx);
+    }
+
     /// Give a new session an immediate first-message fallback, then ask a fresh
     /// background provider session for a concise title. The hidden request has
     /// no resume cursor or MCP servers, so it never enters the conversation or

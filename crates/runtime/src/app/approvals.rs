@@ -31,10 +31,6 @@ impl AppState {
         self.approval_requests(session_id).first()
     }
 
-    pub(super) fn has_approval(&self, session_id: &str) -> bool {
-        !self.approval_requests(session_id).is_empty()
-    }
-
     pub(super) fn clear_approvals(&mut self, session_id: &str) {
         self.approvals.remove(session_id);
     }
@@ -115,6 +111,7 @@ mod tests {
             let (commands, receiver) = smol::channel::unbounded();
             let mut child = live_session("child", commands);
             child.meta.parent_session_id = Some("parent".into());
+            child.turn_in_flight = true;
             state.sessions.push(child.meta.clone());
             if parked {
                 state.residents.parked.insert("child".into(), child);
@@ -134,11 +131,13 @@ mod tests {
             let status = state.child_status_json(&state.sessions[0], &Timeline::default());
             assert_eq!(status["approval_request_id"], "first");
             assert_eq!(status["waiting_approval"], "command `cargo test`");
-            assert!(
+            assert_eq!(
                 state
                     .session_status_snapshot("child")
                     .unwrap()
-                    .pending_approval
+                    .pending_approvals
+                    .len(),
+                2
             );
 
             state
@@ -148,7 +147,7 @@ mod tests {
                 matches!(receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id, decision: ApprovalDecision::Deny }) if request_id == "first")
             );
             assert_eq!(state.first_approval("child").unwrap().id, "second");
-            assert!(state.has_approval("parent"));
+            assert!(!state.approval_requests("parent").is_empty());
 
             drop(receiver);
             assert!(
@@ -169,16 +168,17 @@ mod tests {
                 },
             );
             assert!(
-                !state
+                state
                     .session_status_snapshot("child")
                     .unwrap()
-                    .pending_approval
+                    .pending_approvals
+                    .is_empty()
             );
             assert_eq!(
                 state.child_status_json(&state.sessions[0], &Timeline::default())["approval_request_id"],
                 serde_json::Value::Null
             );
-            assert!(state.has_approval("parent"));
+            assert!(!state.approval_requests("parent").is_empty());
             state.record_approval_event(
                 "parent",
                 &AgentEvent::TurnCompleted {
@@ -187,7 +187,7 @@ mod tests {
                     usage: None,
                 },
             );
-            assert!(!state.has_approval("parent"));
+            assert!(state.approval_requests("parent").is_empty());
         }
     }
 }
