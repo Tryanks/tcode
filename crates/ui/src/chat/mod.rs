@@ -49,14 +49,15 @@ use crate::window_drag_area;
 use crate::window_state::WindowState;
 
 use self::components::assistant::MdState;
+use self::components::changed_files::InlineDiffCache;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
-    ListSync, RowRenderArgs, Segment, TimelineContinuity, TimelineRow, TurnIndexCache,
+    ListSync, RowPart, RowRenderArgs, Segment, TimelineContinuity, TimelineRow, TurnIndexCache,
     activity_run_duration_ms, displayed_error_text, divergent_served_model,
     format_elapsed_deciseconds, latest_message_ids, live_edit_counts, live_edit_rows,
     partition_activity_run, plain_text_as_markdown, row_of_entry, rows_of_turn, segment_entries,
     start_hub_projects, timeline_overdraw, user_content, user_visible_text, work_log_capsule_label,
-    work_log_counts, work_log_outcome,
+    work_log_counts, work_log_key, work_log_outcome,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_row_window, viewport_row_window,
@@ -374,6 +375,7 @@ pub struct ChatView {
     expanded: HashSet<String>,
     auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
+    inline_diffs: InlineDiffCache,
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
     session_key: Option<String>,
@@ -637,6 +639,7 @@ impl ChatView {
             expanded: HashSet::new(),
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
+            inline_diffs: InlineDiffCache::new(),
             full_outputs: HashMap::new(),
             session_key: None,
             highlighted_turn: None,
@@ -721,6 +724,7 @@ impl ChatView {
             self.md_states.clear();
             self.pending_md_builds.clear();
             self.command_panels.borrow_mut().clear();
+            self.inline_diffs.clear();
             self.full_outputs.clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
@@ -1220,10 +1224,10 @@ impl ChatView {
     }
 
     /// Render one timeline row: the segment it spans (a message, an error, a
-    /// Work Log run) and, on the turn's last row, the turn's trailer.
+    /// Work Log run or a part of an expanded one) and, on the turn's last
+    /// row, the turn's trailer.
     ///
-    /// `entries` are the turn's entries; the row renders its own range of
-    /// them and the trailer reads the rest (pending steers, the last
+    /// The trailer reads the whole turn (pending steers, the last
     /// timestamp). `pinned` carries the ids of the last user / last assistant
     /// message in the whole timeline: their action rows stay visible instead
     /// of waiting for a hover, so Copy is never invisible-and-hover-only.
@@ -1233,12 +1237,11 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (row, turn, cwd, entries, pinned) = args;
+        let (row, turn, cwd, own, entries, pinned) = args;
         let index = row.turn;
         let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
 
-        // A row's range re-segments to the one segment it was indexed from.
-        let own = entries.get(row.entry_range.clone()).unwrap_or(&[]);
+        // A row's entries re-segment to the one segment it was indexed from.
         let segmented = segment_entries(own, turn.running);
         let segments = &segmented.flow;
 
@@ -1291,9 +1294,8 @@ impl ChatView {
                     ));
                 }
                 Segment::ActivityRun(activities) => {
-                    let segment_id = activities[0].id.as_str();
                     column = column.child(self.compose_work_log(
-                        (index, segment_id, turn, cwd, activities, row.live_activity),
+                        (index, &row.part, turn, cwd, activities, row.live_activity),
                         cx,
                     ));
                 }
@@ -1693,17 +1695,17 @@ impl ChatView {
         )
     }
 
-    /// Prepare one stateless Work Log capsule.
+    /// Prepare one stateless Work Log capsule, or the part of an expanded one
+    /// that `part` names.
     fn compose_work_log(
         &mut self,
         args: components::work_log::WorkLogArgs<'_>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (index, segment_id, turn, cwd, activities, is_last) = args;
-        let section_key = format!("worklog-{index}-{segment_id}");
+        let (index, part, turn, cwd, activities, is_last) = args;
+        let segment_id = activities[0].id.as_str();
+        let section_key = work_log_key(index, segment_id);
         let running = is_last && turn.running;
-        let (folded, visible) = partition_activity_run(activities, running);
-        let expanded = self.expanded.contains(&section_key);
         let live_reasoning_id = running
             .then(|| activities.last().copied())
             .flatten()
@@ -1714,6 +1716,29 @@ impl ChatView {
                 )
             })
             .map(|entry| entry.id.as_str());
+        match part {
+            RowPart::WorkLogActivity => {
+                let rows = self.compose_work_log_rows(activities, cwd, None, false, cx);
+                return components::work_log::work_log_body(rows).into_any_element();
+            }
+            RowPart::WorkLogLive => {
+                return v_flex()
+                    .w_full()
+                    .gap_1()
+                    .children(self.compose_work_log_rows(
+                        activities,
+                        cwd,
+                        live_reasoning_id,
+                        running,
+                        cx,
+                    ))
+                    .into_any_element();
+            }
+            RowPart::Segment | RowPart::WorkLogHeader { .. } => {}
+        }
+        let header_only = matches!(part, RowPart::WorkLogHeader { .. });
+        let (folded, visible) = partition_activity_run(activities, running);
+        let expanded = self.expanded.contains(&section_key);
 
         let mut flow = v_flex().w_full().gap_1();
         if !folded.is_empty() {
@@ -1725,7 +1750,7 @@ impl ChatView {
             let duration =
                 format_elapsed_deciseconds(activity_run_duration_ms(folded, turn, is_last));
             let outcome = work_log_outcome(turn, folded, is_last);
-            let rows = if expanded {
+            let rows = if expanded && !header_only {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, cx)
             } else {
                 Vec::new()
@@ -1751,7 +1776,7 @@ impl ChatView {
             ));
         }
 
-        if !visible.is_empty() {
+        if !visible.is_empty() && !header_only {
             flow = flow.child(
                 v_flex()
                     .w_full()
@@ -1788,11 +1813,18 @@ impl ChatView {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
                     let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx);
+                    let inline_diff = if expanded && row.counts.is_some() {
+                        Some(self.inline_diffs.render(&key, row, cx))
+                    } else {
+                        self.inline_diffs.forget(&key);
+                        None
+                    };
                     let toggle_key = key.clone();
                     rows.push(components::changed_files::file_edit_row(
                         &key,
                         row,
                         expanded,
+                        inline_diff,
                         cx.listener(move |this, _, _, cx| {
                             this.toggle_activity_expanded(turn, &toggle_key, expanded, cx);
                         }),
@@ -2998,48 +3030,56 @@ impl Render for ChatView {
                 let Some(row) = this.rows.get(index).cloned() else {
                     return div().into_any_element();
                 };
-                // Clone only the entries of this row's turn: the row renders
-                // its own segment and the turn's last row its trailer. The
-                // full history remains behind the store and is never cloned
-                // by the render path. The turn's span comes from the
-                // timeline, not its rows: a pending steer after a message
-                // belongs to no row but renders in the trailer.
-                let Some((turn, entries, turn_start)) = this
+                // The trailer's turn span comes from the timeline, not its
+                // rows: a pending steer after a message belongs to no row.
+                // The rows can trail the live timeline by a frame (e.g.
+                // adopting a running background thread whose timeline is
+                // being re-folded), so the ranges are bounds-checked.
+                let own_range = match &row.part {
+                    RowPart::WorkLogHeader { run } => run.clone(),
+                    _ => row.entry_range.clone(),
+                };
+                let Some((turn, own, trailer)) = this
                     .workspace_store
                     .read(cx)
                     .with_active_timeline(|timeline| {
                         let entries = &timeline.entries;
-                        let start = entries.partition_point(|entry| entry.turn < row.turn);
-                        let len = entries[start..].partition_point(|entry| entry.turn == row.turn);
+                        let trailer = if row.last_in_turn {
+                            let start = entries.partition_point(|entry| entry.turn < row.turn);
+                            let len =
+                                entries[start..].partition_point(|entry| entry.turn == row.turn);
+                            entries[start..start + len].to_vec()
+                        } else {
+                            Vec::new()
+                        };
                         (
                             timeline.turns.get(row.turn).cloned().unwrap_or_default(),
-                            entries[start..start + len].to_vec(),
-                            start,
+                            entries
+                                .get(own_range)
+                                .map(<[_]>::to_vec)
+                                .unwrap_or_default(),
+                            trailer,
                         )
                     })
                 else {
                     return div().into_any_element();
-                };
-                // The row's range, relative to the turn's entries. The rows
-                // are a snapshot that can trail the live timeline by a frame
-                // (e.g. adopting a running background thread whose timeline
-                // is being re-folded); `render_row` bounds-checks the range.
-                let row = TimelineRow {
-                    entry_range: row.entry_range.start.saturating_sub(turn_start)
-                        ..row.entry_range.end.saturating_sub(turn_start),
-                    ..row
                 };
                 let rendered = this.render_row(
                     (
                         &row,
                         &turn,
                         &item_cwd,
-                        &entries,
+                        &own,
+                        &trailer,
                         (last_user_id.as_deref(), last_assistant_id.as_deref()),
                     ),
                     window,
                     cx,
                 );
+                // An expanded Work Log's parts keep the Work Log's own rhythm.
+                let continued = this.rows.get(index + 1).is_some_and(|next| {
+                    matches!(next.part, RowPart::WorkLogActivity | RowPart::WorkLogLive)
+                });
                 v_flex()
                     .debug_selector(move || format!("timeline-row-{index}"))
                     .w_full()
@@ -3054,13 +3094,17 @@ impl Render for ChatView {
                             .bg(cx.theme().list_active)
                     })
                     .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
-                    .pb(px(if index + 1 == item_count {
-                        TIMELINE_EDGE_PADDING
-                    } else if row.last_in_turn {
-                        TURN_GAP
-                    } else {
-                        SEGMENT_GAP
-                    }))
+                    .map(|item| {
+                        if index + 1 == item_count {
+                            item.pb(px(TIMELINE_EDGE_PADDING))
+                        } else if row.last_in_turn {
+                            item.pb(px(TURN_GAP))
+                        } else if continued {
+                            item.pb_1()
+                        } else {
+                            item.pb(px(SEGMENT_GAP))
+                        }
+                    })
                     // `min_w_0`: a turn holds nowrap content (diff rows, command
                     // output). Without it this flex item grows to that content
                     // and the column runs past the page inset instead of
@@ -3735,6 +3779,168 @@ mod tests {
         assert!(cx.debug_bounds("steering-steer").is_some());
     }
 
+    #[gpui::test]
+    fn an_expanded_work_log_lays_out_only_the_activities_on_screen(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, Modifiers, VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta::default()];
+        timeline.entries.push(entry("user", user_item("go")));
+        for index in 0..400 {
+            timeline.entries.push(command(&format!("command-{index}")));
+        }
+        timeline
+            .entries
+            .push(entry("assistant", assistant("Done.")));
+
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw(cx);
+
+        let header = cx
+            .debug_bounds("worklog-header-0-command-0")
+            .expect("collapsed work log");
+        cx.simulate_click(header.center(), Modifiers::default());
+        draw(cx);
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("activity-row-command-0").is_some());
+        assert!(
+            cx.debug_bounds("activity-row-command-399").is_none(),
+            "an expanded work log must not lay out all 400 activities"
+        );
+
+        view.update(cx, |chat, cx| {
+            chat.list_state.set_follow_mode(FollowMode::Tail);
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("activity-row-command-399").is_some());
+        assert!(cx.debug_bounds("activity-row-command-0").is_none());
+    }
+
+    #[gpui::test]
+    fn a_live_file_edit_lays_out_only_the_diff_lines_on_screen(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, VisualTestContext};
+        use gpui::{point, px, size};
+
+        let mut diff = format!("@@ -1,400 +1,401 @@\n+// {}\n", "wide ".repeat(80));
+        for line in 0..400 {
+            diff.push_str(&format!("-fn old_{line}() {{}}\n+fn new_{line}() {{}}\n"));
+        }
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![entry("user", user_item("go"))];
+        for note in 0..20 {
+            timeline.entries.push(entry(
+                &format!("note-{note}"),
+                assistant("A note above the edit."),
+            ));
+        }
+        timeline.entries.push(entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![agent::FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: agent::FileChangeKind::Modify,
+                    diff: Some(diff),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        ));
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(600.), px(900.)));
+        draw(cx);
+
+        assert!(cx.debug_bounds("file-edit-diff-line-0").is_some());
+        assert!(
+            cx.debug_bounds("file-edit-diff-line-300").is_none(),
+            "an inline diff must not lay out all 801 lines"
+        );
+
+        // Both axes scroll inside the diff; the timeline stays put.
+        let timeline_top = |cx: &mut VisualTestContext| {
+            let top = view.read_with(cx, |chat, _| chat.list_state.logical_scroll_top());
+            (top.item_ix, top.offset_in_item)
+        };
+        let before = timeline_top(cx);
+        assert!(
+            view.read_with(cx, |chat, _| chat.list_state.max_offset_for_scrollbar().y) > px(0.)
+        );
+        let diff_bounds = cx.debug_bounds("file-edit-diff").expect("inline diff");
+        let wheel = |delta, cx: &mut VisualTestContext| {
+            for (touch_phase, delta) in [
+                (TouchPhase::Started, point(px(0.), px(0.))),
+                (TouchPhase::Moved, delta),
+                (TouchPhase::Ended, point(px(0.), px(0.))),
+            ] {
+                cx.simulate_event(ScrollWheelEvent {
+                    position: diff_bounds.center(),
+                    delta: ScrollDelta::Pixels(delta),
+                    modifiers: Modifiers::default(),
+                    touch_phase,
+                });
+            }
+            draw(cx);
+        };
+        wheel(point(px(0.), px(-2_000.)), cx);
+        assert!(cx.debug_bounds("file-edit-diff-line-0").is_none());
+        let line = cx
+            .debug_bounds("file-edit-diff-line-120")
+            .expect("a line scrolled into the diff");
+        wheel(point(px(-200.), px(0.)), cx);
+        let scrolled = cx.debug_bounds("file-edit-diff-line-120").unwrap();
+        assert!(
+            scrolled.left() < line.left(),
+            "{scrolled:?} did not scroll left of {line:?}"
+        );
+        assert_eq!(scrolled.top(), line.top());
+        assert_eq!(timeline_top(cx), before);
+
+        // The provider reports a different patch for the same edit.
+        timeline.entries[21] = entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![agent::FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: agent::FileChangeKind::Modify,
+                    diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        );
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("file-edit-diff-line-1").is_some());
+        assert!(cx.debug_bounds("file-edit-diff-line-2").is_none());
+    }
+
     #[test]
     fn collapsed_activity_stays_collapsed_after_visiting_another_session() {
         let mut expansions = AutoActivityExpansions::default();
@@ -3794,7 +4000,7 @@ mod tests {
             status: ItemStatus::Completed,
         };
         for (item, selector, detail_selector) in [
-            (command, "activity-row", "activity-detail"),
+            (command, "activity-row-first", "activity-detail"),
             (file_edit, "file-edit-row", "file-edit-diff"),
         ] {
             let mut timeline = Timeline::default();
