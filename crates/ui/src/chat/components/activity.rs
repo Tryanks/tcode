@@ -162,7 +162,10 @@ pub(crate) fn activity_row(
             crate::tr!("chat.activity_details"),
             cx,
         )
-        .debug_selector(|| "activity-row".into())
+        .debug_selector({
+            let id = entry.id.clone();
+            move || format!("activity-row-{id}")
+        })
         .aria_expanded(expanded)
         .rounded(crate::material::radius_chip())
         .cursor_pointer()

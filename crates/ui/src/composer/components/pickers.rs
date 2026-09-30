@@ -172,7 +172,7 @@ impl Composer {
                 })
                 .collect(),
         };
-        let rows: Vec<ModelRow> = all_rows
+        let rows: Rc<[ModelRow]> = all_rows
             .into_iter()
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
             .collect();
@@ -259,7 +259,7 @@ impl Composer {
                 let rail = rail.clone();
                 let acp_rail_agents = acp_rail_agents.clone();
                 render_model_pane(
-                    &rows,
+                    rows,
                     &selected,
                     rail,
                     &acp_rail_agents,
@@ -652,7 +652,7 @@ impl Composer {
 
 #[allow(clippy::too_many_arguments)]
 fn render_model_pane(
-    rows: &[ModelRow],
+    rows: Rc<[ModelRow]>,
     selected: &Option<String>,
     rail: PickerRail,
     // (id, name) of every installed+enabled ACP agent — one rail entry each.
@@ -764,33 +764,73 @@ fn render_model_pane(
         .overflow_y_scroll_area()
         .child(rail_col);
 
-    let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
-    for (index, row) in rows.iter().enumerate() {
-        list = list.child(render_model_row(
-            row,
-            index,
-            selected,
-            composer.read(cx).compact,
-            store_entity,
-            popover,
-            cx,
-        ));
-    }
-    if rows.is_empty() {
-        list = list.child(
-            div()
-                .flex_none()
-                .px_3()
-                .py_4()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(if loading {
-                    crate::tr!("composer.loading_models")
-                } else {
-                    crate::tr!("composer.no_models")
-                }),
-        );
-    }
+    let list = div()
+        .id("model-picker-list")
+        .role(Role::ListBox)
+        .aria_label(crate::tr!("composer.model_results"))
+        .flex_1()
+        .min_h_0();
+    let list = if rows.is_empty() {
+        list.px_1()
+            .py_1()
+            .child(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(if loading {
+                        crate::tr!("composer.loading_models")
+                    } else {
+                        crate::tr!("composer.no_models")
+                    }),
+            )
+            .into_any_element()
+    } else {
+        let count = rows.len();
+        // Opening the picker shows the current model; a search starts at the
+        // top of its results.
+        let current = model_search
+            .read(cx)
+            .value()
+            .is_empty()
+            .then(|| {
+                rows.iter()
+                    .position(|row| selected.as_deref() == Some(row.id.as_str()))
+            })
+            .flatten();
+        let rows = rows.clone();
+        let selected = selected.clone();
+        let store_entity = store_entity.clone();
+        let popover = popover.clone();
+        list.flex()
+            .flex_col()
+            .child(
+                crate::scroll::VirtualList::measured(
+                    "model-picker-rows",
+                    count,
+                    move |index, _, cx| {
+                        div()
+                            .when(index + 1 < count, |row| row.pb_0p5())
+                            .child(render_model_row(
+                                &rows[index],
+                                index,
+                                &selected,
+                                compact,
+                                &store_entity,
+                                &popover,
+                                cx,
+                            ))
+                    },
+                )
+                .reveal(current)
+                .flex_1()
+                .min_h_0()
+                .px_1()
+                .py_1(),
+            )
+            .into_any_element()
+    };
 
     let mut pane = v_flex()
         .flex_1()
@@ -805,16 +845,7 @@ fn render_model_pane(
                 .border_color(cx.theme().border)
                 .child(Input::new(model_search).appearance(false)),
         )
-        .child(
-            div()
-                .id("model-picker-list")
-                .role(Role::ListBox)
-                .aria_label(crate::tr!("composer.model_results"))
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll_area()
-                .child(list),
-        );
+        .child(list);
     if pending_restart {
         pane = pane.child(
             div()
@@ -1010,7 +1041,7 @@ fn render_model_row(
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
-    cx: &mut Context<PopoverState>,
+    cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let is_current = selected.as_deref() == Some(row.id.as_str());

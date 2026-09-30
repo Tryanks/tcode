@@ -1,10 +1,10 @@
 //! The right-side diff panel view: scope controls, virtualized unified/split
 //! lists, expandable gaps, and line-anchored review comments.
 
-use crate::scroll::ScrollableElement as _;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::highlight::HighlightTheme;
@@ -24,7 +24,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, div, list,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, PopoverState, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use super::model::{
@@ -861,7 +861,13 @@ impl DiffPanel {
             .map(|active| active.session.clone())
             .unwrap_or_default();
         let selected_scope = self.selected_scope(&session, cx);
-        let turns = self.workspace_store.read(cx).diff_turns();
+        let turns: Rc<[usize]> = self
+            .workspace_store
+            .read(cx)
+            .diff_turns()
+            .into_iter()
+            .rev()
+            .collect();
         let label = match selected_scope {
             Some(DiffScope::Turn(turn)) => crate::tr!("diff.turn", count = turn + 1).into_owned(),
             Some(DiffScope::WorkingTree) => crate::tr!("diff.working_tree").into_owned(),
@@ -938,9 +944,43 @@ impl DiffPanel {
                             }
                         })
                     };
-                let mut list = v_flex()
+                let turn_rows = (!turns.is_empty()).then(|| {
+                    let turns = turns.clone();
+                    let panel = panel.clone();
+                    let session = session_selector.clone();
+                    let popover = cx.entity();
+                    crate::scroll::VirtualList::uniform(
+                        "diff-turn-items",
+                        turns.len(),
+                        move |range, _, cx| {
+                            range
+                                .map(|index| {
+                                    let turn = turns[index];
+                                    div().pb_0p5().child(turn_row(
+                                        turn,
+                                        selected_scope == Some(DiffScope::Turn(turn)),
+                                        &panel,
+                                        &session,
+                                        &popover,
+                                        cx,
+                                    ))
+                                })
+                                .collect()
+                        },
+                    )
                     .w_full()
-                    .p_1()
+                    .min_h_0()
+                });
+                v_flex()
+                    .id("diff-turn-list")
+                    .role(Role::Menu)
+                    .aria_label(crate::tr!("diff.scope_menu"))
+                    .min_w(px(190.))
+                    .max_h(px(320.))
+                    .pt_1()
+                    .px_1()
+                    // The last turn row carries its gap.
+                    .pb(px(if turn_rows.is_some() { 2. } else { 4. }))
                     .gap_0p5()
                     .child(scope_row(
                         "diff-scope-working",
@@ -963,65 +1003,8 @@ impl DiffPanel {
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child(crate::tr!("diff.turns")),
-                    );
-                let mut items = turns.clone();
-                items.reverse();
-                for turn in items {
-                    let panel = panel.clone();
-                    let session = session_selector.clone();
-                    let is_sel = selected_scope == Some(DiffScope::Turn(turn));
-                    let turn_label: gpui::SharedString = crate::tr!("diff.turn", count = turn + 1)
-                        .into_owned()
-                        .into();
-                    list = list.child(
-                        material::accessible_clickable(
-                            h_flex(),
-                            ("diff-turn-item", turn),
-                            Role::MenuItem,
-                            turn_label.clone(),
-                            cx,
-                        )
-                        .aria_selected(is_sel)
-                        .flex_none()
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .items_center()
-                        .rounded(px(6.))
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().list_hover))
-                        .when(is_sel, |this| this.bg(cx.theme().list_active))
-                        .child(div().flex_1().child(turn_label))
-                        .when(is_sel, |this| {
-                            this.child(Icon::new(IconName::Check).xsmall())
-                        })
-                        .on_click({
-                            let popover = cx.entity();
-                            move |_, window, cx| {
-                                panel.update(cx, |this, cx| {
-                                    this.scopes.insert(session.clone(), DiffScope::Turn(turn));
-                                    this.cache = None;
-                                    this.selection = None;
-                                    this.workspace_store.update(cx, |store, cx| {
-                                        store.select_diff_turn(turn, cx);
-                                    });
-                                    cx.notify();
-                                });
-                                popover.update(cx, |st, cx| st.dismiss(window, cx));
-                            }
-                        }),
-                    );
-                }
-                div()
-                    .id("diff-turn-list")
-                    .role(Role::Menu)
-                    .aria_label(crate::tr!("diff.scope_menu"))
-                    .min_w(px(190.))
-                    .max_h(px(320.))
-                    .overflow_y_scroll_area()
-                    .child(list)
+                    )
+                    .children(turn_rows)
             })
             .bg(cx.theme().popover)
             .border_1()
@@ -1029,98 +1012,94 @@ impl DiffPanel {
             .shadow_xl()
             .rounded(material::radius_overlay());
 
-        let base_selector = (selected_scope == Some(DiffScope::Branch)).then(|| {
-            let mut branches = self
-                .git_preview
-                .as_ref()
-                .map(|preview| preview.result.branches.clone())
-                .unwrap_or_default();
-            if branches.is_empty() {
-                branches = active_state
+        let base_selector =
+            (selected_scope == Some(DiffScope::Branch)).then(|| {
+                let mut branches: Rc<[String]> = self
+                    .git_preview
                     .as_ref()
-                    .map(|active| active.branches.clone())
+                    .map(|preview| preview.result.branches.as_slice().into())
                     .unwrap_or_default();
-            }
-            let current = self
-                .bases
-                .get(&session)
-                .cloned()
-                .or_else(|| {
-                    self.git_preview
+                if branches.is_empty() {
+                    branches = active_state
                         .as_ref()
-                        .and_then(|p| p.result.default_base.clone())
-                })
-                .unwrap_or_else(|| "HEAD".to_string());
-            let panel = cx.entity();
-            let session_base = session.clone();
-            let trigger = Button::new("diff-base-select")
-                .ghost()
-                .outline()
-                .compact()
-                .label(current.clone())
-                .icon(IconName::ChevronDown);
-            Popover::new("diff-base-popover")
-                .trigger(trigger)
-                .content(move |_, _, cx| {
-                    let mut list = v_flex().w_full().p_1().gap_0p5();
-                    for (branch_index, branch) in branches.clone().into_iter().enumerate() {
+                        .map(|active| active.branches.as_slice().into())
+                        .unwrap_or_default();
+                }
+                let current = self
+                    .bases
+                    .get(&session)
+                    .cloned()
+                    .or_else(|| {
+                        self.git_preview
+                            .as_ref()
+                            .and_then(|p| p.result.default_base.clone())
+                    })
+                    .unwrap_or_else(|| "HEAD".to_string());
+                let panel = cx.entity();
+                let session_base = session.clone();
+                let current_label = current.clone();
+                let current: Rc<str> = current.into();
+                let trigger = Button::new("diff-base-select")
+                    .ghost()
+                    .outline()
+                    .compact()
+                    .label(current_label)
+                    .icon(IconName::ChevronDown);
+                Popover::new("diff-base-popover")
+                    .trigger(trigger)
+                    .content(move |_, _, cx| {
+                        let branches = branches.clone();
+                        let current = current.clone();
                         let panel = panel.clone();
                         let session = session_base.clone();
-                        let chosen = branch.clone();
-                        let selected = branch == current;
-                        let accessible_label =
-                            crate::tr!("diff.base_branch", branch = branch.clone()).into_owned();
-                        list = list.child(
-                            material::accessible_clickable(
-                                h_flex(),
-                                ("diff-base-item", branch_index),
-                                Role::MenuItem,
-                                accessible_label,
-                                cx,
+                        let popover = cx.entity();
+                        let branch_count = branches.len();
+                        let widest = branches
+                            .iter()
+                            .enumerate()
+                            .max_by_key(|(_, branch)| branch.chars().count())
+                            .map_or(0, |(index, _)| index);
+                        div()
+                            .id("diff-base-list")
+                            .role(Role::Menu)
+                            .aria_label(crate::tr!("diff.base_branches"))
+                            .child(
+                                crate::scroll::VirtualList::uniform(
+                                    "diff-base-items",
+                                    branch_count,
+                                    move |range, _, cx| {
+                                        range
+                                            .map(|index| {
+                                                let branch = &branches[index];
+                                                div().pb_0p5().child(base_row(
+                                                    index,
+                                                    branch,
+                                                    *branch == *current,
+                                                    &panel,
+                                                    &session,
+                                                    &popover,
+                                                    cx,
+                                                ))
+                                            })
+                                            .collect()
+                                    },
+                                )
+                                .width_from_row(widest)
+                                .min_w(px(180.))
+                                .max_h(px(280.))
+                                .pt_1()
+                                .px_1()
+                                // The last row carries its gap.
+                                .pb(px(if branch_count == 0 { 4. } else { 2. })),
                             )
-                            .aria_selected(selected)
-                            .flex_none()
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .hover(|row| row.bg(cx.theme().list_hover))
-                            .when(selected, |row| row.bg(cx.theme().list_active))
-                            .child(div().flex_1().child(branch))
-                            .when(selected, |row| {
-                                row.child(Icon::new(IconName::Check).xsmall())
-                            })
-                            .on_click({
-                                let popover = cx.entity();
-                                move |_, window, cx| {
-                                    panel.update(cx, |this, cx| {
-                                        this.bases.insert(session.clone(), chosen.clone());
-                                        this.cache = None;
-                                        this.git_preview = None;
-                                        cx.notify();
-                                    });
-                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                }
-                            }),
-                        );
-                    }
-                    div()
-                        .id("diff-base-list")
-                        .role(Role::Menu)
-                        .aria_label(crate::tr!("diff.base_branches"))
-                        .min_w(px(180.))
-                        .max_h(px(280.))
-                        .overflow_y_scroll_area()
-                        .child(list)
-                })
-                .bg(cx.theme().popover)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_xl()
-                .rounded(material::radius_overlay())
-                .into_any_element()
-        });
+                    })
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .shadow_xl()
+                    .rounded(material::radius_overlay())
+                    .into_any_element()
+            });
 
         let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
         let split_on = self.workspace_store.read(cx).diff_split();
@@ -1935,6 +1914,109 @@ impl DiffPanel {
             )
             .into_any_element()
     }
+}
+
+fn turn_row(
+    turn: usize,
+    selected: bool,
+    panel: &Entity<DiffPanel>,
+    session: &str,
+    popover: &Entity<PopoverState>,
+    cx: &App,
+) -> AnyElement {
+    let panel = panel.clone();
+    let session = session.to_string();
+    let popover = popover.clone();
+    let label: gpui::SharedString = crate::tr!("diff.turn", count = turn + 1)
+        .into_owned()
+        .into();
+    material::accessible_clickable(
+        h_flex(),
+        ("diff-turn-item", turn),
+        Role::MenuItem,
+        label.clone(),
+        cx,
+    )
+    .aria_selected(selected)
+    .flex_none()
+    .w_full()
+    .px_2()
+    .py_1()
+    .gap_2()
+    .items_center()
+    .rounded(px(6.))
+    .text_size(px(13.))
+    .cursor_pointer()
+    .hover(|s| s.bg(cx.theme().list_hover))
+    .when(selected, |this| this.bg(cx.theme().list_active))
+    .child(div().flex_1().min_w_0().truncate().child(label))
+    .when(selected, |this| {
+        this.child(Icon::new(IconName::Check).xsmall())
+    })
+    .on_click(move |_, window, cx| {
+        panel.update(cx, |this, cx| {
+            this.scopes.insert(session.clone(), DiffScope::Turn(turn));
+            this.cache = None;
+            this.selection = None;
+            this.workspace_store.update(cx, |store, cx| {
+                store.select_diff_turn(turn, cx);
+            });
+            cx.notify();
+        });
+        popover.update(cx, |st, cx| st.dismiss(window, cx));
+    })
+    .into_any_element()
+}
+
+fn base_row(
+    index: usize,
+    branch: &str,
+    selected: bool,
+    panel: &Entity<DiffPanel>,
+    session: &str,
+    popover: &Entity<PopoverState>,
+    cx: &App,
+) -> AnyElement {
+    let panel = panel.clone();
+    let session = session.to_string();
+    let popover = popover.clone();
+    let chosen = branch.to_string();
+    material::accessible_clickable(
+        h_flex(),
+        ("diff-base-item", index),
+        Role::MenuItem,
+        crate::tr!("diff.base_branch", branch = branch).into_owned(),
+        cx,
+    )
+    .aria_selected(selected)
+    .flex_none()
+    .w_full()
+    .px_2()
+    .py_1()
+    .rounded(px(6.))
+    .cursor_pointer()
+    .hover(|row| row.bg(cx.theme().list_hover))
+    .when(selected, |row| row.bg(cx.theme().list_active))
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .child(branch.to_string()),
+    )
+    .when(selected, |row| {
+        row.child(Icon::new(IconName::Check).xsmall())
+    })
+    .on_click(move |_, window, cx| {
+        panel.update(cx, |this, cx| {
+            this.bases.insert(session.clone(), chosen.clone());
+            this.cache = None;
+            this.git_preview = None;
+            cx.notify();
+        });
+        popover.update(cx, |state, cx| state.dismiss(window, cx));
+    })
+    .into_any_element()
 }
 
 impl Render for DiffPanel {

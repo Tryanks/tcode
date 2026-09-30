@@ -9,6 +9,7 @@
 //!
 //! Title and action search use [`fuzzy_score`]; message search runs through the host.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -19,17 +20,18 @@ use crate::{
 };
 use agent::ProviderKind;
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, Role, ScrollHandle, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ListAlignment, ListState, ParentElement as _, Render, Role,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, list,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
-use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
 
@@ -106,6 +108,19 @@ struct Group {
     items: Vec<Item>,
 }
 
+enum Row {
+    Caption(String),
+    /// Index into [`Results::items`].
+    Item(usize),
+}
+
+/// The grouped results flattened into list rows. Scroll frames reuse it; the
+/// query, content hits and store index rebuild it.
+struct Results {
+    rows: Vec<Row>,
+    items: Vec<Item>,
+}
+
 pub struct CommandPalette {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -115,7 +130,8 @@ pub struct CommandPalette {
     pub(crate) outside_dismissal: crate::overlay::OutsideDismissal,
     content_hits: Vec<SessionSearchHit>,
     search_generation: u64,
-    list_scroll: ScrollHandle,
+    results: Option<Rc<Results>>,
+    list_state: ListState,
     _search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -131,7 +147,14 @@ impl CommandPalette {
             cx.new(|cx| InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder")));
 
         let subscriptions = vec![
-            observe_store_topics(&store, &[TopicKind::Index, TopicKind::Settings], cx),
+            cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
+                if matches!(
+                    change.topic,
+                    TopicKind::Index | TopicKind::Settings | TopicKind::ActiveSession
+                ) {
+                    this.invalidate_results(false, cx);
+                }
+            }),
             cx.subscribe_in(
                 &query,
                 window,
@@ -139,7 +162,7 @@ impl CommandPalette {
                     InputEvent::Change => {
                         this.selected = 0;
                         this.schedule_content_search(cx);
-                        cx.notify();
+                        this.invalidate_results(true, cx);
                     }
                     InputEvent::PressEnter { .. } => {
                         this.activate_selected(window, cx);
@@ -158,7 +181,8 @@ impl CommandPalette {
             outside_dismissal: crate::overlay::OutsideDismissal::default(),
             content_hits: Vec::new(),
             search_generation: 0,
-            list_scroll: ScrollHandle::new(),
+            results: None,
+            list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             _search_task: None,
             _subscriptions: subscriptions,
         }
@@ -179,6 +203,7 @@ impl CommandPalette {
         }
         self.selected = 0;
         self.content_hits.clear();
+        self.invalidate_results(true, cx);
     }
 
     #[cfg(test)]
@@ -227,7 +252,41 @@ impl CommandPalette {
             return;
         }
         self.content_hits = hits;
+        self.invalidate_results(false, cx);
+    }
+
+    /// A new query starts the list at the top; a store or content-hit update
+    /// keeps the rows the user scrolled to.
+    fn invalidate_results(&mut self, scroll_to_top: bool, cx: &mut Context<Self>) {
+        self.results = None;
+        if scroll_to_top {
+            self.list_state.scroll_to(gpui::ListOffset::default());
+        }
         cx.notify();
+    }
+
+    fn results(&mut self, cx: &Context<Self>) -> Rc<Results> {
+        if let Some(results) = &self.results {
+            return results.clone();
+        }
+        let mut rows = Vec::new();
+        let mut items = Vec::new();
+        for group in self.groups(cx) {
+            rows.push(Row::Caption(group.label));
+            for item in group.items {
+                rows.push(Row::Item(items.len()));
+                items.push(item);
+            }
+        }
+        let top = self.list_state.logical_scroll_top();
+        self.list_state
+            .splice(0..self.list_state.item_count(), rows.len());
+        if top.item_ix < rows.len() {
+            self.list_state.scroll_to(top);
+        }
+        let results = Rc::new(Results { rows, items });
+        self.results = Some(results.clone());
+        results
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -419,15 +478,10 @@ impl CommandPalette {
         groups
     }
 
-    /// Flattened item list (row order), for keyboard selection.
-    fn flat_items(&self, cx: &Context<Self>) -> Vec<Item> {
-        self.groups(cx).into_iter().flat_map(|g| g.items).collect()
-    }
-
     fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let items = self.flat_items(cx);
-        if let Some(item) = items.get(self.selected).cloned() {
-            self.activate(item.action, window, cx);
+        let results = self.results(cx);
+        if let Some(item) = results.items.get(self.selected) {
+            self.activate(item.action.clone(), window, cx);
         }
     }
 
@@ -522,33 +576,159 @@ impl CommandPalette {
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let total = self.flat_items(cx).len();
-        match ev.keystroke.key.as_str() {
+        let results = self.results(cx);
+        let total = results.items.len();
+        let selected = match ev.keystroke.key.as_str() {
             "escape" => {
                 self.close(cx);
                 cx.stop_propagation();
+                return;
             }
-            "down" => {
-                if total > 0 {
-                    self.selected = (self.selected + 1).min(total - 1);
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }
-            "up" => {
-                self.selected = self.selected.saturating_sub(1);
-                cx.notify();
-                cx.stop_propagation();
-            }
-            _ => {}
+            "down" if total > 0 => (self.selected + 1).min(total - 1),
+            "down" => self.selected,
+            "up" => self.selected.saturating_sub(1),
+            _ => return,
+        };
+        cx.stop_propagation();
+        self.selected = selected;
+        if let Some(row) = results
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::Item(index) if *index == selected))
+        {
+            self.list_state.scroll_to_reveal_item(row);
         }
+        cx.notify();
+    }
+}
+
+impl CommandPalette {
+    fn render_row(
+        &self,
+        row: &Row,
+        items: &[Item],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let index = match row {
+            Row::Caption(label) => {
+                return div()
+                    .px_2()
+                    .pt_1()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .font_medium()
+                    .text_color(muted)
+                    .child(label.clone())
+                    .into_any_element();
+            }
+            Row::Item(index) => *index,
+        };
+        let item = &items[index];
+        let is_sel = index == self.selected;
+        let action = item.action.clone();
+        div()
+            .pb_1()
+            .child(
+                h_flex()
+                    .id(("palette-row", index))
+                    .debug_selector({
+                        let action = action.clone();
+                        move || match &action {
+                            Action::NewThread { project_id, .. } => {
+                                format!("palette-new-thread-{project_id}")
+                            }
+                            _ => format!("palette-row-{index}"),
+                        }
+                    })
+                    .role(Role::ListBoxOption)
+                    .aria_label(item.label.clone())
+                    .aria_selected(is_sel)
+                    .when(is_sel, |row| row.aria_active_descendant())
+                    .flex_none()
+                    .w_full()
+                    .h(px(if compact { 48. } else { 38. }))
+                    .px_2()
+                    .gap_2()
+                    .items_center()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .when(is_sel, |s| s.bg(cx.theme().list_active))
+                    .when(!is_sel, |s| {
+                        s.hover(|style| style.bg(cx.theme().list_hover))
+                    })
+                    .child(match &item.action {
+                        Action::ChangeProjectIcon(project) => {
+                            crate::project_icon::artwork(project, 16.).into_any_element()
+                        }
+                        Action::NewThread { project_id, .. } => self
+                            .store
+                            .read(cx)
+                            .project(project_id)
+                            .map(|project| {
+                                crate::project_icon::artwork(project, 16.).into_any_element()
+                            })
+                            .unwrap_or_else(|| {
+                                Icon::new(item.icon.clone())
+                                    .small()
+                                    .text_color(muted)
+                                    .into_any_element()
+                            }),
+                        _ => Icon::new(item.icon.clone())
+                            .small()
+                            .text_color(muted)
+                            .into_any_element(),
+                    })
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(item.label.clone()),
+                            )
+                            .when_some(item.subtitle.clone(), |this, sub| {
+                                this.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(muted)
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(sub),
+                                )
+                            }),
+                    )
+                    .when_some(item.provider, |this, provider| {
+                        this.child(
+                            h_flex()
+                                .flex_none()
+                                .gap_1p5()
+                                .items_center()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .when_some(item.updated_at, |this, at| {
+                                    let ago = now_secs().saturating_sub(at);
+                                    this.child(div().child(humanize_ago(ago)))
+                                })
+                                .child(provider_glyph(provider).xsmall()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate(action.clone(), window, cx);
+                    })),
+            )
+            .into_any_element()
     }
 }
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let groups = self.groups(cx);
-        let total: usize = groups.iter().map(|g| g.items.len()).sum();
+        let results = self.results(cx);
+        let total = results.items.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
         }
@@ -561,152 +741,46 @@ impl Render for CommandPalette {
                 .max(px(0.));
         let dismissal = self.outside_dismissal.clone();
 
-        let mut list_content = v_flex()
-            .flex_none()
-            .w_full()
-            .px(px(if compact { 16. } else { 8. }))
-            .py_2()
-            .gap_1();
-        let mut flat = 0usize;
-        for group in &groups {
-            list_content = list_content.child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .pt_1()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
-                    .child(group.label.clone()),
-            );
-            for item in &group.items {
-                let index = flat;
-                flat += 1;
-                let is_sel = index == self.selected;
-                let action = item.action.clone();
-                list_content = list_content.child(
-                    h_flex()
-                        .id(("palette-row", index))
-                        .debug_selector({
-                            let action = action.clone();
-                            move || match &action {
-                                Action::NewThread { project_id, .. } => {
-                                    format!("palette-new-thread-{project_id}")
-                                }
-                                _ => format!("palette-row-{index}"),
-                            }
-                        })
-                        .role(Role::ListBoxOption)
-                        .aria_label(item.label.clone())
-                        .aria_selected(is_sel)
-                        .when(is_sel, |row| row.aria_active_descendant())
-                        .flex_none()
-                        .w_full()
-                        .h(px(if self.window_state.read(cx).compact {
-                            48.
-                        } else {
-                            38.
-                        }))
-                        .px_2()
-                        .gap_2()
-                        .items_center()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .when(is_sel, |s| s.bg(cx.theme().list_active))
-                        .when(!is_sel, |s| {
-                            s.hover(|style| style.bg(cx.theme().list_hover))
-                        })
-                        .child(match &item.action {
-                            Action::ChangeProjectIcon(project) => {
-                                crate::project_icon::artwork(project, 16.).into_any_element()
-                            }
-                            Action::NewThread { project_id, .. } => self
-                                .store
-                                .read(cx)
-                                .project(project_id)
-                                .map(|project| {
-                                    crate::project_icon::artwork(project, 16.).into_any_element()
-                                })
-                                .unwrap_or_else(|| {
-                                    Icon::new(item.icon.clone())
-                                        .small()
-                                        .text_color(muted)
-                                        .into_any_element()
-                                }),
-                            _ => Icon::new(item.icon.clone())
-                                .small()
-                                .text_color(muted)
-                                .into_any_element(),
-                        })
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .text_size(px(15.))
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .child(item.label.clone()),
-                                )
-                                .when_some(item.subtitle.clone(), |this, sub| {
-                                    this.child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(muted)
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .child(sub),
-                                    )
-                                }),
-                        )
-                        .when_some(item.provider, |this, provider| {
-                            this.child(
-                                h_flex()
-                                    .flex_none()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .text_size(px(11.))
-                                    .text_color(muted)
-                                    .when_some(item.updated_at, |this, at| {
-                                        let ago = now_secs().saturating_sub(at);
-                                        this.child(div().child(humanize_ago(ago)))
-                                    })
-                                    .child(provider_glyph(provider).xsmall()),
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.activate(action.clone(), window, cx);
-                        })),
-                );
-            }
-        }
-        if total == 0 {
-            list_content = list_content.child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .py_4()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(crate::tr!("palette.no_matches")),
-            );
-        }
-        let list = crate::scroll::page_viewport(
-            "palette-list-bounce",
-            crate::wheel_easing::Handle::Scroll(self.list_scroll.clone()),
+        let body = if total == 0 {
             div()
-                .id("palette-list")
-                .debug_selector(|| "palette-list".into())
-                .role(Role::ListBox)
-                .aria_label(crate::tr!("palette.results"))
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .lock_scroll_axis()
-                .track_scroll(&self.list_scroll)
-                .child(list_content),
-        );
+                .px(px(if compact { 24. } else { 16. }))
+                .py_4()
+                .text_size(px(13.))
+                .text_color(muted)
+                .child(crate::tr!("palette.no_matches"))
+                .into_any_element()
+        } else {
+            crate::scroll::page_viewport(
+                "palette-list-bounce",
+                crate::wheel_easing::Handle::List(self.list_state.clone()),
+                div()
+                    .id("palette-list")
+                    .debug_selector(|| "palette-list".into())
+                    .role(Role::ListBox)
+                    .aria_label(crate::tr!("palette.results"))
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .px(px(if compact { 16. } else { 8. }))
+                    .py_2()
+                    .child(
+                        list(
+                            self.list_state.clone(),
+                            cx.processor(move |this, ix: usize, _, cx| {
+                                this.render_row(&results.rows[ix], &results.items, compact, cx)
+                            }),
+                        )
+                        .size_full(),
+                    )
+                    .child(crate::scroll::list_height_hint(
+                        &self.list_state,
+                        px(if compact { 52. } else { 42. }),
+                    )),
+            )
+            .into_any_element()
+        };
 
         let card = crate::material::overlay_contour(
             v_flex()
@@ -741,7 +815,7 @@ impl Render for CommandPalette {
                     ),
                 ),
         )
-        .child(list)
+        .child(body)
         .when(!compact, |card| {
             card.child(
                 h_flex()
@@ -891,7 +965,7 @@ mod tests {
         cx.update(|_, cx| {
             palette.update(cx, |palette, cx| {
                 assert!(palette.query.read(cx).value().is_empty());
-                let items = palette.flat_items(cx);
+                let items = &palette.results(cx).items;
                 assert!(
                     items
                         .iter()
@@ -927,13 +1001,133 @@ mod tests {
             dispatch_palette_key(&palette, cx, "down");
         }
         cx.update(|_, cx| {
-            let total = palette.update(cx, |palette, cx| palette.flat_items(cx).len());
+            let total = palette.update(cx, |palette, cx| palette.results(cx).items.len());
             assert_eq!(palette.read(cx).selected, total - 1);
         });
 
         drop(palette);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn phone_sheet_lays_out_only_the_visible_threads(cx: &mut TestAppContext) {
+        use tcode_core::project::{Project, SessionMeta};
+        use tcode_protocol::{
+            EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
+        };
+
+        struct Sheet {
+            palette: Entity<CommandPalette>,
+        }
+        impl Render for Sheet {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.palette.clone())
+            }
+        }
+
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let project = Project::from_root(std::path::PathBuf::from("/project"));
+        let sessions = (0..300)
+            .map(|index| {
+                let mut meta = SessionMeta::new(
+                    ProviderKind::Codex,
+                    std::path::PathBuf::from("/project"),
+                    None,
+                );
+                meta.id = format!("thread-{index}");
+                meta.title = format!("thread-{index}");
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = 1_000 - index;
+                meta
+            })
+            .collect();
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions,
+                    projects: vec![project],
+                }),
+            ),
+        ] {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| store.select_session("thread-0".into()));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
+            palette: cx.new(|cx| CommandPalette::new(store.clone(), window_state, window, cx)),
+        });
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        let palette = sheet.read_with(cx, |sheet, _| sheet.palette.clone());
+        cx.update(|window, cx| palette.update(cx, |palette, cx| palette.open(false, window, cx)));
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("palette-row-5").is_some());
+        assert!(
+            cx.debug_bounds("palette-row-250").is_none(),
+            "a phone sheet must not lay out all 300 thread rows"
+        );
+
+        let position = cx.debug_bounds("palette-row-5").unwrap().center();
+        for _ in 0..30 {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-1000.))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
+        assert_eq!(last, 309);
+        assert!(cx.debug_bounds("palette-row-309").is_some());
+        assert!(cx.debug_bounds("palette-row-5").is_none());
+
+        for _ in 0..5 {
+            dispatch_palette_key(&palette, cx, "down");
+        }
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(
+            cx.debug_bounds("palette-row-5").is_some(),
+            "the keyboard selection scrolls into view"
+        );
     }
 
     #[gpui::test]

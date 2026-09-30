@@ -1,5 +1,4 @@
 use super::super::*;
-use crate::scroll::ScrollableElement as _;
 
 impl Composer {
     pub(in super::super) fn menu_visible(&self) -> bool {
@@ -256,104 +255,69 @@ impl Composer {
         let muted = cx.theme().muted_foreground;
         let highlight = self.menu_highlight.min(rows.len().saturating_sub(1));
 
-        let mut list = v_flex().w_full().p_1().gap_0p5();
-        if rows.is_empty() {
-            list = list.child(
-                div()
-                    .flex_none()
-                    .px_3()
-                    .py_2p5()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(if loading {
-                        crate::tr!("composer.searching").into_owned()
-                    } else {
-                        empty_text
-                    }),
-            );
-        } else {
-            // Group headers are not selectable, so keyboard selection
-            // continues to index `rows` directly.
-            let mut last_group: Option<&'static str> = None;
-            for (index, row) in rows.iter().enumerate() {
-                if let Some(group) = row.group
-                    && last_group != Some(group)
-                {
-                    last_group = Some(group);
-                    list = list.child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .pt_1p5()
-                            .pb_0p5()
-                            .text_size(px(11.))
-                            .font_medium()
-                            .text_color(muted)
-                            .child(crate::tr!(group).into_owned()),
-                    );
-                }
-                let is_active = index == highlight;
-                let icon = match row.icon {
-                    MenuIcon::File => Icon::empty().path("icons/file.svg"),
-                    MenuIcon::Folder => Icon::empty().path("icons/folder-closed.svg"),
-                    MenuIcon::Command => Icon::empty().path("icons/box.svg"),
-                    MenuIcon::Skill => Icon::empty().path("icons/ruler.svg"),
-                };
-                let accessible_label = crate::tr!(
-                    "composer.trigger_option",
-                    primary = row.primary.clone(),
-                    secondary = row.secondary.clone()
+        let list = if rows.is_empty() {
+            div()
+                .p_1()
+                .child(
+                    div()
+                        .px_3()
+                        .py_2p5()
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .child(if loading {
+                            crate::tr!("composer.searching").into_owned()
+                        } else {
+                            empty_text
+                        }),
                 )
-                .into_owned();
-                list = list.child(
-                    h_flex()
-                        .id(("menu-row", index))
-                        .role(Role::ListBoxOption)
-                        .aria_label(accessible_label)
-                        .aria_selected(is_active)
-                        .when(is_active, |row| row.aria_active_descendant())
-                        .flex_none()
-                        .w_full()
-                        .h(px(28.))
-                        .px_2()
-                        .gap_2()
-                        .items_center()
-                        .rounded(crate::material::radius_chip())
-                        .cursor_pointer()
-                        .when(is_active, |s| s.bg(cx.theme().list_active))
-                        .hover(|s| s.bg(cx.theme().muted))
-                        .child(icon.small().text_color(muted))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(13.))
-                                .font_medium()
-                                .child(row.primary.clone()),
-                        )
-                        .when(!row.secondary.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_size(px(13.))
-                                    .text_color(muted)
-                                    .child(row.secondary.clone()),
-                            )
-                        })
-                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.menu_highlight != index {
-                                this.menu_highlight = index;
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.accept_menu(index, window, cx);
-                        })),
-                );
-            }
-        }
+                .into_any_element()
+        } else {
+            // Group headers are not selectable: each opens the row that starts
+            // its group, so keyboard selection indexes `rows` directly.
+            let mut last_group: Option<&'static str> = None;
+            let headers: Vec<Option<&'static str>> = rows
+                .iter()
+                .map(|row| {
+                    let group = row.group.filter(|group| last_group != Some(*group));
+                    if group.is_some() {
+                        last_group = group;
+                    }
+                    group
+                })
+                .collect();
+            let count = rows.len();
+            let rows: Rc<[MenuRow]> = rows.into();
+            crate::scroll::VirtualList::measured(
+                "composer-trigger-rows",
+                count,
+                cx.processor(move |_, index: usize, _, cx| {
+                    let muted = cx.theme().muted_foreground;
+                    div().when(index + 1 < count, |row| row.pb_0p5()).child(
+                        v_flex()
+                            .gap_0p5()
+                            .when_some(headers[index], |col, group| {
+                                col.child(
+                                    div()
+                                        .px_2()
+                                        .pt_1p5()
+                                        .pb_0p5()
+                                        .text_size(px(11.))
+                                        .font_medium()
+                                        .text_color(muted)
+                                        .child(crate::tr!(group).into_owned()),
+                                )
+                            })
+                            .child(render_menu_row(&rows[index], index, index == highlight, cx)),
+                    )
+                }),
+            )
+            .reveal(Some(highlight))
+            .w_full()
+            // The menu's border sits outside this cap.
+            .max_h(px(286.))
+            .p_1()
+            .into_any_element()
+        };
 
         Some(
             div()
@@ -361,8 +325,6 @@ impl Composer {
                 .role(Role::ListBox)
                 .aria_label(crate::tr!("composer.trigger_results"))
                 .w_full()
-                .max_h(px(288.))
-                .overflow_y_scroll_area()
                 .rounded(crate::material::radius_overlay())
                 .border_1()
                 .border_color(cx.theme().border)
@@ -376,5 +338,131 @@ impl Composer {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+fn render_menu_row(
+    row: &MenuRow,
+    index: usize,
+    is_active: bool,
+    cx: &mut Context<Composer>,
+) -> impl IntoElement + use<> {
+    let muted = cx.theme().muted_foreground;
+    let icon = match row.icon {
+        MenuIcon::File => Icon::empty().path("icons/file.svg"),
+        MenuIcon::Folder => Icon::empty().path("icons/folder-closed.svg"),
+        MenuIcon::Command => Icon::empty().path("icons/box.svg"),
+        MenuIcon::Skill => Icon::empty().path("icons/ruler.svg"),
+    };
+    let accessible_label = crate::tr!(
+        "composer.trigger_option",
+        primary = row.primary.clone(),
+        secondary = row.secondary.clone()
+    )
+    .into_owned();
+    h_flex()
+        .id(("menu-row", index))
+        .debug_selector(move || format!("menu-row-{index}"))
+        .role(Role::ListBoxOption)
+        .aria_label(accessible_label)
+        .aria_selected(is_active)
+        .when(is_active, |row| row.aria_active_descendant())
+        .flex_none()
+        .w_full()
+        .h(px(28.))
+        .px_2()
+        .gap_2()
+        .items_center()
+        .rounded(crate::material::radius_chip())
+        .cursor_pointer()
+        .when(is_active, |s| s.bg(cx.theme().list_active))
+        .hover(|s| s.bg(cx.theme().muted))
+        .child(icon.small().text_color(muted))
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(13.))
+                .font_medium()
+                .child(row.primary.clone()),
+        )
+        .when(!row.secondary.is_empty(), |this| {
+            this.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(row.secondary.clone()),
+            )
+        })
+        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+            if this.menu_highlight != index {
+                this.menu_highlight = index;
+                cx.notify();
+            }
+        }))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.accept_menu(index, window, cx);
+        }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, size};
+
+    #[gpui::test]
+    fn arrow_keys_keep_the_highlighted_mention_laid_out(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
+                "tcode-trigger-menu-test-{}-{}",
+                std::process::id(),
+                tcode_services::store::now_millis()
+            )))
+            .unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("trigger-menu".into(), std::env::temp_dir(), cx);
+            let timeline = state.residents.live.get(&id).unwrap().timeline.clone();
+            (id, timeline)
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(size(px(800.), px(600.)));
+        composer.update_in(cx, |composer, window, cx| {
+            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            let entries = (0..FILE_MENU_ROW_CAP)
+                .map(|index| PathEntry::from_rel(format!("file-{index:02}.rs"), false))
+                .collect();
+            composer.workspace = Some((cwd, entries));
+            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        });
+        cx.simulate_input("@");
+        cx.update(|window, cx| _ = window.draw(cx));
+        let last = FILE_MENU_ROW_CAP - 1;
+        let last_row: &'static str = format!("menu-row-{last}").leak();
+        assert!(cx.debug_bounds("menu-row-0").is_some());
+        assert!(cx.debug_bounds(last_row).is_none());
+
+        for _ in 0..last {
+            cx.simulate_keystrokes("down");
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        assert!(cx.debug_bounds(last_row).is_some());
+        for _ in 0..last {
+            cx.simulate_keystrokes("up");
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        assert!(cx.debug_bounds("menu-row-0").is_some());
     }
 }

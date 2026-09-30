@@ -8,12 +8,14 @@
 //! events its viewport can use in the capture phase and lets the rest bubble
 //! to the ancestor scroller.
 
-use std::{panic::Location, rc::Rc};
+use std::{ops::Range, panic::Location, rc::Rc};
 
 use gpui::{
-    App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    ScrollHandle, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _,
+    AnyElement, App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ListAlignment,
+    ListOffset, ListSizingBehavior, ListState, ParentElement, Pixels, Refineable as _, RenderOnce,
+    ScrollHandle, ScrollStrategy, Stateful, StatefulInteractiveElement, StyleRefinement, Styled,
+    UniformListScrollHandle, Window, canvas, div, list, prelude::FluentBuilder as _, px,
+    uniform_list,
 };
 use gpui_base::{
     InteractiveElementExt as _, ScrollBounce, ScrollableMask, Scrollbar, ScrollbarHandle,
@@ -125,7 +127,7 @@ where
             .use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::default())
             .read(cx)
             .clone();
-        let root_style = root_style_from(&mut self.element);
+        let root_style = root_style_from(self.element.style());
         let content = self
             .element
             .id((self.id.clone(), "content"))
@@ -177,6 +179,7 @@ pub(crate) struct ScrollArea<E: InteractiveElement + Styled + ParentElement + El
     id: ElementId,
     axis: Axis,
     element: E,
+    handle: Option<ScrollHandle>,
 }
 
 impl<E> ScrollArea<E>
@@ -190,7 +193,15 @@ where
             id: Element::id(&element).unwrap_or(fallback),
             axis,
             element,
+            handle: None,
         }
+    }
+
+    /// Scroll through `handle` instead of the area's own, for an owner that
+    /// moves the area itself (e.g. to keep a keyboard selection visible).
+    pub(crate) fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.handle = Some(handle.clone());
+        self
     }
 }
 
@@ -226,13 +237,15 @@ where
     E: InteractiveElement + Styled + ParentElement + Element + 'static,
 {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let scroll_handle = window
-            .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| {
-                ScrollHandle::default()
-            })
-            .read(cx)
-            .clone();
-        let root_style = root_style_from(&mut self.element);
+        let scroll_handle = self.handle.take().unwrap_or_else(|| {
+            window
+                .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| {
+                    ScrollHandle::default()
+                })
+                .read(cx)
+                .clone()
+        });
+        let root_style = root_style_from(self.element.style());
         // The wrapper takes the element's place in its parent's layout; the
         // viewport fills it unless a maximum height of its own bounds it.
         let bounded = self.element.style().max_size.height.is_some();
@@ -264,6 +277,273 @@ where
     }
 }
 
+/// Give `state`'s unmeasured rows `row_height` once the list has laid out, so
+/// wheel, bounce and scrollbar extents include rows not yet in view. Place it
+/// after the list: GPUI clears height hints on the first layout and on width
+/// changes.
+pub(crate) fn list_height_hint(state: &ListState, row_height: Pixels) -> impl IntoElement {
+    let list = state.clone();
+    canvas(
+        move |_, _, _| {
+            if list.is_scrolled_to_end().is_none() && list.max_offset_for_scrollbar().y > px(0.) {
+                list.clone().with_uniform_item_height(row_height);
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+}
+
+type RenderRows = Box<dyn Fn(Range<usize>, &mut Window, &mut App) -> Vec<AnyElement>>;
+type RenderRow = Box<dyn FnMut(usize, &mut Window, &mut App) -> AnyElement>;
+
+enum Rows {
+    /// Every row is as tall as row `measure`, which also sets the width; rows
+    /// never wrap.
+    Uniform { render: RenderRows, measure: usize },
+    /// Rows are measured as they come into view.
+    Measured(RenderRow),
+}
+
+/// A bounded vertical viewport that lays out only the rows in view, for
+/// lists that can grow to hundreds of rows. It scrolls like
+/// [`ScrollableElement::overflow_y_scroll_area`], keeps its position while it
+/// stays rendered, and without a definite height shrinks to its rows up to its
+/// maximum height. Row gaps belong to the rows.
+#[derive(IntoElement)]
+pub(crate) struct VirtualList {
+    id: ElementId,
+    count: usize,
+    rows: Rows,
+    style: StyleRefinement,
+    scrollbar: bool,
+    reveal: Option<usize>,
+}
+
+impl VirtualList {
+    pub(crate) fn uniform<R: IntoElement>(
+        id: impl Into<ElementId>,
+        count: usize,
+        render: impl Fn(Range<usize>, &mut Window, &mut App) -> Vec<R> + 'static,
+    ) -> Self {
+        Self::new(
+            id,
+            count,
+            Rows::Uniform {
+                render: Box::new(move |range, window, cx| {
+                    render(range, window, cx)
+                        .into_iter()
+                        .map(|row| div().whitespace_nowrap().child(row).into_any_element())
+                        .collect()
+                }),
+                measure: 0,
+            },
+        )
+    }
+
+    pub(crate) fn measured<R: IntoElement>(
+        id: impl Into<ElementId>,
+        count: usize,
+        mut render: impl FnMut(usize, &mut Window, &mut App) -> R + 'static,
+    ) -> Self {
+        Self::new(
+            id,
+            count,
+            Rows::Measured(Box::new(move |index, window, cx| {
+                render(index, window, cx).into_any_element()
+            })),
+        )
+    }
+
+    fn new(id: impl Into<ElementId>, count: usize, rows: Rows) -> Self {
+        Self {
+            id: id.into(),
+            count,
+            rows,
+            style: StyleRefinement::default(),
+            scrollbar: false,
+            reveal: None,
+        }
+    }
+
+    /// Scroll row `index` into view whenever it changes, as a keyboard
+    /// highlight moves.
+    pub(crate) fn reveal(mut self, index: Option<usize>) -> Self {
+        self.reveal = index;
+        self
+    }
+
+    /// Size uniform rows, and a list without a definite width, by row `index`.
+    pub(crate) fn width_from_row(mut self, index: usize) -> Self {
+        if let Rows::Uniform { measure, .. } = &mut self.rows {
+            *measure = index;
+        }
+        self
+    }
+
+    /// Overlay Tcode's scrollbar, as [`ScrollableElement::overflow_y_scrollbar`] does.
+    pub(crate) fn scrollbar(mut self) -> Self {
+        self.scrollbar = true;
+        self
+    }
+}
+
+impl Styled for VirtualList {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl RenderOnce for VirtualList {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let root_style = root_style_from(&self.style);
+        let revealed = window.use_keyed_state((self.id.clone(), "revealed"), cx, |_, _| None);
+        let mut last_revealed = *revealed.read(cx);
+        let mut width_probe = None;
+        // A viewport under a cap it shares with pinned siblings shrinks to
+        // what they leave.
+        let (viewport, handle) = match self.rows {
+            Rows::Uniform { render, measure } => {
+                let scroll = window
+                    .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| {
+                        UniformListScrollHandle::new()
+                    })
+                    .read(cx)
+                    .clone();
+                let viewport = uniform_list(self.id.clone(), self.count, render)
+                    .with_sizing_behavior(ListSizingBehavior::Infer)
+                    .with_width_from_item(Some(measure))
+                    .track_scroll(&scroll)
+                    .min_h_0()
+                    .refine_style(&self.style);
+                if let Some(index) = reveal_next(self.reveal, self.count, last_revealed) {
+                    scroll.scroll_to_item(index, ScrollStrategy::Nearest);
+                }
+                let base = scroll.0.borrow().base_handle.clone();
+                (viewport.into_any_element(), Handle::Scroll(base))
+            }
+            Rows::Measured(mut render) => {
+                let count = self.count;
+                // A list that shrinks to its rows sizes itself from the rows
+                // it measured; measuring a viewport past its last height lets
+                // a longer list always reach its cap.
+                let state = window
+                    .use_keyed_state((self.id.clone(), "list"), cx, |window, _| {
+                        ListState::new(count, ListAlignment::Top, window.viewport_size().height)
+                    })
+                    .read(cx)
+                    .clone();
+                if state.item_count() != count {
+                    state.reset(count);
+                    last_revealed = None;
+                }
+                if let Some(index) = reveal_next(self.reveal, self.count, last_revealed) {
+                    reveal_row(&state, index);
+                }
+                // GPUI sizes a list that shrinks to its rows by measuring them
+                // at their widest, so a wrapping row would be measured as one
+                // line. Rows keep the width the list last laid out at, and a
+                // new width lays the list out again.
+                let bounds = state.viewport_bounds();
+                let mut style = gpui::Style::default();
+                style.refine(&self.style);
+                let padding = style
+                    .padding
+                    .to_pixels(bounds.size.into(), window.rem_size());
+                let width = bounds.size.width;
+                let row_width = (width > px(0.)).then(|| width - padding.left - padding.right);
+                width_probe = Some(width_probe_for(state.clone(), width));
+                let render = move |index, window: &mut Window, cx: &mut App| {
+                    let row = render(index, window, cx);
+                    match row_width {
+                        Some(width) => div().w(width).child(row).into_any_element(),
+                        None => row,
+                    }
+                };
+                let viewport = list(state.clone(), render)
+                    .with_sizing_behavior(ListSizingBehavior::Infer)
+                    .min_h_0()
+                    .refine_style(&self.style);
+                (viewport.into_any_element(), Handle::List(state))
+            }
+        };
+        let reveal = self.reveal.or(last_revealed);
+        revealed.update(cx, |revealed, _| *revealed = reveal);
+        let (mask, scrollbar) = match &handle {
+            Handle::Scroll(scroll) => overlays(&self.id, scroll, self.scrollbar),
+            Handle::List(state) => overlays(&self.id, state, self.scrollbar),
+        };
+        wheel_easing::register(
+            div()
+                .id((self.id, "area"))
+                .relative()
+                .flex()
+                .flex_col()
+                .refine_style(&root_style)
+                .child(viewport)
+                .children(width_probe)
+                .child(mask)
+                .children(scrollbar),
+            handle,
+        )
+    }
+}
+
+/// The row a list should scroll to: one requested, in range and not already
+/// revealed.
+fn reveal_next(request: Option<usize>, count: usize, last: Option<usize>) -> Option<usize> {
+    request.filter(|index| *index < count && last != Some(*index))
+}
+
+/// Scroll a measured list so row `index` is fully in view. A row not yet
+/// measured below the top has no known position, so it moves to the top.
+fn reveal_row(state: &ListState, index: usize) {
+    let viewport = state.viewport_bounds();
+    match state.bounds_for_item(index) {
+        Some(row) if row.top() >= viewport.top() && row.bottom() <= viewport.bottom() => {}
+        None if index > state.logical_scroll_top().item_ix => state.scroll_to(ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.),
+        }),
+        _ => state.scroll_to_reveal_item(index),
+    }
+}
+
+/// Renders the list's view again once the list lays out at a width other than
+/// `width`, the one its rows were given.
+fn width_probe_for(state: ListState, width: Pixels) -> AnyElement {
+    canvas(
+        move |_, window, _| {
+            if state.viewport_bounds().size.width != width {
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .into_any_element()
+}
+
+/// The mask that routes wheel input to a virtual list, and its scrollbar.
+fn overlays<H: ScrollbarHandle + Clone>(
+    id: &ElementId,
+    handle: &H,
+    scrollbar: bool,
+) -> (AnyElement, Option<AnyElement>) {
+    let mask = ScrollableMask::new(Axis::Vertical, handle)
+        .id((id.clone(), "mask"))
+        .into_any_element();
+    let scrollbar = scrollbar.then(|| {
+        ScrollbarLayer {
+            id: (id.clone(), "scrollbar").into(),
+            scroll_handle: Rc::new(handle.clone()),
+        }
+        .into_any_element()
+    });
+    (mask, scrollbar)
+}
+
 #[derive(IntoElement)]
 struct ScrollbarLayer<H: ScrollbarHandle + Clone> {
     id: ElementId,
@@ -291,8 +571,7 @@ fn caller_id() -> ElementId {
     ElementId::CodeLocation(*Location::caller())
 }
 
-fn root_style_from<E: Styled>(element: &mut E) -> StyleRefinement {
-    let style = element.style();
+fn root_style_from(style: &StyleRefinement) -> StyleRefinement {
     StyleRefinement {
         size: style.size.clone(),
         min_size: style.min_size.clone(),
@@ -355,6 +634,132 @@ mod tests {
                 .h_full(),
             )
         }
+    }
+
+    struct VirtualLists(usize);
+
+    impl Render for VirtualLists {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let count = self.0;
+            let row = |kind: &'static str, index: usize, height: f32| {
+                div()
+                    .debug_selector(move || format!("{kind}-{index}"))
+                    .h(px(height))
+                    .flex_none()
+            };
+            div()
+                .w(px(200.))
+                .h(px(600.))
+                .child(
+                    div().debug_selector(|| "uniform".into()).child(
+                        VirtualList::uniform("uniform-list", count, move |range, _, _| {
+                            range.map(|index| row("uniform", index, 20.)).collect()
+                        })
+                        .w_full()
+                        .max_h(px(100.))
+                        .py(px(4.)),
+                    ),
+                )
+                .child(
+                    div().debug_selector(|| "measured".into()).child(
+                        VirtualList::measured("measured-list", count, move |index, _, _| {
+                            row("measured", index, if index % 2 == 0 { 20. } else { 30. })
+                        })
+                        .w_full()
+                        .max_h(px(100.))
+                        .py(px(4.)),
+                    ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "capped".into())
+                        .flex()
+                        .flex_col()
+                        .max_h(px(100.))
+                        .child(div().h(px(20.)).flex_none())
+                        .child(
+                            VirtualList::uniform("capped-list", count, move |range, _, _| {
+                                range.map(|index| row("capped", index, 20.)).collect()
+                            })
+                            .w_full()
+                            .min_h_0(),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .h(px(150.))
+                        .child(div().h(px(50.)).flex_none())
+                        .child(
+                            div().flex().flex_col().flex_1().min_h_0().child(
+                                VirtualList::measured("flexed-list", count, move |index, _, _| {
+                                    row("flexed", index, 20.)
+                                })
+                                .flex_1()
+                                .min_h_0(),
+                            ),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn virtual_lists_shrink_to_short_lists_and_cap_long_ones(cx: &mut TestAppContext) {
+        // A capped column shares its cap with a pinned caption; a flexed
+        // slot takes a definite height from its column.
+        for (count, uniform, measured, capped) in [(3, 68., 78., 80.), (300, 100., 100., 100.)] {
+            let (_, cx) = cx.add_window_view(|_, _| VirtualLists(count));
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(cx.debug_bounds("uniform").unwrap().size.height, px(uniform));
+            assert_eq!(
+                cx.debug_bounds("measured").unwrap().size.height,
+                px(measured)
+            );
+            assert_eq!(cx.debug_bounds("capped").unwrap().size.height, px(capped));
+            assert!(cx.debug_bounds("uniform-0").is_some());
+            assert!(cx.debug_bounds("measured-0").is_some());
+            assert!(cx.debug_bounds("uniform-250").is_none());
+            assert!(cx.debug_bounds("measured-250").is_none());
+            assert!(cx.debug_bounds("capped-250").is_none());
+            assert!(cx.debug_bounds("flexed-0").is_some());
+            assert!(cx.debug_bounds("flexed-250").is_none());
+        }
+    }
+
+    struct NarrowRows;
+
+    impl Render for NarrowRows {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(120.)).child(
+                VirtualList::uniform("narrow-list", 3, |range, _, _| {
+                    range
+                        .map(|index| {
+                            div()
+                                .debug_selector(move || format!("narrow-{index}"))
+                                .child("refactor/host-owned-live-turn")
+                        })
+                        .collect()
+                })
+                .max_h(px(200.)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn uniform_rows_stay_one_line_when_their_text_is_too_wide(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| NarrowRows);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let first = cx.debug_bounds("narrow-0").unwrap();
+        let second = cx.debug_bounds("narrow-1").unwrap();
+        assert!(
+            second.top() >= first.bottom(),
+            "{first:?} overlaps {second:?}"
+        );
     }
 
     fn touch(cx: &mut VisualTestContext, phase: TouchPhase, x: f32, y: f32) {
