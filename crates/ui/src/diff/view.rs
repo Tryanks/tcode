@@ -1949,7 +1949,7 @@ fn turn_row(
     .cursor_pointer()
     .hover(|s| s.bg(cx.theme().list_hover))
     .when(selected, |this| this.bg(cx.theme().list_active))
-    .child(div().flex_1().child(label))
+    .child(div().flex_1().min_w_0().truncate().child(label))
     .when(selected, |this| {
         this.child(Icon::new(IconName::Check).xsmall())
     })
@@ -1997,7 +1997,13 @@ fn base_row(
     .cursor_pointer()
     .hover(|row| row.bg(cx.theme().list_hover))
     .when(selected, |row| row.bg(cx.theme().list_active))
-    .child(div().flex_1().child(branch.to_string()))
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .child(branch.to_string()),
+    )
     .when(selected, |row| {
         row.child(Icon::new(IconName::Check).xsmall())
     })

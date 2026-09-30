@@ -788,6 +788,17 @@ fn render_model_pane(
             .into_any_element()
     } else {
         let count = rows.len();
+        // Opening the picker shows the current model; a search starts at the
+        // top of its results.
+        let current = model_search
+            .read(cx)
+            .value()
+            .is_empty()
+            .then(|| {
+                rows.iter()
+                    .position(|row| selected.as_deref() == Some(row.id.as_str()))
+            })
+            .flatten();
         let rows = rows.clone();
         let selected = selected.clone();
         let store_entity = store_entity.clone();
@@ -812,6 +823,7 @@ fn render_model_pane(
                             ))
                     },
                 )
+                .reveal(current)
                 .flex_1()
                 .min_h_0()
                 .px_1()
