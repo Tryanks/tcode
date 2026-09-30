@@ -5,7 +5,8 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     ops::Range,
-    sync::Arc,
+    rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 use crate::highlight::HighlightTheme;
@@ -15,7 +16,7 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ListState, ObjectFit, ParentElement as _, Pixels, Role, SharedString,
+    LayoutId, ListState, ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, Window, div, img,
     prelude::FluentBuilder as _, px, relative, rems, size,
 };
@@ -34,6 +35,8 @@ use super::{
 
 const CODE_CACHE_CAPACITY: usize = 64;
 const BLOCK_OVERDRAW: Pixels = px(300.);
+const CODE_LINES_PER_ITEM: usize = 32;
+const LIST_ITEMS_PER_ITEM: usize = 8;
 const TABLE_BORDER_PX: f32 = 1.;
 const HEADING_BASE_FONT_SIZE: Pixels = px(15.);
 const INLINE_CODE_FONT_SIZE: Pixels = px(13.);
@@ -93,28 +96,155 @@ impl RenderOptions {
             ..self.clone()
         }
     }
+
+    fn gap(&self) -> Rems {
+        if self.in_list || self.is_last {
+            rems(0.)
+        } else {
+            rems(1.)
+        }
+    }
+}
+
+/// One item of the virtualized root list: a whole root block, or a run of the
+/// lines of a long code block or the items of a long list, so a block taller
+/// than the viewport is only built where it is visible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RootItem {
+    pub(super) block: usize,
+    /// The lines or list items of a split block that this item renders.
+    pub(super) span: Option<Range<usize>>,
+}
+
+/// Append the root list's items for `blocks`, the root blocks from index
+/// `first_block`.
+pub(super) fn push_root_items(blocks: &[BlockNode], first_block: usize, items: &mut Vec<RootItem>) {
+    for (offset, block) in blocks.iter().enumerate() {
+        let block_ix = first_block + offset;
+        let (len, per_item) = match block {
+            BlockNode::CodeBlock(code) => (code_lines(&code.code).len(), CODE_LINES_PER_ITEM),
+            BlockNode::List { children, .. } => (children.len(), LIST_ITEMS_PER_ITEM),
+            _ => (0, 1),
+        };
+        if len <= per_item {
+            items.push(RootItem {
+                block: block_ix,
+                span: None,
+            });
+            continue;
+        }
+        items.extend((0..len).step_by(per_item).map(|start| RootItem {
+            block: block_ix,
+            span: Some(start..(start + per_item).min(len)),
+        }));
+    }
+}
+
+/// Whether `item` of block `new` paints exactly as the same item of `old`
+/// did, so the height measured for it still holds. `old_is_last` and
+/// `new_is_last` say whether each block ends its document: the gap below a
+/// block's final item depends on it.
+pub(super) fn item_renders_alike(
+    old: &BlockNode,
+    old_is_last: bool,
+    new: &BlockNode,
+    new_is_last: bool,
+    item: &RootItem,
+) -> bool {
+    let Some(span) = item.span.clone() else {
+        return old == new && old_is_last == new_is_last;
+    };
+    let same_end = |old_len: usize, new_len: usize| {
+        let (old_final, new_final) = (span.end == old_len, span.end == new_len);
+        old_final == new_final && (!old_final || old_is_last == new_is_last)
+    };
+    match (old, new) {
+        (BlockNode::CodeBlock(old), BlockNode::CodeBlock(new)) => {
+            let (old_lines, new_lines) = (code_lines(&old.code), code_lines(&new.code));
+            old.lang == new.lang
+                && same_end(old_lines.len(), new_lines.len())
+                && old_lines.get(span.clone()) == new_lines.get(span)
+        }
+        (
+            BlockNode::List {
+                children: old_items,
+                ordered: old_ordered,
+                start: old_start,
+            },
+            BlockNode::List {
+                children: new_items,
+                ordered: new_ordered,
+                start: new_start,
+            },
+        ) => {
+            old_ordered == new_ordered
+                && old_start == new_start
+                && same_end(old_items.len(), new_items.len())
+                && old_items.get(span.clone()) == new_items.get(span)
+        }
+        _ => false,
+    }
+}
+
+/// The part of `block` from line or list item `start` to `end`, sharing its
+/// selection state, for extracting the text selected across root items.
+pub(super) fn block_span(block: &BlockNode, start: Option<usize>, end: Option<usize>) -> BlockNode {
+    if start.is_none() && end.is_none() {
+        return block.clone();
+    }
+    match block {
+        BlockNode::CodeBlock(code) => {
+            let lines = code_lines(&code.code);
+            let span = start.unwrap_or(0)..end.unwrap_or(lines.len());
+            let states = code
+                .line_states
+                .lock()
+                .ok()
+                .and_then(|states| states.get(span.clone()).map(<[_]>::to_vec))
+                .unwrap_or_default();
+            BlockNode::CodeBlock(CodeBlock {
+                code: lines.get(span).unwrap_or_default().join("\n").into(),
+                lang: code.lang.clone(),
+                line_states: Arc::new(Mutex::new(states)),
+            })
+        }
+        BlockNode::List {
+            children,
+            ordered,
+            start: list_start,
+        } => BlockNode::List {
+            children: children
+                .get(start.unwrap_or(0)..end.unwrap_or(children.len()))
+                .map_or_else(Vec::new, <[_]>::to_vec),
+            ordered: *ordered,
+            start: *list_start,
+        },
+        _ => block.clone(),
+    }
 }
 
 pub(super) fn render_root(
-    node: &BlockNode,
+    node: Rc<BlockNode>,
+    items: Rc<[RootItem]>,
     list_state: ListState,
     content_height: Option<Pixels>,
     state: &Entity<MarkdownState>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let BlockNode::Root { children, .. } = node else {
-        return render_block(node, RenderOptions::default(), state, window, cx);
-    };
-    if list_state.item_count() != children.len() {
-        list_state.reset(children.len());
+    if !matches!(*node, BlockNode::Root { .. }) {
+        return render_block(&node, RenderOptions::default(), state, window, cx);
+    }
+    if list_state.item_count() != items.len() {
+        list_state.reset(items.len());
     }
 
     div()
         .id("root")
         .w_full()
         .child(VirtualizedBlockList {
-            blocks: children.clone(),
+            root: node,
+            items,
             list_state,
             content_height,
             state: state.clone(),
@@ -122,25 +252,38 @@ pub(super) fn render_root(
         .into_any_element()
 }
 
-fn render_root_block(
-    blocks: &[BlockNode],
+fn render_root_item(
+    root: &BlockNode,
+    items: &[RootItem],
     ix: usize,
     width: Pixels,
     state: &Entity<MarkdownState>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let is_last = ix + 1 == blocks.len();
+    let BlockNode::Root { children } = root else {
+        unreachable!("the root list renders the children of a root")
+    };
+    let item = &items[ix];
+    let options = RenderOptions::default().child(item.block, item.block + 1 == children.len());
+    let content = match (&children[item.block], item.span.clone()) {
+        (BlockNode::CodeBlock(code), Some(span)) => {
+            render_code_block(code, Some(span), &options, state, cx)
+        }
+        (
+            BlockNode::List {
+                children,
+                ordered,
+                start,
+            },
+            Some(span),
+        ) => render_list(children, *ordered, *start, span, options, state, window, cx),
+        (block, _) => render_block(block, options, state, window, cx),
+    };
     let block = div()
         .w_full()
         .when(width > px(0.), |block| block.w(width))
-        .child(render_block(
-            &blocks[ix],
-            RenderOptions::default().child(ix, is_last),
-            state,
-            window,
-            cx,
-        ));
+        .child(content);
     #[cfg(test)]
     {
         block
@@ -160,7 +303,8 @@ fn render_root_block(
 /// outer row's content mask. A regular `Infer` list uses its full layout bounds
 /// as its viewport, so nesting it in a virtualized row defeats block culling.
 struct VirtualizedBlockList {
-    blocks: Vec<BlockNode>,
+    root: Rc<BlockNode>,
+    items: Rc<[RootItem]>,
     list_state: ListState,
     content_height: Option<Pixels>,
     state: Entity<MarkdownState>,
@@ -197,13 +341,12 @@ impl Element for VirtualizedBlockList {
             // Outer-list overdraw lays out rows without prepainting them. A
             // regular column measures cold blocks at the actual parent width;
             // an Infer list would cache their min-content heights instead.
-            let mut column =
-                v_flex()
-                    .w_full()
-                    .children((0..self.blocks.len()).map(|ix| {
-                        render_root_block(&self.blocks, ix, px(0.), &self.state, window, cx)
-                    }))
-                    .into_any_element();
+            let mut column = v_flex()
+                .w_full()
+                .children((0..self.items.len()).map(|ix| {
+                    render_root_item(&self.root, &self.items, ix, px(0.), &self.state, window, cx)
+                }))
+                .into_any_element();
             let layout = column.request_layout(window, cx);
             return (layout, Some(column));
         };
@@ -250,11 +393,12 @@ impl Element for VirtualizedBlockList {
         let current_offset = -self.list_state.scroll_px_offset_for_scrollbar().y;
         self.list_state.scroll_by(desired_offset - current_offset);
 
-        let blocks = self.blocks.clone();
+        let root = self.root.clone();
+        let items = self.items.clone();
         let state = self.state.clone();
         let width = viewport.size.width;
         let mut list = gpui::list(self.list_state.clone(), move |ix, window, cx| {
-            render_root_block(&blocks, ix, width, &state, window, cx)
+            render_root_item(&root, &items, ix, width, &state, window, cx)
         })
         .size_full()
         .into_any_element();
@@ -293,11 +437,7 @@ fn render_block(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let gap = if options.in_list || options.is_last {
-        rems(0.)
-    } else {
-        rems(1.)
-    };
+    let gap = options.gap();
     match node {
         BlockNode::Root { children, .. } => {
             let len = children.len();
@@ -370,32 +510,18 @@ fn render_block(
             children,
             ordered,
             start,
-        } => {
-            let len = children.len();
-            v_flex()
-                .id(options.path.clone())
-                .w_full()
-                .pb(gap)
-                .children(children.iter().enumerate().map(|(ix, item)| {
-                    render_list_item(
-                        item,
-                        ix,
-                        RenderOptions {
-                            ordered: *ordered,
-                            list_start: *start,
-                            is_last: ix + 1 == len,
-                            path: format!("{}-{ix}", options.path),
-                            ..options.clone()
-                        },
-                        state,
-                        window,
-                        cx,
-                    )
-                }))
-                .into_any_element()
-        }
+        } => render_list(
+            children,
+            *ordered,
+            *start,
+            0..children.len(),
+            options,
+            state,
+            window,
+            cx,
+        ),
         BlockNode::ListItem { .. } => render_list_item(node, 0, options, state, window, cx),
-        BlockNode::CodeBlock(code) => render_code_block(code, &options, state, cx),
+        BlockNode::CodeBlock(code) => render_code_block(code, None, &options, state, cx),
         BlockNode::Table(table) => render_table(table, &options, state, window, cx),
         BlockNode::HorizontalRule => div()
             .id(options.path)
@@ -673,6 +799,52 @@ fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem>
     items
 }
 
+/// The id of the element rendering `span` of a block. Parts after the first
+/// are its siblings in the root list, and a shared id would share their
+/// element state.
+fn span_id(path: &str, span: &Range<usize>) -> SharedString {
+    if span.start == 0 {
+        path.to_string().into()
+    } else {
+        format!("{path}@{}", span.start).into()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_list(
+    items: &[BlockNode],
+    ordered: bool,
+    start: u32,
+    span: Range<usize>,
+    options: RenderOptions,
+    state: &Entity<MarkdownState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let len = items.len();
+    v_flex()
+        .id(span_id(&options.path, &span))
+        .w_full()
+        .when(span.end == len, |list| list.pb(options.gap()))
+        .children(items[span.clone()].iter().zip(span).map(|(item, ix)| {
+            render_list_item(
+                item,
+                ix,
+                RenderOptions {
+                    ordered,
+                    list_start: start,
+                    is_last: ix + 1 == len,
+                    path: format!("{}-{ix}", options.path),
+                    ..options.clone()
+                },
+                state,
+                window,
+                cx,
+            )
+        }))
+        .into_any_element()
+}
+
 fn render_list_item(
     item: &BlockNode,
     item_ix: usize,
@@ -701,7 +873,18 @@ fn render_list_item(
         };
         match child {
             BlockNode::Paragraph(_) if ix == 0 => {
-                let content = render_block(child, child_options, state, window, cx);
+                let content = div().flex_1().min_w_0().child(render_block(
+                    child,
+                    child_options,
+                    state,
+                    window,
+                    cx,
+                ));
+                #[cfg(test)]
+                let content = {
+                    let path = options.path.clone();
+                    content.debug_selector(move || format!("markdown-list-item-text-{path}"))
+                };
                 rows.push(
                     h_flex()
                         .w_full()
@@ -735,7 +918,7 @@ fn render_list_item(
                                     }),
                             )
                         })
-                        .child(div().flex_1().min_w_0().child(content)),
+                        .child(content),
                 );
             }
             BlockNode::List { .. } => rows.push(div().ml(rems(1.)).child(render_block(
@@ -754,13 +937,15 @@ fn render_list_item(
             ))),
         }
     }
-    v_flex()
-        .id(options.path)
+    let item = v_flex()
+        .id(options.path.clone())
         .w_full()
         .min_w_0()
         .when(*spread, |this| this.gap_2())
-        .children(rows)
-        .into_any_element()
+        .children(rows);
+    #[cfg(test)]
+    let item = item.debug_selector(move || format!("markdown-list-item-{}", options.path));
+    item.into_any_element()
 }
 
 fn cached_highlights(code: &str, lang: &str, theme: &HighlightTheme) -> SharedHighlightRuns {
@@ -800,6 +985,7 @@ fn code_lines(code: &str) -> Vec<&str> {
 
 fn render_code_block(
     code: &CodeBlock,
+    span: Option<Range<usize>>,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
     cx: &mut App,
@@ -818,38 +1004,54 @@ fn render_code_block(
     };
     let all_runs = cached_highlights(code_text, lang, &cx.theme().highlight_theme);
     let lines = code_lines(code_text);
-    let states = code.states_for_lines(&lines);
-    let mut offset = 0;
-    let mut rendered_lines = Vec::with_capacity(lines.len());
+    let span = span.unwrap_or(0..lines.len());
+    let (first, last) = (span.start == 0, span.end == lines.len());
+    let states = code.states_for_lines(&lines, span.clone());
+    let mut offset = lines[..span.start]
+        .iter()
+        .map(|line| line.len() + 1)
+        .sum::<usize>();
+    let span_end = offset
+        + lines[span.clone()]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum::<usize>();
+    // Highlight runs are ordered and disjoint; only those in the span matter.
+    let span_runs = &all_runs[all_runs.partition_point(|(range, _)| range.end <= offset)
+        ..all_runs.partition_point(|(range, _)| range.start < span_end)];
+    let mut rendered_lines = Vec::with_capacity(span.len());
     let mono_font_family = cx.theme().mono_font_family.clone();
-    for (ix, (line, line_state)) in lines.iter().zip(states).enumerate() {
+    for ((line, line_state), ix) in lines[span.clone()].iter().zip(states).zip(span.clone()) {
         let end = offset + line.len();
-        let runs = sub_runs(&all_runs, offset, end);
-        rendered_lines.push(
-            div()
-                .id(("code-line", ix))
-                .min_h(px(18.))
-                .whitespace_normal()
-                .font_family(mono_font_family.clone())
-                .text_size(INLINE_CODE_FONT_SIZE)
-                .child(Inline::new(
-                    ix,
-                    view.clone(),
-                    line_state,
-                    Vec::new(),
-                    runs,
-                    Vec::new(),
-                )),
-        );
+        let runs = sub_runs(span_runs, offset, end);
+        let line = div()
+            .id(("code-line", ix))
+            .min_h(px(18.))
+            .whitespace_normal()
+            .font_family(mono_font_family.clone())
+            .text_size(INLINE_CODE_FONT_SIZE)
+            .child(Inline::new(
+                ix,
+                view.clone(),
+                line_state,
+                Vec::new(),
+                runs,
+                Vec::new(),
+            ));
+        #[cfg(test)]
+        let line = line.debug_selector(move || format!("markdown-code-line-{ix}"));
+        rendered_lines.push(line);
         offset = end.saturating_add(1);
     }
+    let radius = cx.theme().radius;
     div()
-        .id(options.path.clone())
-        .pb(if options.is_last { rems(0.) } else { rems(1.) })
+        .id(span_id(&options.path, &span))
+        .when(last && !options.is_last, |block| block.pb(rems(1.)))
         .child(
             div()
-                .p_3()
-                .rounded(cx.theme().radius)
+                .px_3()
+                .when(first, |block| block.pt_3().rounded_t(radius))
+                .when(last, |block| block.pb_3().rounded_b(radius))
                 .bg(cx.theme().tokens.colors.muted)
                 .child(v_flex().w_full().children(rendered_lines)),
         )

@@ -1,4 +1,10 @@
-use std::{cell::RefCell, ops::RangeInclusive, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    ops::RangeInclusive,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, EntityId, Hitbox, Hsla, Modifiers, Pixels,
@@ -11,7 +17,11 @@ use gpui_base::{
     TouchHandleLayout,
 };
 
-use super::MarkdownState;
+use super::{MarkdownState, inline::InlineState, nodes::TextPosition};
+
+/// A bound on remembered endpoint positions: a selection keeps its two, and
+/// each click that selects nothing adds one until a selection is made.
+const REMEMBERED_POSITIONS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CachedBlockEndpoint {
@@ -20,18 +30,28 @@ struct CachedBlockEndpoint {
 }
 
 #[derive(Default)]
-struct VirtualBlockSelection {
+pub(super) struct VirtualBlockSelection {
     anchor: Option<CachedBlockEndpoint>,
     cursor: Option<CachedBlockEndpoint>,
     coverage: TextSelectionCoverage,
+    /// Text positions of endpoint content points, resolved when the endpoint
+    /// was made, while its text was painted. A copy reads them instead of the
+    /// painted projections, which miss the text of items scrolled away. They
+    /// outlive a clear so a shift-click extends from its anchor.
+    positions: Vec<(Point<Pixels>, TextPosition)>,
 }
 
 impl VirtualBlockSelection {
     fn update(&mut self, snapshot: Option<TextSelectionSnapshot>, entity_id: EntityId) {
         let Some(snapshot) = snapshot else {
-            *self = Self::default();
+            self.clear_endpoints();
             return;
         };
+        let points = [
+            snapshot.anchor().content_point(),
+            snapshot.cursor().content_point(),
+        ];
+        self.positions.retain(|(point, _)| points.contains(point));
         self.coverage = snapshot.coverage();
         Self::update_endpoint(&mut self.anchor, snapshot.anchor(), entity_id);
         Self::update_endpoint(&mut self.cursor, snapshot.cursor(), entity_id);
@@ -49,6 +69,68 @@ impl VirtualBlockSelection {
             .then(|| endpoint.content_key().map(|key| key.value() as usize))
             .flatten();
         *cached = Some(CachedBlockEndpoint { endpoint, block_ix });
+    }
+
+    fn clear_endpoints(&mut self) {
+        self.anchor = None;
+        self.cursor = None;
+        self.coverage = TextSelectionCoverage::default();
+    }
+
+    pub(super) fn forget_positions(&mut self) {
+        self.positions.clear();
+    }
+
+    fn remember(&mut self, point: Point<Pixels>, position: TextPosition) {
+        self.positions
+            .retain(|(remembered, _)| *remembered != point);
+        if self.positions.len() == REMEMBERED_POSITIONS {
+            self.positions.remove(0);
+        }
+        self.positions.push((point, position));
+    }
+
+    fn position(
+        &self,
+        endpoint: &CachedBlockEndpoint,
+        entity_id: EntityId,
+    ) -> Option<TextPosition> {
+        let point = endpoint.endpoint.content_point();
+        (endpoint.endpoint.entity_id() == Some(entity_id))
+            .then(|| {
+                self.positions
+                    .iter()
+                    .find_map(|(remembered, position)| (*remembered == point).then_some(*position))
+            })
+            .flatten()
+    }
+
+    /// The text positions of the selection's start and end in this view, for
+    /// the ends made on painted paragraph, heading or code line text.
+    fn text_range(&self, entity_id: EntityId) -> (Option<TextPosition>, Option<TextPosition>) {
+        let (Some(anchor), Some(cursor)) = (&self.anchor, &self.cursor) else {
+            return (None, None);
+        };
+        let own = if anchor.endpoint.entity_id() == Some(entity_id) {
+            anchor
+        } else {
+            cursor
+        };
+        match self.coverage {
+            TextSelectionCoverage::Full => (None, None),
+            TextSelectionCoverage::FromStart => (None, self.position(own, entity_id)),
+            TextSelectionCoverage::ToEnd => (self.position(own, entity_id), None),
+            TextSelectionCoverage::Bounded => {
+                let anchor_at = (anchor.block_ix, self.position(anchor, entity_id));
+                let cursor_at = (cursor.block_ix, self.position(cursor, entity_id));
+                let (start, end) = if anchor_at <= cursor_at {
+                    (anchor_at, cursor_at)
+                } else {
+                    (cursor_at, anchor_at)
+                };
+                (start.1, end.1)
+            }
+        }
     }
 
     fn block_range(&self, entity_id: EntityId, last: usize) -> Option<RangeInclusive<usize>> {
@@ -75,6 +157,7 @@ impl VirtualBlockSelection {
 #[derive(Clone)]
 pub(super) struct MarkdownSelectionAdapter {
     pub(super) selection: TextSelectionHandle,
+    pub(super) virtual_blocks: Rc<RefCell<VirtualBlockSelection>>,
     frame: Rc<RefCell<FrameSelectionGeometry>>,
     auto_scroll: Rc<RefCell<AutoScrollState>>,
     layout_revision: Option<usize>,
@@ -84,6 +167,8 @@ pub(super) struct MarkdownSelectionAdapter {
 struct FrameSelectionGeometry {
     text_bounds: Vec<Bounds<Pixels>>,
     runs: Vec<TextSelectionRun>,
+    /// The inline state each of `runs` painted.
+    run_states: Vec<Arc<Mutex<InlineState>>>,
     /// The caret boxes at the first and last selected character painted this
     /// frame, where the touch handles go.
     selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
@@ -155,7 +240,7 @@ impl MarkdownSelectionAdapter {
         let auto_scroll_for_clear = auto_scroll.clone();
         selection.clear_with(
             move |cx| {
-                blocks_for_clear.replace(VirtualBlockSelection::default());
+                blocks_for_clear.borrow_mut().clear_endpoints();
                 stop_auto_scroll(&auto_scroll_for_clear);
                 let _ = view_for_clear.update(cx, |state, cx| {
                     state.reset_selection_projection();
@@ -177,18 +262,27 @@ impl MarkdownSelectionAdapter {
                 if selection_for_copy.has_local_selection(cx) {
                     return state.rendered_text();
                 }
-                let last = state.block_count().saturating_sub(1);
-                state.selected_text_in(blocks_for_copy.borrow().block_range(selection_id, last))
+                let last = state.item_count().saturating_sub(1);
+                let blocks = blocks_for_copy.borrow();
+                let (start, end) = blocks.text_range(selection_id);
+                state.selected_text_in(blocks.block_range(selection_id, last), start, end)
             },
             cx,
         );
 
         let view_for_content_key = view.clone();
+        let blocks_for_content_key = virtual_blocks.clone();
         selection.resolve_content_key_with(
             move |point, cx| {
                 let view = view_for_content_key.upgrade()?;
-                view.read(cx)
-                    .block_ix_at(point.y)
+                let state = view.read(cx);
+                if let Some(position) = state.text_position_at(point) {
+                    blocks_for_content_key
+                        .borrow_mut()
+                        .remember(point, position);
+                }
+                state
+                    .item_ix_at(point.y)
                     .map(|block| TextSelectionContentKey::new(block as u64))
             },
             cx,
@@ -207,6 +301,7 @@ impl MarkdownSelectionAdapter {
 
         Self {
             selection,
+            virtual_blocks,
             frame: Rc::default(),
             auto_scroll,
             layout_revision: None,
@@ -241,9 +336,11 @@ impl MarkdownSelectionAdapter {
         layout: TextLayout,
         bounds: Bounds<Pixels>,
         text_bounds: Vec<Bounds<Pixels>>,
+        state: &Arc<Mutex<InlineState>>,
         cx: &mut App,
     ) -> Option<std::ops::Range<usize>> {
         let mut frame = self.frame.borrow_mut();
+        frame.run_states.push(state.clone());
         let document_order = frame.runs.len() as u64;
         frame.text_bounds.extend(text_bounds);
         frame
@@ -255,6 +352,31 @@ impl MarkdownSelectionAdapter {
             .last()
             .cloned()
             .flatten()
+    }
+
+    /// The inline states painted last frame in rows at `window_point`'s
+    /// height, with the text offset nearest to it in each.
+    pub(super) fn runs_at(
+        &self,
+        window_point: Point<Pixels>,
+    ) -> Vec<(Arc<Mutex<InlineState>>, usize)> {
+        let frame = self.frame.borrow();
+        frame
+            .runs
+            .iter()
+            .zip(&frame.run_states)
+            .filter(|(run, _)| {
+                let bounds = run.bounds();
+                bounds.top() <= window_point.y && window_point.y < bounds.bottom()
+            })
+            .map(|(run, state)| {
+                let offset = run
+                    .layout()
+                    .index_for_position(window_point)
+                    .unwrap_or_else(|nearest| nearest);
+                (state.clone(), offset)
+            })
+            .collect()
     }
 
     pub(super) fn register(

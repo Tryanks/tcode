@@ -1,7 +1,6 @@
 //! First-class ACP provider cards and the modal agent marketplace.
 
 use crate::overlay::OverlayExt as _;
-use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
@@ -12,10 +11,11 @@ use crate::{
 };
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    ListAlignment, ListState, ParentElement as _, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
+use std::rc::Rc;
 
 use tcode_core::acp::InstalledAcpAgent;
 use tcode_protocol::AcpMarketplaceItem;
@@ -288,6 +288,11 @@ pub struct AcpPanel {
     tp_base_url: Entity<InputState>,
     tp_model: Entity<InputState>,
     tp_key: Entity<InputState>,
+    /// Measured rows stay valid while the filtered agents keep their ids. The
+    /// registry is small enough to measure whole, so the scrollbar and the
+    /// touch edge bounce see its full extent.
+    market_list: ListState,
+    market_ids: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -314,6 +319,8 @@ impl AcpPanel {
             tp_base_url: input(KIMI_BASE_URL, window, cx),
             tp_model: input(KIMI_MODEL, window, cx),
             tp_key: input(&crate::tr!("providers.third_party.key_hint"), window, cx),
+            market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
+            market_ids: Vec::new(),
             _subscriptions: subscriptions,
         };
         panel
@@ -349,6 +356,10 @@ impl AcpPanel {
         let id = agent.id.clone();
         h_flex()
             .id(gpui::SharedString::from(format!("acp-market-row-{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("acp-market-row-{id}")
+            })
             .w_full()
             .p_3()
             .gap_3()
@@ -427,51 +438,56 @@ impl AcpPanel {
             .into_any_element()
     }
 
-    fn render_marketplace(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_marketplace(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let query = self.search.read(cx).value().trim().to_lowercase();
-        let market: Vec<AcpMarketplaceItem> = self
-            .store
-            .read(cx)
-            .acp_marketplace_items()
-            .into_iter()
-            .filter(|agent| {
-                query.is_empty()
-                    || agent.name.to_lowercase().contains(&query)
-                    || agent.id.to_lowercase().contains(&query)
-                    || agent.description.to_lowercase().contains(&query)
-            })
-            .collect();
+        let market: Rc<Vec<AcpMarketplaceItem>> = Rc::new(
+            self.store
+                .read(cx)
+                .acp_marketplace_items()
+                .into_iter()
+                .filter(|agent| {
+                    query.is_empty()
+                        || agent.name.to_lowercase().contains(&query)
+                        || agent.id.to_lowercase().contains(&query)
+                        || agent.description.to_lowercase().contains(&query)
+                })
+                .collect(),
+        );
+        if !market.iter().map(|agent| &agent.id).eq(&self.market_ids) {
+            self.market_ids = market.iter().map(|agent| agent.id.clone()).collect();
+            self.market_list.reset(market.len());
+        }
         let error = self.store.read(cx).acp_registry_error();
         let loading = self.store.read(cx).acp_registry_loading();
         let empty = market.is_empty();
-        let mut rows = v_flex().w_full();
-        if let Some(error) = error.filter(|_| empty) {
-            rows = rows.child(
-                div()
-                    .flex_none()
-                    .p_3()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().danger_foreground)
-                    .child(error),
-            );
+        let rows = if let Some(error) = error.filter(|_| empty) {
+            div()
+                .p_3()
+                .text_size(px(13.))
+                .text_color(cx.theme().danger_foreground)
+                .child(error)
+                .into_any_element()
         } else if empty && loading {
-            rows = rows.child(
-                div()
-                    .flex_none()
-                    .p_3()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("providers.acp.loading").into_owned()),
-            );
-        }
-        for agent in &market {
-            rows = rows.child(
-                v_flex()
-                    .w_full()
-                    .flex_none()
-                    .child(self.render_market_row(agent, cx)),
-            );
-        }
+            div()
+                .p_3()
+                .text_size(px(13.))
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::tr!("providers.acp.loading").into_owned())
+                .into_any_element()
+        } else {
+            crate::scroll::page_viewport(
+                "acp-market-bounce",
+                crate::wheel_easing::Handle::List(self.market_list.clone()),
+                list(
+                    self.market_list.clone(),
+                    cx.processor(move |this, ix: usize, _, cx| {
+                        this.render_market_row(&market[ix], cx)
+                    }),
+                )
+                .size_full(),
+            )
+            .into_any_element()
+        };
         v_flex()
             .w_full()
             .flex_1()
@@ -479,14 +495,19 @@ impl AcpPanel {
             .gap_3()
             .child(Input::new(&self.search).small())
             .child(
-                div()
+                v_flex()
                     .w_full()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
+                    .relative()
                     .rounded(material::radius_card())
                     .bg(cx.theme().muted)
-                    .child(div().size_full().child(rows)),
+                    .child(rows)
+                    .when(!window.is_inspector_picking(cx), |rows| {
+                        rows.child(
+                            Scrollbar::vertical(&self.market_list).id("acp-market-scrollbar"),
+                        )
+                    }),
             )
             .child(
                 h_flex()
@@ -820,14 +841,14 @@ impl AcpPanel {
 }
 
 impl Render for AcpPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex().size_full().min_h_0().child(match self.view {
             PanelView::Home => v_flex()
                 .size_full()
                 .min_h_0()
                 .gap_3()
                 .child(self.render_provider_entries(cx))
-                .child(self.render_marketplace(cx))
+                .child(self.render_marketplace(window, cx))
                 .into_any_element(),
             PanelView::ThirdParty => self.render_third_party(cx),
             PanelView::CustomAcp => self.render_custom(cx),
@@ -869,6 +890,83 @@ fn format_env(env: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn the_marketplace_paints_only_the_visible_agents(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            EventEnvelope, HostMessage, ProvidersStatus, ServerEvent, Topic, encode_line,
+        };
+
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let acp_marketplace_items = (0..50)
+            .map(|index| AcpMarketplaceItem {
+                id: format!("agent-{index}"),
+                name: format!("Agent {index}"),
+                version: "1.0.0".into(),
+                description: "An agent from the ACP registry".into(),
+                installed: false,
+                installing: false,
+                supported: true,
+            })
+            .collect();
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Providers,
+                    event: ServerEvent::ProvidersReplaced(ProvidersStatus {
+                        acp_marketplace_items,
+                        ..Default::default()
+                    }),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(588.), px(456.)));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("acp-market-row-agent-0").is_some());
+        assert!(
+            cx.debug_bounds("acp-market-row-agent-45").is_none(),
+            "the marketplace must not paint every registry agent"
+        );
+
+        let position = cx.debug_bounds("acp-market-row-agent-0").unwrap().center();
+        for _ in 0..10 {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-1000.))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        assert!(cx.debug_bounds("acp-market-row-agent-49").is_some());
+        assert!(cx.debug_bounds("acp-market-row-agent-0").is_none());
+    }
 
     #[test]
     fn env_shorthand_preserves_values_and_ignores_entries_without_keys() {

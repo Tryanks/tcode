@@ -300,6 +300,7 @@ impl Element for Inline {
                 text_layout.clone(),
                 bounds,
                 text_bounds,
+                &self.state,
                 cx,
             );
             if adapter.selection.has_local_selection(cx) {
