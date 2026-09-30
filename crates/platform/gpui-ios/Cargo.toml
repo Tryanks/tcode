@@ -4,11 +4,11 @@ version = "0.3.7"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-description = "iOS platform backend for gpui-pre (Metal via gpui-pre-wgpu)"
+description = "iOS platform backend for gpui-fast (Metal via gpui_wgpu)"
 
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.7", default-features = false }
-gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.7" }
+gpui_wgpu = { git = "https://github.com/longbridge/gpui-fast" }
 anyhow = "1"
 log = "0.4"
 parking_lot = "0.12"

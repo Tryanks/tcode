@@ -1,4 +1,4 @@
-//! UIKit/Metal platform backend for `gpui-pre`.
+//! UIKit/Metal platform backend for gpui-fast.
 //!
 //! The UIKit host owns the application run loop and a `CAMetalLayer`-backed
 //! view. This crate adapts that view to GPUI and exposes the small C ABI used
