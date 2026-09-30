@@ -27,12 +27,25 @@ impl WorkspaceStore {
 
     pub(super) fn load_pending_chat_history(&mut self, cx: &mut Context<Self>) {
         if self.history_error.is_none()
-            && self.pending_chat_turn.as_ref().is_some_and(|(id, turn)| {
+            && (self.pending_chat_turn.as_ref().is_some_and(|(id, turn)| {
                 self.selected_session_id.as_ref() == Some(id) && *turn < self.session_turn_offset
-            })
+            }) || self.running_turn_opening_unheld())
         {
             self.load_earlier_messages(cx);
         }
+    }
+
+    /// A window cut inside the running turn holds none of the records that
+    /// opened it, so its fold can neither show the turn as live nor time it.
+    /// Such a window holds only that turn; any earlier turn in it would mean
+    /// the running one is held from its start.
+    fn running_turn_opening_unheld(&self) -> bool {
+        self.active_turn_running()
+            && self.session_replica.as_ref().is_some_and(|(id, timeline)| {
+                self.selected_session_id.as_ref() == Some(id)
+                    && !timeline.turn_running
+                    && timeline.turns.len() == 1
+            })
     }
 
     /// Geometry is reported after layout, including the first frame on restore.
@@ -101,14 +114,7 @@ impl WorkspaceStore {
                         let held = store.session_records.entry(session_id.clone()).or_default();
                         held.splice(0..0, records);
                         store.session_from.insert(session_id.clone(), from);
-                        let mut timeline = Timeline::fold_stored(held.iter());
-                        if !store
-                            .session_status_replica
-                            .as_ref()
-                            .is_some_and(|status| status.turn_running)
-                        {
-                            timeline.mark_idle();
-                        }
+                        let timeline = store.fold_held_records(&session_id);
                         store.session_turn_offset = store
                             .session_turn_offset
                             .saturating_sub(timeline.turns.len().saturating_sub(previous_turns));
