@@ -341,9 +341,14 @@ impl PartialEq for CodeBlock {
 }
 
 impl CodeBlock {
-    pub(super) fn states_for_lines(&self, lines: &[&str]) -> Vec<Arc<Mutex<InlineState>>> {
+    /// The selection states of `lines[span]`, the lines one list item paints.
+    pub(super) fn states_for_lines(
+        &self,
+        lines: &[&str],
+        span: Range<usize>,
+    ) -> Vec<Arc<Mutex<InlineState>>> {
         let Ok(mut states) = self.line_states.lock() else {
-            return lines
+            return lines[span]
                 .iter()
                 .map(|line| InlineState::shared((*line).into()))
                 .collect();
@@ -354,33 +359,43 @@ impl CodeBlock {
                 .map(|line| InlineState::shared((*line).into()))
                 .collect();
         } else {
-            for (state, line) in states.iter().zip(lines) {
+            for (state, line) in states[span.clone()].iter().zip(&lines[span.clone()]) {
                 if let Ok(mut state) = state.lock() {
                     state.set_text((*line).into());
                 }
             }
         }
-        states.clone()
+        states[span].to_vec()
     }
 
     fn selected_text(&self) -> String {
         let Ok(states) = self.line_states.lock() else {
             return String::new();
         };
-        let selected = states
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, state)| selected_inline_text(state).map(|text| (ix, text)))
-            .collect::<Vec<_>>();
-        let (Some((first, _)), Some((last, _))) = (selected.first(), selected.last()) else {
+        let (Some(first), Some(last)) = (
+            states
+                .iter()
+                .position(|state| selected_inline_text(state).is_some()),
+            states
+                .iter()
+                .rposition(|state| selected_inline_text(state).is_some()),
+        ) else {
             return String::new();
         };
-        let (first, last) = (*first, *last);
-        let mut lines = vec![String::new(); last - first + 1];
-        for (ix, text) in selected {
-            lines[ix - first] = text;
-        }
-        lines.join("\n")
+        // A selection is contiguous, so the lines between its ends are whole,
+        // including lines that were not painted while it grew.
+        (first..=last)
+            .map(|ix| {
+                if ix == first || ix == last {
+                    selected_inline_text(&states[ix]).unwrap_or_default()
+                } else {
+                    states[ix]
+                        .lock()
+                        .map_or_else(|_| String::new(), |state| state.text.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn clear_selection(&self) {
@@ -504,7 +519,7 @@ mod tests {
         let BlockNode::CodeBlock(code) = leaves[1] else {
             panic!("expected code block");
         };
-        let states = code.states_for_lines(&["first code line", "second code line"]);
+        let states = code.states_for_lines(&["first code line", "second code line"], 0..2);
         select(&states[0], 6..10);
         select(&states[1], 0..6);
 
