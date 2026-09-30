@@ -177,7 +177,7 @@ impl MarkdownSelectionAdapter {
                 if selection_for_copy.has_local_selection(cx) {
                     return state.rendered_text();
                 }
-                let last = state.block_count().saturating_sub(1);
+                let last = state.item_count().saturating_sub(1);
                 state.selected_text_in(blocks_for_copy.borrow().block_range(selection_id, last))
             },
             cx,
@@ -188,7 +188,7 @@ impl MarkdownSelectionAdapter {
             move |point, cx| {
                 let view = view_for_content_key.upgrade()?;
                 view.read(cx)
-                    .block_ix_at(point.y)
+                    .item_ix_at(point.y)
                     .map(|block| TextSelectionContentKey::new(block as u64))
             },
             cx,
