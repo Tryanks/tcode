@@ -177,6 +177,7 @@ pub(crate) struct ScrollArea<E: InteractiveElement + Styled + ParentElement + El
     id: ElementId,
     axis: Axis,
     element: E,
+    handle: Option<ScrollHandle>,
 }
 
 impl<E> ScrollArea<E>
@@ -190,7 +191,15 @@ where
             id: Element::id(&element).unwrap_or(fallback),
             axis,
             element,
+            handle: None,
         }
+    }
+
+    /// Scroll through `handle` instead of the area's own, for an owner that
+    /// moves the area itself (e.g. to keep a keyboard selection visible).
+    pub(crate) fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.handle = Some(handle.clone());
+        self
     }
 }
 
@@ -226,12 +235,14 @@ where
     E: InteractiveElement + Styled + ParentElement + Element + 'static,
 {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let scroll_handle = window
-            .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| {
-                ScrollHandle::default()
-            })
-            .read(cx)
-            .clone();
+        let scroll_handle = self.handle.take().unwrap_or_else(|| {
+            window
+                .use_keyed_state((self.id.clone(), "scroll"), cx, |_, _| {
+                    ScrollHandle::default()
+                })
+                .read(cx)
+                .clone()
+        });
         let root_style = root_style_from(&mut self.element);
         // The wrapper takes the element's place in its parent's layout; the
         // viewport fills it unless a maximum height of its own bounds it.
