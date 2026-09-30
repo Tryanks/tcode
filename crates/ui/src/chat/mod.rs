@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 pub(crate) mod components;
 mod model;
@@ -29,7 +30,7 @@ use gpui::{
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
+use gpui_base::{ElementExt as _, Scrollbar, StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::GitAction;
 use tcode_core::session::{
@@ -364,6 +365,8 @@ pub struct ChatView {
     /// scroll applied between two frames is either overwritten by the next
     /// packet or would have to give up when one arrived first.
     reservation_scroll_back: Option<ReservationScrollBack>,
+    /// The anchor was carried into rows not yet measured.
+    carried_anchor: bool,
     rows: Vec<TimelineRow>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
@@ -371,6 +374,11 @@ pub struct ChatView {
     next_md_build_generation: u64,
     markdown_visible_rows: Range<usize>,
     markdown_scroll_top: Option<usize>,
+    /// The rows the timeline paints in the frame being drawn: GPUI's list
+    /// prepaints only the rows on screen.
+    painted_rows: Rc<Cell<Option<(usize, usize)>>>,
+    /// The first row painted while following the tail.
+    painted_tail_start: Option<usize>,
     /// Open/closed keys for collapsibles other than activity details.
     expanded: HashSet<String>,
     auto_activity_expansions: AutoActivityExpansions,
@@ -417,6 +425,34 @@ fn jump_to_latest_visible(list: &ListState) -> bool {
     // been measured. Prepending shifts the extent and offset together.
     height > px(0.)
         && list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y > height
+}
+
+/// Move an anchor whose offset passes the end of its row onto the row that
+/// offset lands in. A remeasure of the anchor row would otherwise clamp the
+/// offset to that row's height. False while a row it passes is unmeasured.
+fn settle_carried_anchor(list: &ListState) -> bool {
+    if list.is_following_tail() {
+        return true;
+    }
+    let mut anchor = list.logical_scroll_top();
+    let start = anchor.item_ix;
+    let settled = loop {
+        if anchor.item_ix + 1 >= list.item_count() {
+            break true;
+        }
+        let Some(bounds) = list.bounds_for_item(anchor.item_ix) else {
+            break false;
+        };
+        if anchor.offset_in_item < bounds.size.height {
+            break true;
+        }
+        anchor.offset_in_item -= bounds.size.height;
+        anchor.item_ix += 1;
+    };
+    if anchor.item_ix != start {
+        list.scroll_to(anchor);
+    }
+    settled
 }
 
 /// Pixels between the top of the content and the top of the viewport. A list
@@ -629,6 +665,7 @@ impl ChatView {
             timeline_stale: false,
             history_placeholder_height: px(0.),
             reservation_scroll_back: None,
+            carried_anchor: false,
             rows: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
@@ -636,6 +673,8 @@ impl ChatView {
             next_md_build_generation: 0,
             markdown_visible_rows: 0..0,
             markdown_scroll_top: None,
+            painted_rows: Rc::default(),
+            painted_tail_start: None,
             expanded: HashSet::new(),
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
@@ -727,6 +766,7 @@ impl ChatView {
             self.full_outputs.clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
+            self.painted_tail_start = None;
             self.markdown_visible_rows = tail_row_window(self.rows.len());
             self.markdown_scroll_top = Some(self.rows.len());
         }
@@ -783,7 +823,15 @@ impl ChatView {
                     self.list_state.set_follow_mode(FollowMode::Tail);
                 }
             }
-            ListSync::Incremental { splices, remeasure } => {
+            ListSync::Incremental {
+                splices,
+                remeasure,
+                carried,
+            } => {
+                let anchor = self.list_state.logical_scroll_top();
+                let carried_offset = (!self.list_state.is_following_tail()
+                    && carried.iter().any(|range| range.contains(&anchor.item_ix)))
+                .then_some(anchor.offset_in_item);
                 for (range, count) in splices.into_iter().rev() {
                     // The row above a splice changes its padding (the former
                     // last row hands its edge padding to the new one); its
@@ -797,11 +845,22 @@ impl ChatView {
                 for index in remeasure {
                     self.list_state.remeasure_items(index..index + 1);
                 }
+                // A splice over the anchor moves it to the first new row at
+                // offset zero; the carried content starts where the old row
+                // did, so the old offset still names the same pixel. It may
+                // pass that row's end until `settle_carried_anchor` measures it.
+                if let Some(offset) = carried_offset {
+                    self.list_state.scroll_to(ListOffset {
+                        item_ix: self.list_state.logical_scroll_top().item_ix,
+                        offset_in_item: offset,
+                    });
+                    self.carried_anchor = true;
+                }
             }
         }
 
         if self.list_state.is_following_tail() {
-            self.markdown_visible_rows = tail_row_window(self.rows.len());
+            self.markdown_visible_rows = self.markdown_tail_window();
             self.markdown_scroll_top = Some(self.rows.len());
         }
 
@@ -1103,7 +1162,31 @@ impl ChatView {
         }
     }
 
+    /// Invalidate the measured height of the row that renders the activity
+    /// `entry_id`; an expanded Work Log gives each activity a row of its own.
+    fn remeasure_activity(&self, turn: usize, entry_id: &str, cx: &App) {
+        let row = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(|timeline| {
+                let entries = &timeline.entries;
+                let start = entries.partition_point(|entry| entry.turn < turn);
+                let index = start
+                    + entries[start..]
+                        .iter()
+                        .take_while(|entry| entry.turn == turn)
+                        .position(|entry| entry.id == entry_id)?;
+                row_of_entry(&self.rows, index, turn)
+            })
+            .flatten();
+        match row {
+            Some(row) => self.list_state.remeasure_items(row..row + 1),
+            None => self.remeasure_turn(turn),
+        }
+    }
+
     fn set_markdown_visible_rows(&mut self, visible_rows: Range<usize>, cx: &mut Context<Self>) {
+        self.painted_tail_start = None;
         let row_count = self.rows.len();
         let visible_rows = visible_rows.start.min(row_count)..visible_rows.end.min(row_count);
         self.markdown_scroll_top = Some(visible_rows.start);
@@ -1123,11 +1206,39 @@ impl ChatView {
         }
         self.markdown_scroll_top = Some(scroll_top);
         self.markdown_visible_rows = if scroll_top == row_count {
-            tail_row_window(row_count)
+            self.markdown_tail_window()
         } else {
+            self.painted_tail_start = None;
             viewport_row_window(scroll_top, row_count)
         };
         self.sync_markdown_residency(None, cx);
+    }
+
+    /// The tail's rows: the row hint, widened to the rows last painted there.
+    /// Rows only join the tail while it is followed, so those stay in place.
+    fn markdown_tail_window(&self) -> Range<usize> {
+        let tail = tail_row_window(self.rows.len());
+        let start = self
+            .painted_tail_start
+            .map_or(tail.start, |start| start.min(tail.start));
+        start..tail.end
+    }
+
+    /// Row hints only approximate the rows on screen, which can be far
+    /// shorter than a hint assumes (an expanded Work Log's activities). Take
+    /// the rows the list painted when the hint missed some of them.
+    fn adopt_painted_rows(&mut self, painted: Range<usize>, cx: &mut Context<Self>) {
+        let row_count = self.rows.len();
+        let painted = painted.start.min(row_count)..painted.end.min(row_count);
+        self.painted_tail_start = (self.list_state.is_following_tail() && painted.end == row_count)
+            .then_some(painted.start);
+        let window = &self.markdown_visible_rows;
+        if window.start <= painted.start && painted.end <= window.end {
+            return;
+        }
+        self.markdown_visible_rows = painted;
+        self.sync_markdown_residency(None, cx);
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -1154,7 +1265,7 @@ impl ChatView {
 
     fn toggle_activity_expanded(
         &mut self,
-        turn: usize,
+        (turn, entry_id): (usize, &str),
         key: &str,
         expanded: bool,
         cx: &mut Context<Self>,
@@ -1168,7 +1279,8 @@ impl ChatView {
                 },
             );
         }
-        self.remeasure_expanded(turn, cx);
+        self.remeasure_activity(turn, entry_id, cx);
+        cx.notify();
     }
 
     fn remeasure_expanded(&mut self, turn: usize, cx: &mut Context<Self>) {
@@ -1182,7 +1294,7 @@ impl ChatView {
 
     fn auto_activity_expanded(
         &mut self,
-        turn: usize,
+        (turn, entry_id): (usize, &str),
         key: &str,
         enabled: bool,
         recency: AutoActivityRecency,
@@ -1200,6 +1312,7 @@ impl ChatView {
         );
         if let Some((generation, delay)) = auto.collapse {
             let collapse_key = key.to_string();
+            let collapse_entry_id = entry_id.to_string();
             let collapse_session_key = session_key.clone();
             let timer = cx.background_executor().timer(delay);
             cx.spawn(async move |this, cx| {
@@ -1211,7 +1324,7 @@ impl ChatView {
                         generation,
                     ) && this.session_key.as_deref() == Some(collapse_session_key.as_str())
                     {
-                        this.remeasure_turn(turn);
+                        this.remeasure_activity(turn, &collapse_entry_id, cx);
                         cx.notify();
                     }
                 });
@@ -1809,21 +1922,24 @@ impl ChatView {
                 for (file_index, row) in live_edit_rows(changes, cwd).iter().enumerate() {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
-                    let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx);
-                    let inline_diff = if expanded && row.counts.is_some() {
-                        Some(self.inline_diffs.render(&key, row, cx))
-                    } else {
-                        self.inline_diffs.forget(&key);
-                        None
-                    };
+                    let expanded =
+                        self.auto_activity_expanded((turn, &entry.id), &key, enabled, recency, cx);
+                    let inline_diff = (expanded && row.counts.is_some())
+                        .then(|| self.inline_diffs.render(&key, row, cx));
                     let toggle_key = key.clone();
+                    let entry_id = entry.id.clone();
                     rows.push(components::changed_files::file_edit_row(
                         &key,
                         row,
                         expanded,
                         inline_diff,
                         cx.listener(move |this, _, _, cx| {
-                            this.toggle_activity_expanded(turn, &toggle_key, expanded, cx);
+                            this.toggle_activity_expanded(
+                                (turn, &entry_id),
+                                &toggle_key,
+                                expanded,
+                                cx,
+                            );
                         }),
                         cx,
                     ));
@@ -1866,7 +1982,8 @@ impl ChatView {
         );
         let auto_enabled =
             auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
-        let expanded = self.auto_activity_expanded(turn, &key, auto_enabled, recency, cx);
+        let expanded =
+            self.auto_activity_expanded((turn, &entry.id), &key, auto_enabled, recency, cx);
         let command_detail = if expanded {
             match &entry.content {
                 EntryContent::Item(ItemContent::CommandExecution {
@@ -1905,6 +2022,7 @@ impl ChatView {
             None
         };
         let click_key = key;
+        let entry_id = entry.id.clone();
         components::activity::activity_row(
             entry,
             compact,
@@ -1913,7 +2031,7 @@ impl ChatView {
             command_detail,
             elided_output,
             cx.listener(move |this, _, _, cx| {
-                this.toggle_activity_expanded(turn, &click_key, expanded, cx);
+                this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
             }),
             cx,
         )
@@ -1970,13 +2088,15 @@ impl ChatView {
                     Ok(output) => FullOutput::Loaded(output.into()),
                     Err(error) => FullOutput::Failed(error),
                 };
+                this.remeasure_activity(turn, &id, cx);
                 this.full_outputs.insert(id, output);
-                this.remeasure_expanded(turn, cx);
+                cx.notify();
             });
         });
+        self.remeasure_activity(turn, &item_id, cx);
         self.full_outputs
             .insert(item_id, FullOutput::Loading { _request: task });
-        self.remeasure_expanded(turn, cx);
+        cx.notify();
     }
 
     /// Ask the host to render one stored command's output at `cols`.
@@ -2014,7 +2134,7 @@ impl ChatView {
                     .borrow_mut()
                     .adopt(&id, generation, frame)
                 {
-                    this.remeasure_turn(turn);
+                    this.remeasure_activity(turn, &id, cx);
                 }
                 cx.notify();
             });
@@ -2925,6 +3045,18 @@ impl Render for ChatView {
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
+        self.inline_diffs.sweep();
+        self.painted_rows.set(None);
+        if self.carried_anchor {
+            self.carried_anchor = !settle_carried_anchor(&self.list_state);
+            if self.carried_anchor {
+                // The next frame may be idle otherwise; make it render.
+                let chat = cx.entity().downgrade();
+                window.on_next_frame(move |_, cx| {
+                    let _ = chat.update(cx, |_, cx| cx.notify());
+                });
+            }
+        }
         let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
         self.sync_markdown_scroll_position(cx);
         self.apply_reservation_scroll_back(window, cx);
@@ -3077,8 +3209,16 @@ impl Render for ChatView {
                 let continued = this.rows.get(index + 1).is_some_and(|next| {
                     matches!(next.part, RowPart::WorkLogActivity | RowPart::WorkLogLive)
                 });
+                let painted = this.painted_rows.clone();
                 v_flex()
                     .debug_selector(move || format!("timeline-row-{index}"))
+                    .on_prepaint(move |_, _, _| {
+                        painted.set(Some(
+                            painted.get().map_or((index, index + 1), |(start, end)| {
+                                (start.min(index), end.max(index + 1))
+                            }),
+                        ));
+                    })
                     .w_full()
                     .items_center()
                     .px(px(if this.window_state.read(cx).compact {
@@ -3282,13 +3422,22 @@ impl Render for ChatView {
                             {
                                 let list = self.list_state.clone();
                                 let view = cx.entity().downgrade();
+                                let painted = self.painted_rows.clone();
                                 move |_, window, cx| {
                                     // List prepaint may change geometry after render
                                     // (resize, splice, or markdown remeasurement).
                                     // Reconcile the sibling control after that layout.
                                     if jump_to_latest_visible(&list) != show_jump_to_latest {
+                                        let view = view.clone();
                                         window.defer(cx, move |_, cx| {
                                             let _ = view.update(cx, |_, cx| cx.notify());
+                                        });
+                                    }
+                                    if let Some((start, end)) = painted.get() {
+                                        window.defer(cx, move |_, cx| {
+                                            let _ = view.update(cx, |chat, cx| {
+                                                chat.adopt_painted_rows(start..end, cx);
+                                            });
                                         });
                                     }
                                 }
@@ -3438,7 +3587,7 @@ mod tests {
         ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansion,
         AutoActivityExpansions,
         AutoActivityRecency::{ImmediatelySuperseded, Latest, Older},
-        ChatView, ResidencyScope, markdown_entries_for_residency,
+        ChatView, ResidencyScope, RowPart, markdown_entries_for_residency,
     };
     use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
@@ -3777,6 +3926,117 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_paused_reader_on_the_live_window_stays_put_as_it_folds(cx: &mut TestAppContext) {
+        use gpui::{ListOffset, Modifiers, VisualTestContext, px, size};
+        use tcode_core::session::SteeringStatus;
+
+        let tool = |id: &str| {
+            entry(
+                id,
+                EntryContent::Item(ItemContent::ToolCall {
+                    name: "read".into(),
+                    input: serde_json::json!({ "path": id }),
+                    output: None,
+                    status: ItemStatus::Completed,
+                }),
+            )
+        };
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries.push(entry("user", user_item("go")));
+        for index in 0..20 {
+            timeline.entries.push(tool(&format!("tool-{index}")));
+        }
+        // Steers queued behind the live window keep content below it.
+        for index in 0..12 {
+            timeline.entries.push(entry(
+                &format!("steer-{index}"),
+                EntryContent::Steer {
+                    text: format!("queued steer {index}"),
+                    status: SteeringStatus::Pending,
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            ));
+        }
+
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw(cx);
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw(cx);
+        let header = cx
+            .debug_bounds("worklog-header-0-tool-0")
+            .expect("collapsed work log");
+        cx.simulate_click(header.center(), Modifiers::default());
+        draw(cx);
+        // The reader rests two activities into the live window.
+        view.update(cx, |chat, cx| {
+            let live = chat
+                .rows
+                .iter()
+                .position(|row| row.part == RowPart::WorkLogLive)
+                .expect("an expanded live work log");
+            chat.list_state.scroll_to(ListOffset {
+                item_ix: live,
+                offset_in_item: px(70.),
+            });
+            cx.notify();
+        });
+        draw(cx);
+        let reading = cx
+            .debug_bounds("activity-row-tool-18")
+            .expect("the activity under the reader")
+            .top();
+        let top = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("activity-row-tool-18")
+                .map(|bounds| bounds.top())
+        };
+
+        let update = |timeline: &Timeline, cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw(cx);
+            draw(cx);
+        };
+        timeline.entries.push(tool("tool-20"));
+        timeline.entries.push(tool("tool-21"));
+        update(&timeline, cx);
+        assert_eq!(
+            top(cx),
+            Some(reading),
+            "new activities folding the live window moved the reader"
+        );
+
+        timeline.turns[0].running = false;
+        update(&timeline, cx);
+        // Settled, the activity takes the folded rows' indent but keeps its
+        // line.
+        assert_eq!(
+            top(cx),
+            Some(reading),
+            "the live window settling moved the reader"
+        );
+    }
+
+    #[gpui::test]
     fn an_expanded_work_log_lays_out_only_the_activities_on_screen(cx: &mut TestAppContext) {
         use gpui::{FollowMode, ListOffset, Modifiers, VisualTestContext, px, size};
 
@@ -3826,6 +4086,31 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("activity-row-command-399").is_some());
         assert!(cx.debug_bounds("activity-row-command-0").is_none());
+
+        // Opening one activity keeps the measured heights of the turn's
+        // other rows, however far away.
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw(cx);
+        let last = view.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let measured = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |chat, _| {
+                chat.list_state.bounds_for_item(last).is_some()
+            })
+        };
+        assert!(measured(cx));
+        let row = cx
+            .debug_bounds("activity-row-command-0")
+            .expect("the first activity");
+        cx.simulate_click(row.center(), Modifiers::default());
+        draw(cx);
+        assert!(cx.debug_bounds("activity-detail").is_some());
+        assert!(
+            measured(cx),
+            "opening one activity remeasured the whole turn"
+        );
     }
 
     #[gpui::test]
@@ -3936,6 +4221,124 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("file-edit-diff-line-1").is_some());
         assert!(cx.debug_bounds("file-edit-diff-line-2").is_none());
+    }
+
+    #[gpui::test]
+    fn a_built_inline_diff_goes_once_its_row_leaves_the_screen(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![
+            entry("user", user_item("go")),
+            entry(
+                "edit",
+                EntryContent::Item(ItemContent::FileChange {
+                    changes: vec![agent::FileChange {
+                        path: "src/lib.rs".into(),
+                        kind: agent::FileChangeKind::Modify,
+                        diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                }),
+            ),
+        ];
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw(cx);
+        assert!(cx.debug_bounds("file-edit-diff").is_some());
+        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 1);
+
+        // Newer activities fold the open edit into the collapsed Work Log,
+        // so its row never renders again.
+        for index in 0..6 {
+            timeline.entries.push(command(&format!("command-{index}")));
+        }
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+            cx.notify();
+        });
+        draw(cx);
+        draw(cx);
+        assert!(cx.debug_bounds("file-edit-diff").is_none());
+        assert_eq!(view.read_with(cx, |chat, _| chat.inline_diffs.len()), 0);
+    }
+
+    #[gpui::test]
+    fn markdown_on_screen_above_an_expanded_work_log_is_built(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, Modifiers, VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta::default()];
+        timeline.entries = vec![entry("user", user_item("go"))];
+        for index in 0..100 {
+            timeline.entries.push(entry(
+                &format!("note-{index}"),
+                assistant(&format!("Note {index}.")),
+            ));
+        }
+        timeline
+            .entries
+            .push(entry("early", assistant("Looking around first.")));
+        for index in 0..40 {
+            timeline.entries.push(command(&format!("command-{index}")));
+        }
+        timeline.entries.push(entry("late", assistant("Done.")));
+        let (store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(1_024.), px(1_900.)));
+        draw(cx);
+        let header = cx
+            .debug_bounds("worklog-header-0-command-0")
+            .expect("collapsed work log");
+        cx.simulate_click(header.center(), Modifiers::default());
+        draw(cx);
+
+        // Reading the start of the thread retires the message; returning to
+        // the latest shows it again, dozens of short rows above the end.
+        view.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(ListOffset::default());
+            cx.notify();
+        });
+        draw(cx);
+        assert!(!view.read_with(cx, |chat, _| chat.has_resident_markdown_state("early")));
+        view.update(cx, |chat, cx| {
+            chat.list_state.set_follow_mode(FollowMode::Tail);
+            cx.notify();
+        });
+        draw(cx);
+
+        let row = view.read_with(cx, |chat, cx| chat.markdown_row("early", cx).unwrap());
+        assert_eq!(row, 101);
+        assert!(
+            cx.debug_bounds("timeline-row-101").is_some(),
+            "the message is on screen"
+        );
+        assert!(view.read_with(cx, |chat, _| chat.has_resident_markdown_state("early")));
     }
 
     #[test]
@@ -5475,9 +5878,10 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+        // The 15 rows the tail paints, and the 24-row build margin above them.
         assert_eq!(
             view.read_with(cx, |chat, _| chat.resident_markdown_state_count()),
-            36
+            39
         );
         let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(!view.read_with(cx, |chat, _| {

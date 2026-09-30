@@ -339,7 +339,9 @@ fn file_edit_row_header(
 /// Building one diffs and syntax-highlights the whole patch, while its row
 /// renders every frame and the patch changes only when the provider reports
 /// more of it. An entry is rebuilt when its path, patch or theme changes, and
-/// dropped when its row collapses or the session changes.
+/// kept only while its row renders it: [`Self::sweep`] drops every entry the
+/// frame before did not render, as GPUI drops the element state of an element
+/// a frame leaves out, so a diff scrolled or folded away is built again.
 pub(crate) struct InlineDiffCache {
     diffs: HashMap<String, InlineDiff>,
 }
@@ -352,6 +354,7 @@ struct InlineDiff {
     rows: Rc<[RenderedRow]>,
     widest: usize,
     scroll: UniformListScrollHandle,
+    rendered: bool,
 }
 
 struct InlineDiffTheme {
@@ -387,8 +390,15 @@ impl InlineDiffCache {
         self.diffs.clear();
     }
 
-    pub(crate) fn forget(&mut self, key: &str) {
-        self.diffs.remove(key);
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.diffs.len()
+    }
+
+    /// Call once per frame, before the rows render.
+    pub(crate) fn sweep(&mut self) {
+        self.diffs
+            .retain(|_, diff| std::mem::take(&mut diff.rendered));
     }
 
     pub(crate) fn render(&mut self, key: &str, row: &LiveEditRow, cx: &App) -> AnyElement {
@@ -439,10 +449,13 @@ impl InlineDiffCache {
                     rows: rendered.all_rows.into(),
                     widest,
                     scroll,
+                    rendered: false,
                 },
             );
         }
-        render_inline_diff(key, &self.diffs[key], cx)
+        let diff = self.diffs.get_mut(key).expect("built above");
+        diff.rendered = true;
+        render_inline_diff(key, diff, cx)
     }
 }
 
