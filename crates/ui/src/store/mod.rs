@@ -961,10 +961,12 @@ impl WorkspaceStore {
                 self.session_statuses
                     .insert(session_id.clone(), status.clone());
                 if self.selected_session_id.as_ref() == Some(session_id) {
+                    let was_running = self.active_turn_running();
                     let mut status = status.clone();
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(session_id);
                     self.session_status_replica = Some(status);
+                    self.reconcile_replica_liveness(session_id, was_running);
                     self.sync_terminal_topics();
                     self.sync_active_conversation_ui();
                     self.background_session_flags.remove(session_id);
@@ -1033,14 +1035,7 @@ impl WorkspaceStore {
                 if self.session_catching_up {
                     return;
                 }
-                let mut timeline = Timeline::fold_stored(held.iter());
-                if !self
-                    .session_status_replica
-                    .as_ref()
-                    .is_some_and(|status| status.turn_running)
-                {
-                    timeline.mark_idle();
-                }
+                let timeline = self.fold_held_records(session_id);
                 self.baseline_topics.insert(envelope.topic.clone());
                 self.hydrated_sessions.insert(session_id.clone());
                 self.session_turn_offset =
@@ -1335,6 +1330,39 @@ impl WorkspaceStore {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.turn_running)
+    }
+
+    /// The host's status, not the held records, decides whether a turn is
+    /// live: records folded after their provider stopped still end running.
+    fn fold_held_records(&self, session_id: &str) -> Timeline {
+        let mut timeline =
+            Timeline::fold_stored(self.session_records.get(session_id).into_iter().flatten());
+        if !self.active_turn_running() {
+            timeline.mark_idle();
+        }
+        timeline
+    }
+
+    /// Status and events are separate topics, so the status that settles a
+    /// fold can arrive after it. Idling is cheap to apply in place; reviving
+    /// needs a refold because `mark_idle` discarded the live turn's state.
+    fn reconcile_replica_liveness(&mut self, session_id: &str, was_running: bool) {
+        let running = self.active_turn_running();
+        if running == was_running {
+            return;
+        }
+        let Some((replica_id, timeline)) = self.session_replica.as_mut() else {
+            return;
+        };
+        if replica_id != session_id {
+            return;
+        }
+        if !running {
+            timeline.mark_idle();
+        } else if !timeline.turn_running {
+            let timeline = self.fold_held_records(session_id);
+            self.session_replica = Some((session_id.to_owned(), timeline));
+        }
     }
 
     fn suppress_task_auto_open_if_running(&mut self) {
@@ -3677,6 +3705,197 @@ mod tests {
             assert_eq!(store.session_records["large"].len(), 1000);
             assert!(!store.history_loading());
         });
+    }
+
+    fn draft_status() -> tcode_protocol::SessionStatus {
+        let root = scratch_root("tcode-draft-status-test");
+        let host = test_host(SessionStore::open_at(root.clone()).unwrap());
+        let status = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("running".into(), std::env::temp_dir(), cx);
+            state.session_status_snapshot(&id).unwrap()
+        }))
+        .unwrap();
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).unwrap();
+        status
+    }
+
+    fn with_turn_running(
+        status: &tcode_protocol::SessionStatus,
+        running: bool,
+    ) -> tcode_protocol::SessionStatus {
+        let mut status = status.clone();
+        status.turn_running = running;
+        status.working = running;
+        status
+    }
+
+    fn recorded(ts: u64, event: AgentEvent) -> SessionEventRecord {
+        SessionEventRecord {
+            ts: Some(ts),
+            ..event.into()
+        }
+    }
+
+    fn reply(ts: u64) -> SessionEventRecord {
+        recorded(
+            ts,
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: format!("reply-{ts}"),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "working".into(),
+                },
+            }),
+        )
+    }
+
+    fn session_snapshot(
+        session_id: &str,
+        from: u64,
+        records: Vec<SessionEventRecord>,
+    ) -> EventEnvelope {
+        let end = from + records.len() as u64;
+        EventEnvelope {
+            request_id: None,
+            topic: Topic::SessionEvents {
+                session_id: session_id.into(),
+            },
+            event: ServerEvent::SessionSnapshot {
+                from,
+                end,
+                records,
+                total: end,
+                total_turns: 1,
+                truncated: from > 0,
+            },
+        }
+    }
+
+    fn live_turn(workspace: &gpui::Entity<WorkspaceStore>, cx: &TestAppContext) -> Option<u64> {
+        workspace.read_with(cx, |store, _| {
+            store
+                .with_active_timeline(|timeline| {
+                    timeline
+                        .turns
+                        .last()
+                        .filter(|turn| turn.running)
+                        .and_then(|turn| turn.start_ts)
+                })
+                .flatten()
+        })
+    }
+
+    #[gpui::test]
+    fn status_arriving_after_the_snapshot_settles_the_running_turn(cx: &mut TestAppContext) {
+        let status = draft_status();
+        let id = status.session_id.clone();
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        let status_event = |running| EventEnvelope {
+            request_id: None,
+            topic: Topic::SessionStatus {
+                session_id: id.clone(),
+            },
+            event: ServerEvent::SessionStatusReplaced(with_turn_running(&status, running)),
+        };
+        workspace.update(cx, |store, cx| {
+            store.selected_session_id = Some(id.clone());
+            // The status cached from the last visit, before this turn began.
+            store.session_status_replica = Some(with_turn_running(&status, false));
+            store.apply_domain_event(
+                &session_snapshot(
+                    &id,
+                    0,
+                    vec![
+                        recorded(
+                            1_000,
+                            AgentEvent::TurnStarted {
+                                turn_id: "turn".into(),
+                            },
+                        ),
+                        reply(2_000),
+                    ],
+                ),
+                cx,
+            );
+            store.apply_domain_event(&status_event(true), cx);
+        });
+        assert_eq!(live_turn(&workspace, cx), Some(1_000));
+
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(&status_event(false), cx)
+        });
+        assert_eq!(live_turn(&workspace, cx), None);
+    }
+
+    #[gpui::test]
+    fn a_window_cut_inside_the_running_turn_loads_back_to_its_start(cx: &mut TestAppContext) {
+        let status = with_turn_running(&draft_status(), true);
+        let id = status.session_id.clone();
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        workspace.update(cx, |store, cx| {
+            store.selected_session_id = Some(id.clone());
+            store.session_status_replica = Some(status);
+            store.apply_domain_event(&session_snapshot(&id, 3, vec![reply(4_000)]), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(live_turn(&workspace, cx), None);
+
+        let request = std::iter::from_fn(|| outgoing.try_recv().ok())
+            .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+            .find(|request| {
+                matches!(
+                    request.payload,
+                    tcode_protocol::ClientPayload::Query(
+                        tcode_protocol::Query::SessionHistoryPage { before: 3, .. }
+                    )
+                )
+            })
+            .expect("the page holding the turn's start");
+        incoming
+            .try_send(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                    id: request.id,
+                    result: Ok(tcode_protocol::QueryResponse::SessionHistoryPage {
+                        records: vec![
+                            recorded(
+                                1_000,
+                                AgentEvent::TurnStarted {
+                                    turn_id: "turn".into(),
+                                },
+                            ),
+                            reply(2_000),
+                            reply(3_000),
+                        ],
+                        from: 0,
+                        end: 3,
+                        truncated: false,
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        wait_until(cx, &workspace, "the turn's start applied", |cx| {
+            live_turn(&workspace, cx).is_some()
+        });
+        assert_eq!(live_turn(&workspace, cx), Some(1_000));
     }
 
     fn test_host(store: SessionStore) -> SpawnedHost {
