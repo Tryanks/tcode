@@ -2964,27 +2964,13 @@ fn thread_list_scrollbar(
     state: &ListState,
     estimated_row_height: f32,
 ) -> impl IntoElement {
-    let list = state.clone();
     div()
         .absolute()
         .inset_0()
-        .child(
-            canvas(
-                move |_, _, _| {
-                    // GPUI clears height hints on the first layout and width changes.
-                    // Seed after list layout so dragging includes unmeasured rows.
-                    if list.is_scrolled_to_end().is_none()
-                        && list.max_offset_for_scrollbar().y > px(0.)
-                    {
-                        list.clone()
-                            .with_uniform_item_height(px(estimated_row_height));
-                    }
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
-        )
+        .child(crate::scroll::list_height_hint(
+            state,
+            px(estimated_row_height),
+        ))
         .child(Scrollbar::vertical(state).id(id))
 }
 

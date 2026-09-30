@@ -12,9 +12,9 @@ use std::{ops::Range, panic::Location, rc::Rc};
 
 use gpui::{
     AnyElement, App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ListAlignment,
-    ListSizingBehavior, ListState, ParentElement, RenderOnce, ScrollHandle, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, UniformListScrollHandle, Window, div,
-    list, prelude::FluentBuilder as _, uniform_list,
+    ListSizingBehavior, ListState, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, UniformListScrollHandle, Window, canvas,
+    div, list, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_base::{
     InteractiveElementExt as _, ScrollBounce, ScrollableMask, Scrollbar, ScrollbarHandle,
@@ -274,6 +274,24 @@ where
             .child(viewport)
             .child(ScrollableMask::new(self.axis, &scroll_handle).id((self.id, "mask")))
     }
+}
+
+/// Give `state`'s unmeasured rows `row_height` once the list has laid out, so
+/// wheel, bounce and scrollbar extents include rows not yet in view. Place it
+/// after the list: GPUI clears height hints on the first layout and on width
+/// changes.
+pub(crate) fn list_height_hint(state: &ListState, row_height: Pixels) -> impl IntoElement {
+    let list = state.clone();
+    canvas(
+        move |_, _, _| {
+            if list.is_scrolled_to_end().is_none() && list.max_offset_for_scrollbar().y > px(0.) {
+                list.clone().with_uniform_item_height(row_height);
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
 }
 
 type RenderRows = Box<dyn Fn(Range<usize>, &mut Window, &mut App) -> Vec<AnyElement>>;
