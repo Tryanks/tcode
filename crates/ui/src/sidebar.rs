@@ -2974,22 +2974,29 @@ fn thread_list_scrollbar(
         .child(Scrollbar::vertical(state).id(id))
 }
 
-/// Replace every row of `state`. When the row at the scroll top keeps its key,
-/// the list stays on it instead of jumping to the top.
+/// Replace every row of `state`. A list at its top stays there, so a project
+/// that moves up by recent activity is shown. Otherwise the row at the scroll
+/// top keeps its place while it keeps its key, and a vanished row leaves the
+/// list at the same index instead of jumping to the top.
 fn replace_list_rows<K: PartialEq>(
     state: &ListState,
     previous_key: impl FnOnce(usize) -> Option<K>,
     mut keys: impl ExactSizeIterator<Item = K>,
 ) {
     let mut anchor = state.logical_scroll_top();
-    let previous = previous_key(anchor.item_ix);
     let count = keys.len();
-    let index = previous.and_then(|previous| keys.position(|key| key == previous));
+    let at_top = anchor.item_ix == 0 && anchor.offset_in_item <= px(0.);
+    let index =
+        previous_key(anchor.item_ix).and_then(|previous| keys.position(|key| key == previous));
     state.splice(0..state.item_count(), count);
-    if let Some(index) = index {
-        anchor.item_ix = index;
-        state.scroll_to(anchor);
+    if at_top || count == 0 {
+        return;
     }
+    match index {
+        Some(index) => anchor.item_ix = index,
+        None => anchor.item_ix = anchor.item_ix.min(count - 1),
+    }
+    state.scroll_to(anchor);
 }
 
 impl SessionsSidebar {
@@ -5349,6 +5356,19 @@ mod tests {
                 meta
             })
             .collect::<Vec<_>>();
+        let mut other = Project::from_root(PathBuf::from("/other"));
+        other.id = "other".into();
+        let mut other_thread = session("other-0", None);
+        other_thread.project_id = Some(other.id.clone());
+        other_thread.updated_at = 1;
+        sessions.push(other_thread.clone());
+        let snapshot = |sessions: &Vec<SessionMeta>| {
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary: Default::default(),
+                sessions: sessions.clone(),
+                projects: vec![project.clone(), other.clone()],
+            })
+        };
         send(
             Topic::Settings,
             ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
@@ -5357,14 +5377,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        send(
-            Topic::Index,
-            ServerEvent::IndexSnapshot(IndexSnapshot {
-                summary: Default::default(),
-                sessions: sessions.clone(),
-                projects: vec![project.clone()],
-            }),
-        );
+        send(Topic::Index, snapshot(&sessions));
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -5423,17 +5436,13 @@ mod tests {
         newer.project_id = Some(project.id.clone());
         newer.updated_at = 2_000;
         sessions.insert(0, newer);
-        send(
-            Topic::Index,
-            ServerEvent::IndexSnapshot(IndexSnapshot {
-                summary: Default::default(),
-                sessions,
-                projects: vec![project],
-            }),
-        );
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        draw(cx);
+        let apply = |sessions: &Vec<SessionMeta>, cx: &mut VisualTestContext| {
+            send(Topic::Index, snapshot(sessions));
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+        };
+        apply(&sessions, cx);
         sidebar.read_with(cx, |sidebar, _| {
             assert_eq!(
                 sidebar.grouped_list_state.logical_scroll_top().item_ix,
@@ -5442,6 +5451,45 @@ mod tests {
             );
         });
         assert!(cx.debug_bounds("sidebar-thread-virtual-250").is_some());
+
+        let top = sidebar.read_with(cx, |sidebar, _| far_row(sidebar));
+        sessions
+            .iter_mut()
+            .find(|meta| meta.id == "virtual-250")
+            .unwrap()
+            .archived_at = Some(1);
+        apply(&sessions, cx);
+        sidebar.read_with(cx, |sidebar, _| {
+            assert_eq!(
+                sidebar.grouped_list_state.logical_scroll_top().item_ix,
+                top,
+                "archiving the top thread leaves the list where it was"
+            );
+        });
+        assert!(cx.debug_bounds("sidebar-thread-virtual-251").is_some());
+
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar
+                .grouped_list_state
+                .scroll_to(gpui::ListOffset::default());
+            cx.notify();
+        });
+        draw(cx);
+        sessions
+            .iter_mut()
+            .find(|meta| meta.id == "other-0")
+            .unwrap()
+            .updated_at = 5_000;
+        apply(&sessions, cx);
+        sidebar.read_with(cx, |sidebar, _| {
+            assert_eq!(sidebar.grouped_row_keys[0].1, "other");
+            assert_eq!(
+                sidebar.grouped_list_state.logical_scroll_top().item_ix,
+                0,
+                "a list at its top shows the project that moved up"
+            );
+        });
+        assert!(cx.debug_bounds("sidebar-thread-other-0").is_some());
     }
 
     #[gpui::test]
