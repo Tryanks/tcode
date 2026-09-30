@@ -1,6 +1,6 @@
 # gpui-android
 
-Android platform backend for the `gpui-pre` 0.3.5 snapshot used by tcode. The
+Android platform backend for the gpui-fast GPUI used by tcode. The
 crate is an ordinary Rust dependency on every target, but its implementation is
 compiled only for Android. Calling `platform()` elsewhere fails with a clear
 panic instead of pulling Android libraries into host builds.
@@ -15,7 +15,7 @@ over a small Rust worker pool; delayed work uses timer threads and foreground
 continuations wake the Android looper.
 
 The platform exposes one full-screen `PlatformWindow`. It owns the current
-`ANativeWindow`, a `gpui-pre-wgpu::WgpuRenderer`, and the shared `WgpuContext`.
+`ANativeWindow`, a `gpui_wgpu::WgpuRenderer`, and the shared `WgpuContext`.
 `InitWindow` creates or replaces the Vulkan surface. `TerminateWindow`
 unconfigures it before Android invalidates the native window, while preserving
 the device, pipelines, and sprite atlas for resume. The surface's presence is
@@ -80,7 +80,7 @@ corresponding started/moved/ended/cancelled phase. Pointer ids are paired with
 the motion stream's monotonic down time so a reused Android id cannot collide
 with an earlier GPUI touch.
 
-Gesture interpretation lives in gpui-pre's portable gesture arena, the same
+Gesture interpretation lives in GPUI's portable gesture arena, the same
 path used by `gpui-ios`. Android supplies only platform tuning: a 450 ms long
 press and `ScrollPhysics::android()`. Tap synthesis, touch slop, scroll capture,
 drag-cancels-click, velocity sampling, and momentum are therefore shared with

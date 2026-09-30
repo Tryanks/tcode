@@ -32,6 +32,12 @@ default-members = ["crates/app"]
 [patch.crates-io]
 # The upstream extern class uses an uninhabited type; see vendor/block/PATCH.md.
 block = { path = "vendor/block" }
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-reqwest-client = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast" }
+gpui-pre-web = { git = "https://github.com/longbridge/gpui-fast" }
 
 # opt-level 3 stays the shipping default on every platform, including the
 # Android APK, although `s`/`z` produce a smaller library: `z` worsened tail
