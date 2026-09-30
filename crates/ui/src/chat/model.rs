@@ -1384,9 +1384,14 @@ pub(crate) enum ListSync {
     /// Rows inserted or replaced in place. `splices` are ranges of the old
     /// rows and the number of new rows standing in for each, ascending, so
     /// they apply back to front; `remeasure` indexes the new rows.
+    /// `carried` are the spliced old ranges whose content continues, in
+    /// order, in the rows standing in for them: an expanded Work Log's live
+    /// window folding activities out into rows of their own. A reader resting
+    /// in one keeps its pixel offset into the new rows.
     Incremental {
         splices: Vec<(Range<usize>, usize)>,
         remeasure: Vec<usize>,
+        carried: Vec<Range<usize>>,
     },
 }
 
@@ -1441,6 +1446,7 @@ fn list_sync_with<'a>(
 
     let mut splices: Vec<(Range<usize>, usize)> = Vec::new();
     let mut remeasure = Vec::new();
+    let mut carried = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < old.len() || j < new_len {
         if i < old.len() && j < new_len {
@@ -1490,13 +1496,29 @@ fn list_sync_with<'a>(
                 j += 1;
             }
             splices.push((start..i, j - inserted));
-            remeasure.extend(inserted..j);
+            if old[start].part == RowPart::WorkLogLive {
+                carried.push(start..i);
+            } else {
+                remeasure.extend(inserted..j);
+            }
         } else if j < new_len && !new_existed {
             let inserted = j;
             while j < new_len && !old_pos.contains_key(&new_at(j).identity) {
                 j += 1;
             }
-            splices.push((i..i, j - inserted));
+            // Activities folded out of a live window arrive right above it.
+            if i < old.len()
+                && old[i].part == RowPart::WorkLogLive
+                && j < new_len
+                && new_at(j).identity == old[i].identity
+            {
+                splices.push((i..i + 1, j - inserted + 1));
+                carried.push(i..i + 1);
+                i += 1;
+                j += 1;
+            } else {
+                splices.push((i..i, j - inserted));
+            }
         } else {
             // Both rows live on elsewhere: an order change.
             return ListSync::Reset { count: new_len };
@@ -1509,7 +1531,11 @@ fn list_sync_with<'a>(
             count: *count,
             remeasure,
         },
-        _ => ListSync::Incremental { splices, remeasure },
+        _ => ListSync::Incremental {
+            splices,
+            remeasure,
+            carried,
+        },
     }
 }
 
@@ -1558,7 +1584,8 @@ mod tests {
             list_sync(&old, &new, TimelineContinuity::Complete),
             ListSync::Incremental {
                 splices: vec![(1..2, 2)],
-                remeasure: vec![1, 2]
+                remeasure: vec![1, 2],
+                carried: vec![],
             }
         );
     }
@@ -1649,7 +1676,8 @@ mod tests {
             ),
             ListSync::Incremental {
                 splices: vec![(1..2, 0)],
-                remeasure: vec![0]
+                remeasure: vec![0],
+                carried: vec![],
             }
         );
         assert_eq!(
@@ -1841,6 +1869,7 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![(2..2, 1)],
                 remeasure: vec![1],
+                carried: vec![],
             }
         );
 
@@ -1858,6 +1887,7 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![],
                 remeasure: vec![2],
+                carried: vec![],
             }
         );
 
@@ -1874,6 +1904,7 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![(3..3, 1)],
                 remeasure: vec![],
+                carried: vec![],
             }
         );
 
@@ -2074,6 +2105,7 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![],
                 remeasure: vec![0],
+                carried: vec![],
             }
         );
     }
@@ -2106,6 +2138,7 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![],
                 remeasure: vec![0],
+                carried: vec![],
             }
         );
     }
@@ -2274,6 +2307,7 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![],
                 remeasure: vec![rows.len() - 1],
+                carried: vec![],
             }
         );
     }
@@ -2310,23 +2344,22 @@ mod tests {
         assert_eq!(row_of_entry(&rows, 3, 0), Some(4));
 
         // The oldest live activity folds into a row of its own above the
-        // live window.
+        // live window; both carry the live window's content.
         entries.push(command("cmd-8"));
         let grown = index_rows(&running, &entries, None, &expanded);
-        assert_eq!(
+        assert!(matches!(
             list_sync(&rows, &grown, TimelineContinuity::Complete),
-            ListSync::Incremental {
-                splices: vec![(5..5, 1)],
-                remeasure: vec![1, 6],
-            }
-        );
+            ListSync::Incremental { splices, remeasure, carried }
+                if splices == [(5..6, 2)] && remeasure == [1] && carried.as_slice() == std::slice::from_ref(&(5..6))
+        ));
 
         // Once the turn ends every activity is folded.
         let finished = index_rows(&[TurnMeta::default()], &entries, None, &expanded);
         assert_eq!(finished.len(), 2 + 9);
         assert!(matches!(
             list_sync(&grown, &finished, TimelineContinuity::Complete),
-            ListSync::Incremental { splices, .. } if splices == [(6..7, 5)]
+            ListSync::Incremental { splices, carried, .. }
+                if splices == [(6..7, 5)] && carried.as_slice() == std::slice::from_ref(&(6..7))
         ));
 
         let collapsed = index_rows(&[TurnMeta::default()], &entries, None, &HashSet::new());
@@ -2337,6 +2370,7 @@ mod tests {
             ListSync::Incremental {
                 splices: vec![(2..11, 0)],
                 remeasure: vec![1],
+                carried: vec![],
             }
         );
     }
