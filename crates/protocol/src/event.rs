@@ -2,15 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{
-    ApprovalMode, InteractionMode, OptionDescriptor, OptionSelection, ProviderCommand,
-    ProviderKind, RewindMode,
+    ApprovalMode, ApprovalRequest, InteractionMode, OptionDescriptor, OptionSelection,
+    ProviderCommand, ProviderKind, RewindMode,
 };
 use serde::{Deserialize, Serialize};
 use tcode_core::{
     git::{GitAction, GitStatus},
     project::{Project, SessionMeta, WorktreeInfo},
     provider_status::ProviderSnapshot,
-    session::{ReviewComment, StoredEvent},
+    session::{PendingUserInput, ReviewComment, RunningTurn, StoredEvent},
     settings::Settings,
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
@@ -268,8 +268,12 @@ pub struct SessionStatus {
     #[serde(default)]
     pub stopping: bool,
     pub working: bool,
-    pub pending_approval: bool,
-    pub pending_user_input: bool,
+    /// The live turn and the requests it waits on. A client's fold of a
+    /// history window can place them but cannot decide them: the window may
+    /// begin after they opened, and a provider can stop without a record.
+    pub running_turn: Option<RunningTurn>,
+    pub pending_approvals: Vec<ApprovalRequest>,
+    pub pending_user_input: Option<PendingUserInput>,
     #[serde(rename = "supports_steering")]
     pub steering_supported: bool,
     pub provider_option_descriptors: Vec<OptionDescriptor>,
