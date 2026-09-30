@@ -6,17 +6,19 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::spinner::Spinner;
 use agent::TurnStatus;
 use gpui::{
-    AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::session::{TimelineEntry, TurnMeta};
 
+use super::super::model::RowPart;
+
 pub(crate) type WorkLogArgs<'a> = (
     usize,
-    &'a str,
+    &'a RowPart,
     &'a TurnMeta,
     &'a Path,
     &'a [&'a TimelineEntry],
@@ -61,6 +63,10 @@ pub(crate) fn work_log(
         capsule_label.clone(),
         cx,
     )
+    .debug_selector({
+        let selector = format!("worklog-header-{index}-{segment_id}");
+        move || selector
+    })
     .aria_expanded(expanded)
     .self_start()
     .h(px(28.))
@@ -117,16 +123,21 @@ pub(crate) fn work_log(
         )
     });
 
-    // Rows line up under the header label: 6px header padding + 12px chevron
-    // + 6px gap, minus the 4px an activity row keeps for its hover pill.
-    let body = v_flex().w_full().gap_1().pl(px(20.)).children(rows);
-
     v_flex()
         .w_full()
         .gap_1()
         .child(header)
-        .when(expanded, |flow| flow.child(body))
+        .when(expanded && !rows.is_empty(), |flow| {
+            flow.child(work_log_body(rows))
+        })
         .into_any_element()
+}
+
+/// Folded activity rows under an expanded header.
+pub(crate) fn work_log_body(rows: Vec<AnyElement>) -> Div {
+    // Rows line up under the header label: 6px header padding + 12px chevron
+    // + 6px gap, minus the 4px an activity row keeps for its hover pill.
+    v_flex().w_full().gap_1().pl(px(20.)).children(rows)
 }
 
 fn chevron(open: bool) -> IconName {

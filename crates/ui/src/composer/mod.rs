@@ -38,6 +38,7 @@ use gpui::{
     Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::PopoverState;
+use gpui_base::input::{MoveDown, MoveUp};
 
 pub(crate) const CONTEXT: &str = "Composer";
 
@@ -1250,26 +1251,27 @@ impl Render for Composer {
                     cx.stop_propagation();
                     return;
                 }
-                if !this.menu_visible() {
-                    return;
+                if key == "escape" && this.menu_visible() {
+                    this.menu_dismissed = true;
+                    cx.notify();
                 }
-                let (rows, _, _) = this.menu_rows(cx);
-                match key {
-                    "up" => {
-                        this.menu_highlight = this.menu_highlight.saturating_sub(1);
-                        cx.notify();
-                    }
-                    "down" => {
-                        if !rows.is_empty() {
-                            this.menu_highlight = (this.menu_highlight + 1).min(rows.len() - 1);
-                        }
-                        cx.notify();
-                    }
-                    "escape" => {
-                        this.menu_dismissed = true;
-                        cx.notify();
-                    }
-                    _ => {}
+            }))
+            // The editor binds Up and Down to cursor moves, which consume the
+            // keystroke before any key-down listener runs.
+            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                if this.menu_visible() {
+                    this.menu_highlight = this.menu_highlight.saturating_sub(1);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                if this.menu_visible() {
+                    let (rows, _, _) = this.menu_rows(cx);
+                    this.menu_highlight =
+                        (this.menu_highlight + 1).min(rows.len().saturating_sub(1));
+                    cx.stop_propagation();
+                    cx.notify();
                 }
             }))
             .on_drop(

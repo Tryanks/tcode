@@ -40,47 +40,85 @@ impl Composer {
         };
         let muted = cx.theme().muted_foreground;
 
+        let detail_bg = cx.theme().muted;
+        let detail_area = |content: AnyElement| {
+            div()
+                .id("approval-detail-scroll")
+                .w_full()
+                .max_h(px(240.))
+                .overflow_y_scroll_area()
+                .p_2()
+                .rounded(px(8.))
+                .bg(detail_bg)
+                .child(content)
+                .into_any_element()
+        };
         let detail: AnyElement = match &request.kind {
-            ApprovalKind::ExecCommand { command, cwd, .. } => v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(command.clone()),
-                )
-                .when_some(cwd.clone(), |this, cwd| {
-                    this.child(
+            ApprovalKind::ExecCommand { command, cwd, .. } => detail_area(
+                v_flex()
+                    .gap_1()
+                    .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(crate::tr!("approval.in_directory", cwd = cwd)),
+                            .text_size(px(13.))
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(command.clone()),
                     )
-                })
-                .into_any_element(),
-            ApprovalKind::FileChange { changes, .. } => v_flex()
-                .gap_0p5()
-                .children(changes.iter().map(|change| {
-                    div()
-                        .text_size(px(13.))
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(format!(
-                            "{} {}",
-                            file_change_kind_label(change.kind),
-                            change.path
-                        ))
-                }))
-                .into_any_element(),
-            ApprovalKind::FileRead { detail } => div()
-                .text_size(px(13.))
-                .font_family(cx.theme().mono_font_family.clone())
-                .child(detail.clone())
-                .into_any_element(),
-            ApprovalKind::ToolUse { name, input, .. } => div()
-                .text_size(px(13.))
-                .font_family(cx.theme().mono_font_family.clone())
-                .child(format!("{name} {input}"))
-                .into_any_element(),
+                    .when_some(cwd.clone(), |this, cwd| {
+                        this.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(crate::tr!("approval.in_directory", cwd = cwd)),
+                        )
+                    })
+                    .into_any_element(),
+            ),
+            ApprovalKind::FileChange { changes, .. } => {
+                let changes = Rc::new(changes.clone());
+                let last = changes.len().saturating_sub(1);
+                div()
+                    .debug_selector(|| "approval-detail".into())
+                    .w_full()
+                    .rounded(px(8.))
+                    .bg(detail_bg)
+                    .child(
+                        crate::scroll::VirtualList::measured(
+                            "approval-detail-scroll",
+                            changes.len(),
+                            move |index, _, cx| {
+                                let change = &changes[index];
+                                div()
+                                    .debug_selector(move || format!("approval-change-{index}"))
+                                    .when(index < last, |row| row.pb_0p5())
+                                    .text_size(px(13.))
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(format!(
+                                        "{} {}",
+                                        file_change_kind_label(change.kind),
+                                        change.path
+                                    ))
+                            },
+                        )
+                        .w_full()
+                        .max_h(px(240.))
+                        .p_2(),
+                    )
+                    .into_any_element()
+            }
+            ApprovalKind::FileRead { detail } => detail_area(
+                div()
+                    .text_size(px(13.))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(detail.clone())
+                    .into_any_element(),
+            ),
+            ApprovalKind::ToolUse { name, input, .. } => detail_area(
+                div()
+                    .text_size(px(13.))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(format!("{name} {input}"))
+                    .into_any_element(),
+            ),
         };
 
         let pending = self
@@ -172,19 +210,7 @@ impl Composer {
                         .text_color(muted),
                     ),
             )
-            .when(expanded, |this| {
-                this.child(
-                    div()
-                        .id("approval-detail-scroll")
-                        .w_full()
-                        .max_h(px(240.))
-                        .overflow_y_scroll_area()
-                        .p_2()
-                        .rounded(px(8.))
-                        .bg(cx.theme().muted)
-                        .child(detail),
-                )
-            })
+            .when(expanded, |this| this.child(detail))
             .when(!request.options.is_empty(), |this| {
                 // An ACP agent sends its own option list: render exactly those
                 // buttons (the labels are the agent's), ordered rejections-first
@@ -360,5 +386,116 @@ impl Composer {
         self.workspace_store.update(cx, |store, _cx| {
             store.respond_approval(request_id, decision)
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, size};
+
+    /// A phone composer whose session awaits approval of a patch to `paths`.
+    fn phone_composer_with_patch(
+        cx: &mut TestAppContext,
+        paths: impl Iterator<Item = String>,
+    ) -> &mut VisualTestContext {
+        cx.update(crate::theme::init);
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
+                "tcode-approval-list-test-{}-{}",
+                std::process::id(),
+                tcode_services::store::now_millis()
+            )))
+            .unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let changes = paths
+            .map(|path| agent::FileChange {
+                path,
+                kind: agent::FileChangeKind::Modify,
+                diff: None,
+            })
+            .collect();
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("approval-list".into(), std::env::temp_dir(), cx);
+            for event in [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                },
+                agent::AgentEvent::ApprovalRequested(ApprovalRequest {
+                    id: "patch".into(),
+                    turn_id: None,
+                    kind: ApprovalKind::FileChange {
+                        changes,
+                        reason: None,
+                    },
+                    options: Vec::new(),
+                }),
+            ] {
+                state.provider_event_for_test(&id, event, cx);
+            }
+            (id.clone(), state.residents.live[&id].timeline.clone())
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new_with_layout(store.clone(), true, window, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| _ = window.draw(cx));
+        // The first layout finds the list's width; the next frame lays out
+        // rows at it.
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            _ = window.draw(cx);
+        });
+        cx
+    }
+
+    #[gpui::test]
+    fn a_long_file_change_request_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
+        let cx =
+            phone_composer_with_patch(cx, (0..300).map(|index| format!("src/file-{index}.rs")));
+        let first = cx
+            .debug_bounds("approval-change-0")
+            .expect("first change row");
+        assert!(
+            cx.debug_bounds("approval-change-250").is_none(),
+            "the approval card must not lay out all 300 file rows"
+        );
+
+        // Rows are measured as they come into view, so the list reaches its
+        // end over successive gestures.
+        for _ in 0..20 {
+            cx.simulate_event(ScrollWheelEvent {
+                position: first.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-2_000.))),
+                ..Default::default()
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+        assert!(cx.debug_bounds("approval-change-299").is_some());
+        assert!(cx.debug_bounds("approval-change-0").is_none());
+    }
+
+    #[gpui::test]
+    fn a_short_request_shows_every_wrapped_path(cx: &mut TestAppContext) {
+        let cx = phone_composer_with_patch(
+            cx,
+            (0..2).map(|index| format!("src/{}file-{index}.rs", "deeply/nested/".repeat(6))),
+        );
+        let detail = cx.debug_bounds("approval-detail").expect("detail box");
+        let first = cx.debug_bounds("approval-change-0").expect("first path");
+        let second = cx.debug_bounds("approval-change-1").expect("second path");
+        assert!(first.size.height > px(30.), "a long path wraps on a phone");
+        assert!(second.top() >= first.bottom());
+        assert!(
+            second.bottom() <= detail.bottom(),
+            "a short list grows to show every path"
+        );
     }
 }

@@ -101,17 +101,11 @@ impl WorkspaceStore {
                         let held = store.session_records.entry(session_id.clone()).or_default();
                         held.splice(0..0, records);
                         store.session_from.insert(session_id.clone(), from);
-                        let mut timeline = Timeline::fold_stored(held.iter());
-                        if !store
-                            .session_status_replica
-                            .as_ref()
-                            .is_some_and(|status| status.turn_running)
-                        {
-                            timeline.mark_idle();
-                        }
+                        let mut timeline = store.fold_held_records(&session_id);
                         store.session_turn_offset = store
                             .session_turn_offset
                             .saturating_sub(timeline.turns.len().saturating_sub(previous_turns));
+                        store.settle_running_turn(&mut timeline);
                         store.session_replica = Some((session_id, timeline));
                     }
                     Err(error) => {

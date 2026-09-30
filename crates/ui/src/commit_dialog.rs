@@ -2,7 +2,6 @@
 //! current branch, a default-branch safeguard banner, and a commit-message
 //! textarea pre-filled by AI generation (with a regenerate button).
 
-use crate::scroll::ScrollableElement as _;
 use std::collections::HashSet;
 
 use crate::theme::ActiveTheme as _;
@@ -161,6 +160,7 @@ impl CommitDialog {
         let path = file.path.clone();
         let path_for_toggle = file.path.clone();
         h_flex()
+            .debug_selector(move || format!("commit-file-{index}"))
             .w_full()
             .py_1()
             .px_1()
@@ -177,8 +177,7 @@ impl CommitDialog {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .text_size(px(13.))
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(path),
@@ -283,26 +282,33 @@ impl Render for CommitDialog {
                     count = self.files.len()
                 )),
         );
-        let mut file_rows = v_flex().w_full().gap_0p5();
-        if self.files.is_empty() {
-            file_rows = file_rows.child(
-                div()
-                    .p_2()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(crate::tr!("git.commit.no_changes")),
-            );
+        let file_list = if self.files.is_empty() {
+            div()
+                .p_2()
+                .text_size(px(13.))
+                .text_color(muted)
+                .child(crate::tr!("git.commit.no_changes"))
+                .into_any_element()
         } else {
-            for (index, file) in self.files.iter().enumerate() {
-                file_rows = file_rows.child(self.render_file_row(index, file, cx));
-            }
-        }
-        let file_list = div()
-            .id("commit-files")
+            crate::scroll::VirtualList::uniform(
+                "commit-files",
+                self.files.len(),
+                cx.processor(move |dialog, range: std::ops::Range<usize>, _window, cx| {
+                    range
+                        .map(|index| {
+                            div().pb_0p5().child(dialog.render_file_row(
+                                index,
+                                &dialog.files[index],
+                                cx,
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
             .w_full()
             .max_h(px(180.))
-            .overflow_y_scroll_area()
-            .child(file_rows);
+            .into_any_element()
+        };
         body = body.child(
             v_flex().w_full().gap_1().child(files_header).child(
                 div()
@@ -310,7 +316,10 @@ impl Render for CommitDialog {
                     .rounded(crate::material::radius_input())
                     .border_1()
                     .border_color(cx.theme().border)
-                    .p_1()
+                    .pt_1()
+                    .px_1()
+                    // The last file row carries its gap.
+                    .pb(px(if self.files.is_empty() { 4. } else { 2. }))
                     .child(file_list),
             ),
         );
@@ -358,5 +367,91 @@ impl Render for CommitDialog {
             cx,
         )
         .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, point};
+    use tcode_core::git::GitStatus;
+    use tcode_protocol::{
+        EventEnvelope, GitStatusStatus, HostMessage, ServerEvent, Topic, encode_line,
+    };
+
+    #[gpui::test]
+    fn a_long_change_list_lays_out_only_the_visible_files(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let status = GitStatus {
+            is_repo: true,
+            has_working_tree_changes: true,
+            changed_files: (0..300)
+                .map(|index| GitFileEntry {
+                    path: format!("src/file-{index}.rs"),
+                    insertions: 1,
+                    deletions: 0,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::GitStatus {
+                        session_id: "session".into(),
+                    },
+                    event: ServerEvent::GitStatusReplaced(GitStatusStatus {
+                        status: Some(status),
+                        busy: false,
+                    }),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| store.select_session("session".into()));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_dialog, cx) = cx.add_window_view(|window, cx| {
+            CommitDialog::new(store.clone(), GitAction::Commit, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(640.), px(800.)));
+        cx.update(|window, cx| _ = window.draw(cx));
+        let first = cx.debug_bounds("commit-file-0").expect("first file row");
+        assert!(
+            cx.debug_bounds("commit-file-250").is_none(),
+            "the dialog must not lay out all 300 file rows"
+        );
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: first.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("commit-file-299").is_some());
+        assert!(cx.debug_bounds("commit-file-0").is_none());
     }
 }

@@ -37,8 +37,9 @@ pub use wire::{
 // Version 4 adds client-generated command deduplication keys; version 5 moves
 // authentication into the transport, so hello carries no token; version 6
 // sends index and history changes instead of whole replacements and
-// compresses the native transport.
-pub const PROTOCOL_VERSION: u32 = 6;
+// compresses the native transport; version 7 carries the running turn and
+// the requests it waits on in the session status.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[cfg(test)]
 mod tests;

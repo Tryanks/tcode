@@ -2,7 +2,6 @@
 use crate::{
     icon::{Icon, IconName},
     overlay::OverlayExt as _,
-    scroll::ScrollableElement as _,
     sizing::fit_viewport,
     store::{WorkspaceStore, images},
     theme::ActiveTheme as _,
@@ -12,14 +11,18 @@ use crate::{
     },
 };
 use gpui::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Subscription, Window, div, img, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, Role, ScrollStrategy, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
+    UniformListScrollHandle, Window, div, img, prelude::FluentBuilder as _, px, uniform_list,
 };
-use gpui_base::{h_flex, v_flex};
-use std::path::PathBuf;
+use gpui_base::{ElementExt as _, Scrollbar, h_flex, v_flex};
+use std::{path::PathBuf, rc::Rc};
 use tcode_core::project::Project;
 use tcode_protocol::{IconImageEntry, QueryResponse};
+
+const TILE_WIDTH: f32 = 96.;
+const TILE_GAP: f32 = 8.;
 
 pub(crate) fn artwork(project: &Project, size: f32) -> impl IntoElement + use<> {
     img(images::project_icon(project, size))
@@ -65,6 +68,9 @@ struct Picker {
     saving: bool,
     error: Option<String>,
     generation: u64,
+    /// Tiles per row derive from the grid's width in the previous frame.
+    grid_width: Pixels,
+    grid_scroll: UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -102,6 +108,8 @@ impl Picker {
             saving: false,
             error: None,
             generation: 0,
+            grid_width: px(0.),
+            grid_scroll: UniformListScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -113,6 +121,7 @@ impl Picker {
         self.error = None;
         self.selected = None;
         self.entries.clear();
+        self.grid_scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.path.update(cx, |input, cx| {
             input.set_value(directory.to_string_lossy().to_string(), window, cx)
         });
@@ -175,6 +184,88 @@ impl Picker {
         .detach();
         cx.notify();
     }
+
+    fn render_tile(&self, entry: &IconImageEntry, cx: &mut Context<Self>) -> AnyElement {
+        let path = entry.path.clone();
+        let is_dir = entry.is_dir;
+        let is_selected = self.selected.as_ref() == Some(&path);
+        let content = if is_dir {
+            Icon::new(IconName::Folder)
+                .size(px(32.))
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            img(images::icon_thumbnail(path.clone()))
+                .size(px(64.))
+                .with_fallback(|| {
+                    Icon::empty()
+                        .path("icons/image.svg")
+                        .size(px(28.))
+                        .into_any_element()
+                })
+                .into_any_element()
+        };
+        crate::material::accessible_clickable(
+            v_flex(),
+            SharedString::from(format!("icon-file-{}", entry.name)),
+            Role::Button,
+            entry.name.clone(),
+            cx,
+        )
+        .aria_selected(is_selected)
+        .debug_selector({
+            let name = entry.name.clone();
+            move || format!("icon-file-{name}")
+        })
+        .w(px(TILE_WIDTH))
+        .h(px(108.))
+        .p_2()
+        .gap_1()
+        .items_center()
+        .justify_center()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(if is_selected {
+            cx.theme().primary
+        } else {
+            cx.theme().border
+        })
+        .bg(if is_selected {
+            cx.theme().accent
+        } else {
+            cx.theme().background
+        })
+        .hover(|el| el.bg(cx.theme().accent))
+        .cursor_pointer()
+        .child(
+            div()
+                .h(px(68.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(content),
+        )
+        .child(
+            div()
+                .w_full()
+                .truncate()
+                .text_size(px(11.))
+                .child(entry.name.clone()),
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            if this.saving {
+                return;
+            }
+            if is_dir {
+                this.browse(path.clone(), window, cx);
+            } else {
+                this.selected = Some(path.clone());
+                this.error = None;
+                cx.notify();
+            }
+        }))
+        .into_any_element()
+    }
 }
 
 impl Render for Picker {
@@ -190,95 +281,14 @@ impl Render for Picker {
             .remote_host_name()
             .map(str::to_owned)
             .unwrap_or_else(|| crate::tr!("project_icon.this_machine").into_owned());
-        let mut grid = h_flex().flex_wrap().gap_2().items_start();
-        let mut count = 0;
-        for entry in self
-            .entries
-            .iter()
-            .filter(|entry| entry.name.to_lowercase().contains(&search))
-        {
-            count += 1;
-            let path = entry.path.clone();
-            let is_dir = entry.is_dir;
-            let is_selected = selected.as_ref() == Some(&path);
-            let content = if is_dir {
-                Icon::new(IconName::Folder)
-                    .size(px(32.))
-                    .text_color(cx.theme().muted_foreground)
-                    .into_any_element()
-            } else {
-                img(images::icon_thumbnail(path.clone()))
-                    .size(px(64.))
-                    .with_fallback(|| {
-                        Icon::empty()
-                            .path("icons/image.svg")
-                            .size(px(28.))
-                            .into_any_element()
-                    })
-                    .into_any_element()
-            };
-            grid = grid.child(
-                crate::material::accessible_clickable(
-                    v_flex(),
-                    SharedString::from(format!("icon-file-{}", entry.name)),
-                    Role::Button,
-                    entry.name.clone(),
-                    cx,
-                )
-                .aria_selected(is_selected)
-                .debug_selector({
-                    let name = entry.name.clone();
-                    move || format!("icon-file-{name}")
-                })
-                .w(px(96.))
-                .h(px(108.))
-                .p_2()
-                .gap_1()
-                .items_center()
-                .justify_center()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(if is_selected {
-                    cx.theme().primary
-                } else {
-                    cx.theme().border
-                })
-                .bg(if is_selected {
-                    cx.theme().accent
-                } else {
-                    cx.theme().background
-                })
-                .hover(|el| el.bg(cx.theme().accent))
-                .cursor_pointer()
-                .child(
-                    div()
-                        .h(px(68.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(content),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .truncate()
-                        .text_size(px(11.))
-                        .child(entry.name.clone()),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.saving {
-                        return;
-                    }
-                    if is_dir {
-                        this.browse(path.clone(), window, cx);
-                    } else {
-                        this.selected = Some(path.clone());
-                        this.error = None;
-                        cx.notify();
-                    }
-                })),
-            );
-        }
+        let matches: Rc<Vec<usize>> = Rc::new(
+            (0..self.entries.len())
+                .filter(|&index| self.entries[index].name.to_lowercase().contains(&search))
+                .collect(),
+        );
+        let columns = ((f32::from(self.grid_width) + TILE_GAP) / (TILE_WIDTH + TILE_GAP))
+            .floor()
+            .max(1.) as usize;
         let viewport_height =
             (f32::from(window.viewport_size().height) * 0.9 - 360.).clamp(48., 320.);
         let content = if self.loading {
@@ -286,15 +296,47 @@ impl Render for Picker {
                 .p_4()
                 .child(crate::tr!("project_icon.loading"))
                 .into_any_element()
-        } else if count == 0 {
+        } else if matches.is_empty() {
             div()
                 .p_4()
                 .text_color(cx.theme().muted_foreground)
                 .child(crate::tr!("project_icon.empty"))
                 .into_any_element()
         } else {
-            grid.into_any_element()
+            let rows = matches.len().div_ceil(columns);
+            let list = uniform_list(
+                "icon-file-rows",
+                rows,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .map(|row| {
+                            let tiles =
+                                &matches[row * columns..matches.len().min((row + 1) * columns)];
+                            h_flex().gap(px(TILE_GAP)).pb(px(TILE_GAP)).children(
+                                tiles
+                                    .iter()
+                                    .map(|&index| this.render_tile(&this.entries[index], cx)),
+                            )
+                        })
+                        .collect()
+                }),
+            )
+            .size_full()
+            .track_scroll(&self.grid_scroll);
+            let scroll = self.grid_scroll.0.borrow().base_handle.clone();
+            div()
+                .size_full()
+                .child(crate::scroll::page_viewport(
+                    "icon-file-grid-bounce",
+                    crate::wheel_easing::Handle::Scroll(scroll),
+                    list,
+                ))
+                .when(!window.is_inspector_picking(cx), |grid| {
+                    grid.child(Scrollbar::vertical(&self.grid_scroll).id("icon-file-scrollbar"))
+                })
+                .into_any_element()
         };
+        let picker = cx.entity().downgrade();
         v_flex()
             .id("project-icon-picker")
             .debug_selector(|| "project-icon-picker".into())
@@ -368,8 +410,15 @@ impl Render for Picker {
                 div()
                     .id("icon-file-grid")
                     .h(px(viewport_height))
-                    .overflow_y_scrollbar()
-                    .child(content),
+                    .child(content)
+                    .on_prepaint(move |bounds, _, cx| {
+                        _ = picker.update(cx, |picker, cx| {
+                            if picker.grid_width != bounds.size.width {
+                                picker.grid_width = bounds.size.width;
+                                cx.notify();
+                            }
+                        });
+                    }),
             )
             .when_some(self.error.clone(), |el, error| {
                 el.child(
@@ -511,6 +560,82 @@ mod tests {
                 "thumbnail must use the host path: {read:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn the_file_grid_builds_only_the_visible_thumbnails(cx: &mut TestAppContext) {
+        use tcode_client::HostLink;
+        use tcode_protocol::{ClientPayload, Query, decode_client_line};
+        cx.update(crate::theme::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            Picker::new(
+                store.clone(),
+                Project::from_root(PathBuf::from("/project")),
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(648.), px(700.)));
+        draw(cx);
+        picker.update(cx, |picker, cx| {
+            picker.entries = (0..300)
+                .map(|index| IconImageEntry {
+                    path: PathBuf::from(format!("/host/images/{index}.png")),
+                    name: format!("{index}.png"),
+                    is_dir: false,
+                })
+                .collect();
+            cx.notify();
+        });
+        draw(cx);
+        let reads = || {
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .filter_map(|line| match decode_client_line(&line).unwrap().payload {
+                    ClientPayload::Query(Query::ReadIconImage { path }) => Some(path),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = cx.debug_bounds("icon-file-0.png").unwrap();
+        assert_eq!(
+            cx.debug_bounds("icon-file-5.png").unwrap().top(),
+            first.top(),
+            "the grid fills its width with tiles"
+        );
+        assert!(
+            cx.debug_bounds("icon-file-299.png").is_none(),
+            "the grid must not build every tile in the folder"
+        );
+        let read = reads();
+        assert!(read.contains(&PathBuf::from("/host/images/0.png")));
+        assert!(
+            !read.contains(&PathBuf::from("/host/images/299.png")),
+            "an offscreen thumbnail must not be loaded"
+        );
+
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100_000.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("icon-file-299.png").is_some());
+        assert!(cx.debug_bounds("icon-file-0.png").is_none());
+        assert!(reads().contains(&PathBuf::from("/host/images/299.png")));
     }
 
     #[gpui::test]
