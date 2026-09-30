@@ -67,10 +67,17 @@ is derived from it. **Process** is how to build, check and submit work.
    "mirrors X" notes are deleted when touched. A constraint drafted by an AI is
    not a requirement until it appears here.
 
-9. **Adopt upstream early, never fork it.** Prefer an upstream's experimental
-   feature and feed findings back over waiting for it to mature. Do not maintain
-   a fork of a dependency: when upstream declines a fix, Tcode carries the bug
-   and waits.
+9. **Adopt upstream early; Tcode's work stays in Tcode.** Prefer an upstream's
+   experimental feature over waiting for it to mature, and never fork a
+   dependency. A suspected upstream problem may be investigated freely —
+   reading its source, building it, patching a local copy to confirm a cause —
+   and is judged by its effect on Tcode's real use. Findings are reported to
+   the maintainer or as an issue in this repository; diagnostic patches stay
+   local and are discarded, and Tcode carries the bug until upstream changes on
+   its own. Acting on an upstream — an issue, pull request, comment or patch
+   there — is never a recommendation or an option to offer: it happens only
+   when the maintainer explicitly asks for it, with the maintainer taking part
+   throughout.
 
 ## Process
 
@@ -164,6 +171,27 @@ Native platform behaviour — macOS permission grants, input delivery, camera
 pairing on a phone — is only established by exercising it on that platform.
 Ignored tests that need a desktop slot or credentials say so in their reason;
 run them deliberately, never report an early return as a pass.
+
+### Problems that may be a dependency's
+
+Work through these in order; each step ends before the next begins.
+
+1. **Localize.** Establish whether the cause is Tcode's code, a Tcode test, or
+   the dependency. A test counts only once it drives the dependency the way
+   the running app does (frames, clocks, input); a test that departs from that
+   is Tcode's to fix. A failing test is a lead, not a verdict.
+2. **Weigh the impact.** Name the builds, platforms and user paths the problem
+   reaches in real use, and how it shows there. Where nothing real is reached,
+   say so; that ends the matter apart from the report.
+3. **Confirm the cause.** Read the dependency's source, check it out, and patch
+   or instrument a local copy until the cause is shown rather than inferred.
+   The copy lives outside this repository and is deleted afterwards.
+4. **Report.** Give the maintainer — in the session, or as an issue in this
+   repository when it outlives one — the cause, the evidence and the impact
+   from step 2. Principle 9 governs anything beyond this repository.
+5. **Carry it.** Handle the problem inside Tcode at the owner of the affected
+   behaviour, with a comment naming the dependency behaviour it works around,
+   or leave it in place when step 2 found no real impact.
 
 ### Code layout
 
