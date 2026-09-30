@@ -49,6 +49,7 @@ use crate::window_drag_area;
 use crate::window_state::WindowState;
 
 use self::components::assistant::MdState;
+use self::components::changed_files::InlineDiffCache;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
     ListSync, RowPart, RowRenderArgs, Segment, TimelineContinuity, TimelineRow, TurnIndexCache,
@@ -374,6 +375,7 @@ pub struct ChatView {
     expanded: HashSet<String>,
     auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
+    inline_diffs: InlineDiffCache,
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
     session_key: Option<String>,
@@ -637,6 +639,7 @@ impl ChatView {
             expanded: HashSet::new(),
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
+            inline_diffs: InlineDiffCache::new(),
             full_outputs: HashMap::new(),
             session_key: None,
             highlighted_turn: None,
@@ -721,6 +724,7 @@ impl ChatView {
             self.md_states.clear();
             self.pending_md_builds.clear();
             self.command_panels.borrow_mut().clear();
+            self.inline_diffs.clear();
             self.full_outputs.clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
@@ -1809,11 +1813,18 @@ impl ChatView {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
                     let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx);
+                    let inline_diff = if expanded && row.counts.is_some() {
+                        Some(self.inline_diffs.render(&key, row, cx))
+                    } else {
+                        self.inline_diffs.forget(&key);
+                        None
+                    };
                     let toggle_key = key.clone();
                     rows.push(components::changed_files::file_edit_row(
                         &key,
                         row,
                         expanded,
+                        inline_diff,
                         cx.listener(move |this, _, _, cx| {
                             this.toggle_activity_expanded(turn, &toggle_key, expanded, cx);
                         }),
@@ -3818,6 +3829,116 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("activity-row-command-399").is_some());
         assert!(cx.debug_bounds("activity-row-command-0").is_none());
+    }
+
+    #[gpui::test]
+    fn a_live_file_edit_lays_out_only_the_diff_lines_on_screen(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, VisualTestContext};
+        use gpui::{point, px, size};
+
+        let mut diff = format!("@@ -1,400 +1,401 @@\n+// {}\n", "wide ".repeat(80));
+        for line in 0..400 {
+            diff.push_str(&format!("-fn old_{line}() {{}}\n+fn new_{line}() {{}}\n"));
+        }
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![entry("user", user_item("go"))];
+        for note in 0..20 {
+            timeline.entries.push(entry(
+                &format!("note-{note}"),
+                assistant("A note above the edit."),
+            ));
+        }
+        timeline.entries.push(entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![agent::FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: agent::FileChangeKind::Modify,
+                    diff: Some(diff),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        ));
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        cx.simulate_resize(size(px(600.), px(900.)));
+        draw(cx);
+
+        assert!(cx.debug_bounds("file-edit-diff-line-0").is_some());
+        assert!(
+            cx.debug_bounds("file-edit-diff-line-300").is_none(),
+            "an inline diff must not lay out all 801 lines"
+        );
+
+        // Both axes scroll inside the diff; the timeline stays put.
+        let timeline_top = |cx: &mut VisualTestContext| {
+            let top = view.read_with(cx, |chat, _| chat.list_state.logical_scroll_top());
+            (top.item_ix, top.offset_in_item)
+        };
+        let before = timeline_top(cx);
+        assert!(
+            view.read_with(cx, |chat, _| chat.list_state.max_offset_for_scrollbar().y) > px(0.)
+        );
+        let diff_bounds = cx.debug_bounds("file-edit-diff").expect("inline diff");
+        let wheel = |delta, cx: &mut VisualTestContext| {
+            for (touch_phase, delta) in [
+                (TouchPhase::Started, point(px(0.), px(0.))),
+                (TouchPhase::Moved, delta),
+                (TouchPhase::Ended, point(px(0.), px(0.))),
+            ] {
+                cx.simulate_event(ScrollWheelEvent {
+                    position: diff_bounds.center(),
+                    delta: ScrollDelta::Pixels(delta),
+                    modifiers: Modifiers::default(),
+                    touch_phase,
+                });
+            }
+            draw(cx);
+        };
+        wheel(point(px(0.), px(-2_000.)), cx);
+        assert!(cx.debug_bounds("file-edit-diff-line-0").is_none());
+        let line = cx
+            .debug_bounds("file-edit-diff-line-120")
+            .expect("a line scrolled into the diff");
+        wheel(point(px(-200.), px(0.)), cx);
+        let scrolled = cx.debug_bounds("file-edit-diff-line-120").unwrap();
+        assert!(
+            scrolled.left() < line.left(),
+            "{scrolled:?} did not scroll left of {line:?}"
+        );
+        assert_eq!(scrolled.top(), line.top());
+        assert_eq!(timeline_top(cx), before);
+
+        // The provider reports a different patch for the same edit.
+        timeline.entries[21] = entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![agent::FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: agent::FileChangeKind::Modify,
+                    diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        );
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("file-edit-diff-line-1").is_some());
+        assert!(cx.debug_bounds("file-edit-diff-line-2").is_none());
     }
 
     #[test]
