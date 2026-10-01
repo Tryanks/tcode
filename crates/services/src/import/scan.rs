@@ -130,17 +130,22 @@ pub fn scan_recent_dirs(roots: &ExternalRoots, exclude_roots: &[PathBuf]) -> Vec
 
     let mut groups = HashMap::<PathBuf, Vec<ExternalThread>>::new();
     for (cwd, thread) in found {
-        if !cwd.is_dir()
-            || exclude_roots
-                .iter()
-                .any(|excluded| same_path(&cwd, excluded))
-        {
-            continue;
-        }
         groups.entry(cwd).or_default().push(thread);
     }
+    // Filesystem checks run once per directory, not per thread: each one can
+    // block on a slow or unreachable mount.
+    let excluded: Vec<_> = exclude_roots
+        .iter()
+        .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
+        .collect();
     let mut dirs: Vec<_> = groups
         .into_iter()
+        .filter(|(cwd, _)| {
+            cwd.is_dir() && {
+                let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+                !excluded.contains(&cwd)
+            }
+        })
         .map(|(path, mut threads)| {
             threads.sort_by_key(|thread| std::cmp::Reverse(thread.last_active_ms));
             RecentDir {
@@ -208,11 +213,4 @@ fn desktop_metadata(root: &Path) -> HashMap<String, DesktopMeta> {
         );
     }
     metadata
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
 }

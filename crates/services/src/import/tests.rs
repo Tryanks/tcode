@@ -196,6 +196,14 @@ fn scanner_groups_attributes_orders_and_excludes() {
         })],
     );
 
+    // A link back to an ancestor must not list the sessions below it again.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        roots.codex_session_roots[0].join("2026"),
+        roots.codex_session_roots[0].join("2026/01/loop"),
+    )
+    .unwrap();
+
     let recent = scan_recent_dirs(&roots, std::slice::from_ref(&excluded_cwd));
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0].path, desktop_cwd);
