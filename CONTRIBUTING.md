@@ -55,9 +55,16 @@ is derived from it. **Process** is how to build, check and submit work.
    Orchestrate as its first plugin; the plugin API is designed first, and until
    it exists nothing is restructured toward plugins.
 
-7. **No house UI principles.** Tcode follows the recommendations and defaults of
-   gpui-base and gpui-kit. There is no separate design contract to keep in sync
-   with the code.
+7. **gpui-base is the infrastructure; no house UI principles.** Tcode follows
+   the recommendations and defaults of gpui-base and gpui-kit, and keeps no
+   separate design contract in sync with the code. Everything gpui-base
+   provides on top of GPUI — selection, scrolling, positioning, dismissal,
+   focus, theme tokens, motion, virtual lists, form controls — is used as it
+   is, defaults included, before anything of the kind is written in Tcode.
+   Tcode's own components are styled compositions of those primitives; they
+   never re-derive a primitive's rules locally. A primitive is reimplemented,
+   or a default overridden, only where gpui-base demonstrably cannot meet the
+   need; the site names that gap, and it is removed once gpui-base closes it.
 
 8. **Code and tests are the only source of truth.** This section is the only
    maintainer-authored text; comments, issues and other documents are derived
