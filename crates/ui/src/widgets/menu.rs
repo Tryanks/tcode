@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, DismissEvent, ElementId, Entity,
+    Action, Anchor, AnyElement, App, AppContext as _, Context, DismissEvent, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton,
     MouseDownEvent, ParentElement, Pixels, Point, Render, RenderOnce, Role, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, anchored,
-    deferred, div, prelude::FluentBuilder, px,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, deferred, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 
@@ -501,9 +501,11 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             // (on the trigger itself or above it) live.
             trigger = trigger.child(
                 deferred(
-                    anchored()
-                        .position(position)
-                        .snap_to_window_with_margin(px(8.))
+                    gpui_base::Positioner::corner(Anchor::TopLeft, position)
+                        // The window margin base's own Popup keeps, which it
+                        // does not export.
+                        .margin(px(8.))
+                        .occlude()
                         .child(div().child(menu.clone()).on_mouse_down_out(
                             move |_, window, cx| {
                                 dismissal.consume(window, cx);
@@ -607,6 +609,36 @@ mod tests {
                 cx,
             );
         });
+    }
+
+    #[gpui::test]
+    fn context_menu_opens_at_the_pointer_and_stays_in_the_window(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| MenuHarness(Rc::default()));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let right_click = |cx: &mut VisualTestContext, position| {
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: MouseButton::Right,
+                position,
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.debug_bounds("tcode-popup-menu").expect("menu opens")
+        };
+
+        let menu = right_click(cx, point(px(20.), px(30.)));
+        assert_eq!(menu.origin, point(px(20.), px(30.)));
+
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
+
+        let menu = right_click(cx, point(px(380.), px(50.)));
+        assert!(menu.right() <= px(393. - 8.), "{menu:?}");
+        assert_eq!(menu.top(), px(50.));
     }
 
     #[gpui::test]
