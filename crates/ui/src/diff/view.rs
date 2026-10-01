@@ -700,7 +700,7 @@ impl DiffPanel {
                 .h(px(28.))
                 .px_2p5()
                 .gap_1p5()
-                .rounded(material::radius_button())
+                .rounded(material::radius_button(cx))
                 .text_size(px(13.))
                 .font_medium()
                 .when(is_active, |s| s.bg(tab_active))
@@ -914,7 +914,7 @@ impl DiffPanel {
                         .px_2()
                         .py_1()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(cx.theme().tokens.radius.sm)
                         .text_size(px(13.))
                         .cursor_pointer()
                         .hover(|row| row.bg(cx.theme().list_hover))
@@ -1007,7 +1007,7 @@ impl DiffPanel {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_xl()
-            .rounded(material::radius_overlay());
+            .rounded(material::radius_overlay(cx));
 
         let base_selector =
             (selected_scope == Some(DiffScope::Branch)).then(|| {
@@ -1094,7 +1094,7 @@ impl DiffPanel {
                     .border_1()
                     .border_color(cx.theme().border)
                     .shadow_xl()
-                    .rounded(material::radius_overlay())
+                    .rounded(material::radius_overlay(cx))
                     .into_any_element()
             });
 
@@ -1525,7 +1525,7 @@ impl DiffPanel {
             .gap_2()
             .items_center()
             .bg(cx.theme().secondary)
-            .rounded(material::radius_card())
+            .rounded(material::radius_card(cx))
             .relative()
             .when_some(rail, |this, color| {
                 this.child(
@@ -1650,7 +1650,7 @@ impl DiffPanel {
             .gap_1p5()
             .items_start()
             .bg(cx.theme().warning.opacity(0.12))
-            .rounded(material::radius_card())
+            .rounded(material::radius_card(cx))
             .text_size(px(11.))
             .text_color(cx.theme().warning_foreground)
             .font_family(cx.theme().font_family.clone())
@@ -1699,7 +1699,7 @@ impl DiffPanel {
                     .py_1p5()
                     .gap_2()
                     .relative()
-                    .rounded(material::radius_card())
+                    .rounded(material::radius_card(cx))
                     .bg(cx.theme().muted)
                     .font_family(cx.theme().font_family.clone())
                     .text_size(px(11.))
@@ -1734,7 +1734,7 @@ impl DiffPanel {
                         .py_2()
                         .gap_2()
                         .bg(cx.theme().muted)
-                        .rounded(material::radius_card())
+                        .rounded(material::radius_card(cx))
                         .font_family(cx.theme().font_family.clone())
                         .child(Input::new(input).appearance(false))
                         .child(
@@ -1757,7 +1757,7 @@ impl DiffPanel {
                         .px_3()
                         .py_1()
                         .bg(cx.theme().muted)
-                        .rounded(material::radius_card())
+                        .rounded(material::radius_card(cx))
                         .font_family(cx.theme().font_family.clone())
                         .child(
                             Button::new("diff-add-comment")
@@ -1941,7 +1941,7 @@ fn turn_row(
     .py_1()
     .gap_2()
     .items_center()
-    .rounded(px(6.))
+    .rounded(cx.theme().tokens.radius.sm)
     .text_size(px(13.))
     .cursor_pointer()
     .hover(|s| s.bg(cx.theme().list_hover))
@@ -1990,7 +1990,7 @@ fn base_row(
     .w_full()
     .px_2()
     .py_1()
-    .rounded(px(6.))
+    .rounded(cx.theme().tokens.radius.sm)
     .cursor_pointer()
     .hover(|row| row.bg(cx.theme().list_hover))
     .when(selected, |row| row.bg(cx.theme().list_active))

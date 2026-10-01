@@ -19,7 +19,7 @@ impl Composer {
         let fg = cx.theme().primary_foreground;
         let store_main = self.workspace_store.clone();
 
-        let chevron = crate::material::overlay_popover("implement-menu")
+        let chevron = crate::material::overlay_popover("implement-menu", cx)
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("implement-menu-trigger")
@@ -42,7 +42,7 @@ impl Composer {
                             .py_1p5()
                             .gap_2()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded(cx.theme().tokens.radius.sm)
                             .cursor_pointer()
                             .text_size(px(13.))
                             .hover(|s| s.bg(cx.theme().muted))
@@ -75,7 +75,7 @@ impl Composer {
             .flex_none()
             .h(px(32.))
             .items_center()
-            .rounded(crate::material::radius_button())
+            .rounded(crate::material::radius_button(cx))
             .bg(primary)
             .text_color(fg)
             .overflow_hidden()

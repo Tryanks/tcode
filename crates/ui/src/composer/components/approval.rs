@@ -48,7 +48,7 @@ impl Composer {
                 .max_h(px(240.))
                 .overflow_y_scroll_area()
                 .p_2()
-                .rounded(px(8.))
+                .rounded(cx.theme().tokens.radius.md)
                 .bg(detail_bg)
                 .child(content)
                 .into_any_element()
@@ -79,7 +79,7 @@ impl Composer {
                 div()
                     .debug_selector(|| "approval-detail".into())
                     .w_full()
-                    .rounded(px(8.))
+                    .rounded(cx.theme().tokens.radius.md)
                     .bg(detail_bg)
                     .child(
                         crate::scroll::VirtualList::measured(
@@ -135,7 +135,7 @@ impl Composer {
             .w_full()
             .gap_2()
             .p(px(14.))
-            .rounded(crate::material::radius_card())
+            .rounded(crate::material::radius_card(cx))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
@@ -245,7 +245,7 @@ impl Composer {
                             .flex_none()
                     })
                     .disabled(!self.interactive(cx) || pending)
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .label(option.label.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.respond(
@@ -298,7 +298,7 @@ impl Composer {
                         .small()
                         .h(px(28.))
                         .disabled(!interactive)
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .label(crate::tr!("approval.cancel_turn"))
                         .text_color(cx.theme().muted_foreground)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -311,7 +311,7 @@ impl Composer {
                         .small()
                         .h(px(28.))
                         .disabled(!interactive)
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .label(if compact {
                             crate::tr!("mobile.deny")
                         } else {
@@ -328,7 +328,7 @@ impl Composer {
                         .small()
                         .h(px(28.))
                         .disabled(!interactive)
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .label(if compact {
                             crate::tr!("mobile.always_allow")
                         } else {
@@ -348,7 +348,7 @@ impl Composer {
                         .small()
                         .h(px(28.))
                         .disabled(!interactive)
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .label(if compact {
                             crate::tr!("mobile.allow")
                         } else {

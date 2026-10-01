@@ -268,7 +268,7 @@ impl RenderOnce for Button {
             (bg, fg)
         };
         let corners = match self.rounded {
-            ButtonRounded::Medium => Corners::all(theme.radius),
+            ButtonRounded::Medium => Corners::all(theme.tokens.radius.md),
             ButtonRounded::Size(value) => Corners::all(value),
             ButtonRounded::Corners(corners) => corners,
         };

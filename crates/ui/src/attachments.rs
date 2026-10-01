@@ -20,9 +20,10 @@ pub(crate) fn open_image_lightbox(
         // Leave room for the dialog header, padding and bottom margin in short windows.
         let max_h = (viewport.height * 0.75).min(viewport.height * 0.9 - px(96.));
         let source = source.clone();
+        let image_radius = crate::material::radius_card(cx);
         builder
             .w(px(1200.))
-            .rounded(crate::material::radius_overlay())
+            .rounded(crate::material::radius_overlay(cx))
             .bg(cx.theme().popover)
             .border_1()
             .border_color(cx.theme().border)
@@ -34,7 +35,7 @@ pub(crate) fn open_image_lightbox(
                         img(source.clone())
                             .max_w_full()
                             .max_h(max_h)
-                            .rounded(crate::material::radius_card()),
+                            .rounded(image_radius),
                     ),
                 )
             })

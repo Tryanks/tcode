@@ -391,7 +391,7 @@ impl RenderOnce for Dialog {
             .bg(cx.theme().popover)
             .border_1()
             .border_color(cx.theme().border)
-            .rounded(crate::material::radius_overlay())
+            .rounded(crate::material::radius_overlay(cx))
             .shadow_xl()
             .occlude()
             .refine_style(&self.style)

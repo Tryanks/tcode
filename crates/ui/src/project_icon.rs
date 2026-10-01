@@ -223,7 +223,7 @@ impl Picker {
         .gap_1()
         .items_center()
         .justify_center()
-        .rounded(cx.theme().radius)
+        .rounded(cx.theme().tokens.radius.md)
         .border_1()
         .border_color(if is_selected {
             cx.theme().primary

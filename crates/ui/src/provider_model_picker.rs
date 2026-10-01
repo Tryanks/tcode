@@ -219,7 +219,7 @@ impl ProviderModelPicker {
 impl Render for ProviderModelPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picker = cx.entity();
-        crate::material::overlay_popover(self.popover_id)
+        crate::material::overlay_popover(self.popover_id, cx)
             .trigger(self.trigger(cx))
             .content(move |_, window, cx| {
                 let (profiles, selected_profile, selected, excluded) = {
@@ -335,7 +335,7 @@ impl Render for ProviderModelPicker {
                             .items_center()
                             .justify_center()
                             .gap_1p5()
-                            .rounded(crate::material::radius_button())
+                            .rounded(crate::material::radius_button(cx))
                             .cursor_pointer()
                             .when(is_selected, |tab| tab.bg(cx.theme().accent).font_medium())
                             .hover(|tab| tab.bg(cx.theme().accent))
@@ -383,7 +383,7 @@ fn option_row(
         .py_1p5()
         .gap_2()
         .items_center()
-        .rounded(crate::material::radius_button())
+        .rounded(crate::material::radius_button(cx))
         .cursor_pointer()
         .hover(|style| style.bg(cx.theme().accent))
         .child(tinted_glyph(store, option.provider, option.profile_id.as_deref(), cx).small())

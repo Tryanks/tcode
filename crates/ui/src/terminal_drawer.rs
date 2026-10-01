@@ -1462,7 +1462,7 @@ impl Render for TerminalDrawer {
                     .h(px(25.))
                     .gap(px(2.))
                     .px_2()
-                    .rounded(material::radius_button())
+                    .rounded(material::radius_button(cx))
                     .bg(if selected {
                         cx.theme().list_active
                     } else {

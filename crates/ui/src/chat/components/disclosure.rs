@@ -79,7 +79,7 @@ pub(crate) fn disclosure(
     .px_1p5()
     .gap_1p5()
     .items_center()
-    .rounded(crate::material::radius_button())
+    .rounded(crate::material::radius_button(cx))
     .text_size(px(11.))
     .text_color(muted)
     .cursor_pointer()
@@ -108,7 +108,7 @@ fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
     div()
         .w_full()
-        .rounded(crate::material::radius_card())
+        .rounded(crate::material::radius_card(cx))
         .bg(cx.theme().muted)
         // The card keeps clicks to itself, but a pan that its body cannot use
         // must still reach the timeline behind it.
@@ -276,7 +276,7 @@ pub(crate) fn proposed_plan_card(
     h_flex()
         .w_full()
         .items_stretch()
-        .rounded(crate::material::radius_card())
+        .rounded(crate::material::radius_card(cx))
         .overflow_hidden()
         .bg(cx.theme().muted.opacity(0.6))
         .child(

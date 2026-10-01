@@ -1,4 +1,4 @@
-use gpui::{AnyElement, IntoElement as _, ParentElement as _, Styled as _, div, px};
+use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, div, px};
 use gpui_base::{h_flex, v_flex};
 /// A QR code as `(width_in_modules, dark_module_flags)`, row-major.
 fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
@@ -15,7 +15,7 @@ fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
 /// Paint the matrix as one flex row per module row, collapsing consecutive
 /// same-colour modules into a single box — a per-module element would be
 /// thousands of nodes repainting every countdown tick.
-pub(super) fn qr_element(payload: &str) -> Option<AnyElement> {
+pub(super) fn qr_element(payload: &str, cx: &App) -> Option<AnyElement> {
     const MODULE: f32 = 4.;
     const QUIET: f32 = 12.;
     let (width, modules) = qr_modules(payload)?;
@@ -46,7 +46,7 @@ pub(super) fn qr_element(payload: &str) -> Option<AnyElement> {
         div()
             .flex_none()
             .p(px(QUIET))
-            .rounded(crate::material::radius_card())
+            .rounded(crate::material::radius_card(cx))
             .bg(gpui::white())
             .child(grid)
             .into_any_element(),

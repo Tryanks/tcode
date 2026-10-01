@@ -63,7 +63,7 @@ pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut 
         let dialog_content = content.clone();
         builder
             .w(px(680.))
-            .rounded(crate::material::radius_overlay())
+            .rounded(crate::material::radius_overlay(cx))
             .bg(cx.theme().popover)
             .border_1()
             .border_color(cx.theme().border)
@@ -236,7 +236,7 @@ impl AddProjectDialog {
                     let progress_content = content.clone();
                     builder
                         .w(px(480.))
-                        .rounded(crate::material::radius_overlay())
+                        .rounded(crate::material::radius_overlay(cx))
                         .bg(cx.theme().popover)
                         .border_1()
                         .border_color(cx.theme().border)
@@ -299,7 +299,7 @@ impl AddProjectDialog {
                         .gap_1()
                         .px_3()
                         .py_2()
-                        .rounded(crate::material::radius_card())
+                        .rounded(crate::material::radius_card(cx))
                         .text_size(px(13.))
                         .cursor_pointer()
                         .hover(|style| style.bg(cx.theme().list_hover))
@@ -374,12 +374,12 @@ impl Render for AddProjectDialog {
                             .child(
                                 Input::new(&self.path_input)
                                     .flex_1()
-                                    .rounded(crate::material::radius_input()),
+                                    .rounded(crate::material::radius_input(cx)),
                             )
                             .when(can_browse, |row| {
                                 row.child(
                                     Button::new("browse-project-directory")
-                                        .rounded(crate::material::radius_button())
+                                        .rounded(crate::material::radius_button(cx))
                                         .label(crate::tr!("sidebar.browse"))
                                         .on_click(cx.listener(|dialog, _, window, cx| {
                                             dialog.browse_clicked(window, cx);
@@ -515,7 +515,7 @@ impl Render for ImportProgress {
                     .child(
                         h_flex().w_full().justify_end().child(
                             Button::new("external-import-ok")
-                                .rounded(crate::material::radius_button())
+                                .rounded(crate::material::radius_button(cx))
                                 .primary()
                                 .label(crate::tr!("sidebar.import_ok"))
                                 .on_click(move |_, window, cx| {
@@ -533,13 +533,13 @@ impl Render for ImportProgress {
 fn render_add_footer(
     dialog: &Entity<AddProjectDialog>,
     _window: &mut Window,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> AnyElement {
     let open = dialog.clone();
     DialogActions::new()
         .child(
             Button::new("add-project-cancel")
-                .rounded(crate::material::radius_button())
+                .rounded(crate::material::radius_button(cx))
                 .label(crate::tr!("sidebar.cancel"))
                 .on_click(move |_, window, cx| {
                     window.close_dialog(cx);
@@ -547,7 +547,7 @@ fn render_add_footer(
         )
         .child(
             Button::new("add-project-open")
-                .rounded(crate::material::radius_button())
+                .rounded(crate::material::radius_button(cx))
                 .primary()
                 .label(crate::tr!("sidebar.open"))
                 .on_click(move |_, window, cx| {

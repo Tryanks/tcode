@@ -98,6 +98,7 @@ impl Render for HostPermissions {
                                 crate::tr!(label),
                                 bg.opacity(0.12),
                                 fg,
+                                cx,
                             )),
                     );
                 }

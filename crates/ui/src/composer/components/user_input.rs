@@ -99,7 +99,7 @@ impl Composer {
                 .rounded(if multi {
                     px(5.)
                 } else {
-                    crate::material::radius_input()
+                    crate::material::radius_input(cx)
                 })
                 .border_1()
                 .border_color(if is_selected { primary } else { muted })
@@ -117,7 +117,7 @@ impl Composer {
                     .py_1()
                     .gap_2()
                     .items_start()
-                    .rounded(crate::material::radius_chip())
+                    .rounded(crate::material::radius_chip(cx))
                     .cursor_pointer()
                     .when(is_selected, |s| s.bg(cx.theme().list_active))
                     .hover(|s| s.bg(cx.theme().muted))
@@ -179,7 +179,7 @@ impl Composer {
             .gap_2()
             .px_2()
             .py_1()
-            .rounded(px(8.))
+            .rounded(cx.theme().tokens.radius.md)
             .border_1()
             .border_color(cx.theme().input)
             .bg(cx.theme().popover)
@@ -199,7 +199,7 @@ impl Composer {
                     cx,
                 )
                 .size(px(if self.compact { 44. } else { 28. }))
-                .rounded(crate::material::radius_input())
+                .rounded(crate::material::radius_input(cx))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -241,7 +241,7 @@ impl Composer {
                     .small()
                     .h(px(28.))
                     .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .label(crate::tr!("userinput.previous"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_go(-1, &questions_previous, window, cx)
@@ -257,7 +257,7 @@ impl Composer {
                     .small()
                     .h(px(28.))
                     .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .label(crate::tr!("userinput.next_question"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_go(1, &questions_next, window, cx)
@@ -271,7 +271,7 @@ impl Composer {
                     .small()
                     .h(px(28.))
                     .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .label(crate::tr!("userinput.done"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_submit(&questions_submit, request_submit.clone(), window, cx);
@@ -307,7 +307,7 @@ impl Composer {
             .w_full()
             .gap_2()
             .p(px(14.))
-            .rounded(crate::material::radius_card())
+            .rounded(crate::material::radius_card(cx))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
@@ -498,7 +498,7 @@ impl Composer {
             .gap_2()
             .px_3()
             .py_1p5()
-            .rounded(crate::material::radius_card())
+            .rounded(crate::material::radius_card(cx))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
@@ -528,7 +528,7 @@ impl Composer {
                         .when(is_selected, |button| button.primary())
                         .when(!is_selected, |button| button.outline())
                         .when(self.compact, |button| button.min_h(px(touch)))
-                        .rounded(crate::material::radius_chip())
+                        .rounded(crate::material::radius_chip(cx))
                         .label(option.label.clone())
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.ui_toggle_option(&question_for_click, label.clone(), cx);
@@ -548,7 +548,7 @@ impl Composer {
             .items_center()
             .gap_2()
             .pl_2()
-            .rounded(crate::material::radius_input())
+            .rounded(crate::material::radius_input(cx))
             .border_1()
             .border_color(cx.theme().input)
             .bg(cx.theme().background)

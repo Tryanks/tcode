@@ -855,7 +855,7 @@ impl Composer {
                         cx,
                     )
                     .size(px(28.))
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -882,7 +882,7 @@ impl Composer {
                         cx,
                     )
                     .size(px(28.))
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -940,7 +940,7 @@ impl Composer {
             cx,
         )
         .size(px(28.))
-        .rounded(crate::material::radius_input())
+        .rounded(crate::material::radius_input(cx))
         .flex()
         .items_center()
         .justify_center()
@@ -1167,7 +1167,7 @@ impl Render for Composer {
                         .ghost()
                         .small()
                         .h(px(22.))
-                        .rounded(crate::material::radius_chip())
+                        .rounded(crate::material::radius_chip(cx))
                         .text_size(px(11.5))
                         .font_family(cx.theme().mono_font_family.clone())
                         .label(format!("{} · {}  ×", context.terminal_label, range))
@@ -1193,7 +1193,7 @@ impl Render for Composer {
                         .ghost()
                         .small()
                         .h(px(22.))
-                        .rounded(crate::material::radius_chip())
+                        .rounded(crate::material::radius_chip(cx))
                         .text_size(px(11.5))
                         .font_family(cx.theme().mono_font_family.clone())
                         .label(format!("{} {}  ×", comment.file, range))
@@ -1216,7 +1216,7 @@ impl Render for Composer {
             .rounded(if self.compact {
                 px(16.)
             } else {
-                crate::material::radius_composer()
+                crate::material::radius_composer(cx)
             })
             .border_1()
             .border_color(if composer_focused {

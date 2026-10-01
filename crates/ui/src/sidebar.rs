@@ -1636,7 +1636,7 @@ impl SessionsSidebar {
             .items_center()
             .gap_2()
             .px_2()
-            .rounded(cx.theme().radius)
+            .rounded(cx.theme().tokens.radius.md)
             .cursor_pointer()
             .hover(|s| s.bg(cx.theme().sidebar_accent))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1705,7 +1705,7 @@ impl SessionsSidebar {
                 .items_center()
                 .gap_2()
                 .px_2()
-                .rounded(cx.theme().radius)
+                .rounded(cx.theme().tokens.radius.md)
                 .cursor_pointer()
                 .when(active, |row| row.bg(cx.theme().list_active))
                 .when(!active, |row| {
@@ -1994,7 +1994,7 @@ impl SessionsSidebar {
         .items_center()
         .gap_1()
         .px_2()
-        .rounded(cx.theme().radius)
+        .rounded(cx.theme().tokens.radius.md)
         .cursor_pointer()
         .hover(|s| s.bg(cx.theme().sidebar_accent))
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2038,7 +2038,7 @@ impl SessionsSidebar {
             .size_5()
             .items_center()
             .justify_center()
-            .rounded(cx.theme().radius * 0.5)
+            .rounded(cx.theme().tokens.radius.sm)
             .cursor_pointer()
             // Opacity (rather than `visibility: hidden`) keeps this in Root's
             // tab-stop registry so keyboard focus can reveal it. `focus`, not
@@ -2541,7 +2541,7 @@ impl SessionsSidebar {
             .gap_2()
             .pl(px(if is_child { 42. } else { 30. }))
             .pr(px(THREAD_ROW_PADDING_X))
-            .rounded(px(6.))
+            .rounded(cx.theme().tokens.radius.sm)
             // First child so the row's content paints over the mark.
             .when_some(
                 self.provider_mark(meta, GROUPED_ROW_HEIGHT, THREAD_ROW_PADDING_X, cx),
@@ -2660,7 +2660,7 @@ impl SessionsSidebar {
                     .size_5()
                     .items_center()
                     .justify_center()
-                    .rounded(cx.theme().radius * 0.5)
+                    .rounded(cx.theme().tokens.radius.sm)
                     .cursor_pointer()
                     .opacity(0.)
                     .group_hover(row_key, |button| button.opacity(1.))
@@ -2741,7 +2741,7 @@ impl SessionsSidebar {
                     .gap(px(2.))
             })
             .px(px(THREAD_ROW_PADDING_X))
-            .rounded(px(6.))
+            .rounded(cx.theme().tokens.radius.sm)
             // First child so the row's content paints over the mark.
             .when_some(
                 self.provider_mark(meta, row_height, THREAD_ROW_PADDING_X, cx),

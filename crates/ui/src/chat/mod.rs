@@ -2487,7 +2487,7 @@ impl ChatView {
         // ChatView entity (the popover content runs at App level, not in a view
         // context, so `cx.listener` is unavailable here).
         let chat = cx.entity();
-        let chevron = crate::material::overlay_popover("git-menu")
+        let chevron = crate::material::overlay_popover("git-menu", cx)
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("git-menu-trigger")
@@ -2515,7 +2515,7 @@ impl ChatView {
                         .py_1p5()
                         .gap_2()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(cx.theme().tokens.radius.sm)
                         .text_size(px(13.))
                         .child(git_action_icon(action).xsmall().text_color(muted))
                         .child(div().flex_1().child(label));
@@ -2548,7 +2548,7 @@ impl ChatView {
                 .flex_none()
                 .h(px(28.))
                 .items_center()
-                .rounded(px(8.))
+                .rounded(cx.theme().tokens.radius.md)
                 .border_1()
                 .border_color(border)
                 .overflow_hidden()
@@ -2606,7 +2606,7 @@ impl ChatView {
         let main_cwd = cwd.clone();
         let menu_cwd = cwd;
 
-        let chevron = crate::material::overlay_popover("open-menu")
+        let chevron = crate::material::overlay_popover("open-menu", cx)
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("open-menu-trigger")
@@ -2632,7 +2632,7 @@ impl ChatView {
                         .py_1p5()
                         .gap_2()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(cx.theme().tokens.radius.sm)
                         .cursor_pointer()
                         .text_size(px(13.))
                         .hover(move |s| s.bg(accent))
@@ -2688,7 +2688,7 @@ impl ChatView {
             .h(px(28.))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .items_center()
-            .rounded(px(8.))
+            .rounded(cx.theme().tokens.radius.md)
             .border_1()
             .border_color(border)
             .overflow_hidden()
@@ -2853,7 +2853,7 @@ impl ChatView {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .rounded(cx.theme().radius)
+                    .rounded(cx.theme().tokens.radius.md)
                     .cursor_pointer()
                     .hover(|row| row.bg(cx.theme().accent))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2925,7 +2925,7 @@ impl ChatView {
                 // The outline button's bg is ~transparent; an opaque popover
                 // backing keeps the pill readable over the chat text below.
                 div()
-                    .rounded(cx.theme().radius)
+                    .rounded(cx.theme().tokens.radius.md)
                     .bg(cx.theme().popover)
                     .shadow_md()
                     .child(
@@ -3227,7 +3227,7 @@ impl Render for ChatView {
                         CONTENT_MIN_PADDING
                     }))
                     .when(this.highlighted_turn == Some(row.turn), |item| {
-                        item.rounded(crate::material::radius_card())
+                        item.rounded(crate::material::radius_card(cx))
                             .bg(cx.theme().list_active)
                     })
                     .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
@@ -3343,7 +3343,7 @@ impl Render for ChatView {
                             .px(px(10.))
                             .py(px(6.))
                             .text_size(px(15.))
-                            .rounded(px(12.))
+                            .rounded(cx.theme().tokens.radius.lg)
                             .bg(cx.theme().foreground.opacity(0.08))
                             .text_color(if acknowledged {
                                 cx.theme().foreground
