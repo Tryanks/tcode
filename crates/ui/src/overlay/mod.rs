@@ -17,10 +17,16 @@ use crate::touch_selection::WindowTouchSelectionOverlay;
 use dialog::ActiveDialog;
 use notification::NotificationList;
 
-/// Retains the dismissed pointer sequence after its popup content unmounts.
-/// Mount `release_listener` with the trigger, not the transient surface.
+/// The release guard for popups gpui-base dismisses on a press outside them.
+///
+/// gpui-base closes a popover, menu or sheet on the outside press itself,
+/// and GPUI then delivers that press's release, and the click it completes,
+/// to whatever the popup uncovered. Arming the guard from the dismissal
+/// swallows that one release; the next press disarms it, so a dismissal by
+/// Escape or by choosing an item costs nothing. Mount `release_listener`
+/// with the trigger, not the transient surface, which is gone by the release.
 #[derive(Clone, Default)]
-pub(crate) struct OutsideDismissal(Rc<std::cell::Cell<Option<gpui::MouseButton>>>);
+pub(crate) struct OutsideDismissal(Rc<std::cell::Cell<bool>>);
 
 impl OutsideDismissal {
     pub(crate) fn new(id: ElementId, window: &mut Window, cx: &mut App) -> Self {
@@ -30,20 +36,33 @@ impl OutsideDismissal {
             .clone()
     }
 
-    pub(crate) fn consume(&self, event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App) {
-        self.0.set(Some(event.button));
+    /// The popup was dismissed; the release of the press that did it, if
+    /// one is in progress, is swallowed.
+    pub(crate) fn dismissed(&self) {
+        self.0.set(true);
+    }
+
+    /// Dismissed by `event`, which is swallowed as well: a press that closes
+    /// a menu or a picker does nothing else.
+    pub(crate) fn consume(&self, window: &mut Window, cx: &mut App) {
+        self.dismissed();
         window.prevent_default();
         cx.stop_propagation();
     }
 
     pub(crate) fn release_listener(&self) -> impl IntoElement {
-        let pending = self.0.clone();
+        let armed = self.0.clone();
         gpui::canvas(
             |_, _, _| {},
             move |_, _, window, _| {
-                window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
-                    if phase.capture() && pending.get() == Some(event.button) {
-                        pending.set(None);
+                let disarm = armed.clone();
+                window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, _| {
+                    if phase.capture() {
+                        disarm.set(false);
+                    }
+                });
+                window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, window, cx| {
+                    if phase.capture() && armed.replace(false) {
                         window.prevent_default();
                         cx.stop_propagation();
                     }
