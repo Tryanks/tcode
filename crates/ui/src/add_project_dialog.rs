@@ -31,10 +31,10 @@ use tcode_protocol::{CommandResponse, ExternalImportState, ExternalThread, Recen
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
 const RECENT_VIEWPORT_MAX_HEIGHT: f32 = 390.;
-/// Everything above the recents viewport inside the dialog: title, the path row
-/// and the footer. Subtracted so the list scrolls instead of pushing the Open
-/// button off a short window.
-const RECENT_VIEWPORT_CHROME: f32 = 260.;
+/// Everything around the recents viewport inside the dialog: title, the path
+/// row, the recents heading and the footer. Subtracted so the list scrolls
+/// instead of pushing the Open button off a short window.
+const RECENT_VIEWPORT_CHROME: f32 = 280.;
 
 enum RecentState {
     Loading,
@@ -366,12 +366,6 @@ impl Render for AddProjectDialog {
             .gap_4()
             .child(
                 v_flex()
-                    .gap_2()
-                    .child(div().text_size(px(13.)).font_semibold().child(recent_label))
-                    .child(self.render_recent(window, cx)),
-            )
-            .child(
-                v_flex()
                     .gap_1()
                     .child(
                         h_flex()
@@ -409,6 +403,22 @@ impl Render for AddProjectDialog {
                                 .child(error),
                         )
                     }),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_size(px(13.)).font_semibold().child(recent_label))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::tr!("sidebar.recent_import_hint")),
+                            ),
+                    )
+                    .child(self.render_recent(window, cx)),
             )
     }
 }
@@ -583,9 +593,14 @@ fn tool_counts(threads: &[ExternalThread]) -> String {
     ]
     .into_iter()
     .filter_map(|source| {
-        counts
-            .get(&source)
-            .map(|count| format!("{} ×{count}", source.display_name()))
+        counts.get(&source).map(|&count| {
+            let tool = source.display_name();
+            if count == 1 {
+                crate::tr!("sidebar.recent_tool_threads_one", tool = tool).into_owned()
+            } else {
+                crate::tr!("sidebar.recent_tool_threads", tool = tool, count = count).into_owned()
+            }
+        })
     })
     .collect::<Vec<_>>()
     .join(" · ")

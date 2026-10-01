@@ -318,7 +318,9 @@ fn collect_files(
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // Not followed through symlinks: a link back to an ancestor would
+            // make the walk branch without end.
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 visit(&path, predicate, files);
             } else if predicate(&path) {
                 files.push(path);
