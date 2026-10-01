@@ -579,11 +579,6 @@ impl CommandPalette {
         let results = self.results(cx);
         let total = results.items.len();
         let selected = match ev.keystroke.key.as_str() {
-            "escape" => {
-                self.close(cx);
-                cx.stop_propagation();
-                return;
-            }
             "down" if total > 0 => (self.selected + 1).min(total - 1),
             "down" => self.selected,
             "up" => self.selected.saturating_sub(1),
@@ -836,34 +831,36 @@ impl Render for CommandPalette {
             .id("palette-card")
             .debug_selector(|| "palette-card".into())
             .occlude()
+            // The palette's own focus sits on the card, under the dialog
+            // host, so the list keys reach it from the host and from the
+            // query input alike.
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
+            });
+        let palette = cx.entity();
+        gpui_base::Dialog::new(cx)
+            .backdrop(
+                div()
+                    .absolute()
+                    .size_full()
+                    .bg(crate::material::scrim(1., cx)),
+            )
+            .popup(card)
+            // Enter belongs to the query input, which runs the selected item.
+            .on_ok(|_, _, _| false)
+            .request_close(move |_, _, cx| {
+                dismissal.dismissed();
+                palette.update(cx, |this, cx| this.close(cx));
             })
-            .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
-                dismissal.consume(window, cx);
-                this.close(cx);
-            }));
-        let overlay = div()
-            .id("palette-overlay")
-            .track_focus(&self.focus_handle)
-            .occlude()
-            .w(viewport.width)
-            .h(viewport.height)
-            .bg(crate::material::scrim(1., cx))
-            .flex()
             .flex_col()
             .items_center()
-            .when(compact, |overlay| overlay.justify_end().pb(insets.bottom))
-            .when(!compact, |overlay| overlay.pt(insets.top + px(96.)))
-            .on_key_down(cx.listener(Self::on_key_down))
-            .child(card);
-        gpui::deferred(
-            gpui::anchored()
-                .position(gpui::point(px(0.), px(0.)))
-                .child(overlay),
-        )
-        .with_priority(gpui_base::POPUP_PRIORITY)
+            .when(compact, |host| host.justify_end().pb(insets.bottom))
+            .when(!compact, |host| {
+                host.justify_start().pt(insets.top + px(96.))
+            })
     }
 }
 
@@ -882,20 +879,25 @@ mod tests {
 
     struct PaletteHarness {
         palette: Entity<CommandPalette>,
+        window_state: Entity<WindowState>,
     }
 
     impl PaletteHarness {
         fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
             let window_state = cx.new(|_| WindowState::new(false));
             Self {
-                palette: cx.new(|cx| CommandPalette::new(store, window_state, window, cx)),
+                palette: cx.new(|cx| CommandPalette::new(store, window_state.clone(), window, cx)),
+                window_state,
             }
         }
     }
 
     impl Render for PaletteHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let open = self.window_state.read(cx).palette_open;
             div()
+                .size_full()
+                .when(open, |root| root.child(self.palette.clone()))
         }
     }
 
@@ -1013,6 +1015,56 @@ mod tests {
             let total = palette.update(cx, |palette, cx| palette.results(cx).items.len());
             assert_eq!(palette.read(cx).selected, total - 1);
         });
+
+        drop(palette);
+        drop(workspace_store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn escape_from_the_query_and_a_backdrop_press_close_the_palette(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-palette-dismiss-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let store = SessionStore::open_at(root.clone()).expect("open test store");
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let palette_store = workspace_store.clone();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            PaletteHarness::new(palette_store.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let (palette, window_state) = cx.update(|_, cx| {
+            let harness = harness.read(cx);
+            (harness.palette.clone(), harness.window_state.clone())
+        });
+        let open = |cx: &mut VisualTestContext, focus_query: bool| {
+            cx.update(|window, cx| {
+                window_state.update(cx, |state, cx| state.open_palette(cx));
+                palette.update(cx, |palette, cx| palette.open(focus_query, window, cx));
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(cx.debug_bounds("palette-card").is_some());
+        };
+        let is_open = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            window_state.read_with(cx, |state, _| state.palette_open)
+        };
+
+        open(cx, true);
+        cx.update(|window, cx| {
+            let query = palette.read(cx).query.read(cx).focus_handle(cx);
+            assert!(query.is_focused(window), "the query takes focus");
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(!is_open(cx), "Escape reaches the dialog through the query");
+        assert!(cx.debug_bounds("palette-card").is_none());
+
+        open(cx, false);
+        cx.simulate_click(gpui::point(px(10.), px(10.)), gpui::Modifiers::default());
+        assert!(!is_open(cx), "a backdrop press closes the palette");
 
         drop(palette);
         drop(workspace_store);
