@@ -12,7 +12,7 @@ use gpui::{
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_base::{StyledExt as _, Toggle, ToggleGroup, v_flex};
+use gpui_base::{StyledExt as _, Tab, Toggle, ToggleGroup, v_flex};
 
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
@@ -451,6 +451,23 @@ pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
         .id(id)
         .role(role)
         .aria_label(label)
+}
+
+/// A gpui-base tab that can take keyboard focus. Callers style it and put
+/// it in a [`gpui_base::Tabs`] list.
+pub fn tab(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    cx: &App,
+) -> Tab {
+    let ring = focus_ring(cx);
+    Tab::new(id)
+        .selected(selected)
+        .accessibility_label(label)
+        .tab_index(0)
+        .focus_visible(move |style| style.shadow(vec![ring]))
+        .cursor_pointer()
 }
 
 /// The keyboard focus ring of a clickable that is not a `Button`.

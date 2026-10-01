@@ -831,38 +831,30 @@ impl SettingsPage {
         } else {
             cx.theme().muted_foreground
         };
-        crate::material::accessible_clickable(
-            gpui_base::h_flex(),
-            section.id(),
-            Role::Tab,
-            label.clone(),
-            cx,
-        )
-        .aria_selected(active)
-        .debug_selector(move || section.id().into())
-        // Keep the hitbox, stable element id, and hover style on the
-        // same element. Splitting them across an outer clickable and
-        // an anonymous inner row leaves GPUI tracking two overlapping
-        // interaction regions, which makes hover paint stale or skip
-        // as the pointer crosses adjacent tabs.
-        .h(px(30.))
-        .items_center()
-        .gap_2()
-        .px_2()
-        .rounded(px(6.))
-        .cursor_pointer()
-        .when(active, |s| s.bg(cx.theme().list_active))
-        .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
-        .child(Icon::new(section.icon()).size_4().text_color(fg))
-        .child(
-            div()
-                .text_size(px(13.))
-                .when(active, |d| d.font_medium())
-                .text_color(fg)
-                .child(label),
-        )
-        .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
-        .into_any_element()
+        crate::material::tab(section.id(), label.clone(), active, cx)
+            .debug_selector(move || section.id().into())
+            // Keep the hitbox, stable element id, and hover style on the
+            // same element. Splitting them across an outer clickable and
+            // an anonymous inner row leaves GPUI tracking two overlapping
+            // interaction regions, which makes hover paint stale or skip
+            // as the pointer crosses adjacent tabs.
+            .h(px(30.))
+            .justify_start()
+            .gap_2()
+            .px_2()
+            .rounded(px(6.))
+            .when(active, |s| s.bg(cx.theme().list_active))
+            .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
+            .child(Icon::new(section.icon()).size_4().text_color(fg))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .when(active, |d| d.font_medium())
+                    .text_color(fg)
+                    .child(label),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
+            .into_any_element()
     }
 
     fn group_caption(&self, group: SectionGroup, cx: &Context<Self>) -> AnyElement {
@@ -980,9 +972,9 @@ impl SettingsPage {
     }
 
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut tabs = v_flex()
-            .id("settings-nav-tabs")
-            .role(Role::TabList)
+        let mut tabs = gpui_base::Tabs::new("settings-nav-tabs")
+            .flex()
+            .flex_col()
             .aria_label(crate::tr!("settings.title"))
             .flex_1()
             .min_h_0()
