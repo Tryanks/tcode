@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 use crate::theme::HighlightTheme;
+use crate::widgets::menu::{ContextMenuExt as _, PopupMenu};
 use crate::widgets::tooltip::Tooltip;
 use agent::{ChangeCompleteness, FileChange, FileChangeKind};
 use gpui::{
@@ -146,6 +147,21 @@ pub(crate) fn changed_files(
             .cursor_pointer()
             .hover(|chip| chip.bg(cx.theme().accent))
             .on_click(on_click)
+            .context_menu({
+                let path = change.path.clone();
+                let cwd = cwd.to_path_buf();
+                move |menu, _, _| {
+                    menu.menu(
+                        crate::tr!("chat.view_diff").into_owned(),
+                        Box::new(super::super::OpenFileDiff {
+                            turn: index,
+                            path: path.clone(),
+                        }),
+                    )
+                    .separator()
+                    .path_items(&path, Some(&cwd))
+                }
+            })
             .into_any_element(),
         );
     }
@@ -234,6 +250,7 @@ impl FileEditRowStyle {
 pub(crate) fn file_edit_row(
     key: &str,
     row: &LiveEditRow,
+    cwd: &Path,
     expanded: bool,
     inline_diff: Option<AnyElement>,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -242,6 +259,13 @@ pub(crate) fn file_edit_row(
     let style = FileEditRowStyle::from_theme(cx);
     let expandable = row.counts.is_some();
     let header = file_edit_row_header(row, expanded, expandable, &style);
+    let path_menu = {
+        let path = row.path.clone();
+        let cwd = cwd.to_path_buf();
+        move |menu: PopupMenu, _: &mut Window, _: &mut gpui::Context<PopupMenu>| {
+            menu.path_items(&path, Some(&cwd))
+        }
+    };
     let header: AnyElement = if expandable {
         crate::material::accessible_clickable(
             header,
@@ -255,9 +279,10 @@ pub(crate) fn file_edit_row(
         .cursor_pointer()
         .hover(|header| header.bg(cx.theme().accent))
         .on_click(on_toggle)
+        .context_menu(path_menu)
         .into_any_element()
     } else {
-        header.into_any_element()
+        header.context_menu(path_menu).into_any_element()
     };
 
     v_flex()
@@ -569,6 +594,7 @@ mod tests {
             gpui_base::v_flex().size_full().child(file_edit_row(
                 key,
                 &self.row,
+                std::path::Path::new("/"),
                 self.expanded,
                 diff,
                 |_, _, _| {},

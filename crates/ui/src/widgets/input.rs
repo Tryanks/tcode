@@ -5,14 +5,29 @@ use crate::{
     sizing::{Sizable, Size},
     theme::ActiveTheme as _,
     touch_selection::{EditMenuItem, TouchSelectionOverlay},
+    widgets::menu::ContextMenuExt as _,
 };
 use gpui::{
-    Action, AnyElement, App, DefiniteLength, Edges, Entity, Focusable as _, IntoElement,
-    LongPressEvent, ParentElement as _, RenderOnce, SharedString, StyleRefinement, Styled,
-    TextAlign, TouchPhase, Window, div, prelude::FluentBuilder as _, px, rems,
+    Action, AnyElement, App, DefiniteLength, Edges, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement, LongPressEvent, ParentElement as _, RenderOnce,
+    SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div,
+    prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::StyledExt as _;
 use gpui_base::{InputBase, RoleOverride};
+use serde::Deserialize;
+
+/// A right-click menu item of a field. The menu takes focus while it is open,
+/// so its choice is forwarded to the field's own focus handle, where the
+/// editor's Cut, Copy, Paste and Select All handlers live.
+#[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_input, no_json)]
+enum InputMenu {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
 
 pub use gpui_base::input::{Copy, InputEvent, InputState, Paste, SelectAll, TextareaState};
 
@@ -264,7 +279,18 @@ impl RenderOnce for Input {
             };
             let input_entity = base.clone();
             let focus = base.read(cx).focus_handle(cx);
+            let menu_focus = focus.clone();
+            let menu_state = base.clone();
+            let disabled = self.disabled;
             InputBase::new(("input", base.entity_id()))
+                .on_action(move |action: &InputMenu, window, cx| match action {
+                    InputMenu::Cut => {
+                        menu_focus.dispatch_action(&gpui_base::input::Cut, window, cx)
+                    }
+                    InputMenu::Copy => menu_focus.dispatch_action(&Copy, window, cx),
+                    InputMenu::Paste => menu_focus.dispatch_action(&Paste, window, cx),
+                    InputMenu::SelectAll => menu_focus.dispatch_action(&SelectAll, window, cx),
+                })
                 .focused(focused)
                 .disabled(self.disabled)
                 .role(self.role)
@@ -346,6 +372,46 @@ impl RenderOnce for Input {
                 // The handles float above the field and the menu above the
                 // window; both are deferred, so they draw over the editor.
                 .children(touch_selection)
+                // The editor already moved the caret to the press; what the
+                // menu offers follows what the field can do right now, as the
+                // touch edit menu does, with items disabled rather than left
+                // out so the menu keeps one shape.
+                .context_menu(move |menu, _, cx| {
+                    if disabled {
+                        return menu;
+                    }
+                    let (capabilities, has_text) = {
+                        let base = menu_state.read(cx);
+                        (base.context_menu_capabilities(), base.text().len() > 0)
+                    };
+                    let editable = capabilities.is_editable();
+                    let copyable = capabilities.is_copyable();
+                    let has_selection = capabilities.has_selection();
+                    menu.menu_with_enable(
+                        crate::tr!("edit_menu.cut").into_owned(),
+                        Box::new(InputMenu::Cut),
+                        editable && copyable && has_selection,
+                    )
+                    .menu_with_enable(
+                        crate::tr!("edit_menu.copy").into_owned(),
+                        Box::new(InputMenu::Copy),
+                        copyable && has_selection,
+                    )
+                    // Offered whenever the text can change, without peeking
+                    // at the clipboard: the synchronous read is always empty
+                    // on the web, and an empty clipboard pastes nothing.
+                    .menu_with_enable(
+                        crate::tr!("edit_menu.paste").into_owned(),
+                        Box::new(InputMenu::Paste),
+                        editable,
+                    )
+                    .separator()
+                    .menu_with_enable(
+                        crate::tr!("edit_menu.select_all").into_owned(),
+                        Box::new(InputMenu::SelectAll),
+                        has_text,
+                    )
+                })
                 .into_any_element()
         })
     }

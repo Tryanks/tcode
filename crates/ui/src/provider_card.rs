@@ -6,6 +6,7 @@
 //! settings dialog, a transactional modal form.
 
 use crate::icon::Icon;
+use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::IconName,
     overlay::OverlayExt as _,
@@ -398,7 +399,16 @@ impl ProviderCard {
                                                 copy.clone(),
                                             ));
                                         }),
-                                ),
+                                )
+                                .context_menu({
+                                    let command = command.clone();
+                                    move |menu, _, _| {
+                                        menu.menu(
+                                            crate::tr!("providers.copy_command").into_owned(),
+                                            Box::new(CopyText(command.clone())),
+                                        )
+                                    }
+                                }),
                         );
                 }
                 pane

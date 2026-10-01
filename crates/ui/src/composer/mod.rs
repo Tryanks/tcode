@@ -20,6 +20,7 @@ use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
+use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
@@ -43,6 +44,20 @@ use gpui_base::input::{MoveDown, MoveUp};
 pub(crate) const CONTEXT: &str = "Composer";
 
 gpui::actions!(tcode_composer, [ToggleInteractionMode]);
+
+/// A context-menu action on the composer's chips, queue rows and pending
+/// images, which the composer applies as their buttons do.
+#[derive(gpui::Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_composer, no_json)]
+enum ComposerMenu {
+    RemoveTerminalContext(u64),
+    RemoveReviewComment(usize),
+    QueueSteer(u64),
+    QueueEdit { id: u64, text: String },
+    QueueDrop(u64),
+    ImageOpen(usize),
+    ImageRemove(usize),
+}
 use gpui_base::{ElementExt as _, StyledExt as _, h_flex, v_flex};
 
 use crate::attachments::attach_error_message;
@@ -497,6 +512,28 @@ impl Composer {
     /// Remove a queued message and return its text to the composer for editing.
     /// Selecting the replacement lets the user discard it with one keystroke,
     /// while queued attachments are deliberately ignored.
+    fn on_menu(&mut self, action: &ComposerMenu, window: &mut Window, cx: &mut Context<Self>) {
+        match action.clone() {
+            ComposerMenu::RemoveTerminalContext(id) => self
+                .workspace_store
+                .update(cx, |store, _cx| store.remove_terminal_context(id)),
+            ComposerMenu::RemoveReviewComment(index) => self
+                .workspace_store
+                .update(cx, |store, _cx| store.remove_review_comment(index)),
+            ComposerMenu::QueueSteer(id) => self
+                .workspace_store
+                .update(cx, |store, _cx| store.steer_queued(id)),
+            ComposerMenu::QueueEdit { id, text } => {
+                self.drop_queued_and_refill(id, text, window, cx)
+            }
+            ComposerMenu::QueueDrop(id) => self
+                .workspace_store
+                .update(cx, |store, _cx| store.drop_queued(id)),
+            ComposerMenu::ImageOpen(index) => self.open_image_preview(index, window, cx),
+            ComposerMenu::ImageRemove(index) => self.remove_image(index, cx),
+        }
+    }
+
     fn drop_queued_and_refill(
         &mut self,
         id: u64,
@@ -1163,6 +1200,7 @@ impl Render for Composer {
                     } else {
                         format!("L{}-L{}", context.line_start, context.line_end)
                     };
+                    let text = context.text.clone();
                     Button::new(("terminal-context-chip", id))
                         .ghost()
                         .small()
@@ -1176,6 +1214,17 @@ impl Render for Composer {
                             this.workspace_store
                                 .update(cx, |store, _cx| store.remove_terminal_context(id));
                         }))
+                        .context_menu(move |menu, _, _| {
+                            menu.menu(
+                                crate::tr!("chat.copy_text").into_owned(),
+                                Box::new(CopyText(text.clone())),
+                            )
+                            .separator()
+                            .menu(
+                                crate::tr!("composer.remove_context").into_owned(),
+                                Box::new(ComposerMenu::RemoveTerminalContext(id)),
+                            )
+                        })
                 }));
         let review_comments = self.workspace_store.read(cx).review_comments();
         let has_review_comments = !review_comments.is_empty();
@@ -1189,6 +1238,7 @@ impl Render for Composer {
                     } else {
                         format!("L{}-L{}", comment.line_start, comment.line_end)
                     };
+                    let text = comment.text.clone();
                     Button::new(("review-comment-chip", index))
                         .ghost()
                         .small()
@@ -1202,6 +1252,17 @@ impl Render for Composer {
                             this.workspace_store
                                 .update(cx, |store, _cx| store.remove_review_comment(index));
                         }))
+                        .context_menu(move |menu, _, _| {
+                            menu.menu(
+                                crate::tr!("chat.copy_text").into_owned(),
+                                Box::new(CopyText(text.clone())),
+                            )
+                            .separator()
+                            .menu(
+                                crate::tr!("composer.remove_context").into_owned(),
+                                Box::new(ComposerMenu::RemoveReviewComment(index)),
+                            )
+                        })
                 }),
         );
 
@@ -1320,6 +1381,7 @@ impl Render for Composer {
             }))
             .pb_2()
             .key_context(CONTEXT)
+            .on_action(cx.listener(Self::on_menu))
             .on_action(cx.listener(|this, _: &ToggleInteractionMode, _, cx| {
                 if !this.interactive(cx) {
                     cx.propagate();
