@@ -163,7 +163,7 @@ pub(crate) fn action_button(
     Button::new(id.into())
         .ghost()
         .small()
-        .rounded(crate::material::radius_chip())
+        .rounded(crate::material::radius_chip(cx))
         .icon(Icon::new(icon).text_color(cx.theme().muted_foreground))
         .tooltip(label.into())
 }

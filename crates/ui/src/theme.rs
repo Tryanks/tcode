@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, sync::LazyLock};
 
-use gpui::{App, Global, Hsla, Pixels, Rgba, SharedString, Window, WindowAppearance, px};
+use gpui::{App, Global, Hsla, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
     ColorTokens, PlotTheme, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarStyles,
     ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
@@ -65,7 +65,6 @@ pub struct Theme {
     pub popover: Hsla,
     pub primary: Hsla,
     pub primary_foreground: Hsla,
-    pub radius: Pixels,
     pub ring: Hsla,
     pub scrollbar: Hsla,
     pub scrollbar_thumb: Hsla,
@@ -150,6 +149,8 @@ struct ThemeConfig {
     #[serde(rename = "mono_font.family")]
     mono_font_family: String,
     radius: f32,
+    #[serde(rename = "radius.lg")]
+    radius_lg: f32,
     colors: HashMap<String, String>,
 }
 
@@ -207,8 +208,6 @@ impl TryFrom<ThemeConfig> for Theme {
         let popover = color("popover.background")?;
         let danger = color("danger.background")?;
         let danger_foreground = color("danger.foreground")?;
-        let radius = px(config.radius);
-
         let tokens = SemanticThemeTokens {
             colors: ColorTokens {
                 selection: primary.alpha(0.3),
@@ -230,11 +229,12 @@ impl TryFrom<ThemeConfig> for Theme {
                 input,
                 ring,
             },
+            // The scale gpui-kit derives from the same two theme-file keys.
             radius: RadiusTokens {
-                sm: px(config.radius * 0.5),
-                md: radius,
-                lg: px(config.radius + 4.),
-                xl: px(config.radius + 8.),
+                sm: px(config.radius / 2.),
+                md: px(config.radius),
+                lg: px(config.radius_lg),
+                xl: px(config.radius * 2.),
                 ..Default::default()
             },
             typography: TypographyTokens {
@@ -272,7 +272,6 @@ impl TryFrom<ThemeConfig> for Theme {
             popover,
             primary,
             primary_foreground,
-            radius,
             ring,
             scrollbar: color("scrollbar.background")?,
             scrollbar_thumb: color("scrollbar.thumb.background")?,
@@ -318,6 +317,7 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         ThemeMode::Light => cx.global::<Themes>().light.clone(),
         ThemeMode::Dark => cx.global::<Themes>().dark.clone(),
     };
+    let radius = theme.tokens.radius;
     let base_theme = gpui_base::Theme {
         appearance: match mode {
             ThemeMode::Light => ThemeAppearance::Light,
@@ -335,10 +335,10 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
                     .track(|style| style.bg(theme.scrollbar))
                     .track_hover(|style| style.bg(theme.scrollbar))
                     .track_active(|style| style.bg(theme.scrollbar).border_color(theme.border))
-                    .thumb(|style| style.bg(theme.scrollbar_thumb).radius(theme.radius))
-                    .thumb_hover(|style| style.bg(theme.scrollbar_thumb_hover).radius(theme.radius))
+                    .thumb(|style| style.bg(theme.scrollbar_thumb).radius(radius.full))
+                    .thumb_hover(|style| style.bg(theme.scrollbar_thumb_hover).radius(radius.full))
                     .thumb_active(|style| {
-                        style.bg(theme.scrollbar_thumb_hover).radius(theme.radius)
+                        style.bg(theme.scrollbar_thumb_hover).radius(radius.full)
                     }),
             ),
         resizable: ResizableTheme {

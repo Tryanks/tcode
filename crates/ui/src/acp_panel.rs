@@ -238,7 +238,7 @@ impl Render for AcpAgentCard {
         let agent = self.store.read(cx).installed_acp_agent(&self.agent_id);
         v_flex()
             .w_full()
-            .rounded(material::radius_card())
+            .rounded(material::radius_card(cx))
             .bg(cx.theme().secondary)
             .overflow_hidden()
             .when_some(agent, |card, agent| {
@@ -500,7 +500,7 @@ impl AcpPanel {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .rounded(material::radius_card())
+                    .rounded(material::radius_card(cx))
                     .bg(cx.theme().muted)
                     .child(rows)
                     .when(!window.is_inspector_picking(cx), |rows| {
@@ -549,7 +549,7 @@ impl AcpPanel {
                 .p_3()
                 .gap_3()
                 .items_center()
-                .rounded(material::radius_card())
+                .rounded(material::radius_card(cx))
                 .bg(cx.theme().muted)
                 .child(glyph.text_color(if enabled {
                     cx.theme().foreground
@@ -639,7 +639,7 @@ impl AcpPanel {
                 .id(id)
                 .px_3()
                 .py_1p5()
-                .rounded(material::radius_button())
+                .rounded(material::radius_button(cx))
                 .cursor_pointer()
                 .when(active, |s| s.bg(cx.theme().accent).font_medium())
                 .hover(|s| s.bg(cx.theme().accent))

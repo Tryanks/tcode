@@ -74,7 +74,7 @@ impl Composer {
                     cx,
                 )
                 .size(px(22.))
-                .rounded(crate::material::radius_input())
+                .rounded(crate::material::radius_input(cx))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -102,7 +102,7 @@ impl Composer {
                         .outline()
                         .small()
                         .h(px(28.))
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .label(crate::tr!("fallback.edit_retry"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
@@ -119,7 +119,7 @@ impl Composer {
                         .primary()
                         .small()
                         .h(px(28.))
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .label(crate::tr!("fallback.retry_on", model = model.clone()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
@@ -139,7 +139,7 @@ impl Composer {
             .w_full()
             .gap_2()
             .p(px(14.))
-            .rounded(crate::material::radius_card())
+            .rounded(crate::material::radius_card(cx))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
@@ -213,7 +213,7 @@ impl Composer {
                     cx,
                 )
                 .size(px(22.))
-                .rounded(crate::material::radius_input())
+                .rounded(crate::material::radius_input(cx))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -239,7 +239,7 @@ impl Composer {
             .gap_2()
             .px_2()
             .py_1()
-            .rounded(px(8.))
+            .rounded(cx.theme().tokens.radius.md)
             .border_1()
             .border_color(cx.theme().input)
             .bg(cx.theme().popover)
@@ -259,7 +259,7 @@ impl Composer {
                     cx,
                 )
                 .size(px(28.))
-                .rounded(crate::material::radius_input())
+                .rounded(crate::material::radius_input(cx))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -298,7 +298,7 @@ impl Composer {
             .w_full()
             .gap_2()
             .p(px(14.))
-            .rounded(crate::material::radius_card())
+            .rounded(crate::material::radius_card(cx))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)

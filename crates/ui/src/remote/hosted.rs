@@ -173,7 +173,7 @@ impl HostedPanel {
             };
             row = row.p_3().gap_4().items_start().child(invitation);
             if let Some(link) = &state.invite {
-                row = row.children(super::qr::qr_element(link));
+                row = row.children(super::qr::qr_element(link, cx));
             }
             column = column.child(crate::material::group(cx).child(row));
         }

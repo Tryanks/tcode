@@ -1,7 +1,7 @@
 use crate::{theme::ActiveTheme as _, widgets::Kbd};
 use gpui::{
     Action, AnyElement, AnyView, App, AppContext as _, Context, IntoElement, ParentElement as _,
-    Render, SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Render, SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::StyledExt as _;
 
@@ -81,7 +81,7 @@ impl Render for Tooltip {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_md()
-            .rounded(px(6.))
+            .rounded(cx.theme().tokens.radius.sm)
             .justify_between()
             .py_0p5()
             .px_2()

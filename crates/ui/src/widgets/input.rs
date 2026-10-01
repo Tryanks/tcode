@@ -302,7 +302,7 @@ impl RenderOnce for Input {
                 })
                 .when(self.appearance, |this| {
                     this.bg(theme.background)
-                        .rounded(theme.radius)
+                        .rounded(theme.tokens.radius.md)
                         .when(self.bordered, |this| {
                             this.border_1().border_color(theme.input)
                         })

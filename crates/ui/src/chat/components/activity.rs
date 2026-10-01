@@ -167,7 +167,7 @@ pub(crate) fn activity_row(
             move || format!("activity-row-{id}")
         })
         .aria_expanded(expanded)
-        .rounded(crate::material::radius_chip())
+        .rounded(crate::material::radius_chip(cx))
         .cursor_pointer()
         .hover(|row| row.bg(cx.theme().accent))
         .on_click(on_toggle)

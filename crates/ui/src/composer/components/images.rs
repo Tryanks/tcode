@@ -470,14 +470,14 @@ impl Composer {
                     .items_center()
                     .pl(px(2.))
                     .pr_1()
-                    .rounded(crate::material::radius_chip())
+                    .rounded(crate::material::radius_chip(cx))
                     .overflow_hidden()
                     .bg(cx.theme().secondary)
                     .cursor_pointer()
                     .child(
                         img(crate::store::host_image(path))
                             .size(px(18.))
-                            .rounded(crate::material::radius_chip()),
+                            .rounded(crate::material::radius_chip(cx)),
                     )
                     .child(
                         div()
@@ -498,7 +498,7 @@ impl Composer {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(crate::material::radius_chip())
+                            .rounded(crate::material::radius_chip(cx))
                             .cursor_pointer()
                             .hover(|s| s.bg(cx.theme().muted))
                             .child(

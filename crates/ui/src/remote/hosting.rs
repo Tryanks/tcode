@@ -610,7 +610,7 @@ impl HostingPanel {
                     .child(
                         Input::new(&self.host_name_input)
                             .small()
-                            .rounded(crate::material::radius_input()),
+                            .rounded(crate::material::radius_input(cx)),
                     ),
             )
             .into_any_element();
@@ -687,7 +687,7 @@ impl HostingPanel {
                         .child(
                             Input::new(&self.traverse_url_input)
                                 .small()
-                                .rounded(crate::material::radius_input()),
+                                .rounded(crate::material::radius_input(cx)),
                         ),
                 )
                 .into_any_element()
@@ -813,7 +813,7 @@ pub(super) fn invitation_card<V: 'static>(
     cx: &mut Context<V>,
 ) -> AnyElement {
     let link = invitation.url();
-    let qr = qr_element(&link);
+    let qr = qr_element(&link, cx);
     let text = v_flex()
         .flex_1()
         .min_w_0()

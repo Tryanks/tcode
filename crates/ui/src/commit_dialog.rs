@@ -240,7 +240,7 @@ impl Render for CommitDialog {
                     .w_full()
                     .p_3()
                     .gap_2()
-                    .rounded(crate::material::radius_card())
+                    .rounded(crate::material::radius_card(cx))
                     .border_1()
                     .border_color(cx.theme().warning)
                     .bg(cx.theme().warning.opacity(0.08))
@@ -313,7 +313,7 @@ impl Render for CommitDialog {
             v_flex().w_full().gap_1().child(files_header).child(
                 div()
                     .w_full()
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .border_1()
                     .border_color(cx.theme().border)
                     .pt_1()
@@ -337,7 +337,7 @@ impl Render for CommitDialog {
             )
             .child(
                 Button::new("commit-regenerate")
-                    .rounded(crate::material::radius_button())
+                    .rounded(crate::material::radius_button(cx))
                     .ghost()
                     .xsmall()
                     .icon(IconName::Undo)
@@ -356,14 +356,14 @@ impl Render for CommitDialog {
                 .w_full()
                 .gap_1()
                 .child(message_header)
-                .child(Textarea::new(&self.message).rounded(crate::material::radius_input())),
+                .child(Textarea::new(&self.message).rounded(crate::material::radius_input(cx))),
         );
 
         crate::material::overlay_contour(
             div()
                 .w_full()
                 .min_w(px(520.))
-                .rounded(crate::material::radius_overlay()),
+                .rounded(crate::material::radius_overlay(cx)),
             cx,
         )
         .child(body)
