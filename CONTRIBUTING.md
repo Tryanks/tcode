@@ -50,12 +50,7 @@ is derived from it. **Process** is how to build, check and submit work.
    checked — the service never sees it; and no SLA is promised. Current status
    and plan: [#376](https://github.com/Tryanks/tcode/issues/376).
 
-6. **Orchestrate is core.** Multi-agent orchestration is a core capability and
-   keeps iterating. The long-term plan is a WASM plugin framework with
-   Orchestrate as its first plugin; the plugin API is designed first, and until
-   it exists nothing is restructured toward plugins.
-
-7. **gpui-base is the infrastructure; no house UI principles.** Tcode follows
+6. **gpui-base is the infrastructure; no house UI principles.** Tcode follows
    the recommendations and defaults of gpui-base and gpui-kit, and keeps no
    separate design contract in sync with the code. Everything gpui-base
    provides on top of GPUI — selection, scrolling, positioning, dismissal,
@@ -66,7 +61,7 @@ is derived from it. **Process** is how to build, check and submit work.
    or a default overridden, only where gpui-base demonstrably cannot meet the
    need; the site names that gap, and it is removed once gpui-base closes it.
 
-8. **Code and tests are the only source of truth.** This section is the only
+7. **Code and tests are the only source of truth.** This section is the only
    maintainer-authored text; comments, issues and other documents are derived
    from it and are corrected when they disagree with it or with the code. A
    comment is kept only when it states a constraint the code cannot express or
@@ -81,16 +76,20 @@ is derived from it. **Process** is how to build, check and submit work.
    that proves no such contract is deleted, with whatever code existed only
    to satisfy it; a test is never edited into passing.
 
-9. **Adopt upstream early; Tcode's work stays in Tcode.** Prefer an upstream's
-   experimental feature over waiting for it to mature, and never fork a
-   dependency. A suspected upstream problem may be investigated freely —
-   reading its source, building it, patching a local copy to confirm a cause —
-   and is judged by its effect on Tcode's real use. Findings are reported to
-   the maintainer or as an issue in this repository; diagnostic patches stay
-   local and are discarded, and Tcode carries the bug until upstream changes on
-   its own. Acting on an upstream — an issue, pull request, comment or patch
-   there — is never a recommendation or an option to offer: it happens only
-   when the maintainer explicitly asks for it, with the maintainer taking part
+8. **Adopt upstream early; fix what is Tcode's, carry what is upstream's.**
+   Prefer an upstream's experimental feature over waiting for it to mature,
+   and never fork a dependency. A problem whose cause lies within Tcode — its
+   code, its tests, or the way it uses a dependency — is fixed in Tcode where
+   it is found, as part of the work at hand; it is not carried, reported or
+   left for later. Only a problem whose cause lies in the upstream itself is
+   carried and reported. Such a problem may be investigated freely — reading
+   its source, building it, patching a local copy to confirm a cause — and is
+   judged by its effect on Tcode's real use. Findings are reported to the
+   maintainer or as an issue in this repository; diagnostic patches stay local
+   and are discarded, and Tcode carries the bug until upstream changes on its
+   own. Acting on an upstream — an issue, pull request, comment or patch there
+   — is never a recommendation or an option to offer: it happens only when the
+   maintainer explicitly asks for it, with the maintainer taking part
    throughout.
 
 ## Process
@@ -193,7 +192,9 @@ Work through these in order; each step ends before the next begins.
 1. **Localize.** Establish whether the cause is Tcode's code, a Tcode test, or
    the dependency. A test counts only once it drives the dependency the way
    the running app does (frames, clocks, input); a test that departs from that
-   is Tcode's to fix. A failing test is a lead, not a verdict.
+   is Tcode's to fix. A failing test is a lead, not a verdict. When the cause
+   is Tcode's, fix it now as part of the work at hand and stop here; the
+   remaining steps are only for a cause in the dependency.
 2. **Weigh the impact.** Name the builds, platforms and user paths the problem
    reaches in real use, and how it shows there. Where nothing real is reached,
    say so; that ends the matter apart from the report.
@@ -202,7 +203,7 @@ Work through these in order; each step ends before the next begins.
    The copy lives outside this repository and is deleted afterwards.
 4. **Report.** Give the maintainer — in the session, or as an issue in this
    repository when it outlives one — the cause, the evidence and the impact
-   from step 2. Principle 9 governs anything beyond this repository.
+   from step 2. Principle 8 governs anything beyond this repository.
 5. **Carry it.** Handle the problem inside Tcode at the owner of the affected
    behaviour, with a comment naming the dependency behaviour it works around,
    or leave it in place when step 2 found no real impact.
