@@ -100,7 +100,7 @@ impl Composer {
                 .ghost()
                 .compact()
                 .h(px(28.))
-                .rounded(crate::material::radius_chip())
+                .rounded(crate::material::radius_chip(cx))
                 .tooltip(tooltip)
                 .child(if preparing {
                     Spinner::new().small().color(color).into_any_element()

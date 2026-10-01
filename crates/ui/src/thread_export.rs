@@ -77,7 +77,7 @@ fn open_delivery_dialog(
         let directory = directory.clone();
         builder
             .w(px(420.))
-            .rounded(crate::material::radius_overlay())
+            .rounded(crate::material::radius_overlay(cx))
             .bg(cx.theme().popover)
             .border_1()
             .border_color(cx.theme().border)
@@ -97,13 +97,13 @@ fn open_delivery_dialog(
                 DialogActions::new()
                     .child(
                         Button::new("export-cancel")
-                            .rounded(crate::material::radius_button())
+                            .rounded(crate::material::radius_button(cx))
                             .label(crate::tr!("export.cancel"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
                         Button::new("export-copy")
-                            .rounded(crate::material::radius_button())
+                            .rounded(crate::material::radius_button(cx))
                             .label(crate::tr!("export.copy"))
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
@@ -121,7 +121,7 @@ fn open_delivery_dialog(
                         let store = download_store.clone();
                         actions.child(
                             Button::new("export-download")
-                                .rounded(crate::material::radius_button())
+                                .rounded(crate::material::radius_button(cx))
                                 .label(crate::tr!("export.download"))
                                 .on_click(move |_, window, cx| {
                                     let result = store.read(cx).deliver_artifact(
@@ -154,7 +154,7 @@ fn open_delivery_dialog(
                         let directory = directory.clone();
                         actions.child(
                             Button::new("export-save")
-                                .rounded(crate::material::radius_button())
+                                .rounded(crate::material::radius_button(cx))
                                 .primary()
                                 .label(crate::tr!("export.save"))
                                 .on_click(move |_, window, cx| {

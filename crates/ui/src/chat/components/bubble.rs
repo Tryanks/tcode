@@ -79,7 +79,7 @@ pub(crate) fn native_rewind_button(
     .disabled(disabled)
     .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)));
     Some(
-        crate::material::overlay_popover(("rewind-menu", turn))
+        crate::material::overlay_popover(("rewind-menu", turn), cx)
             .anchor(Anchor::TopRight)
             .when(compact, |popover| {
                 popover.bottom_sheet(crate::tr!("chat.rewind"))
@@ -129,7 +129,7 @@ pub(crate) fn native_rewind_button(
                         .py_1p5()
                         .gap_2()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(cx.theme().tokens.radius.sm)
                         .cursor_pointer()
                         .text_size(px(13.))
                         .hover(move |style| style.bg(accent))
@@ -248,7 +248,7 @@ pub(crate) fn user_bubble(
                     .mb(px(-2.))
                     .flex()
                     .items_center()
-                    .rounded(crate::material::radius_chip())
+                    .rounded(crate::material::radius_chip(cx))
                     .bg(cx.theme().muted)
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
@@ -268,7 +268,7 @@ pub(crate) fn user_bubble(
                     .max_w_3_4()
                     .px(px(10.))
                     .py(px(6.))
-                    .rounded(px(12.))
+                    .rounded(cx.theme().tokens.radius.lg)
                     .bg(cx.theme().foreground.opacity(0.08))
                     .when(pending, |bubble| {
                         bubble

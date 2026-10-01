@@ -165,7 +165,7 @@ impl LocalPermissions {
             .flex_none()
             .gap_2()
             .items_center()
-            .child(crate::material::semantic_chip(chip, bg, fg));
+            .child(crate::material::semantic_chip(chip, bg, fg, cx));
         if !granted {
             controls = controls
                 .child(
@@ -218,7 +218,7 @@ impl LocalPermissions {
             .w_full()
             .items_center()
             .gap_3()
-            .rounded(crate::material::radius_card())
+            .rounded(crate::material::radius_card(cx))
             .bg(cx.theme().warning.opacity(0.12))
             .px_3()
             .py_2p5()

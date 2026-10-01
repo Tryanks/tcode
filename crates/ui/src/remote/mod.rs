@@ -771,7 +771,7 @@ impl RemotePanel {
                     .child(
                         Input::new(&self.form.invitation)
                             .large()
-                            .rounded(crate::material::radius_input()),
+                            .rounded(crate::material::radius_input(cx)),
                     ),
             )
             .children(self.attempt_status(cx))

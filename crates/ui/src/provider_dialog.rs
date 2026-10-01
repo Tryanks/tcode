@@ -460,7 +460,7 @@ impl ProviderDialog {
                         .into_owned()
                         .into(),
                     Input::new(&self.display_name)
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .into_any_element(),
                     cx,
                 ),
@@ -532,7 +532,7 @@ impl ProviderDialog {
                 .into_owned()
                 .into(),
                 Input::new(&self.binary)
-                    .rounded(crate::material::radius_input())
+                    .rounded(crate::material::radius_input(cx))
                     .into_any_element(),
                 cx,
             ),
@@ -544,7 +544,7 @@ impl ProviderDialog {
                     crate::tr!(home_label).into_owned().into(),
                     crate::tr!(home_help).into_owned().into(),
                     Input::new(&self.home)
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .into_any_element(),
                     cx,
                 ),
@@ -575,7 +575,7 @@ impl ProviderDialog {
                     crate::tr!("providers.launch_args").into_owned().into(),
                     crate::tr!("providers.launch_args_help").into_owned().into(),
                     Input::new(&self.launch_args)
-                        .rounded(crate::material::radius_input())
+                        .rounded(crate::material::radius_input(cx))
                         .into_any_element(),
                     cx,
                 ),
@@ -644,37 +644,36 @@ impl ProviderDialog {
             );
         } else {
             for (index, row) in self.env_rows.iter().enumerate() {
-                block =
-                    block.child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(div().flex_1().min_w_0().child(
-                                Input::new(&row.name).rounded(crate::material::radius_input()),
-                            ))
-                            .child(div().flex_1().min_w_0().child(
-                                Input::new(&row.value).rounded(crate::material::radius_input()),
-                            ))
-                            .child(
-                                Switch::new(("env-sensitive", index))
-                                    .checked(row.sensitive)
-                                    .tooltip(crate::tr!("providers.env.sensitive"))
-                                    .on_click(cx.listener(move |this, _: &bool, window, cx| {
-                                        this.toggle_env_sensitive(index, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(("env-remove", index))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Delete)
-                                    .tooltip(crate::tr!("providers.env.remove"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.remove_env_row(index, window, cx);
-                                    })),
-                            ),
-                    );
+                block = block.child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .child(div().flex_1().min_w_0().child(
+                            Input::new(&row.name).rounded(crate::material::radius_input(cx)),
+                        ))
+                        .child(div().flex_1().min_w_0().child(
+                            Input::new(&row.value).rounded(crate::material::radius_input(cx)),
+                        ))
+                        .child(
+                            Switch::new(("env-sensitive", index))
+                                .checked(row.sensitive)
+                                .tooltip(crate::tr!("providers.env.sensitive"))
+                                .on_click(cx.listener(move |this, _: &bool, window, cx| {
+                                    this.toggle_env_sensitive(index, window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(("env-remove", index))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Delete)
+                                .tooltip(crate::tr!("providers.env.remove"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.remove_env_row(index, window, cx);
+                                })),
+                        ),
+                );
             }
         }
         block
@@ -717,11 +716,9 @@ impl ProviderDialog {
                 .pt_2()
                 .gap_2()
                 .items_center()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(&self.custom_model).rounded(crate::material::radius_input()),
-                    ),
-                )
+                .child(div().flex_1().min_w_0().child(
+                    Input::new(&self.custom_model).rounded(crate::material::radius_input(cx)),
+                ))
                 .child(
                     Button::new("add-custom-model")
                         .outline()
@@ -771,6 +768,7 @@ impl ProviderDialog {
                 crate::tr!("providers.models.custom").into_owned(),
                 cx.theme().info.opacity(0.12),
                 cx.theme().info_foreground,
+                cx,
             ));
         }
         if hidden {
@@ -778,6 +776,7 @@ impl ProviderDialog {
                 crate::tr!("providers.models.hidden").into_owned(),
                 cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
+                cx,
             ));
         }
 

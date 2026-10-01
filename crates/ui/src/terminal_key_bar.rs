@@ -210,7 +210,7 @@ impl TerminalKeyBar {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .rounded(material::radius_button())
+            .rounded(material::radius_button(cx))
             .text_size(px(13.))
             .hover(|style| style.bg(cx.theme().accent))
             .on_click(cx.listener(move |_, _, window, cx| {
@@ -240,7 +240,7 @@ impl TerminalKeyBar {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .rounded(material::radius_button())
+            .rounded(material::radius_button(cx))
             .text_size(px(12.))
             .font_medium()
             .when(selected, |style| {

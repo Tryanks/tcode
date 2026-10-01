@@ -85,7 +85,7 @@ impl RenderOnce for EditMenu {
         let on_paint = self.on_paint;
         // A T3 pill, as iOS draws its edit menu: the overlay contour at the
         // overlay radius, its items filling it edge to edge.
-        let radius = material::radius_overlay();
+        let radius = material::radius_overlay(cx);
         // Inside the hairline border, so a pressed end item's fill follows
         // the pill's corner.
         let inner_radius = radius - px(1.);

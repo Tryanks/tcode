@@ -480,7 +480,7 @@ impl OrchestrateSettingsPanel {
                     ),
             );
         let panel = cx.entity();
-        let dropdown = crate::material::overlay_popover("orchestrate-child-approval-popover")
+        let dropdown = crate::material::overlay_popover("orchestrate-child-approval-popover", cx)
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let option = |mode: ChildApprovalMode,
@@ -497,7 +497,7 @@ impl OrchestrateSettingsPanel {
                         .py_1()
                         .gap_2()
                         .items_center()
-                        .rounded(crate::material::radius_button())
+                        .rounded(crate::material::radius_button(cx))
                         .text_size(px(13.))
                         .cursor_pointer()
                         .hover(|style| style.bg(cx.theme().accent))
@@ -847,7 +847,7 @@ impl OrchestrateSettingsPanel {
                                 } else {
                                     crate::tr!("orchestrate.children.disabled")
                                 };
-                                crate::material::semantic_chip(label, bg, fg)
+                                crate::material::semantic_chip(label, bg, fg, cx)
                             })
                             .child(
                                 Switch::new(("orchestrate-child-enabled", index))
@@ -947,7 +947,7 @@ impl OrchestrateSettingsPanel {
                     .child(
                         Textarea::new(&row.description)
                             .text_sm()
-                            .rounded(crate::material::radius_input()),
+                            .rounded(crate::material::radius_input(cx)),
                     )
                     .into_any_element(),
             );

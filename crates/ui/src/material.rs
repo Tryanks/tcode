@@ -68,39 +68,39 @@ pub fn content_surface(cx: &App) -> Hsla {
     }
 }
 
-/// Popovers, menus, dialogs, toasts.
-pub fn radius_overlay() -> Pixels {
-    px(10.)
+/// Popovers, menus, dialogs, toasts: the theme's large-element radius.
+pub fn radius_overlay(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.lg
 }
 /// Cards, event cards, diff blocks.
-pub fn radius_card() -> Pixels {
-    px(10.)
+pub fn radius_card(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.md
 }
 /// Plain inputs and button-group containers.
-pub fn radius_input() -> Pixels {
-    px(8.)
+pub fn radius_input(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.md
 }
 /// Buttons.
-pub fn radius_button() -> Pixels {
-    px(8.)
+pub fn radius_button(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.md
 }
 /// Chips and compact status badges.
-pub fn radius_chip() -> Pixels {
-    px(6.)
+pub fn radius_chip(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.sm
 }
 /// Composer field corners.
-pub fn radius_composer() -> Pixels {
-    px(14.)
+pub fn radius_composer(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.lg
 }
 /// The phone's bottom sheet, top corners only.
-pub fn radius_overlay_sheet() -> Pixels {
-    px(16.)
+pub fn radius_overlay_sheet(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.xl
 }
 
 /// A T3 overlay popover: one panel surface at the overlay radius with the
 /// component library's large soft shadow.
-pub fn overlay_popover(id: impl Into<ElementId>) -> Popover {
-    Popover::new(id).rounded(radius_overlay()).shadow_xl()
+pub fn overlay_popover(id: impl Into<ElementId>, cx: &App) -> Popover {
+    Popover::new(id).rounded(radius_overlay(cx)).shadow_xl()
 }
 
 /// A 1px separator that fades out toward both ends, replacing full-bleed
@@ -137,7 +137,7 @@ pub fn overlay_contour(el: Div, cx: &App) -> Div {
 pub fn group(cx: &App) -> Div {
     v_flex()
         .w_full()
-        .rounded(radius_card())
+        .rounded(radius_card(cx))
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().popover)
@@ -312,7 +312,7 @@ pub(crate) fn segmented_track(
                 .flex_shrink_0()
                 .gap(px(2.))
                 .p(px(3.))
-                .rounded(px(10.))
+                .rounded(cx.theme().tokens.radius.md)
                 .bg(cx.theme().secondary)
                 .children(segments),
         )
@@ -342,7 +342,7 @@ pub fn segment(
         // label's default line height gave it.
         .h(px(21.))
         .px(px(6.))
-        .rounded(px(8.))
+        .rounded(cx.theme().tokens.radius.md)
         .cursor_pointer()
         .text_size(px(13.))
         .text_color(cx.theme().muted_foreground)
@@ -409,12 +409,12 @@ pub fn rail_detail(content: impl IntoElement, cx: &App) -> Div {
     )
 }
 
-pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
+pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla, cx: &App) -> Div {
     div()
         .flex_none()
         .px_2()
         .py(px(1.))
-        .rounded(radius_chip())
+        .rounded(radius_chip(cx))
         .bg(bg)
         .text_size(px(11.))
         .font_medium()
@@ -499,14 +499,14 @@ pub fn loading_skeleton(cx: &gpui::App) -> gpui::AnyElement {
                     div()
                         .w(gpui::relative(0.7))
                         .h(px(14.))
-                        .rounded(px(4.))
+                        .rounded(cx.theme().tokens.radius.sm)
                         .bg(cx.theme().secondary),
                 )
                 .child(
                     div()
                         .w(gpui::relative(0.35))
                         .h(px(11.))
-                        .rounded(px(4.))
+                        .rounded(cx.theme().tokens.radius.sm)
                         .bg(cx.theme().secondary),
                 )
         }))

@@ -125,7 +125,7 @@ pub(crate) fn error_card(
     h_flex()
         .w_full()
         .items_stretch()
-        .rounded(crate::material::radius_card())
+        .rounded(crate::material::radius_card(cx))
         .overflow_hidden()
         .border_1()
         .border_color(danger.opacity(0.22))
