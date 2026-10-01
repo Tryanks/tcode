@@ -54,7 +54,7 @@ impl Composer {
                         .child(picker_current.clone())
                         .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
                 );
-            crate::material::overlay_popover("branch-popover")
+            crate::material::overlay_popover("branch-popover", cx)
                 .anchor(Anchor::BottomRight)
                 .trigger(trigger)
                 .on_open_change(move |open, _window, cx| {
@@ -189,7 +189,7 @@ impl Composer {
                     .child(label)
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
-        crate::material::overlay_popover("workspace-popover")
+        crate::material::overlay_popover("workspace-popover", cx)
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_state, _window, cx| {
@@ -209,7 +209,7 @@ impl Composer {
                         .py_1p5()
                         .gap_2()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(cx.theme().tokens.radius.sm)
                         .cursor_pointer()
                         .text_size(px(13.))
                         .hover(|s| s.bg(cx.theme().muted))
@@ -293,7 +293,7 @@ fn branch_row(
                 .py_1p5()
                 .gap_2()
                 .items_center()
-                .rounded(px(6.))
+                .rounded(cx.theme().tokens.radius.sm)
                 .cursor_pointer()
                 .text_size(px(13.))
                 .hover(|s| s.bg(cx.theme().muted))

@@ -51,7 +51,7 @@ pub(super) fn badge(
     let hover = cx.theme().secondary_active;
     let tooltip_url = url.clone();
     let badge = Button::new(("markdown-image-link", ix))
-        .rounded(px(8.))
+        .rounded(cx.theme().tokens.radius.md)
         .h(px(badge_height))
         .px_2()
         .gap_1()

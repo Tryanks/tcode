@@ -312,7 +312,7 @@ impl Render for Notification {
             .occlude()
             .w_full()
             .p_4()
-            .rounded(crate::material::radius_overlay())
+            .rounded(crate::material::radius_overlay(cx))
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)

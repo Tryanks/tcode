@@ -1043,7 +1043,7 @@ fn render_code_block(
         rendered_lines.push(line);
         offset = end.saturating_add(1);
     }
-    let radius = cx.theme().radius;
+    let radius = cx.theme().tokens.radius.md;
     div()
         .id(span_id(&options.path, &span))
         .when(last && !options.is_last, |block| block.pb(rems(1.)))
@@ -1207,7 +1207,7 @@ fn render_scroll_table(
         .w(px(total_width))
         .border_1()
         .border_color(cx.theme().border)
-        .rounded(cx.theme().radius)
+        .rounded(cx.theme().tokens.radius.md)
         .overflow_hidden()
         .children(rows);
     #[cfg(test)]

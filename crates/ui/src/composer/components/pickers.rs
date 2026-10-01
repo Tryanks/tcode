@@ -209,7 +209,7 @@ impl Composer {
             .h(px(28.))
             .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
             .disabled(!self.interactive(cx))
-            .rounded(crate::material::radius_input())
+            .rounded(crate::material::radius_input(cx))
             .child(
                 h_flex()
                     .when(self.compact || store.native_subagent_readonly(), |el| {
@@ -241,7 +241,7 @@ impl Composer {
         // field asks for the keyboard.
         let search_focus = (!crate::window_seam::is_mobile(cx))
             .then(|| self.model_search.read(cx).focus_handle(cx));
-        crate::material::overlay_popover(("model-picker-popover", self.model_picker_token))
+        crate::material::overlay_popover(("model-picker-popover", self.model_picker_token), cx)
             .when_some(search_focus, |popover, focus| popover.track_focus(&focus))
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
@@ -362,7 +362,7 @@ impl Composer {
             .h(px(28.))
             .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
             .disabled(!self.interactive(cx))
-            .rounded(crate::material::radius_chip())
+            .rounded(crate::material::radius_chip(cx))
             .child(
                 h_flex()
                     .gap_1p5()
@@ -376,7 +376,7 @@ impl Composer {
         let store_entity = self.workspace_store.clone();
         let composer_entity = cx.entity();
         let context_window_custom = self.context_window_custom.clone();
-        crate::material::overlay_popover("traits-popover")
+        crate::material::overlay_popover("traits-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))
@@ -435,7 +435,7 @@ impl Composer {
             .h(px(28.))
             .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
             .disabled(!self.interactive(cx))
-            .rounded(crate::material::radius_chip())
+            .rounded(crate::material::radius_chip(cx))
             .tooltip(tooltip)
             .child(
                 h_flex()
@@ -480,14 +480,14 @@ impl Composer {
             .h(px(28.))
             .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
             .disabled(!self.interactive(cx))
-            .rounded(crate::material::radius_chip())
+            .rounded(crate::material::radius_chip(cx))
             .child(div().size(px(16.)).child(crate::widgets::ring::ring_canvas(
                 pct.unwrap_or(0.0),
                 ring_color,
                 track,
             )));
 
-        crate::material::overlay_popover("context-popover")
+        crate::material::overlay_popover("context-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("composer.context_window_title"))
@@ -517,7 +517,7 @@ impl Composer {
             .h(px(28.))
             .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
             .disabled(!self.interactive(cx))
-            .rounded(crate::material::radius_input())
+            .rounded(crate::material::radius_input(cx))
             .child(
                 h_flex()
                     .min_w_0()
@@ -534,7 +534,7 @@ impl Composer {
         let store_entity = self.workspace_store.clone();
         let compact = self.compact;
         let pending_restart = composer.approval_pending_restart;
-        crate::material::overlay_popover("permission-popover")
+        crate::material::overlay_popover("permission-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.approval_mode"))
@@ -569,7 +569,7 @@ impl Composer {
             .aria_label(crate::tr!("attach.add").into_owned())
             .child(Icon::new(IconName::Plus).small().text_color(muted));
 
-        crate::material::overlay_popover("attach-popover")
+        crate::material::overlay_popover("attach-popover", cx)
             .anchor(Anchor::BottomLeft)
             .bottom_sheet(crate::tr!("attach.add"))
             .trigger(trigger)
@@ -590,7 +590,7 @@ impl Composer {
                             .py_1p5()
                             .gap_1p5()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded(cx.theme().tokens.radius.sm)
                             .cursor_pointer()
                             .text_size(px(13.))
                             .text_color(muted)
@@ -629,7 +629,7 @@ impl Composer {
             .tooltip(crate::tr!("composer.more_controls"))
             .child(Icon::new(IconName::Ellipsis).small().text_color(muted));
 
-        crate::material::overlay_popover("overflow-popover")
+        crate::material::overlay_popover("overflow-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("composer.more_controls"))
@@ -682,7 +682,7 @@ fn render_model_pane(
         crate::material::tab(id, label.clone(), active, cx)
             .flex_none()
             .size(px(if compact { 44. } else { 28. }))
-            .rounded(px(6.))
+            .rounded(cx.theme().tokens.radius.sm)
             .when(active, |s| s.bg(cx.theme().muted))
             .hover(|s| s.bg(cx.theme().muted))
             .tooltip(move |window, cx| {
@@ -870,7 +870,7 @@ fn render_model_pane(
         .when(composer.read(cx).compact, |pane| pane.w_full())
         .h(px(360.))
         .items_stretch()
-        .rounded(crate::material::radius_card())
+        .rounded(crate::material::radius_card(cx))
         .overflow_hidden()
         .on_key_down(move |ev, window, cx| {
             if !ev.keystroke.modifiers.secondary() {
@@ -1074,7 +1074,7 @@ fn render_model_row(
         .py_1()
         .gap_2()
         .items_center()
-        .rounded(crate::material::radius_chip())
+        .rounded(crate::material::radius_chip(cx))
         .cursor_pointer()
         .when(is_current, |row| row.bg(cx.theme().list_active))
         .hover(|s| s.bg(cx.theme().muted))
@@ -1147,7 +1147,7 @@ fn render_model_row(
                     .flex_none()
                     .px_1()
                     .py(px(1.))
-                    .rounded(px(4.))
+                    .rounded(cx.theme().tokens.radius.sm)
                     .border_1()
                     .border_color(cx.theme().border)
                     .text_size(px(11.))
@@ -1176,7 +1176,7 @@ fn render_model_row(
                     .items_center()
                     .justify_center()
             })
-            .rounded(px(4.))
+            .rounded(cx.theme().tokens.radius.sm)
             .cursor_pointer()
             .hover(|s| s.bg(cx.theme().accent))
             .child(
@@ -1262,7 +1262,7 @@ fn render_permission_pane(
                 .py_1()
                 .gap_2()
                 .items_start()
-                .rounded(crate::material::radius_chip())
+                .rounded(crate::material::radius_chip(cx))
                 .when(is_current, |row| row.bg(cx.theme().list_active))
                 .when(is_disabled, |row| row.opacity(0.55))
                 .when(!is_disabled, |row| {
@@ -1449,7 +1449,7 @@ fn render_traits_pane(
                             .py_1p5()
                             .gap_2()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded(cx.theme().tokens.radius.sm)
                             .cursor_pointer()
                             .text_size(px(13.))
                             .hover(|s| s.bg(cx.theme().muted))
@@ -1499,7 +1499,7 @@ fn render_traits_pane(
                                 .py_1p5()
                                 .gap_2()
                                 .items_center()
-                                .rounded(px(6.))
+                                .rounded(cx.theme().tokens.radius.sm)
                                 .cursor_pointer()
                                 .text_size(px(13.))
                                 .hover(|s| s.bg(cx.theme().muted))
@@ -1561,7 +1561,7 @@ fn render_traits_pane(
                             .py_1p5()
                             .gap_2()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded(cx.theme().tokens.radius.sm)
                             .cursor_pointer()
                             .text_size(px(13.))
                             .hover(|s| s.bg(cx.theme().muted))
@@ -1712,7 +1712,7 @@ fn render_overflow_pane(
             .py_1p5()
             .gap_1p5()
             .items_center()
-            .rounded(px(6.))
+            .rounded(cx.theme().tokens.radius.sm)
             .text_size(px(13.))
             .text_color(muted)
             .child(icon.small().text_color(muted))
@@ -1751,7 +1751,7 @@ fn render_overflow_pane(
                 .py_1p5()
                 .gap_1p5()
                 .items_center()
-                .rounded(px(6.))
+                .rounded(cx.theme().tokens.radius.sm)
                 .cursor_pointer()
                 .text_size(px(13.))
                 .text_color(muted)
@@ -1997,7 +1997,7 @@ mod sheet_tests {
             let store = self.store.clone();
             let context = self.context;
             div().size_full().p_4().child(
-                crate::material::overlay_popover("picker-regression")
+                crate::material::overlay_popover("picker-regression", cx)
                     .when(compact, |popover| popover.bottom_sheet("Details"))
                     .trigger(
                         Button::new("open")

@@ -144,7 +144,7 @@ impl RenderOnce for Kbd {
             .px_1()
             .min_w_5()
             .text_center()
-            .rounded(cx.theme().radius * 0.5)
+            .rounded(cx.theme().tokens.radius.sm)
             .line_height(relative(1.))
             .text_xs()
             .whitespace_normal()

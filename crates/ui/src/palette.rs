@@ -647,7 +647,7 @@ impl CommandPalette {
                     .px_2()
                     .gap_2()
                     .items_center()
-                    .rounded(px(6.))
+                    .rounded(cx.theme().tokens.radius.sm)
                     .cursor_pointer()
                     .when(is_sel, |s| s.bg(cx.theme().list_active))
                     .when(!is_sel, |s| {
@@ -786,10 +786,10 @@ impl Render for CommandPalette {
                 })
                 .h(px(440.).min(available))
                 .when(compact, |card| {
-                    card.rounded_t(crate::material::radius_overlay_sheet())
+                    card.rounded_t(crate::material::radius_overlay_sheet(cx))
                 })
                 .when(!compact, |card| {
-                    card.rounded(crate::material::radius_overlay())
+                    card.rounded(crate::material::radius_overlay(cx))
                 })
                 .overflow_hidden(),
             cx,
@@ -806,7 +806,7 @@ impl Render for CommandPalette {
                     div().flex_1().child(
                         Input::new(&self.query)
                             .appearance(false)
-                            .rounded(crate::material::radius_input()),
+                            .rounded(crate::material::radius_input(cx)),
                     ),
                 ),
         )

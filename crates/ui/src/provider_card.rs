@@ -260,7 +260,7 @@ impl ProviderCard {
                         div()
                             .id("reveal-email")
                             .px_1()
-                            .rounded(crate::material::radius_button())
+                            .rounded(crate::material::radius_button(cx))
                             .cursor_pointer()
                             .hover(|s| s.bg(cx.theme().accent))
                             .child(shown)
@@ -302,7 +302,7 @@ impl ProviderCard {
             .and_then(|v| v.update_command_summary.clone());
         let store = self.store.clone();
 
-        crate::material::overlay_popover("update-popover")
+        crate::material::overlay_popover("update-popover", cx)
             .p_3()
             .trigger(
                 Button::new("update-available")
@@ -371,7 +371,7 @@ impl ProviderCard {
                                 .w_full()
                                 .gap_1()
                                 .items_center()
-                                .rounded(crate::material::radius_input())
+                                .rounded(crate::material::radius_input(cx))
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .bg(cx.theme().muted)

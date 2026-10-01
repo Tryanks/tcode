@@ -112,7 +112,7 @@ impl RenderOnce for Checkbox {
                     .size(indicator_size)
                     .flex_shrink_0()
                     .border_1()
-                    .rounded(cx.theme().radius.min(px(4.)))
+                    .rounded(cx.theme().tokens.radius.sm)
                     .bg(cx.theme().background)
                     .border_color(cx.theme().input)
                     .styles(|styles| {

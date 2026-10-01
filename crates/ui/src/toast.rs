@@ -97,7 +97,7 @@ pub fn notification(
                             .id(("toast-detail-scroll", id as usize))
                             .max_h_40()
                             .p_2()
-                            .rounded(crate::material::radius_input())
+                            .rounded(crate::material::radius_input(cx))
                             .bg(cx.theme().muted)
                             .text_xs()
                             .font_family(cx.theme().mono_font_family.clone())

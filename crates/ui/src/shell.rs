@@ -1316,7 +1316,7 @@ fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Statef
         .pr(px(10.))
         .gap(px(2.))
         .items_center()
-        .rounded(px(12.))
+        .rounded(cx.theme().tokens.radius.lg)
         .cursor_pointer()
         .text_color(cx.theme().foreground)
         .active(|s| s.bg(cx.theme().foreground.opacity(0.08)))
@@ -1353,7 +1353,7 @@ fn nav_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(12.))
+        .rounded(cx.theme().tokens.radius.lg)
         .cursor_pointer()
         .text_color(if enabled {
             theme.foreground

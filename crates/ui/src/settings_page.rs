@@ -842,7 +842,7 @@ impl SettingsPage {
             .justify_start()
             .gap_2()
             .px_2()
-            .rounded(px(6.))
+            .rounded(cx.theme().tokens.radius.sm)
             .when(active, |s| s.bg(cx.theme().list_active))
             .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
             .child(Icon::new(section.icon()).size_4().text_color(fg))
@@ -1607,7 +1607,7 @@ impl SettingsPage {
                     .child(
                         Input::new(&self.device_name_input.state)
                             .small()
-                            .rounded(crate::material::radius_input()),
+                            .rounded(crate::material::radius_input(cx)),
                     ),
             )
             .into_any_element()
@@ -1638,7 +1638,7 @@ impl SettingsPage {
             .child(
                 Input::new(&self.remote_attachment_limit_input.state)
                     .w(px(72.))
-                    .rounded(crate::material::radius_input()),
+                    .rounded(crate::material::radius_input(cx)),
             )
             .into_any_element()
     }
@@ -1648,7 +1648,7 @@ impl SettingsPage {
         let version = status.latest.unwrap_or_default();
         let release_url = status.release_url.unwrap_or_default();
 
-        crate::material::overlay_popover("tcode-update-popover")
+        crate::material::overlay_popover("tcode-update-popover", cx)
             .p_3()
             .trigger(
                 Button::new("tcode-update-available")
@@ -1916,6 +1916,7 @@ impl SettingsPage {
                     crate::usage::plan_label(&plan),
                     cx.theme().muted,
                     muted,
+                    cx,
                 ))
             })
             .into_any_element()
@@ -2070,7 +2071,7 @@ impl SettingsPage {
                 .child(
                     Input::new(&self.auto_archive_idle_input.state)
                         .w(px(72.))
-                        .rounded(crate::material::radius_input()),
+                        .rounded(crate::material::radius_input(cx)),
                 )
                 .into_any_element(),
             self.row_frame(cx)
@@ -2083,7 +2084,7 @@ impl SettingsPage {
                 .child(
                     Input::new(&self.auto_archive_keep_input.state)
                         .w(px(72.))
-                        .rounded(crate::material::radius_input()),
+                        .rounded(crate::material::radius_input(cx)),
                 )
                 .into_any_element(),
         ];
@@ -2490,7 +2491,7 @@ impl SettingsPage {
                 div().w(px(240.)).child(
                     Input::new(&self.home_url_input.state)
                         .small()
-                        .rounded(crate::material::radius_input()),
+                        .rounded(crate::material::radius_input(cx)),
                 ),
             )
             .into_any_element()
@@ -2804,7 +2805,7 @@ impl SettingsPage {
         let page = cx.entity();
         let on_select = Rc::new(on_select);
         let menu_label = title.clone();
-        let dropdown = crate::material::overlay_popover(popover_id)
+        let dropdown = crate::material::overlay_popover(popover_id, cx)
             .trigger(trigger)
             .content(move |_, _, cx| {
                 v_flex()
@@ -2830,7 +2831,7 @@ impl SettingsPage {
                         .w_full()
                         .px_2()
                         .gap_2()
-                        .rounded(crate::material::radius_button())
+                        .rounded(crate::material::radius_button(cx))
                         .cursor_pointer()
                         .hover(|s| s.bg(cx.theme().accent));
                         let item = if let Some(description) = option.description {

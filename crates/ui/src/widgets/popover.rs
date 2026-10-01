@@ -185,7 +185,7 @@ impl RenderOnce for Popover {
                     .occlude()
                     .when(appearance, |el| {
                         el.p_1()
-                            .rounded(crate::material::radius_overlay())
+                            .rounded(crate::material::radius_overlay(cx))
                             .bg(cx.theme().popover)
                             .border_1()
                             .border_color(cx.theme().border)
@@ -263,7 +263,7 @@ impl Popover {
                 .max_w(viewport.width)
                 .flex_none()
                 .max_h(max_height)
-                .rounded_t(crate::material::radius_overlay_sheet())
+                .rounded_t(crate::material::radius_overlay_sheet(cx))
                 .bg(cx.theme().popover)
                 .border_t_1()
                 .border_color(cx.theme().border)
