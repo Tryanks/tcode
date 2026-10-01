@@ -965,19 +965,19 @@ fn render_compact_model_footer(
         .px(px(16.))
         .pt(px(12.));
     if let Some((label, options, current)) = effort {
-        let mut track = crate::material::segmented_track("compact-effort", cx);
-        for option in options {
-            let selected = current.as_deref() == Some(option.value.as_str());
-            let store = store_entity.clone();
-            let value = option.value.clone();
-            track = track.child(
+        let segments = options
+            .iter()
+            .map(|option| {
+                let selected = current.as_deref() == Some(option.value.as_str());
+                let store = store_entity.clone();
+                let value = option.value.clone();
                 crate::material::segment(
                     gpui::SharedString::from(format!("compact-effort-{}", option.value)),
                     option.label.clone(),
                     selected,
                     cx,
                 )
-                .on_click(move |_, _, cx| {
+                .on_change(move |_, _, _, cx| {
                     let value = value.clone();
                     store.update(cx, |store, _cx| {
                         store.set_active_option(
@@ -985,37 +985,38 @@ fn render_compact_model_footer(
                             Some(serde_json::Value::String(value)),
                         );
                     });
-                }),
-            );
-        }
+                })
+            })
+            .collect::<Vec<_>>();
+        let track = crate::material::segmented_track("compact-effort", segments, cx);
         footer = footer.child(group(label.into(), track, cx));
     }
 
     let current = composer_state.approval_mode;
     let enabled = composer_state.native_approval_modes_enabled;
-    let mut track = crate::material::segmented_track("compact-approval", cx);
-    for (mode, label, _, _) in APPROVAL_MODES {
-        let disabled = !enabled
-            && matches!(
-                mode,
-                ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
-            );
-        let store = store_entity.clone();
-        track = track.child(
+    let segments = APPROVAL_MODES
+        .iter()
+        .map(|(mode, label, _, _)| {
+            let mode = *mode;
+            let disabled = !enabled
+                && matches!(
+                    mode,
+                    ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
+                );
+            let store = store_entity.clone();
             crate::material::segment(
                 gpui::SharedString::from(format!("compact-approval-{label}")),
                 crate::tr!(label).into_owned(),
                 mode == current,
                 cx,
             )
-            .when(disabled, |segment| segment.opacity(0.55))
-            .when(!disabled, |segment| {
-                segment.on_click(move |_, _, cx| {
-                    store.update(cx, |store, _cx| store.set_active_approval_mode(mode));
-                })
-            }),
-        );
-    }
+            .disabled(disabled)
+            .on_change(move |_, _, _, cx| {
+                store.update(cx, |store, _cx| store.set_active_approval_mode(mode));
+            })
+        })
+        .collect::<Vec<_>>();
+    let track = crate::material::segmented_track("compact-approval", segments, cx);
     footer
         .child(group(
             crate::tr!("mobile.approval_mode").into_owned().into(),
