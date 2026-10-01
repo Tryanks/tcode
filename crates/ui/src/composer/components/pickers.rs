@@ -679,15 +679,10 @@ fn render_model_pane(
                      cx: &mut Context<PopoverState>|
      -> AnyElement {
         let composer = composer.clone();
-        crate::material::accessible_clickable(div(), id, Role::Tab, label.clone(), cx)
-            .aria_selected(active)
+        crate::material::tab(id, label.clone(), active, cx)
             .flex_none()
             .size(px(if compact { 44. } else { 28. }))
-            .flex()
-            .items_center()
-            .justify_center()
             .rounded(px(6.))
-            .cursor_pointer()
             .when(active, |s| s.bg(cx.theme().muted))
             .hover(|s| s.bg(cx.theme().muted))
             .tooltip(move |window, cx| {
@@ -707,14 +702,22 @@ fn render_model_pane(
             .into_any_element()
     };
 
-    let mut rail_col = v_flex().w_full().py_2().px_1p5().gap_1().child(rail_icon(
-        "rail-fav".into(),
-        crate::tr!("composer.favorites").into_owned().into(),
-        Icon::new(IconName::Star),
-        rail == PickerRail::Favorites,
-        PickerRail::Favorites,
-        cx,
-    ));
+    let mut rail_col = gpui_base::Tabs::new("model-provider-rail-tabs")
+        .flex()
+        .flex_col()
+        .aria_label(crate::tr!("composer.model_sources"))
+        .w_full()
+        .py_2()
+        .px_1p5()
+        .gap_1()
+        .child(rail_icon(
+            "rail-fav".into(),
+            crate::tr!("composer.favorites").into_owned().into(),
+            Icon::new(IconName::Star),
+            rail == PickerRail::Favorites,
+            PickerRail::Favorites,
+            cx,
+        ));
     // One entry per *enabled* native profile: every built-in plus any
     // user-created profiles whose switch is on. Each is its own rail.
     let profile_ids: Vec<String> = {
@@ -754,8 +757,6 @@ fn render_model_pane(
     }
     let rail = div()
         .id("model-provider-rail")
-        .role(Role::TabList)
-        .aria_label(crate::tr!("composer.model_sources"))
         .flex_none()
         .w(px(if compact { 56. } else { 44. }))
         .h_full()

@@ -695,15 +695,12 @@ impl DiffPanel {
                    label: gpui::SharedString,
                    is_active: bool,
                    cx: &mut Context<Self>|
-         -> gpui::Stateful<gpui::Div> {
-            material::accessible_clickable(h_flex(), id, Role::Tab, label.clone(), cx)
-                .aria_selected(is_active)
+         -> gpui_base::Tab {
+            material::tab(id, label.clone(), is_active, cx)
                 .h(px(28.))
                 .px_2p5()
                 .gap_1p5()
-                .items_center()
                 .rounded(material::radius_button())
-                .cursor_pointer()
                 .text_size(px(13.))
                 .font_medium()
                 .when(is_active, |s| s.bg(tab_active))
@@ -714,10 +711,10 @@ impl DiffPanel {
                 .child(label)
         };
 
-        h_flex()
-            .id("right-panel-tabs")
+        gpui_base::Tabs::new("right-panel-tabs")
+            .flex()
+            .items_center()
             .debug_selector(|| "right-panel-tabs".into())
-            .role(Role::TabList)
             .aria_label(crate::tr!("diff.panel_tabs"))
             .flex_none()
             .h(px(if hosts_caption {
