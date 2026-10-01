@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::attachments::{TransferVerdict, transfer_verdict};
 use crate::thread_export::format_size;
+use crate::widgets::menu::ContextMenuExt as _;
 use image::GenericImageView as _;
 use std::cell::RefCell;
 use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_IMAGES, MAX_SOURCE_BYTES};
@@ -459,6 +460,7 @@ impl Composer {
         let mut row = h_flex().w_full().gap_1().flex_wrap();
         for (index, image) in self.pending_images.iter().enumerate() {
             let path = image.path.clone();
+            let menu_path = path.to_string_lossy().into_owned();
             let name = image.name.clone();
             row = row.child(
                 h_flex()
@@ -510,7 +512,20 @@ impl Composer {
                                 cx.stop_propagation();
                                 this.remove_image(index, cx);
                             })),
-                    ),
+                    )
+                    .context_menu(move |menu, _, _| {
+                        menu.menu(
+                            crate::tr!("markdown.open_image").into_owned(),
+                            Box::new(ComposerMenu::ImageOpen(index)),
+                        )
+                        .separator()
+                        .path_items(&menu_path, None)
+                        .separator()
+                        .menu(
+                            crate::tr!("composer.remove_image").into_owned(),
+                            Box::new(ComposerMenu::ImageRemove(index)),
+                        )
+                    }),
             );
         }
         Some(row.into_any_element())

@@ -1,14 +1,17 @@
+use std::path::Path;
 use std::rc::Rc;
 
 use gpui::{
-    Action, Anchor, AnyElement, App, AppContext as _, Context, DismissEvent, ElementId, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, RenderOnce, Role, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, deferred, div,
-    prelude::FluentBuilder, px,
+    Action, Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent,
+    ElementId, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, RenderOnce,
+    Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    Window, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
+use serde::Deserialize;
 
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::{
     icon::{Icon, IconName},
     scroll::ScrollableElement as _,
@@ -17,6 +20,37 @@ use crate::{
 };
 
 const CONTEXT: &str = "TcodePopupMenu";
+
+/// The actions every context menu can offer without its surface wiring a
+/// handler: each [`ContextMenu`] trigger handles them, so a menu item built
+/// anywhere resolves at the nearest trigger above it.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_menu, no_json)]
+pub struct CopyText(pub String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_menu, no_json)]
+pub struct OpenUrl(pub String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_menu, no_json)]
+pub struct OpenPath(pub String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_menu, no_json)]
+pub struct OpenPathInZed(pub String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_menu, no_json)]
+pub struct RevealPath(pub String);
+
+/// Launching an editor is the client's own process work, so it is injected
+/// through the client host rather than linked here. A client without one (a
+/// phone, a browser) reports that plainly.
+pub fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
+    if !matches!(crate::remote::open_in_editor(path, cx), Some(Ok(()))) {
+        window.push_notification(
+            Notification::error(crate::tr!("errors.zed_cli_missing")),
+            cx,
+        );
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -121,6 +155,56 @@ impl PopupMenu {
             self.items.push(MenuItem::Separator);
         }
         self
+    }
+    /// What a file path offers wherever one appears: open it, open it in
+    /// Zed, reveal it, and copy it absolute or relative to `base_dir`.
+    pub fn path_items(self, path: &str, base_dir: Option<&Path>) -> Self {
+        let relative = base_dir
+            .map(|base_dir| crate::workspace_walk::relativize_to_workspace(path, base_dir))
+            .filter(|relative| relative != path);
+        self.menu(
+            crate::tr!("chat.open").into_owned(),
+            Box::new(OpenPath(path.to_string())),
+        )
+        .menu(
+            crate::tr!("chat.open_zed").into_owned(),
+            Box::new(OpenPathInZed(path.to_string())),
+        )
+        .menu(
+            crate::tr!("chat.reveal_in_file_manager").into_owned(),
+            Box::new(RevealPath(path.to_string())),
+        )
+        .separator()
+        .menu(
+            crate::tr!("chat.copy_path").into_owned(),
+            Box::new(CopyText(path.to_string())),
+        )
+        .when_some(relative, |menu, relative| {
+            menu.menu(
+                crate::tr!("markdown.path_copy_relative").into_owned(),
+                Box::new(CopyText(relative)),
+            )
+        })
+    }
+    /// Copy and Select All for read-only text in the window selection. Copy
+    /// goes through the root's `Copy`, which reads the window selection, so
+    /// it is enabled only while something is selected; Select All dispatches
+    /// to the surface that owns the text and is offered when `select_all`.
+    pub fn selection_items(self, select_all: bool, window: &mut Window, cx: &mut App) -> Self {
+        let has_selection = !gpui_base::TextSelection::selected_text(window, cx)
+            .trim()
+            .is_empty();
+        self.menu_with_enable(
+            crate::tr!("edit_menu.copy").into_owned(),
+            Box::new(gpui_base::input::Copy),
+            has_selection,
+        )
+        .when(select_all, |menu| {
+            menu.menu(
+                crate::tr!("edit_menu.select_all").into_owned(),
+                Box::new(gpui_base::input::SelectAll),
+            )
+        })
     }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
@@ -457,14 +541,25 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                 });
             },
         );
-        let mut trigger = self.trigger.on_mouse_down(MouseButton::Right, {
-            let state = state.clone();
-            let open = open.clone();
-            move |event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                open(event.position, state.clone(), window, cx);
-            }
-        });
+        let mut trigger = self
+            .trigger
+            .on_mouse_down(MouseButton::Right, {
+                let state = state.clone();
+                let open = open.clone();
+                move |event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    open(event.position, state.clone(), window, cx);
+                }
+            })
+            .on_action(|action: &CopyText, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
+            })
+            .on_action(|action: &OpenUrl, _, cx| cx.open_url(&action.0))
+            .on_action(|action: &OpenPath, _, cx| cx.open_with_system(Path::new(&action.0)))
+            .on_action(|action: &OpenPathInZed, window, cx| {
+                open_in_zed(Path::new(&action.0), window, cx)
+            })
+            .on_action(|action: &RevealPath, _, cx| cx.reveal_path(Path::new(&action.0)));
         if touch {
             let state = state.clone();
             trigger = trigger.child(

@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::scroll::ScrollableElement as _;
+use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 #[cfg(not(target_family = "wasm"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_family = "wasm")]
@@ -147,7 +148,40 @@ impl Composer {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.drop_queued_and_refill(id, text.clone(), window, cx);
                             })),
-                    ),
+                    )
+                    .context_menu({
+                        let text = message.text.clone();
+                        let interactive = self.interactive(cx);
+                        move |menu, _, _| {
+                            menu.menu(
+                                crate::tr!("chat.copy_text").into_owned(),
+                                Box::new(CopyText(text.clone())),
+                            )
+                            .separator()
+                            .menu_with_enable(
+                                if scheduled {
+                                    crate::tr!("composer.send_now").into_owned()
+                                } else {
+                                    crate::tr!("composer.steer_queued").into_owned()
+                                },
+                                Box::new(ComposerMenu::QueueSteer(id)),
+                                interactive && (scheduled || can_steer),
+                            )
+                            .menu_with_enable(
+                                crate::tr!("composer.edit_queued").into_owned(),
+                                Box::new(ComposerMenu::QueueEdit {
+                                    id,
+                                    text: text.clone(),
+                                }),
+                                interactive,
+                            )
+                            .menu_with_enable(
+                                crate::tr!("composer.drop_queued").into_owned(),
+                                Box::new(ComposerMenu::QueueDrop(id)),
+                                interactive,
+                            )
+                        }
+                    }),
             );
         }
         Some(

@@ -1,9 +1,11 @@
 //! Proposed-plan Markdown and structured task steps, hosted beside the diff view.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::menu::PopupMenu;
 use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
@@ -11,17 +13,56 @@ use crate::{
 };
 use agent::{PlanStep, PlanStepStatus};
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, px,
+    Action, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
+use serde::Deserialize;
 
 use tcode_core::session::plan_title;
 
-use crate::markdown::{MarkdownState, MarkdownView};
+use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 use crate::material;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+
+/// A proposed plan's context-menu action: the same three its buttons offer,
+/// here and on the chat's plan card.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_plan, no_json)]
+pub(crate) struct PlanMenu {
+    pub(crate) markdown: String,
+    pub(crate) kind: PlanMenuKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(crate) enum PlanMenuKind {
+    Copy,
+    Download,
+    Save,
+}
+
+/// The plan's actions as menu items, for the Markdown that shows it and the
+/// margin around it.
+pub(crate) fn plan_menu_items(markdown: String) -> MenuExtension {
+    Rc::new(move |menu: PopupMenu, _: &mut Window, _: &mut App| {
+        [
+            ("plan.copy", PlanMenuKind::Copy),
+            ("plan.download", PlanMenuKind::Download),
+            ("plan.save_workspace", PlanMenuKind::Save),
+        ]
+        .into_iter()
+        .fold(menu, |menu, (key, kind)| {
+            menu.menu(
+                crate::tr!(key).into_owned(),
+                Box::new(PlanMenu {
+                    markdown: markdown.clone(),
+                    kind,
+                }),
+            )
+        })
+    })
+}
 
 pub struct PlanPanel {
     store: Entity<WorkspaceStore>,
@@ -85,6 +126,7 @@ impl PlanPanel {
             plan_title(&markdown).unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned());
         let md_state = self.sync_markdown(&markdown, cx);
         let copied = self.copied;
+        let menu_items = plan_menu_items(markdown.clone());
 
         let md_copy = markdown.clone();
         let md_download = markdown.clone();
@@ -126,7 +168,11 @@ impl PlanPanel {
                     .min_w_0()
                     .text_size(px(13.))
                     .line_height(px(20.))
-                    .child(MarkdownView::new(&md_state).selectable(true)),
+                    .child(
+                        MarkdownView::new(&md_state)
+                            .selectable(true)
+                            .menu_extension(menu_items),
+                    ),
             )
             .child(
                 h_flex()
@@ -181,6 +227,26 @@ impl PlanPanel {
             )
             .child(material::faded_hairline(cx))
             .into_any_element()
+    }
+
+    fn on_plan_menu(&mut self, action: &PlanMenu, _: &mut Window, cx: &mut Context<Self>) {
+        let markdown = action.markdown.clone();
+        match action.kind {
+            PlanMenuKind::Copy => {
+                self.store
+                    .update(cx, |store, _cx| store.copy_plan(markdown));
+                self.mark_copied(cx);
+            }
+            PlanMenuKind::Download => {
+                let fallback = crate::tr!("plan.proposed_plan").into_owned();
+                self.store
+                    .update(cx, |store, _cx| store.download_plan(markdown, fallback));
+            }
+            PlanMenuKind::Save => {
+                self.store
+                    .update(cx, |store, _cx| store.save_plan_to_workspace(markdown));
+            }
+        }
     }
 
     fn render_steps(&self, steps: &[PlanStep], cx: &mut Context<Self>) -> AnyElement {
@@ -293,17 +359,20 @@ impl Render for PlanPanel {
             column = column.child(self.render_steps(&steps, cx));
         }
 
-        v_flex().size_full().child(crate::scroll::page_viewport(
-            "plan-scroll-bounce",
-            crate::wheel_easing::Handle::Scroll(self.vscroll.clone()),
-            div()
-                .id("plan-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .lock_scroll_axis()
-                .track_scroll(&self.vscroll)
-                .child(column),
-        ))
+        v_flex()
+            .size_full()
+            .on_action(cx.listener(Self::on_plan_menu))
+            .child(crate::scroll::page_viewport(
+                "plan-scroll-bounce",
+                crate::wheel_easing::Handle::Scroll(self.vscroll.clone()),
+                div()
+                    .id("plan-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .lock_scroll_axis()
+                    .track_scroll(&self.vscroll)
+                    .child(column),
+            ))
     }
 }

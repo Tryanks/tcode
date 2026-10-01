@@ -1,4 +1,5 @@
 use crate::theme::ActiveTheme as _;
+use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
@@ -180,7 +181,47 @@ pub(crate) fn activity_row(
     if expanded && expandable {
         block = block.child(activity_detail(entry, command_detail, elided_output, cx));
     }
-    block.into_any_element()
+    let copy_items = activity_copy_items(entry);
+    block
+        .context_menu(move |menu, _, _| {
+            copy_items
+                .iter()
+                .cloned()
+                .fold(menu, |menu, (label, text)| {
+                    menu.menu(label, Box::new(CopyText(text)))
+                })
+        })
+        .into_any_element()
+}
+
+/// What the row's context menu copies: the detail's parts are plain text, so
+/// the window selection cannot reach them, and a reader wants the whole
+/// command or output rather than its one-line preview.
+fn activity_copy_items(entry: &TimelineEntry) -> Vec<(String, String)> {
+    let mut items = Vec::new();
+    let mut push = |key: &str, text: &str| {
+        if !text.trim().is_empty() {
+            items.push((crate::tr!(key).into_owned(), text.to_string()));
+        }
+    };
+    match &entry.content {
+        EntryContent::Item(ItemContent::CommandExecution {
+            command, output, ..
+        }) => {
+            push("chat.copy_command", command);
+            push("chat.copy_output", output);
+        }
+        EntryContent::Item(ItemContent::ToolCall { input, output, .. }) => {
+            let input = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+            push("chat.copy_input", &input);
+            push("chat.copy_output", output.as_deref().unwrap_or_default());
+        }
+        EntryContent::Item(ItemContent::Reasoning { text }) => push("chat.copy_text", text),
+        EntryContent::Item(ItemContent::WebSearch { query }) => push("chat.copy_text", query),
+        EntryContent::Item(ItemContent::Other { summary, .. }) => push("chat.copy_text", summary),
+        _ => {}
+    }
+    items
 }
 
 /// A row summary in the tool-chips grammar: the bare verb, then its argument

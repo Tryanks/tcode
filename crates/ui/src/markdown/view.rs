@@ -2,47 +2,35 @@
 //! `text/text_view.rs` implementation.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::touch_selection::SelectAllTouched;
 use crate::widgets::input::SelectAll;
-use crate::widgets::menu::ContextMenuExt as _;
+use crate::widgets::menu::{ContextMenuExt as _, CopyText, OpenUrl, PopupMenu};
 use gpui::{
-    Action, AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId,
-    Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
+    Action, AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _,
 };
 use gpui_base::{StyledExt as _, TouchHandleLayout};
 use serde::Deserialize;
 
-use super::{link_target::LinkTarget, state::MarkdownState};
+use super::{
+    link_target::LinkTarget,
+    state::{MarkdownState, PendingContextTarget},
+};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct OpenLink(String);
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct CopyLinkAddress(String);
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct CopyLinkText(String);
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct OpenPath(String);
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct OpenPathInZed(String);
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct RevealPath(String);
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct CopyPath(String);
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_markdown_link, no_json)]
-struct CopyRelativePath(String);
+#[action(namespace = tcode_markdown, no_json)]
+struct OpenImage {
+    url: String,
+    title: String,
+}
+
+/// Items a surface adds below the view's own: a message offers to copy or
+/// rewind itself, a plan to download itself.
+pub type MenuExtension = Rc<dyn Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu>;
 
 /// A GPUI element that renders an [`Entity<MarkdownState>`].
 #[derive(Clone)]
@@ -53,6 +41,7 @@ pub struct MarkdownView {
     selectable: Option<bool>,
     compact_headings: Option<bool>,
     base_dir: Option<PathBuf>,
+    menu_extension: Option<MenuExtension>,
 }
 
 impl MarkdownView {
@@ -65,6 +54,7 @@ impl MarkdownView {
             selectable: None,
             compact_headings: None,
             base_dir: None,
+            menu_extension: None,
         }
     }
 
@@ -84,6 +74,12 @@ impl MarkdownView {
     /// Set the directory used to resolve relative Markdown links.
     pub fn base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
         self.base_dir = Some(base_dir.into());
+        self
+    }
+
+    /// Append the surface's own items to the view's context menu.
+    pub fn menu_extension(mut self, extension: MenuExtension) -> Self {
+        self.menu_extension = Some(extension);
         self
     }
 }
@@ -175,80 +171,84 @@ impl Element for MarkdownView {
                     state.update(cx, |_, cx| cx.notify());
                 }
             })
-            .on_action(|action: &OpenLink, _, cx| cx.open_url(&action.0))
-            .on_action(|action: &CopyLinkAddress, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
-            })
-            .on_action(|action: &CopyLinkText, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
-            })
-            .on_action(|action: &OpenPath, _, cx| cx.open_with_system(Path::new(&action.0)))
-            .on_action(|action: &OpenPathInZed, window, cx| {
-                open_in_zed(Path::new(&action.0), window, cx)
-            })
-            .on_action(|action: &RevealPath, _, cx| cx.reveal_path(Path::new(&action.0)))
-            .on_action(|action: &CopyPath, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
-            })
-            .on_action(|action: &CopyRelativePath, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
+            .on_action({
+                let state = state.clone();
+                move |action: &OpenImage, window, cx| {
+                    let source = state.read(cx).image_source(&action.url.clone().into());
+                    crate::attachments::open_image_lightbox(
+                        source,
+                        action.title.clone(),
+                        window,
+                        cx,
+                    );
+                }
             })
             .child(state.clone())
             .refine_style(&self.style)
             .context_menu({
                 let state = state.clone();
-                move |menu, _window, cx| {
-                    let markdown = state.read(cx);
-                    let Some(pending) = markdown.pending_context_link.clone() else {
-                        return menu;
+                let extension = self.menu_extension.clone();
+                move |menu, window, cx| {
+                    let (selectable, pending, base_dir) = {
+                        let markdown = state.read(cx);
+                        (
+                            markdown.is_selectable(),
+                            markdown.pending_context.clone(),
+                            markdown.base_dir().map(Path::to_path_buf),
+                        )
                     };
-                    match pending.target {
-                        LinkTarget::Web(url) => menu
-                            .menu(
-                                crate::tr!("markdown.link_open").into_owned(),
-                                Box::new(OpenLink(url)),
-                            )
-                            .separator()
-                            .menu(
-                                crate::tr!("markdown.link_copy_address").into_owned(),
-                                Box::new(CopyLinkAddress(pending.raw_url.to_string())),
-                            )
-                            .menu(
-                                crate::tr!("markdown.link_copy_text").into_owned(),
-                                Box::new(CopyLinkText(pending.text.to_string())),
-                            ),
-                        LinkTarget::Local(path) => {
-                            let path = path.to_string_lossy().into_owned();
-                            let relative_path = markdown.base_dir().map(|base_dir| {
-                                crate::workspace_walk::relativize_to_workspace(&path, base_dir)
-                            });
-                            menu.menu(
-                                crate::tr!("chat.open").into_owned(),
-                                Box::new(OpenPath(path.clone())),
-                            )
-                            .menu(
-                                crate::tr!("chat.open_zed").into_owned(),
-                                Box::new(OpenPathInZed(path.clone())),
-                            )
-                            .menu(
-                                crate::tr!("chat.reveal_in_file_manager").into_owned(),
-                                Box::new(RevealPath(path.clone())),
-                            )
-                            .separator()
-                            .menu(
-                                crate::tr!("chat.copy_path").into_owned(),
-                                Box::new(CopyPath(path)),
-                            )
-                            .when_some(
-                                relative_path,
-                                |menu, relative_path| {
-                                    menu.menu(
-                                        crate::tr!("markdown.path_copy_relative").into_owned(),
-                                        Box::new(CopyRelativePath(relative_path)),
-                                    )
-                                },
-                            )
+                    let menu = if selectable {
+                        menu.selection_items(true, window, cx)
+                    } else {
+                        menu
+                    };
+                    let menu = match pending {
+                        None => menu,
+                        Some(PendingContextTarget::Link(pending)) => match pending.target {
+                            LinkTarget::Web(url) => menu
+                                .separator()
+                                .menu(
+                                    crate::tr!("markdown.link_open").into_owned(),
+                                    Box::new(OpenUrl(url)),
+                                )
+                                .menu(
+                                    crate::tr!("markdown.link_copy_address").into_owned(),
+                                    Box::new(CopyText(pending.raw_url.to_string())),
+                                )
+                                .menu(
+                                    crate::tr!("markdown.link_copy_text").into_owned(),
+                                    Box::new(CopyText(pending.text.to_string())),
+                                ),
+                            LinkTarget::Local(path) => menu
+                                .separator()
+                                .path_items(&path.to_string_lossy(), base_dir.as_deref()),
+                        },
+                        Some(PendingContextTarget::CodeBlock(code)) => menu.separator().menu(
+                            crate::tr!("markdown.code_copy").into_owned(),
+                            Box::new(CopyText(code)),
+                        ),
+                        Some(PendingContextTarget::Image { url, title }) => {
+                            let menu = menu.separator().menu(
+                                crate::tr!("markdown.open_image").into_owned(),
+                                Box::new(OpenImage {
+                                    url: url.to_string(),
+                                    title,
+                                }),
+                            );
+                            match state.read(cx).resolve_link(&url) {
+                                LinkTarget::Web(address) => menu.menu(
+                                    crate::tr!("markdown.image_copy_address").into_owned(),
+                                    Box::new(CopyText(address)),
+                                ),
+                                LinkTarget::Local(path) => menu
+                                    .separator()
+                                    .path_items(&path.to_string_lossy(), base_dir.as_deref()),
+                            }
                         }
+                    };
+                    match &extension {
+                        Some(extension) => extension(menu.separator(), window, cx),
+                        None => menu,
                     }
                 }
             })
@@ -307,7 +307,7 @@ impl Element for MarkdownView {
                     && event.button == MouseButton::Right
                     && hitbox.is_hovered(window)
                 {
-                    state.update(cx, |state, cx| state.set_pending_context_link(None, cx));
+                    state.update(cx, |state, cx| state.set_pending_context(None, cx));
                 }
             }
         });
@@ -340,18 +340,6 @@ impl Element for MarkdownView {
                 cx,
             );
         }
-    }
-}
-
-/// Launching an editor is the client's own process work, so it is injected
-/// through the client host rather than linked here. A client without one (a
-/// phone, a browser) reports that plainly.
-fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
-    if !matches!(crate::remote::open_in_editor(path, cx), Some(Ok(()))) {
-        window.push_notification(
-            Notification::error(crate::tr!("errors.zed_cli_missing")),
-            cx,
-        );
     }
 }
 
@@ -1246,13 +1234,29 @@ mod tests {
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
     }
 
+    /// The view under the window `Root`, which owns Copy for the window
+    /// selection, as the shell mounts it.
+    fn right_click_window(
+        cx: &mut TestAppContext,
+    ) -> (Entity<RightClickRoot>, &mut VisualTestContext) {
+        let view = Rc::new(std::cell::OnceCell::new());
+        let (_, cx) = cx.add_window_view({
+            let view = view.clone();
+            move |window, cx| {
+                let root = cx.new(RightClickRoot::new);
+                view.set(root.clone()).ok().unwrap();
+                gpui_base::Root::new(root, window, cx)
+            }
+        });
+        (view.get().unwrap().clone(), cx)
+    }
+
     #[gpui::test]
     fn link_context_menu_action_opens_the_url(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         cx.update(crate::widgets::menu::init);
-        let (view, cx) = cx.add_window_view(|_, cx| RightClickRoot::new(cx));
-        let cx: &mut VisualTestContext = cx;
+        let (view, cx) = right_click_window(cx);
         cx.run_until_parked();
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -1274,19 +1278,20 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        // Select "Open Link" and confirm; the action must dispatch through
-        // the trigger's ancestor chain to the OpenLink handler.
-        cx.simulate_keystrokes("down enter");
+        // Copy is disabled with nothing selected, so the first Down lands on
+        // Select All and the second on "Open link"; the action must dispatch
+        // through the trigger's ancestor chain to the OpenUrl handler.
+        cx.simulate_keystrokes("down down enter");
         cx.run_until_parked();
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
     }
 
     #[gpui::test]
-    fn right_click_off_link_is_swallowed_so_no_menu_opens(cx: &mut TestAppContext) {
+    fn right_click_on_text_opens_the_selection_menu_and_is_swallowed(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let (view, cx) = cx.add_window_view(|_, cx| RightClickRoot::new(cx));
-        let cx: &mut VisualTestContext = cx;
+        cx.update(crate::widgets::menu::init);
+        let (view, cx) = right_click_window(cx);
         cx.run_until_parked();
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -1302,31 +1307,61 @@ mod tests {
             )
         });
 
-        // Plain (and selectable) text: the press must be swallowed before the
-        // context-menu popover — and thus before the root handler — sees it.
+        // Plain (and selectable) text: the view's own menu (Copy, Select
+        // All) opens and takes focus, and the press is consumed before the
+        // root handler sees it.
         cx.simulate_mouse_down(text_pos, MouseButton::Right, Modifiers::default());
         cx.simulate_mouse_up(text_pos, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         let bubbled = view.read_with(cx, |root, _| *root.bubbled_right_clicks.borrow());
         assert_eq!(bubbled, 0, "right-click on plain text must not propagate");
-
-        let focused = cx.update(|window, cx| window.focused(cx));
         let markdown_focus =
             view.read_with(cx, |root, cx| root.markdown.read(cx).focus_handle.clone());
+        let focused = cx.update(|window, cx| window.focused(cx));
         assert!(
-            focused.is_none() || focused == Some(markdown_focus.clone()),
-            "no menu may take focus on a plain-text right-click"
+            focused.is_some_and(|focused| focused != markdown_focus),
+            "a plain-text right-click must open and focus the context menu"
         );
 
-        // A link still surfaces its context menu: the popover consumes the
-        // press (so the root handler stays at zero) and focuses the menu.
-        cx.simulate_mouse_down(link_pos, MouseButton::Right, Modifiers::default());
-        cx.simulate_mouse_up(link_pos, MouseButton::Right, Modifiers::default());
+        // Select All from that menu selects the whole view, and Copy, which
+        // was disabled with nothing selected, then copies it.
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+        assert_eq!(
+            cx.update(gpui_base::TextSelection::selected_text).trim(),
+            "Alpha beta\nclick"
+        );
+        cx.simulate_mouse_down(text_pos, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(text_pos, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("Alpha beta\nclick")
+        );
+
+        // A link's menu adds the link items after the view's own; the press
+        // is consumed the same way and the menu takes focus.
+        cx.simulate_mouse_down(link_pos, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(link_pos, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bubbled = view.read_with(cx, |root, _| *root.bubbled_right_clicks.borrow());
+        assert_eq!(bubbled, 0, "right-click on a link must not propagate");
         let focused = cx.update(|window, cx| window.focused(cx));
         assert!(
             focused.is_some_and(|focused| focused != markdown_focus),

@@ -12,6 +12,7 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
+use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -54,6 +55,14 @@ enum DiffViewOption {
     Wrap,
     Whitespace,
     Invisibles,
+}
+
+/// A code row's context-menu action on the review selection.
+#[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_diff, no_json)]
+enum DiffSelectionMenu {
+    CopyLines,
+    AddComment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -825,6 +834,67 @@ impl DiffPanel {
         self.apply_view_option(*option, cx);
     }
 
+    fn on_selection_menu(
+        &mut self,
+        action: &DiffSelectionMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.selection.clone() else {
+            return;
+        };
+        match action {
+            DiffSelectionMenu::CopyLines => {
+                let text = self.selected_lines(&selection, cx);
+                if !text.is_empty() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }
+            DiffSelectionMenu::AddComment => self.start_comment(window, cx),
+        }
+    }
+
+    /// The selected rows' text, without diff markers, in file order.
+    fn selected_lines(&self, selection: &CommentSelection, _: &App) -> String {
+        let Some(file) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.files.iter().find(|file| file.path == selection.file))
+        else {
+            return String::new();
+        };
+        let start = selection.row_start.min(selection.row_end);
+        let end = selection.row_start.max(selection.row_end);
+        file.all_rows
+            .iter()
+            .skip(start)
+            .take(end + 1 - start)
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn start_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.comment_input = Some(cx.new(|cx| {
+            InputState::new(window, cx).placeholder(crate::tr!("diff.comment_placeholder"))
+        }));
+        self.remeasure_lists();
+        cx.notify();
+    }
+
+    /// The file's absolute path: the rendered path is relative to the
+    /// workspace for display.
+    fn absolute_file_path(&self, file: &RenderedFile, cx: &App) -> String {
+        let path = Path::new(&file.path);
+        if path.is_absolute() {
+            return file.path.clone();
+        }
+        match self.workspace_store.read(cx).diff_active_state() {
+            Some(active) => active.cwd.join(path).to_string_lossy().into_owned(),
+            None => file.path.clone(),
+        }
+    }
+
     fn apply_view_option(&mut self, option: DiffViewOption, cx: &mut Context<Self>) {
         match option {
             DiffViewOption::Split => {
@@ -1574,6 +1644,15 @@ impl DiffPanel {
                             .child(format!("-{}", file.removed)),
                     ),
             )
+            .context_menu({
+                let path = self.absolute_file_path(file, cx);
+                let cwd = self
+                    .workspace_store
+                    .read(cx)
+                    .diff_active_state()
+                    .map(|active| active.cwd);
+                move |menu, _, _| menu.path_items(&path, cwd.as_deref())
+            })
             .into_any_element()
     }
 
@@ -1765,12 +1844,7 @@ impl DiffPanel {
                                 .small()
                                 .label(crate::tr!("diff.add_comment"))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.comment_input = Some(cx.new(|cx| {
-                                        InputState::new(window, cx)
-                                            .placeholder(crate::tr!("diff.comment_placeholder"))
-                                    }));
-                                    this.remeasure_lists();
-                                    cx.notify();
+                                    this.start_comment(window, cx);
                                 })),
                         )
                         .into_any_element(),
@@ -1893,7 +1967,31 @@ impl DiffPanel {
                 .child(gutter(ReviewSide::Old, cx))
                 .child(gutter(ReviewSide::New, cx));
         }
-        cell.child(code).into_any_element()
+        let line = row.text.clone();
+        let selected_here = self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.file == file.path);
+        let commenting = self.comment_input.is_some();
+        cell.child(code)
+            .context_menu(move |menu, _, _| {
+                menu.menu(
+                    crate::tr!("diff.copy_line").into_owned(),
+                    Box::new(CopyText(line.clone())),
+                )
+                .menu_with_enable(
+                    crate::tr!("diff.copy_selected_lines").into_owned(),
+                    Box::new(DiffSelectionMenu::CopyLines),
+                    selected_here,
+                )
+                .separator()
+                .menu_with_enable(
+                    crate::tr!("diff.add_comment").into_owned(),
+                    Box::new(DiffSelectionMenu::AddComment),
+                    selected_here && !commenting,
+                )
+            })
+            .into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2030,6 +2128,7 @@ impl Render for DiffPanel {
             .min_w_0()
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_view_option))
+            .on_action(cx.listener(Self::on_selection_menu))
             .when(!compact, |root| {
                 root.child(self.render_tab_strip(window, cx))
             });

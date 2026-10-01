@@ -19,7 +19,7 @@ use gpui::{
 use super::{
     link_target::LinkTarget,
     nodes::LinkMark,
-    state::{MarkdownState, PendingLinkMenu},
+    state::{MarkdownState, PendingContextTarget, PendingLinkMenu},
 };
 
 /// Mutable paint-time data retained by the parsed IR.
@@ -368,14 +368,18 @@ impl Element for Inline {
                                     let target = view.read(cx).resolve_link(&link.url);
                                     let text =
                                         text.get(range).map(SharedString::from).unwrap_or_default();
-                                    PendingLinkMenu {
+                                    PendingContextTarget::Link(PendingLinkMenu {
                                         target,
                                         text,
                                         raw_url: link.url,
-                                    }
+                                    })
                                 },
                             );
-                        view.update(cx, |state, cx| state.set_pending_context_link(pending, cx));
+                        // A press beside a link keeps the enclosing block's
+                        // target (a code block's), which bubbled first.
+                        if pending.is_some() {
+                            view.update(cx, |state, cx| state.set_pending_context(pending, cx));
+                        }
                     }
                     _ => {}
                 }
