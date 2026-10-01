@@ -72,7 +72,14 @@ is derived from it. **Process** is how to build, check and submit work.
    comment is kept only when it states a constraint the code cannot express or
    the reason an obvious alternative was rejected; narrated steps, history and
    "mirrors X" notes are deleted when touched. A constraint drafted by an AI is
-   not a requirement until it appears here.
+   not a requirement until it appears here. A test, whatever its form, is
+   truth only for a contract real use needs, and only while it is the test
+   that proves it by driving the code the way the running app does. The suite
+   is larger than its contracts: a test met while working on its area is
+   judged on those terms, not left until it fails, and a failing one is first
+   a question about the test and only then a verdict on the code. A test
+   that proves no such contract is deleted, with whatever code existed only
+   to satisfy it; a test is never edited into passing.
 
 9. **Adopt upstream early; Tcode's work stays in Tcode.** Prefer an upstream's
    experimental feature over waiting for it to mature, and never fork a
@@ -200,6 +207,46 @@ Work through these in order; each step ends before the next begins.
    behaviour, with a comment naming the dependency behaviour it works around,
    or leave it in place when step 2 found no real impact.
 
+### When a test fails, or is met on the way
+
+Work through these in order for a failure met while developing, in CI, or
+intermittently, and for every test in the area a change touches, whether or
+not it fails; the suite predates this bar and is far larger than its
+contracts, and the form of a test — unit, headless UI, probe, replay, or one
+not seen before — changes none of the questions. "Make it pass" is not a
+step: an assertion is never loosened or rewritten to the new output, a run is
+never retried into green, and no seam is added to production for the test's
+sake.
+
+1. **Reproduce it as the app would.** For a failure, run the case alone and
+   inside the suite. A failure that depends on the suite's timing, on the wall clock, or
+   on a frame the platform would have drawn differently is the test driver's
+   fault, however the assertion reads: make the driver behave like the running
+   app (frames, clocks, input) and stop there if that settles it. The gpui-fast
+   switch (#555) was this case for every one of its ten failures.
+2. **Judge the assertion, not the diff.** Name the contract the test states
+   and where it comes from: a behaviour a user path reaches, a recorded
+   fixture, or a known regression; name the credible regression that would
+   fail it; and name why no other test already owns that contract. If any
+   answer is missing — it asserts an implementation detail, a number nothing
+   depends on, an assumption inherited from an earlier dependency, a scenario
+   no user path reaches, or a contract a stronger test already proves — the
+   test is wrong whatever the code does, and the fact that it was written
+   with care, or passes, or has peers of the same shape, is not an answer.
+   Delete it, and with it every function, seam, fixture or dependency whose
+   only reason to exist was that test. The
+   [`test-audit` skill](.agents/skills/test-audit/SKILL.md) has the patterns
+   and the retention bar.
+3. **Only then treat the code as broken.** When the contract is real and the
+   code no longer meets it, fix the code at the behaviour's owner and keep the
+   test. A test is rewritten only to move it to the owning boundary or to
+   drive the code the way the app does, never to agree with the code.
+4. **Say which it was.** The pull request names each failed or removed
+   test, the step that settled it, and the evidence. A deleted test names
+   where the contract is still covered, or why there was none; a fixed driver
+   names what the app does that the test did not. The number of tests kept or
+   removed is evidence of nothing.
+
 ### Code layout
 
 ```
@@ -277,7 +324,9 @@ coverage was redundant and where any remaining contract is still covered. For a
 bug fix, show the regression test fails without the fix when practical. Test
 counts and deleted line counts are not quality targets. When a test's value is
 in doubt, or when auditing or pruning tests, follow the
-[`test-audit` skill](.agents/skills/test-audit/SKILL.md).
+[`test-audit` skill](.agents/skills/test-audit/SKILL.md); for a test that
+fails or sits in the area of a change, follow
+[When a test fails, or is met on the way](#when-a-test-fails-or-is-met-on-the-way).
 
 **Evidence in the pull request.** Describe the changed behaviour, why added
 abstractions are needed or removed ones redundant, and the contract protected
