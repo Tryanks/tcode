@@ -1684,8 +1684,8 @@ impl AppShell {
                 cx,
             );
         });
-        let mut segments = crate::material::segmented_track("compact-panel-track", cx);
-        for (id, label, selected) in [
+        let shell = cx.entity();
+        let segments = [
             (
                 "terminal",
                 crate::tr!("terminal.title").into_owned(),
@@ -1712,17 +1712,22 @@ impl AppShell {
                     id == "preview"
                 }),
             ),
-        ] {
-            segments = segments.child(
-                crate::material::segment(
-                    SharedString::from(format!("compact-panel-{id}")),
-                    label,
-                    selected,
-                    cx,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.show_panel(id, cx))),
-            );
-        }
+        ]
+        .into_iter()
+        .map(|(id, label, selected)| {
+            let shell = shell.clone();
+            crate::material::segment(
+                SharedString::from(format!("compact-panel-{id}")),
+                label,
+                selected,
+                cx,
+            )
+            .on_change(move |_, _, _, cx| {
+                shell.update(cx, |shell, cx| shell.show_panel(id, cx));
+            })
+        })
+        .collect::<Vec<_>>();
+        let segments = crate::material::segmented_track("compact-panel-track", segments, cx);
 
         let body: AnyElement = if self.pending_navigation_restore.is_some() {
             crate::material::loading_skeleton(cx)
