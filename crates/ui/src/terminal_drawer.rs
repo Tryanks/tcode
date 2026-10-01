@@ -1444,9 +1444,9 @@ impl Render for TerminalDrawer {
             self.marked_text = None;
         }
 
-        let mut tab_strip = h_flex()
-            .id("terminal-tab-list")
-            .role(Role::TabList)
+        let mut tab_strip = gpui_base::Tabs::new("terminal-tab-list")
+            .flex()
+            .items_center()
             .aria_label(crate::tr!("terminal.tabs"))
             .min_w_0()
             .gap(px(2.))
@@ -1457,61 +1457,54 @@ impl Render for TerminalDrawer {
             let close_id = id;
             let tab_label = crate::tr!("terminal.tab", label = label.clone()).into_owned();
             tab_strip = tab_strip.child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    ("terminal-tab", id),
-                    Role::Tab,
-                    tab_label,
-                    cx,
-                )
-                .aria_selected(selected)
-                .h(px(25.))
-                .gap(px(2.))
-                .px_2()
-                .rounded(material::radius_button())
-                .cursor_pointer()
-                .bg(if selected {
-                    cx.theme().list_active
-                } else {
-                    cx.theme().background.opacity(0.)
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.workspace_store
-                        .update(cx, |store, _cx| store.activate_terminal(id));
-                }))
-                .child(
-                    div()
-                        .max_w(px(92.))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_size(px(11.))
-                        .text_color(if *exited || !selected {
-                            cx.theme().muted_foreground
-                        } else {
-                            cx.theme().foreground
-                        })
-                        .child(label.clone()),
-                )
-                .when(*bell, |this| {
-                    this.child(
+                crate::material::tab(("terminal-tab", id), tab_label, selected, cx)
+                    .justify_start()
+                    .h(px(25.))
+                    .gap(px(2.))
+                    .px_2()
+                    .rounded(material::radius_button())
+                    .bg(if selected {
+                        cx.theme().list_active
+                    } else {
+                        cx.theme().background.opacity(0.)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace_store
+                            .update(cx, |store, _cx| store.activate_terminal(id));
+                    }))
+                    .child(
                         div()
+                            .max_w(px(92.))
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .text_size(px(11.))
-                            .text_color(cx.theme().warning)
-                            .child("●"),
+                            .text_color(if *exited || !selected {
+                                cx.theme().muted_foreground
+                            } else {
+                                cx.theme().foreground
+                            })
+                            .child(label.clone()),
                     )
-                })
-                .child(
-                    Button::new(("terminal-tab-close", close_id))
-                        .ghost()
-                        .compact()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .tooltip(crate::tr!("terminal.close_tab"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store
-                                .update(cx, |store, cx| store.close_terminal(close_id, cx));
-                        })),
-                ),
+                    .when(*bell, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().warning)
+                                .child("●"),
+                        )
+                    })
+                    .child(
+                        Button::new(("terminal-tab-close", close_id))
+                            .ghost()
+                            .compact()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(crate::tr!("terminal.close_tab"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace_store
+                                    .update(cx, |store, cx| store.close_terminal(close_id, cx));
+                            })),
+                    ),
             );
         }
 
