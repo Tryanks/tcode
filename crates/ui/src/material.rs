@@ -338,6 +338,9 @@ pub fn segment(
         .focus_visible(move |style| style.shadow(vec![ring]))
         .flex_grow(1.)
         .flex_shrink_0()
+        // Toggle sizes itself to its text; the pill keeps the height the
+        // label's default line height gave it.
+        .h(px(21.))
         .px(px(6.))
         .rounded(px(8.))
         .cursor_pointer()
