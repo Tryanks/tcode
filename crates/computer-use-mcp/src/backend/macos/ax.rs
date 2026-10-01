@@ -7,7 +7,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
-use core_foundation::base::{CFGetTypeID, CFRelease, CFRetain, CFTypeID, CFTypeRef, TCFType};
+use core_foundation::base::{
+    CFEqual, CFGetTypeID, CFHash, CFRelease, CFRetain, CFTypeID, CFTypeRef, TCFType,
+};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::number::CFNumber;
 use core_foundation::runloop::{
@@ -610,7 +612,7 @@ pub(super) fn observe_tree(root: &RootInfo) -> Result<UiNode, BackendError> {
     let window = locate_window_in_application(application.as_ax(), root)?;
     let mut context = WalkContext {
         count: 0,
-        visited: HashSet::new(),
+        visited: VisitedElements::default(),
         root_frame: root.frame,
     };
     let mut tree = walk_element(window.as_ax(), 0, &mut context).ok_or_else(|| {
@@ -732,8 +734,39 @@ fn window_match_score(window: AXUIElementRef, root: &RootInfo) -> f64 {
 
 struct WalkContext {
     count: usize,
-    visited: HashSet<usize>,
+    visited: VisitedElements,
     root_frame: Frame,
+}
+
+/// The elements a walk has entered, compared as AX identities.
+///
+/// Each element is retained for the walk: a child array is released once
+/// its subtree is walked, and the next array the system hands out can reuse
+/// a freed element's address, so an address alone cannot stand for a node.
+#[derive(Default)]
+struct VisitedElements {
+    buckets: HashMap<usize, Vec<OwnedCf>>,
+}
+
+impl VisitedElements {
+    /// Records `element`; `false` when an equal element was already recorded.
+    fn insert(&mut self, element: AXUIElementRef) -> bool {
+        let value = element as CFTypeRef;
+        // SAFETY: the caller holds `element` live for the call.
+        let hash = unsafe { CFHash(value) };
+        let bucket = self.buckets.entry(hash).or_default();
+        if bucket
+            .iter()
+            .any(|seen| unsafe { CFEqual(seen.0, value) } != 0)
+        {
+            return false;
+        }
+        // SAFETY: `element` is live; retaining keeps it so for the walk.
+        if let Some(owned) = unsafe { OwnedCf::from_borrowed(value) } {
+            bucket.push(owned);
+        }
+        true
+    }
 }
 
 fn walk_element(
@@ -741,7 +774,7 @@ fn walk_element(
     depth: usize,
     context: &mut WalkContext,
 ) -> Option<UiNode> {
-    if context.count >= MAX_NODES || !context.visited.insert(element as usize) {
+    if context.count >= MAX_NODES || !context.visited.insert(element) {
         return None;
     }
     context.count += 1;
@@ -1030,6 +1063,31 @@ fn ax_error_name(code: AXError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The system hands out a fresh object for every element reference, and
+    /// reuses a released one's address: a walk that told nodes apart by
+    /// address dropped the first child of a group whose address a freed
+    /// sibling's child had used.
+    #[test]
+    fn visited_elements_are_told_apart_by_identity_not_address() {
+        let element = |pid: i32| {
+            // SAFETY: AXUIElementCreateApplication follows the create rule and
+            // needs no permission to make a reference.
+            unsafe { OwnedCf::from_create(AXUIElementCreateApplication(pid) as CFTypeRef) }
+                .expect("an application element")
+        };
+        let mut visited = VisitedElements::default();
+        let own = std::process::id() as i32;
+        assert!(visited.insert(element(own).as_ax()));
+        assert!(
+            !visited.insert(element(own).as_ax()),
+            "a second reference to the same element is the same node"
+        );
+        for pid in 1..=256 {
+            let other = element(pid);
+            assert!(visited.insert(other.as_ax()), "pid {pid} is a new element");
+        }
+    }
 
     #[test]
     fn chromium_bundle_detection_is_case_insensitive_and_narrow() {
