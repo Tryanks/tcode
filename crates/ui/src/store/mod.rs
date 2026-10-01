@@ -4186,7 +4186,12 @@ mod tests {
                 "the parent's replicated records were dropped on the way back"
             );
         });
-        assert!(archived(cx, &workspace, "child"));
+        // The index and its summary replicate on their own topics: the
+        // return to the parent follows the index, the archived count the
+        // summary, and nothing orders one before the other.
+        wait_until(cx, &workspace, "child archived", |cx| {
+            archived(cx, &workspace, "child")
+        });
 
         command(
             &host,
