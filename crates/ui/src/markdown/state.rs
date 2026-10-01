@@ -791,4 +791,31 @@ mod tests {
             "intro\nfirst line\nsecond line\nname value\nalpha beta\n"
         );
     }
+
+    #[gpui::test]
+    fn drag_copies_exactly_the_highlighted_text(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton, point};
+
+        cx.update(crate::theme::init);
+        cx.update(super::super::init);
+        let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new("Hello world", cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| _ = window.draw(cx));
+
+        // The sweep ends the drag on both halves of every character it crosses.
+        for x in 1..120 {
+            let (start, end) = (point(px(1.), px(12.)), point(px(x as f32), px(12.)));
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+            cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+
+            let highlighted =
+                view.read_with(cx, |root, cx| root.markdown.read(cx).parsed.selected_text());
+            let copied = cx.update(gpui_base::TextSelection::selected_text);
+            assert_eq!(copied, highlighted, "drag to x = {x}");
+        }
+    }
 }
