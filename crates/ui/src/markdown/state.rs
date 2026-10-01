@@ -27,6 +27,15 @@ pub(super) struct PendingLinkMenu {
     pub(super) raw_url: SharedString,
 }
 
+/// What the last right-click landed on, recorded by the inline that was hit
+/// and read by the view's context menu, which opens after the press settles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PendingContextTarget {
+    Link(PendingLinkMenu),
+    CodeBlock(String),
+    Image { url: SharedUri, title: String },
+}
+
 /// State backing a [`super::MarkdownView`].
 pub struct MarkdownState {
     pub(super) focus_handle: FocusHandle,
@@ -35,7 +44,7 @@ pub struct MarkdownState {
     pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
     link_targets: LinkTargetCache,
-    pub(super) pending_context_link: Option<PendingLinkMenu>,
+    pub(super) pending_context: Option<PendingContextTarget>,
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
     pub(super) link_press_origin: Option<Point<Pixels>>,
@@ -76,7 +85,7 @@ impl MarkdownState {
             compact_headings: false,
             base_dir: None,
             link_targets: LinkTargetCache::default(),
-            pending_context_link: None,
+            pending_context: None,
             link_press_origin: None,
             is_selecting: false,
             text: text.to_string(),
@@ -205,15 +214,15 @@ impl MarkdownState {
         crate::store::host_image(path)
     }
 
-    pub(super) fn set_pending_context_link(
+    pub(super) fn set_pending_context(
         &mut self,
-        pending_context_link: Option<PendingLinkMenu>,
+        pending_context: Option<PendingContextTarget>,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_context_link == pending_context_link {
+        if self.pending_context == pending_context {
             return;
         }
-        self.pending_context_link = pending_context_link;
+        self.pending_context = pending_context;
         cx.notify();
     }
 

@@ -205,6 +205,23 @@ struct TerminalClear(u64);
 #[action(namespace = tcode_terminal, no_json)]
 struct TerminalAddContext(u64);
 
+/// A tab's context-menu action. Restart and the splits act on the active
+/// terminal, so the tab is activated first.
+#[derive(Action, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_terminal, no_json)]
+struct TerminalTabMenu {
+    id: u64,
+    kind: TerminalTabMenuKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+enum TerminalTabMenuKind {
+    Restart,
+    SplitHorizontal,
+    SplitVertical,
+    Close,
+}
+
 /// A drawer action that does not fit the compact toolbar row and lives in its
 /// overflow menu, which addresses items by action rather than by callback.
 #[derive(Action, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -640,6 +657,25 @@ impl TerminalDrawer {
             }
             TerminalOverflow::Restart => store.restart_terminal(),
             TerminalOverflow::Close => store.close_terminal_panel(cx),
+        });
+    }
+
+    fn on_tab_menu(&mut self, action: &TerminalTabMenu, _: &mut Window, cx: &mut Context<Self>) {
+        let TerminalTabMenu { id, kind } = *action;
+        self.workspace_store.update(cx, |store, cx| match kind {
+            TerminalTabMenuKind::Restart => {
+                store.activate_terminal(id);
+                store.restart_terminal();
+            }
+            TerminalTabMenuKind::SplitHorizontal => {
+                store.activate_terminal(id);
+                store.split_terminal(TerminalSplitDirection::Horizontal);
+            }
+            TerminalTabMenuKind::SplitVertical => {
+                store.activate_terminal(id);
+                store.split_terminal(TerminalSplitDirection::Vertical);
+            }
+            TerminalTabMenuKind::Close => store.close_terminal(id, cx),
         });
     }
 
@@ -1504,7 +1540,33 @@ impl Render for TerminalDrawer {
                                 this.workspace_store
                                     .update(cx, |store, cx| store.close_terminal(close_id, cx));
                             })),
-                    ),
+                    )
+                    .context_menu({
+                        let can_split =
+                            tabs.len() < MAX_TERMINALS_PER_SESSION && active_split.is_none();
+                        move |menu, _, _| {
+                            let item = |kind| Box::new(TerminalTabMenu { id, kind });
+                            menu.menu(
+                                crate::tr!("terminal.restart").into_owned(),
+                                item(TerminalTabMenuKind::Restart),
+                            )
+                            .menu_with_enable(
+                                crate::tr!("terminal.split_horizontal").into_owned(),
+                                item(TerminalTabMenuKind::SplitHorizontal),
+                                can_split,
+                            )
+                            .menu_with_enable(
+                                crate::tr!("terminal.split_vertical").into_owned(),
+                                item(TerminalTabMenuKind::SplitVertical),
+                                can_split,
+                            )
+                            .separator()
+                            .menu(
+                                crate::tr!("terminal.close_tab").into_owned(),
+                                item(TerminalTabMenuKind::Close),
+                            )
+                        }
+                    }),
             );
         }
 
@@ -1711,6 +1773,7 @@ impl Render for TerminalDrawer {
             .on_action(cx.listener(Self::on_terminal_clear))
             .on_action(cx.listener(Self::on_terminal_add_context))
             .on_action(cx.listener(Self::on_overflow))
+            .on_action(cx.listener(Self::on_tab_menu))
             .child(header)
             .child(
                 crate::material::accessible_clickable(
