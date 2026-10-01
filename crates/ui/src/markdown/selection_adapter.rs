@@ -7,9 +7,9 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, EntityId, Hitbox, Hsla, Modifiers, Pixels,
-    PlatformInput, Point, ScrollDelta, ScrollWheelEvent, Task, TextLayout, WeakEntity, Window,
-    point, px,
+    AnyWindowHandle, App, AppContext as _, Bounds, EntityId, Half as _, Hitbox, Hsla, Modifiers,
+    Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, Task, TextLayout, WeakEntity,
+    Window, point, px,
 };
 use gpui_base::{
     TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint, TextSelectionEvent,
@@ -355,7 +355,7 @@ impl MarkdownSelectionAdapter {
     }
 
     /// The inline states painted last frame in rows at `window_point`'s
-    /// height, with the text offset nearest to it in each.
+    /// height, with the character boundary nearest to it in each.
     pub(super) fn runs_at(
         &self,
         window_point: Point<Pixels>,
@@ -369,13 +369,7 @@ impl MarkdownSelectionAdapter {
                 let bounds = run.bounds();
                 bounds.top() <= window_point.y && window_point.y < bounds.bottom()
             })
-            .map(|(run, state)| {
-                let offset = run
-                    .layout()
-                    .index_for_position(window_point)
-                    .unwrap_or_else(|nearest| nearest);
-                (state.clone(), offset)
-            })
+            .map(|(run, state)| (state.clone(), nearest_boundary(run, window_point)))
             .collect()
     }
 
@@ -440,6 +434,40 @@ impl MarkdownSelectionAdapter {
 
     pub(super) fn has_selection_snapshot(&self, cx: &App) -> bool {
         self.selection.snapshot(cx).is_some()
+    }
+}
+
+/// The character boundary in `run` nearest to `window_point`.
+///
+/// gpui-base paints a character as selected when the selection covers its
+/// horizontal midpoint, while `TextLayout::index_for_position` returns the
+/// start of the character under the point, so an end on a character's right
+/// half would copy one character less than is painted. The midpoint and the
+/// width of a character that ends its row follow gpui-base's band test.
+fn nearest_boundary(run: &TextSelectionRun, window_point: Point<Pixels>) -> usize {
+    let layout = run.layout();
+    let offset = match layout.index_for_position(window_point) {
+        Ok(offset) => offset,
+        Err(nearest) => return nearest,
+    };
+    let Some(next_offset) = run.text()[offset..]
+        .chars()
+        .next()
+        .map(|character| offset + character.len_utf8())
+    else {
+        return offset;
+    };
+    let Some(position) = layout.position_for_index(offset) else {
+        return offset;
+    };
+    let width = layout
+        .position_for_index(next_offset)
+        .filter(|next| next.y == position.y)
+        .map_or_else(|| layout.line_height().half(), |next| next.x - position.x);
+    if window_point.x >= position.x + width.half() {
+        next_offset
+    } else {
+        offset
     }
 }
 
