@@ -44,6 +44,7 @@ pub fn user_bubble(
             copied: false,
             markdown: None,
             rewind: None,
+            rewind_menu: None,
         },
         bubble::BubbleHandlers {
             copy: click(),

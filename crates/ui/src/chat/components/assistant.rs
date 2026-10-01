@@ -1,22 +1,24 @@
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Div, Entity,
-    InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Context, Div,
+    Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
 use crate::markdown::parse::ParsedDocument;
-use crate::markdown::{MarkdownState, MarkdownView};
+use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 
 use super::super::model::{MdSync, md_sync};
 
@@ -68,6 +70,18 @@ pub(crate) struct AssistantData<'a> {
     pub(crate) copied: bool,
 }
 
+/// The message's own context-menu item: the whole text, as the hover Copy
+/// button copies it. Offered inside the Markdown (below the view's own
+/// items) and on the margin around it.
+pub(crate) fn copy_message_items(text: Arc<str>) -> MenuExtension {
+    Rc::new(move |menu: PopupMenu, _: &mut Window, _: &mut App| {
+        menu.menu(
+            crate::tr!("chat.copy_message").into_owned(),
+            Box::new(CopyText(text.to_string())),
+        )
+    })
+}
+
 /// An assistant message: rendered markdown plus a hover-revealed Copy action.
 pub(crate) fn assistant(
     data: AssistantData<'_>,
@@ -84,6 +98,7 @@ pub(crate) fn assistant(
         show_actions,
         copied,
     } = data;
+    let menu_items = copy_message_items(Arc::from(text));
     let content = markdown.map_or_else(
         || div().child(text.to_string()).into_any_element(),
         |markdown| {
@@ -91,6 +106,7 @@ pub(crate) fn assistant(
                 .compact_headings(true)
                 .selectable(true)
                 .base_dir(cwd)
+                .menu_extension(menu_items.clone())
                 .into_any_element()
         },
     );
@@ -101,9 +117,12 @@ pub(crate) fn assistant(
             .line_height(px(26.))
             .child(content),
     );
+    let margin_menu = move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
+        menu_items(menu, window, cx)
+    };
 
     if !show_actions {
-        return message.into_any_element();
+        return message.context_menu(margin_menu).into_any_element();
     }
 
     let group_key = SharedString::from(format!("assistant-{id}"));
@@ -123,6 +142,7 @@ pub(crate) fn assistant(
                 |element, delta| element.opacity(delta),
             ),
         )
+        .context_menu(margin_menu)
         .into_any_element()
 }
 

@@ -1,5 +1,6 @@
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -140,5 +141,14 @@ pub(crate) fn error_card(
                 .bg(danger),
         )
         .child(content)
+        .context_menu({
+            let message = message.to_string();
+            move |menu, _, _| {
+                menu.menu(
+                    crate::tr!("chat.copy_error").into_owned(),
+                    Box::new(CopyText(message.clone())),
+                )
+            }
+        })
         .into_any_element()
 }

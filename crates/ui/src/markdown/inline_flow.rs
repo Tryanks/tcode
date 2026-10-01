@@ -10,17 +10,17 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity,
     GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
-    IntoElement, LayoutId, LineFragment as WrapLineFragment, ObjectFit, ParentElement as _, Pixels,
-    Role, ShapedLine, SharedString, SharedUri, Size, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, TextRun, TextStyle, WhiteSpace, Window, div, img, point,
-    prelude::FluentBuilder as _, px, relative, size,
+    IntoElement, LayoutId, LineFragment as WrapLineFragment, MouseButton, ObjectFit,
+    ParentElement as _, Pixels, Role, ShapedLine, SharedString, SharedUri, Size,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, TextRun, TextStyle, WhiteSpace,
+    Window, div, img, point, prelude::FluentBuilder as _, px, relative, size,
 };
 
 use super::{
     inline::{Inline, InlineState},
     link_target::LinkTarget,
     nodes::LinkMark,
-    state::MarkdownState,
+    state::{MarkdownState, PendingContextTarget},
 };
 
 const ELEMENT_LEN: usize = 1;
@@ -154,6 +154,9 @@ impl InlineFlow {
         let link = link.clone();
         let title = title.to_string();
         let tooltip_title = title.clone();
+        let context_view = view.clone();
+        let context_url = url.clone();
+        let context_title = title.clone();
         let label = if !title.trim().is_empty() {
             title.clone()
         } else if let Some(link) = &link {
@@ -176,6 +179,17 @@ impl InlineFlow {
                 image.tooltip(move |window, cx| {
                     Tooltip::new(tooltip_title.clone()).build(window, cx)
                 })
+            })
+            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                context_view.update(cx, |state, cx| {
+                    state.set_pending_context(
+                        Some(PendingContextTarget::Image {
+                            url: context_url.clone(),
+                            title: context_title.clone(),
+                        }),
+                        cx,
+                    )
+                });
             })
             .on_click(move |_, window, cx| {
                 gpui_base::TextSelection::end(window, cx);

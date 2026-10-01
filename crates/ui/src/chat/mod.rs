@@ -15,9 +15,10 @@ pub(crate) mod components;
 mod model;
 mod residency;
 
-use crate::overlay::{Notification, OverlayExt as _};
+use crate::overlay::OverlayExt as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::menu::{ContextMenuExt as _, PopupMenu, open_in_zed};
 use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
@@ -25,12 +26,13 @@ use crate::{
 };
 use agent::{ItemContent, RewindMode};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
+    Action, Anchor, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
     FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ElementExt as _, Scrollbar, StyledExt as _, h_flex, v_flex};
+use serde::Deserialize;
 
 use tcode_core::git::GitAction;
 use tcode_core::session::{
@@ -41,6 +43,7 @@ use tcode_core::ui::RightTab;
 use crate::commit_dialog::CommitDialog;
 use crate::composer::Composer;
 use crate::git::{git_action_label_key, git_hint_key};
+use crate::plan_panel::{PlanMenu, PlanMenuKind};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
 use crate::terminal_drawer::TerminalDrawer;
@@ -50,6 +53,24 @@ use crate::window_drag_area;
 use crate::window_state::WindowState;
 
 use self::components::assistant::MdState;
+
+/// A message's context-menu rewind, which the chat applies as the bubble's
+/// rewind popover does.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_chat, no_json)]
+pub(crate) struct RewindTurn {
+    pub(crate) turn: usize,
+    pub(crate) mode: RewindMode,
+}
+
+/// A changed-file chip's context-menu "View diff".
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_chat, no_json)]
+pub(crate) struct OpenFileDiff {
+    pub(crate) turn: usize,
+    pub(crate) path: String,
+}
+
 use self::components::changed_files::InlineDiffCache;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
@@ -1651,6 +1672,39 @@ impl ChatView {
         column.into_any_element()
     }
 
+    fn on_rewind_turn(&mut self, action: &RewindTurn, _: &mut Window, cx: &mut Context<Self>) {
+        let RewindTurn { turn, mode } = *action;
+        self.workspace_store
+            .update(cx, |store, _cx| store.rewind_turn(turn, mode));
+    }
+
+    fn on_open_file_diff(&mut self, action: &OpenFileDiff, _: &mut Window, cx: &mut Context<Self>) {
+        let OpenFileDiff { turn, path } = action.clone();
+        self.workspace_store
+            .update(cx, |store, cx| store.open_diff_for_file(turn, path, cx));
+    }
+
+    fn on_plan_menu(&mut self, action: &PlanMenu, _: &mut Window, cx: &mut Context<Self>) {
+        let markdown = action.markdown.clone();
+        match action.kind {
+            PlanMenuKind::Copy => {
+                self.workspace_store
+                    .update(cx, |store, _cx| store.copy_plan(markdown));
+                self.mark_copied("plan".into(), cx);
+            }
+            PlanMenuKind::Download => {
+                let fallback_title = crate::tr!("plan.proposed_plan").into_owned();
+                self.workspace_store.update(cx, |store, _cx| {
+                    store.download_plan(markdown, fallback_title)
+                });
+            }
+            PlanMenuKind::Save => {
+                self.workspace_store
+                    .update(cx, |store, _cx| store.save_plan_to_workspace(markdown));
+            }
+        }
+    }
+
     fn compose_user(
         &self,
         args: components::bubble::UserMessageArgs<'_>,
@@ -1674,6 +1728,12 @@ impl ChatView {
             .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
             .map(|len| &text[..len]);
         let visible = user_visible_text(text, context_len);
+        let rewind_menu = steering
+            .is_none()
+            .then(|| self.workspace_store.read(cx).chat_native_rewind_state(turn))
+            .flatten()
+            .filter(|(available, _)| *available)
+            .map(|(_, disabled)| components::bubble::RewindMenu { turn, disabled });
         let rewind = steering
             .is_none()
             .then(|| {
@@ -1733,6 +1793,7 @@ impl ChatView {
                 copied,
                 markdown,
                 rewind,
+                rewind_menu,
             },
             components::bubble::BubbleHandlers {
                 copy: Box::new(cx.listener(move |this, _, _, cx| {
@@ -1931,6 +1992,7 @@ impl ChatView {
                     rows.push(components::changed_files::file_edit_row(
                         &key,
                         row,
+                        cwd,
                         expanded,
                         inline_diff,
                         cx.listener(move |this, _, _, cx| {
@@ -2344,9 +2406,25 @@ impl ChatView {
         let preview_showing = right_panel_open && right_tab == RightTab::Preview;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
+        let title_menu = {
+            let title = title.clone();
+            let cwd = cwd.clone();
+            move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+                let menu = menu.when_some(title.clone(), |menu, title| {
+                    menu.menu(
+                        crate::tr!("chat.copy_title").into_owned(),
+                        Box::new(crate::widgets::menu::CopyText(title)),
+                    )
+                });
+                match &cwd {
+                    Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
+                    None => menu,
+                }
+            }
+        };
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
-            .child(window_caption::drag_region(title_el))
+            .child(window_caption::drag_region(title_el).context_menu(title_menu))
             .when(show_actions, |this| {
                 this.children(self.render_git_button(cx))
                     .children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
@@ -3408,6 +3486,9 @@ impl Render for ChatView {
         let main = v_flex()
             .size_full()
             .min_h_0()
+            .on_action(cx.listener(Self::on_rewind_turn))
+            .on_action(cx.listener(Self::on_open_file_diff))
+            .on_action(cx.listener(Self::on_plan_menu))
             .child(
                 div()
                     .id("timeline")
@@ -3546,18 +3627,6 @@ fn render_commit_footer(
                 }),
         )
         .into_any_element()
-}
-
-/// Launching an editor is the client's own process work, so it is injected
-/// through the client host rather than linked here. A client without one (a
-/// phone, a browser) reports that plainly.
-fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
-    if !matches!(crate::remote::open_in_editor(cwd, cx), Some(Ok(()))) {
-        window.push_notification(
-            Notification::error(crate::tr!("errors.zed_cli_missing")),
-            cx,
-        );
-    }
 }
 
 /// The breathing room between the timeline and the header/composer. A phone

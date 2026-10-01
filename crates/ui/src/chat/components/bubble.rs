@@ -2,21 +2,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::menu::{ContextMenuExt as _, PopupMenu};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
+use agent::RewindMode;
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement as _,
     ObjectFit, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
+use std::rc::Rc;
 
 use tcode_core::session::SteeringStatus;
 
+use super::super::RewindTurn;
 use super::assistant;
-use crate::markdown::{MarkdownState, MarkdownView};
+use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub(crate) type SharedClickHandler = Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -42,6 +46,52 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) copied: bool,
     pub(crate) markdown: Option<Entity<MarkdownState>>,
     pub(crate) rewind: Option<AnyElement>,
+    /// The rewind the context menu offers, when the harness has one: the
+    /// turn, whether it is blocked right now, and whether a conversation
+    /// rewind is possible (there is none for the first turn).
+    pub(crate) rewind_menu: Option<RewindMenu>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RewindMenu {
+    pub(crate) turn: usize,
+    pub(crate) disabled: bool,
+}
+
+/// The bubble's context-menu items: copy the message, then the rewind modes
+/// the popover button offers. Shared by the Markdown inside the bubble and
+/// the bubble's own margin.
+fn bubble_menu_items(copy_text: Arc<str>, rewind: Option<RewindMenu>) -> MenuExtension {
+    Rc::new(move |menu: PopupMenu, window: &mut Window, cx: &mut App| {
+        let menu = if copy_text.trim().is_empty() {
+            menu
+        } else {
+            assistant::copy_message_items(copy_text.clone())(menu, window, cx)
+        };
+        let Some(RewindMenu { turn, disabled }) = rewind else {
+            return menu;
+        };
+        let mut modes = Vec::new();
+        if turn > 0 {
+            modes.push((
+                crate::tr!("chat.rewind_all").into_owned(),
+                RewindMode::FilesAndConversation,
+            ));
+            modes.push((
+                crate::tr!("chat.rewind_conversation").into_owned(),
+                RewindMode::Conversation,
+            ));
+        }
+        modes.push((
+            crate::tr!("chat.rewind_files").into_owned(),
+            RewindMode::Files,
+        ));
+        modes
+            .into_iter()
+            .fold(menu.separator(), |menu, (label, mode)| {
+                menu.menu_with_enable(label, Box::new(RewindTurn { turn, mode }), !disabled)
+            })
+    })
 }
 
 pub(crate) struct BubbleHandlers {
@@ -165,8 +215,10 @@ pub(crate) fn user_bubble(
         copied,
         markdown,
         rewind,
+        rewind_menu,
     } = data;
     let BubbleHandlers { copy, images } = handlers;
+    let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu);
     let text_style = window.text_style();
     let text_width = visible.lines().fold(px(0.), |width, line| {
         let run = text_style.to_run(line.len());
@@ -201,6 +253,7 @@ pub(crate) fn user_bubble(
                 .zip(images)
                 .enumerate()
                 .map(|(image_index, (path, on_click))| {
+                    let menu_path = path.clone();
                     let path = PathBuf::from(path);
                     div()
                         .id(SharedString::from(format!(
@@ -218,6 +271,7 @@ pub(crate) fn user_bubble(
                                 .object_fit(ObjectFit::Cover),
                         )
                         .on_click(on_click)
+                        .context_menu(move |menu, _, _| menu.path_items(&menu_path, None))
                 })
                 .collect::<Vec<_>>(),
         )
@@ -230,6 +284,7 @@ pub(crate) fn user_bubble(
                 .selectable(true)
                 .compact_headings(true)
                 .base_dir(cwd)
+                .menu_extension(menu_items.clone())
                 .into_any_element()
         },
     );
@@ -284,5 +339,6 @@ pub(crate) fn user_bubble(
         .child(assistant::reserve_action_row(
             actions, group_key, pinned, compact,
         ))
+        .context_menu(move |menu, window, cx| menu_items(menu, window, cx))
         .into_any_element()
 }

@@ -16,9 +16,9 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ListState, ObjectFit, ParentElement as _, Pixels, Rems, Role, SharedString,
-    StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, Window, div, img,
-    prelude::FluentBuilder as _, px, relative, rems, size,
+    LayoutId, ListState, MouseButton, ObjectFit, ParentElement as _, Pixels, Rems, Role,
+    SharedString, StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, Window,
+    div, img, prelude::FluentBuilder as _, px, relative, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -29,7 +29,7 @@ use super::{
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
     link_target::LinkTarget,
     nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
-    state::MarkdownState,
+    state::{MarkdownState, PendingContextTarget},
     utils::list_item_prefix,
 };
 
@@ -571,6 +571,9 @@ fn render_paragraph(
                 let view = view.clone();
                 let source = view.read(cx).image_source(&image.url);
                 let link = image.link.clone();
+                let context_view = view.clone();
+                let context_url = image.url.clone();
+                let context_title = title.clone();
                 let label = if !title.trim().is_empty() {
                     title.clone()
                 } else if let Some(link) = &link {
@@ -594,6 +597,17 @@ fn render_paragraph(
                         image.tooltip(move |window, cx| {
                             Tooltip::new(tooltip_title.clone()).build(window, cx)
                         })
+                    })
+                    .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                        context_view.update(cx, |state, cx| {
+                            state.set_pending_context(
+                                Some(PendingContextTarget::Image {
+                                    url: context_url.clone(),
+                                    title: context_title.clone(),
+                                }),
+                                cx,
+                            )
+                        });
                     })
                     .on_click(move |_, window, cx| {
                         gpui_base::TextSelection::end(window, cx);
@@ -1044,9 +1058,24 @@ fn render_code_block(
         offset = end.saturating_add(1);
     }
     let radius = cx.theme().tokens.radius.md;
+    // The whole fence, not the painted span: a long block is split across
+    // list items and the menu copies the code a reader sees as one block.
+    let whole_code = code_text
+        .strip_suffix('\n')
+        .unwrap_or(code_text)
+        .to_string();
+    let context_view = view.clone();
     div()
         .id(span_id(&options.path, &span))
         .when(last && !options.is_last, |block| block.pb(rems(1.)))
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            context_view.update(cx, |state, cx| {
+                state.set_pending_context(
+                    Some(PendingContextTarget::CodeBlock(whole_code.clone())),
+                    cx,
+                )
+            });
+        })
         .child(
             div()
                 .px_3()

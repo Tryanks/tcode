@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::menu::ContextMenuExt as _;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -19,6 +20,7 @@ use tcode_core::session::OrchestrateCallback;
 
 use super::super::model::one_line;
 use crate::markdown::{MarkdownState, MarkdownView};
+use crate::plan_panel::plan_menu_items;
 
 const CALLBACK_TITLE_MAX_CHARS: usize = 24;
 const DISCLOSURE_LINE_HEIGHT: f32 = 20.;
@@ -169,6 +171,7 @@ pub(crate) fn proposed_plan_card(
     let title = tcode_core::session::plan_title(markdown)
         .unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned());
     let long = markdown.chars().count() > 900 || markdown.lines().count() > 20;
+    let menu_items = plan_menu_items(markdown.to_string());
 
     let body: AnyElement = if collapsed {
         div().into_any_element()
@@ -180,7 +183,8 @@ pub(crate) fn proposed_plan_card(
             .child(
                 MarkdownView::new(&markdown_state)
                     .selectable(true)
-                    .base_dir(cwd),
+                    .base_dir(cwd)
+                    .menu_extension(menu_items.clone()),
             )
             .into_any_element()
     } else {
@@ -289,6 +293,7 @@ pub(crate) fn proposed_plan_card(
                 .bg(cx.theme().info),
         )
         .child(content)
+        .context_menu(move |menu, window, cx| menu_items(menu, window, cx))
         .into_any_element()
 }
 
