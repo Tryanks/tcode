@@ -840,8 +840,8 @@ impl Render for CommandPalette {
                 window.prevent_default();
                 cx.stop_propagation();
             })
-            .on_mouse_down_out(cx.listener(move |this, event, window, cx| {
-                dismissal.consume(event, window, cx);
+            .on_mouse_down_out(cx.listener(move |this, _, window, cx| {
+                dismissal.consume(window, cx);
                 this.close(cx);
             }));
         let overlay = div()

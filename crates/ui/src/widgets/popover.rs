@@ -6,8 +6,7 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui::{
-    Focusable as _, Role, SharedString, StatefulInteractiveElement as _, anchored, deferred, div,
-    point, px,
+    Focusable as _, Role, SharedString, StatefulInteractiveElement as _, deferred, div, px,
 };
 use gpui_base::StyledExt as _;
 use std::rc::Rc;
@@ -142,6 +141,10 @@ impl RenderOnce for Popover {
             return self.render_sheet(window, cx);
         }
 
+        // gpui-base's `overlay_closable` dismisses on the outside press and
+        // lets it through: it would also focus, select or press what the
+        // popup uncovered. A press that closes a picker or a menu does
+        // nothing else, so the press and its release are consumed here.
         let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
         let release = dismissal.clone();
         let closable = self.overlay_closable;
@@ -173,8 +176,8 @@ impl RenderOnce for Popover {
                 gpui_base::v_flex()
                     .id("tcode-popover-content")
                     .when(closable, |el| {
-                        el.on_mouse_down_out(move |event, window, cx| {
-                            dismissal.consume(event, window, cx);
+                        el.on_mouse_down_out(move |_, window, cx| {
+                            dismissal.consume(window, cx);
                             popover.update(cx, |state, cx| state.dismiss(window, cx));
                             cx.notify(parent);
                         })
@@ -209,7 +212,6 @@ impl Popover {
             }
         });
         let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
-        let outside = dismissal.clone();
         let closable = self.overlay_closable;
         let open = state.read(cx).is_open();
         // Keep the sheet mounted through its fade-out before dismissal.
@@ -244,7 +246,6 @@ impl Popover {
             // The grabber, the title row and the hairline above the content.
             let chrome_height = px(16.) + px(48.) + px(1.);
             let close = state.clone();
-            let backdrop = state.clone();
             let focus = state.read(cx).focus_handle(cx);
             let content = self
                 .content
@@ -255,16 +256,6 @@ impl Popover {
                 .role(Role::Group)
                 .aria_label(self.sheet_title.clone().unwrap_or_default())
                 .occlude()
-                .track_focus(&focus)
-                .key_context("Popover")
-                .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
-                .when(closable, |surface| {
-                    surface.on_mouse_down_out(move |event, window, cx| {
-                        outside.consume(event, window, cx);
-                        backdrop.update(cx, |state, cx| state.dismiss(window, cx));
-                        cx.notify(parent);
-                    })
-                })
                 // Offset animation would move the hit targets, so fade with the
                 // backdrop while keeping the sheet in its final position.
                 .opacity(progress)
@@ -329,22 +320,34 @@ impl Popover {
                         .children(content)
                         .children(self.children),
                 );
+            let request_close = state.clone();
             root = root.child(
                 deferred(
-                    anchored().position(point(px(0.), px(0.))).child(
-                        div()
-                            .id("touch-picker-backdrop")
-                            .debug_selector(|| "touch-picker-backdrop".into())
-                            .occlude()
-                            .w(viewport.width)
-                            .h(viewport.height)
-                            .pb(insets.bottom)
-                            .bg(crate::material::scrim(progress, cx))
-                            .flex()
-                            .flex_col()
-                            .justify_end()
-                            .child(surface),
-                    ),
+                    gpui_base::Sheet::new(cx)
+                        .focus_handle(focus)
+                        .overlay_closable(closable)
+                        .request_close(move |window, cx| {
+                            dismissal.dismissed();
+                            request_close.update(cx, |state, cx| state.dismiss(window, cx));
+                            cx.notify(parent);
+                        })
+                        .overlay(
+                            div()
+                                .id("touch-picker-backdrop")
+                                .debug_selector(|| "touch-picker-backdrop".into())
+                                .absolute()
+                                .inset_0()
+                                .occlude()
+                                .bg(crate::material::scrim(progress, cx)),
+                        )
+                        .surface(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .bottom(insets.bottom)
+                                .w(viewport.width)
+                                .child(surface),
+                        ),
                 )
                 .with_priority(gpui_base::POPUP_PRIORITY),
             );
@@ -356,7 +359,7 @@ impl Popover {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Render, TestAppContext};
+    use gpui::{Render, TestAppContext, point};
     use std::cell::Cell;
 
     struct SheetHarness(Rc<Cell<usize>>);
@@ -537,6 +540,40 @@ mod tests {
                 assert_eq!(releases.get(), 1);
             }
         }
+    }
+
+    #[gpui::test]
+    fn a_dismissal_without_a_press_leaves_the_next_click_alone(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let clicks = Rc::new(Cell::new(0));
+        let releases = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let clicks = clicks.clone();
+            let releases = releases.clone();
+            move |_, _| OutsideHarness {
+                kind: Kind::Sheet,
+                clicks,
+                releases,
+            }
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("outside-trigger").unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("touch-picker-sheet").is_some());
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("touch-picker-sheet").is_none());
+
+        let position = cx.debug_bounds("outside-target").unwrap().center();
+        cx.simulate_click(position, Default::default());
+        assert_eq!((clicks.get(), releases.get()), (1, 1));
     }
 
     #[gpui::test]

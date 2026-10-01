@@ -505,8 +505,8 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                         .position(position)
                         .snap_to_window_with_margin(px(8.))
                         .child(div().child(menu.clone()).on_mouse_down_out(
-                            move |event, window, cx| {
-                                dismissal.consume(event, window, cx);
+                            move |_, window, cx| {
+                                dismissal.consume(window, cx);
                                 menu.update(cx, |_, cx| cx.emit(DismissEvent));
                             },
                         )),
