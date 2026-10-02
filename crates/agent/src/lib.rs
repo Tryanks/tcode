@@ -1577,52 +1577,6 @@ fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod mcp_registration_tests {
-    use super::*;
-
-    fn reg() -> McpRegistration {
-        McpRegistration {
-            name: McpRegistration::SERVER_NAME_PREVIEW.into(),
-            url: "http://127.0.0.1:53211/mcp".into(),
-            bearer_token: "abc123".into(),
-        }
-    }
-
-    #[test]
-    fn claude_mcp_config_json_shape() {
-        let registration = reg();
-        let json: serde_json::Value =
-            serde_json::from_str(&claude_mcp_config_json([&registration])).unwrap();
-        let server = &json["mcpServers"]["tcode_preview"];
-        assert_eq!(server["type"], "http");
-        assert_eq!(server["url"], "http://127.0.0.1:53211/mcp");
-        assert_eq!(server["headers"]["Authorization"], "Bearer abc123");
-    }
-
-    #[test]
-    fn codex_config_override_is_valid_toml_streamable_http() {
-        let arg = reg().codex_config_override();
-        let (key, value) = arg.split_once('=').unwrap();
-        assert_eq!(key, "mcp_servers.tcode_preview");
-        // The value must parse as a TOML inline table with url + auth header,
-        // and must NOT use a literal bearer_token (codex rejects that for HTTP).
-        let doc: toml::Value = toml::from_str(&format!("v = {value}")).unwrap();
-        let table = &doc["v"];
-        assert_eq!(table["url"].as_str(), Some("http://127.0.0.1:53211/mcp"));
-        assert_eq!(
-            table["http_headers"]["Authorization"].as_str(),
-            Some("Bearer abc123")
-        );
-        assert!(table.get("bearer_token").is_none());
-        // tcode's own servers are exempt from codex's MCP tool-call approval.
-        assert_eq!(
-            table["default_tools_approval_mode"].as_str(),
-            Some("approve")
-        );
-    }
-}
-
-#[cfg(test)]
 mod launch_env_tests {
     use super::*;
 

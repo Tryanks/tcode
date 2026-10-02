@@ -810,13 +810,6 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// Open a section the way a tap on its row does, for tests that exercise
-    /// the navigation this page hands to the window.
-    #[cfg(test)]
-    pub(crate) fn select_section_for_test(&mut self, cx: &mut Context<Self>) {
-        self.select_section(Section::General, cx);
-    }
-
     /// The open section's name, which is also this page's compact nav-bar
     /// title and the label its child's Back control carries.
     pub(crate) fn section_title(&self) -> SharedString {
@@ -3036,19 +3029,6 @@ mod tests {
         }
     }
 
-    fn assert_section_applicability(
-        capabilities: SettingsCapabilities,
-        expected: &[(Section, bool)],
-    ) {
-        for (section, applies) in expected {
-            assert_eq!(
-                section.applies(&capabilities),
-                *applies,
-                "unexpected applicability for {section:?} under {capabilities:?}"
-            );
-        }
-    }
-
     #[test]
     fn archived_page_bounds_clamp_to_the_last_populated_page() {
         assert_eq!(page_bounds(0, 3, 50), (0, 0, 0), "empty list has no pages");
@@ -3059,48 +3039,6 @@ mod tests {
             (2, 100, 120),
             "a page past the end shows the last page instead of an empty one"
         );
-    }
-
-    #[test]
-    fn sections_apply_from_client_capabilities_and_attachment() {
-        let common = [
-            (Section::General, true),
-            (Section::Providers, true),
-            (Section::Usage, true),
-            (Section::Orchestrate, true),
-            (Section::ComputerUse, true),
-            (Section::Archived, true),
-        ];
-
-        // Computer Use and Browser configure a screen. A client that drives one
-        // — its own, or another machine's from a desktop that has the
-        // capability — keeps them open; one that drives none folds them away.
-        assert!(Section::ComputerUse.advanced() && Section::Browser.advanced());
-        assert!(!Section::General.advanced());
-
-        let local_desktop = capabilities(true, true, true, false);
-        assert_section_applicability(local_desktop, &common);
-        assert!(Section::Browser.applies(&local_desktop));
-        assert!(local_desktop.can_manage_local_permissions());
-        assert!(!local_desktop.folds_advanced());
-        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-        assert!(Section::Remote.applies(&local_desktop));
-
-        let remote_desktop = capabilities(true, true, true, true);
-        assert_section_applicability(remote_desktop, &common);
-        assert!(Section::Browser.applies(&remote_desktop));
-        assert!(!remote_desktop.can_manage_local_permissions());
-        assert!(!remote_desktop.folds_advanced());
-        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-        assert!(Section::Remote.applies(&remote_desktop));
-
-        let remote_phone = capabilities(false, false, false, true);
-        assert_section_applicability(remote_phone, &common);
-        assert!(!Section::Browser.applies(&remote_phone));
-        assert!(!remote_phone.can_manage_local_permissions());
-        assert!(remote_phone.folds_advanced());
-        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-        assert!(!Section::Remote.applies(&remote_phone));
     }
 
     struct CompactSettingsProbe {
@@ -3200,33 +3138,88 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(393.), px(852.)));
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-
-        assert!(cx.debug_bounds("settings-device-caption").is_some());
-        assert!(cx.debug_bounds("settings-machine-caption").is_some());
-        assert!(cx.debug_bounds("settings-nav-general").is_some());
-        assert!(cx.debug_bounds("settings-nav-browser").is_none());
-        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-        assert!(cx.debug_bounds("settings-nav-remote").is_none());
-
-        // This client drives no screen of its own and is attached elsewhere, so
-        // Computer Use is applicable but folded away until the user asks.
-        assert!(cx.debug_bounds("settings-advanced-toggle").is_some());
-        assert!(cx.debug_bounds("settings-nav-computer-use").is_none());
-        probe.update(cx, |probe, cx| {
-            probe.page.update(cx, |page, cx| {
-                page.advanced_expanded = Some(true);
+        // The navigation consumes capability values supplied by platform
+        // owners. Exercise each policy row through its rendered section list;
+        // local permission eligibility is a policy check, not an OS grant test.
+        for (capabilities, local_permissions, folded, browser, remote) in [
+            (
+                capabilities(true, true, true, false),
+                true,
+                false,
+                true,
+                true,
+            ),
+            (
+                capabilities(true, true, true, true),
+                false,
+                false,
+                true,
+                true,
+            ),
+            (
+                capabilities(false, false, false, true),
+                false,
+                true,
+                false,
+                false,
+            ),
+        ] {
+            probe.update(cx, |probe, cx| {
+                probe.page.update(cx, |page, cx| {
+                    page.capabilities = capabilities;
+                    page.advanced_expanded = None;
+                    assert_eq!(
+                        page.capabilities.can_manage_local_permissions(),
+                        local_permissions
+                    );
+                    cx.notify();
+                });
                 cx.notify();
             });
-            cx.notify();
-        });
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-        assert!(cx.debug_bounds("settings-nav-computer-use").is_some());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                _ = window.draw(cx);
+            });
+            for selector in [
+                "settings-device-caption",
+                "settings-machine-caption",
+                "settings-nav-general",
+                "settings-nav-providers",
+                "settings-nav-usage",
+                "settings-nav-orchestrate",
+                "settings-nav-archived",
+            ] {
+                assert!(
+                    cx.debug_bounds(selector).is_some(),
+                    "{capabilities:?}: {selector}"
+                );
+            }
+            assert_eq!(cx.debug_bounds("settings-nav-browser").is_some(), browser);
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            assert_eq!(cx.debug_bounds("settings-nav-remote").is_some(), remote);
+            #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
+            let _ = remote;
+            assert!(
+                cx.debug_bounds("settings-advanced-toggle").is_some(),
+                "{capabilities:?}: advanced disclosure remains available in either state"
+            );
+            assert_eq!(
+                cx.debug_bounds("settings-nav-computer-use").is_some(),
+                !folded
+            );
+            if folded {
+                let toggle = cx.debug_bounds("settings-advanced-toggle").unwrap();
+                cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.refresh();
+                    _ = window.draw(cx);
+                });
+                assert!(cx.debug_bounds("settings-nav-computer-use").is_some());
+                assert!(cx.debug_bounds("settings-nav-browser").is_none());
+            }
+        }
 
         // A stale palette/deep-link target is rejected by the same predicate
         // and returns a compact detail route to the root list.

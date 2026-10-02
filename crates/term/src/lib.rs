@@ -205,11 +205,6 @@ pub struct Terminal {
 
 #[cfg(feature = "pty")]
 impl Terminal {
-    /// Resolve the cwd that a subsequent [`Terminal::spawn`] should use.
-    pub fn resolve_spawn_cwd(cwd: impl AsRef<Path>) -> PathBuf {
-        PtyHandle::resolve_spawn_cwd(cwd)
-    }
-
     /// Spawn the platform's default interactive shell in `cwd`.
     pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
         Self::from_pty(PtyHandle::spawn(cwd)?)
@@ -323,11 +318,6 @@ impl Terminal {
 
     pub fn working_directory(&self) -> PathBuf {
         self.pty.working_directory()
-    }
-
-    /// Apply a cwd override to [`Terminal::spawn`] calls made synchronously by `f`.
-    pub fn with_spawn_cwd<R>(cwd: impl Into<PathBuf>, f: impl FnOnce() -> R) -> R {
-        PtyHandle::with_spawn_cwd(cwd, f)
     }
 
     /// Return a receiver for rendering-relevant terminal events.

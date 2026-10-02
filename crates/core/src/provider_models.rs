@@ -210,6 +210,24 @@ mod tests {
 
     #[test]
     fn model_preferences_keep_catalog_order_and_hidden_rows_out_of_the_picker() {
+        let mut models = catalog();
+        models[1].options = vec![
+            OptionDescriptor::Boolean {
+                id: "thinking".into(),
+                label: "Thinking".into(),
+                default_value: false,
+            },
+            OptionDescriptor::Select {
+                id: "reasoningEffort".into(),
+                label: "Reasoning".into(),
+                options: vec![SelectOption {
+                    value: "high".into(),
+                    label: "High".into(),
+                    description: None,
+                }],
+                default_value: None,
+            },
+        ];
         let settings = ProviderSettings {
             custom_models: vec!["custom".into(), "hidden-custom".into()],
             hidden_models: vec!["opus".into(), "hidden-custom".into()],
@@ -231,7 +249,7 @@ mod tests {
                 vec!["haiku", "custom", "sonnet"],
             ),
         ] {
-            let all = resolve_models(&catalog(), &settings, &favorites);
+            let all = resolve_models(&models, &settings, &favorites);
             assert_eq!(all.len(), 5);
             for row in &all {
                 assert_eq!(row.hidden, settings.hidden_models.contains(&row.id));
@@ -244,11 +262,20 @@ mod tests {
                     assert_eq!(row.name, row.id);
                 }
             }
-            let picker = picker_models(&catalog(), &settings, &favorites);
+            let picker = picker_models(&models, &settings, &favorites);
             assert_eq!(
                 picker.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
                 expected
             );
+            for rows in [&all, &picker] {
+                assert_eq!(
+                    rows.iter()
+                        .find(|row| row.id == "sonnet")
+                        .unwrap()
+                        .capabilities,
+                    [ModelCapability::Thinking, ModelCapability::Reasoning]
+                );
+            }
         }
     }
 
@@ -345,31 +372,5 @@ mod tests {
             ..spec("fable", "Fable")
         };
         assert_eq!(FastMode::of(&plain), None);
-    }
-
-    #[test]
-    fn reads_capabilities_from_catalog_descriptors() {
-        let mut model = spec("opus", "Opus");
-        model.options = vec![
-            OptionDescriptor::Boolean {
-                id: "thinking".into(),
-                label: "Thinking".into(),
-                default_value: false,
-            },
-            OptionDescriptor::Select {
-                id: "reasoningEffort".into(),
-                label: "Reasoning".into(),
-                options: vec![SelectOption {
-                    value: "high".into(),
-                    label: "High".into(),
-                    description: None,
-                }],
-                default_value: None,
-            },
-        ];
-        assert_eq!(
-            resolve_models(&[model], &ProviderSettings::default(), &[])[0].capabilities,
-            [ModelCapability::Thinking, ModelCapability::Reasoning]
-        );
     }
 }

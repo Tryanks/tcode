@@ -230,18 +230,29 @@ mod tests {
         let mux = HostMux::new(to_host, from_host);
         let one = mux.attach();
         let two = mux.attach();
-        let send = |connection: &Connection, kind: &str, id: u64| {
-            connection.to_host.send_blocking(format!(r#"{{"id":{id},"payload":{{"type":"{kind}","content":{{"topic":{{"type":"session_events","content":{{"session_id":"one"}}}}}}}}}}"#)).unwrap();
+        let session_topic =
+            serde_json::json!({"type":"session_events","content":{"session_id":"one"}});
+        let send = |connection: &Connection, kind: &str, id: u64, topic: &serde_json::Value| {
+            connection
+                .to_host
+                .send_blocking(
+                    encode_line(&serde_json::json!({
+                        "id": id,
+                        "payload": {"type": kind, "content": {"topic": topic}},
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
         };
-        send(&one, "subscribe", 1);
+        send(&one, "subscribe", 1, &session_topic);
         let _: String = host_rx.recv_blocking().unwrap();
         let event = r#"{"type":"event","content":{"topic":{"type":"session_events","content":{"session_id":"one"}},"event":{"type":"session_snapshot","content":{"from":0,"records":[]}}}}"#;
         host_tx.send_blocking(event.into()).unwrap();
         assert_eq!(one.from_host.recv_blocking().unwrap(), event);
         assert!(two.from_host.try_recv().is_err());
-        send(&two, "subscribe", 2);
+        send(&two, "subscribe", 2, &session_topic);
         let _: String = host_rx.recv_blocking().unwrap();
-        send(&one, "unsubscribe", 3);
+        send(&one, "unsubscribe", 3, &session_topic);
         let ack = one.from_host.recv_blocking().unwrap();
         assert!(ack.contains("ack"));
         assert!(
@@ -251,10 +262,34 @@ mod tests {
         host_tx.send_blocking(event.into()).unwrap();
         assert_eq!(two.from_host.recv_blocking().unwrap(), event);
         assert!(one.from_host.try_recv().is_err());
+
+        let index_topic = serde_json::json!({"type":"index"});
+        for client in [&one, &two] {
+            send(client, "subscribe", 4, &index_topic);
+            let _: String = host_rx.recv_blocking().unwrap();
+        }
+        drop(one.to_host);
+        // The closed output proves the mux processed the first detach.
+        assert!(one.from_host.recv_blocking().is_err());
+        let index_event = r#"{"type":"event","content":{"topic":{"type":"index"},"event":{"type":"index_snapshot","content":{"sessions":[],"projects":[]}}}}"#;
+        host_tx.send_blocking(index_event.into()).unwrap();
+        assert_eq!(two.from_host.recv_blocking().unwrap(), index_event);
+        assert!(
+            host_rx.try_recv().is_err(),
+            "disconnecting one client keeps the other's Index subscription"
+        );
         drop(two.to_host);
-        let unsubscribe: serde_json::Value =
-            serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
-        assert_eq!(unsubscribe["payload"]["type"], "unsubscribe");
+        let mut released = HashSet::new();
+        for _ in 0..2 {
+            let unsubscribe: serde_json::Value =
+                serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
+            assert_eq!(unsubscribe["payload"]["type"], "unsubscribe");
+            released.insert(unsubscribe["payload"]["content"]["topic"].to_string());
+        }
+        assert_eq!(
+            released,
+            HashSet::from([session_topic.to_string(), index_topic.to_string()])
+        );
     }
 
     #[test]

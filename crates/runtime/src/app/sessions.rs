@@ -1079,20 +1079,6 @@ impl AppState {
             .is_some_and(ActiveSession::has_work)
     }
 
-    /// Number of active or parked sessions that still own live work: a turn in
-    /// flight, an unacknowledged delivery, queued messages, or provider
-    /// background tasks. Quitting stops all of it, so the quit guard must gate
-    /// on this rather than on turns alone.
-    #[cfg(test)]
-    pub(super) fn working_sessions_count(&self) -> usize {
-        self.residents
-            .live
-            .values()
-            .chain(self.residents.parked.values())
-            .filter(|s| s.has_work())
-            .count()
-    }
-
     /// Record that a thread has been visited now (clears its unread dot).
     pub(super) fn mark_visited(&mut self, session_id: &str, cx: &mut HostCx) {
         self.settings

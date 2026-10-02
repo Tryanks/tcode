@@ -698,93 +698,75 @@ mod tests {
 
     #[test]
     fn bounded_output_continuation_round_trips_without_mutation() {
-        let mut store = StateStore::default();
-        let original = "0123456789α中文😀\n".repeat(4_000);
-        let visible = store.bound_model_text(Some("S9"), original.clone());
-        assert!(visible.len() < 20 * 1024);
-        let output_ref = visible
-            .split_whitespace()
-            .find(|part| part.starts_with("@o"))
-            .unwrap();
-        assert!(matches!(
-            store.read_output(output_ref, Some("other-state"), None),
-            Err(StateError::OutputOwnerMismatch { .. })
-        ));
-        for offset in [11, original.len() + 1] {
-            assert!(
-                matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
-            );
-        }
-        let mut rebuilt = visible
-            .split("\n\n[output truncated")
-            .next()
-            .unwrap()
-            .to_string();
-        let mut offset = rebuilt.len();
-        loop {
-            let page = store
+        for (original, line_limited) in [
+            ("0123456789α中文😀\n".repeat(4_000), false),
+            ("β\n".repeat(4_001), true),
+        ] {
+            let mut store = StateStore::default();
+            let visible = store.bound_model_text(Some("S9"), original.clone());
+            assert!(visible.len() < 20 * 1024);
+            let output_ref = visible
+                .split_whitespace()
+                .find(|part| part.starts_with("@o"))
+                .unwrap();
+            assert!(matches!(
+                store.read_output(output_ref, Some("other-state"), None),
+                Err(StateError::OutputOwnerMismatch { .. })
+            ));
+            let split_character = original
+                .char_indices()
+                .find(|(_, ch)| ch.len_utf8() > 1)
+                .unwrap()
+                .0
+                + 1;
+            for offset in [split_character, original.len() + 1] {
+                assert!(
+                    matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
+                );
+            }
+            let mut rebuilt = visible
+                .split("\n\n[output truncated")
+                .next()
+                .unwrap()
+                .to_string();
+            assert!(rebuilt.len() <= PREVIEW_BYTES);
+            assert!(rebuilt.lines().count() <= MAX_MODEL_LINES);
+            if line_limited {
+                assert_eq!(rebuilt, "β\n".repeat(2_000));
+            }
+            let mut offset = rebuilt.len();
+            loop {
+                let page = store
+                    .read_output(output_ref, Some("S9"), Some(offset))
+                    .unwrap();
+                assert!(page.text.len() <= PAGE_BYTES);
+                assert!(page.text.lines().count() <= MAX_MODEL_LINES);
+                assert!(page.next_offset > page.offset || page.eof);
+                if line_limited && !page.eof {
+                    assert!(page.text.ends_with('\n'));
+                }
+                rebuilt.push_str(&page.text);
+                if page.eof {
+                    break;
+                }
+                offset = page.next_offset;
+            }
+            assert_eq!(rebuilt, original);
+
+            let repeated = store
                 .read_output(output_ref, Some("S9"), Some(offset))
                 .unwrap();
-            rebuilt.push_str(&page.text);
-            if page.eof {
-                break;
-            }
-            offset = page.next_offset;
+            let repeated_again = store
+                .read_output(output_ref, Some("S9"), Some(offset))
+                .unwrap();
+            assert_eq!(repeated, repeated_again);
         }
-        assert_eq!(rebuilt, original);
-
-        let repeated = store
-            .read_output(output_ref, Some("S9"), Some(offset))
-            .unwrap();
-        let repeated_again = store
-            .read_output(output_ref, Some("S9"), Some(offset))
-            .unwrap();
-        assert_eq!(repeated, repeated_again);
     }
 
     #[test]
-    fn harness_delta_reports_added_removed_and_unchanged_labels() {
-        let entry = |display: &str| StableLabel {
-            key: display.to_lowercase(),
-            display: display.to_string(),
-        };
-        let baseline = vec![entry("Kept"), entry("Removed")];
-        let current = vec![entry("Kept"), entry("Added")];
-        let changed = harness_delta_lines(&current, Some(&baseline));
-        assert!(changed.iter().any(|line| line == "+ \"Added\""));
-        assert!(changed.iter().any(|line| line == "- \"Removed\""));
-
-        let unchanged = harness_delta_lines(&current, Some(&current));
-        assert_eq!(unchanged, ["no stable label changes."]);
-
-        let initial = harness_delta_lines(&current, None);
-        assert_eq!(initial, ["initial observation for this root."]);
-    }
-
-    #[test]
-    fn recent_actions_keep_only_the_latest_bounded_window_in_order() {
+    fn harness_observations_keep_deltas_targets_and_recent_actions() {
         let mut store = StateStore::default();
-        let root = root(1);
-        store.insert_observation(root.clone(), tree("one"));
-        let total = RECENT_ACTION_CAPACITY + 3;
-        store.record_actions(&root, (0..total).map(|index| format!("press @e{index}")));
-
-        let recent = &store
-            .harness_histories
-            .get(&root.identity())
-            .unwrap()
-            .recent_actions;
-        assert_eq!(recent.len(), RECENT_ACTION_CAPACITY);
-        assert_eq!(
-            recent.front().unwrap(),
-            &format!("press @e{}", total - RECENT_ACTION_CAPACITY)
-        );
-        assert_eq!(recent.back().unwrap(), &format!("press @e{}", total - 1));
-    }
-
-    #[test]
-    fn candidate_targets_include_only_interactive_nodes_with_assigned_refs() {
-        let mut tree = UiNode {
+        let observation_tree = |label: &str| UiNode {
             role: "window".into(),
             title: "Test".into(),
             enabled: true,
@@ -804,30 +786,46 @@ mod tests {
                 },
                 UiNode {
                     role: "static_text".into(),
-                    title: "Read only".into(),
+                    title: label.into(),
                     enabled: true,
                     ..UiNode::default()
                 },
             ],
             ..UiNode::default()
         };
-        assign_refs(&mut tree);
-        let button_ref = tree.children[0].ref_id.clone();
-        let action_ref = tree.children[1].ref_id.clone();
-        let read_only_ref = tree.children[2].ref_id.clone();
-
-        let candidates = candidate_target_lines(&tree);
-        assert_eq!(candidates.len(), 2);
+        let first = store.insert_observation(root(1), observation_tree("Removed"));
+        assert!(first.harness_annotation.contains(
+            "<state_delta since=\"previous\">\ninitial observation for this root.\n</state_delta>"
+        ));
         assert!(
-            candidates
-                .iter()
-                .any(|line| line == &format!("- {button_ref} button \"Save\""))
+            first
+                .harness_annotation
+                .contains("<recent_actions>\nnone\n</recent_actions>")
         );
-        assert!(
-            candidates
-                .iter()
-                .any(|line| { line == &format!("- {action_ref} group \"Action group\"") })
-        );
-        assert!(candidates.iter().all(|line| !line.contains(&read_only_ref)));
+        store.record_actions(&root(1), (0..11).map(|index| format!("press @e{index}")));
+        let second = store.insert_observation(root(1), observation_tree("Added"));
+        let annotation = &second.harness_annotation;
+        assert!(annotation.contains(
+            "<recent_actions>\n- press @e3\n- press @e4\n- press @e5\n- press @e6\n- press @e7\n- press @e8\n- press @e9\n- press @e10\n</recent_actions>"
+        ));
+        for observation in [&first, &second] {
+            let button_ref = &observation.tree.children[0].ref_id;
+            let action_ref = &observation.tree.children[1].ref_id;
+            assert!(!button_ref.is_empty());
+            assert!(!action_ref.is_empty());
+            assert_ne!(button_ref, action_ref);
+            assert!(observation.harness_annotation.contains(&format!(
+                "<candidate_targets>\n- {button_ref} button \"Save\"\n- {action_ref} group \"Action group\"\n</candidate_targets>"
+            )));
+        }
+        for baseline in ["previous", "initial"] {
+            assert!(annotation.contains(&format!(
+                "<state_delta since=\"{baseline}\">\n+ \"Added\"\n- \"Removed\"\n</state_delta>"
+            )));
+        }
+        let unchanged = store.insert_observation(root(1), observation_tree("Added"));
+        assert!(unchanged.harness_annotation.contains(
+            "<state_delta since=\"previous\">\nno stable label changes.\n</state_delta>"
+        ));
     }
 }

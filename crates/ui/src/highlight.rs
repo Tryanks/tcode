@@ -519,15 +519,9 @@ mod tests {
             "uncompilable patterns:\n{}",
             failures.join("\n")
         );
-    }
 
-    /// Regression: this exact snippet used to panic syntect through a lazy
-    /// compile of an Oniguruma-only JavaScript (Babel) pattern, aborting the
-    /// app mid-render (double panic during unwind). Calls the unguarded
-    /// parser directly so the `catch_unwind` fallback cannot mask a dirty
-    /// dump.
-    #[test]
-    fn jsx_arrow_function_highlights_without_panicking() {
+        // Exercise the known lazy JavaScript (Babel) parser panic without the
+        // production catch_unwind fallback masking an incompatible dump.
         let src = "const f = async (a, b) => a + b;\n";
         let syntax = syntax_for_name_or_extension("jsx").expect("jsx syntax");
         assert_eq!(syntax.name, "JavaScript (Babel)");

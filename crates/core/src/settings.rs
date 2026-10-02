@@ -1481,67 +1481,95 @@ mod tests {
 
     #[test]
     fn provider_color_maps_builtins_to_brand_and_custom_providers_to_distinct_palette_slots() {
-        let mut settings = Settings::default();
+        let settings = Settings::default();
         assert_eq!(settings.provider_color("claude"), 0xD97757);
         assert_eq!(settings.provider_color("codex"), 0x8B5CF6);
         assert_eq!(settings.provider_color("pi"), 0x4D9ABF);
         assert_eq!(settings.provider_color("opencode"), 0x22A06B);
 
-        for id in ["work-claude", "proxy-codex", "lab"] {
-            settings.profiles.insert(
-                id.into(),
-                ProviderProfile {
-                    kind: ProviderKind::ClaudeCode,
-                    settings: ProviderSettings::default(),
-                },
-            );
-        }
-        for id in ["gemini", "goose"] {
-            settings.acp_agents.insert(
-                id.into(),
-                InstalledAcpAgent {
-                    id: id.into(),
-                    name: id.into(),
-                    version: String::new(),
-                    icon: None,
-                    launch: agent::AcpLaunch::Npx {
-                        package: id.into(),
-                        args: Vec::new(),
-                        env: Vec::new(),
+        for (profiles, agents, expected) in [
+            (
+                vec!["work-claude".to_string()],
+                vec!["gemini"],
+                Some(vec![0x6B7FD7, 0x14B8A6]),
+            ),
+            (
+                ["work-claude", "proxy-codex", "lab"]
+                    .map(String::from)
+                    .to_vec(),
+                vec!["gemini", "goose"],
+                None,
+            ),
+            (
+                (0..13).map(|i| format!("profile-{i:02}")).collect(),
+                vec![],
+                None,
+            ),
+        ] {
+            let mut settings = Settings::default();
+            for id in &profiles {
+                settings.profiles.insert(
+                    id.clone(),
+                    ProviderProfile {
+                        kind: ProviderKind::ClaudeCode,
+                        settings: ProviderSettings::default(),
                     },
-                    enabled: true,
-                    env: Vec::new(),
-                    launch_args: None,
-                },
+                );
+            }
+            for id in &agents {
+                settings.acp_agents.insert(
+                    (*id).into(),
+                    InstalledAcpAgent {
+                        id: (*id).into(),
+                        name: (*id).into(),
+                        version: String::new(),
+                        icon: None,
+                        launch: agent::AcpLaunch::Npx {
+                            package: (*id).into(),
+                            args: Vec::new(),
+                            env: Vec::new(),
+                        },
+                        enabled: true,
+                        env: Vec::new(),
+                        launch_args: None,
+                    },
+                );
+            }
+            let keys: Vec<_> = profiles
+                .into_iter()
+                .chain(agents.iter().map(|id| format!("acp:{id}")))
+                .collect();
+            let colors: Vec<u32> = keys
+                .iter()
+                .map(|key| settings.provider_color(key))
+                .collect();
+            if let Some(expected) = expected {
+                assert_eq!(colors, expected);
+            }
+            let mut first_palette: Vec<_> = colors
+                .iter()
+                .take(PROVIDER_COLOR_PALETTE.len())
+                .copied()
+                .collect();
+            first_palette.sort_unstable();
+            first_palette.dedup();
+            assert_eq!(
+                first_palette.len(),
+                keys.len().min(PROVIDER_COLOR_PALETTE.len()),
+                "{colors:06X?}"
             );
-        }
-        let keys = [
-            "work-claude",
-            "proxy-codex",
-            "lab",
-            "acp:gemini",
-            "acp:goose",
-        ];
-        let colors: Vec<u32> = keys.iter().map(|k| settings.provider_color(k)).collect();
-        let mut distinct = colors.clone();
-        distinct.sort_unstable();
-        distinct.dedup();
-        assert_eq!(distinct.len(), keys.len(), "{colors:06X?}");
-        for color in &colors {
-            assert!(PROVIDER_COLOR_PALETTE.contains(color));
-            assert!(
-                ![0xD97757, 0x8B5CF6, 0x4D9ABF, 0x22A06B].contains(color),
-                "custom providers never take a brand color"
+            for color in &colors {
+                assert!(PROVIDER_COLOR_PALETTE.contains(color));
+                assert!(![0xD97757, 0x8B5CF6, 0x4D9ABF, 0x22A06B].contains(color));
+            }
+            assert_eq!(
+                colors,
+                keys.iter()
+                    .map(|key| settings.provider_color(key))
+                    .collect::<Vec<_>>()
             );
+            assert_eq!(settings.provider_color("deleted-profile"), 0xF59E0B);
         }
-        // Deterministic across calls, and a deleted profile still has a color.
-        assert_eq!(
-            colors,
-            keys.iter()
-                .map(|k| settings.provider_color(k))
-                .collect::<Vec<_>>()
-        );
-        assert!(PROVIDER_COLOR_PALETTE.contains(&settings.provider_color("gone")));
     }
 
     #[test]
@@ -1780,15 +1808,28 @@ mod tests {
 
     #[test]
     fn orchestrate_moves_untouched_astra_executors_to_sol_6() {
-        for text in [
-            OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION,
-            DEFAULT_GPT_6_EXECUTION_DEFINITION,
+        let old_sol_text = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
+        for (model, text, retained_default_text) in [
+            ("gpt-5.6-sol", old_sol_text, old_sol_text),
+            (
+                "gpt-6-astra",
+                OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION,
+                DEFAULT_GPT_6_EXECUTION_DEFINITION,
+            ),
+            (
+                "gpt-6-astra",
+                DEFAULT_GPT_6_EXECUTION_DEFINITION,
+                DEFAULT_GPT_6_EXECUTION_DEFINITION,
+            ),
         ] {
-            let old_json = format!(
-                r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-6-astra","description":{},"enabled":true,"fast":false}}]}}"#,
-                serde_json::to_string(text).unwrap()
-            );
-            let migrated: OrchestrateSettings = serde_json::from_str(&old_json).unwrap();
+            let source = serde_json::json!({
+                "provider": "codex", "model": model, "description": text,
+                "enabled": true, "fast": false
+            });
+            let migrated: OrchestrateSettings = serde_json::from_value(serde_json::json!({
+                "decision_models": [], "child_models": [source.clone()]
+            }))
+            .unwrap();
             assert_eq!(
                 migrated.child_models,
                 [builtin_model(
@@ -1797,112 +1838,54 @@ mod tests {
                     DEFAULT_SOL_6_DEFINITION
                 )]
             );
-            // Customised text, a profile, or a flipped switch keeps Astra.
-            for variant in [
-                old_json.replace(text, "mine"),
-                old_json.replace(r#""enabled":true"#, r#""enabled":false"#),
-                old_json.replace(r#""fast":false"#, r#""fast":true"#),
-                old_json.replace(
-                    r#""provider":"codex","#,
-                    r#""provider":"codex","profile_id":"corp","#,
-                ),
+            for (description, expected_description, profile, enabled, fast) in [
+                ("custom", "custom", None, true, false),
+                (text, retained_default_text, Some("custom"), true, false),
+                (text, retained_default_text, None, false, false),
+                (text, retained_default_text, None, true, true),
             ] {
-                let kept: OrchestrateSettings = serde_json::from_str(&variant).unwrap();
-                assert_eq!(kept.child_models.len(), 1, "input: {variant}");
+                let kept: OrchestrateSettings = serde_json::from_value(serde_json::json!({
+                    "decision_models": [],
+                    "child_models": [{
+                        "provider": "codex", "model": model, "description": description,
+                        "profile_id": profile, "enabled": enabled, "fast": fast
+                    }]
+                }))
+                .unwrap();
                 assert_eq!(
-                    kept.child_models[0].model, "gpt-6-astra",
-                    "input: {variant}"
+                    kept.child_models,
+                    [OrchestrateChildModel {
+                        provider: ProviderKind::Codex,
+                        model: model.into(),
+                        profile_id: profile.map(str::to_string),
+                        enabled,
+                        fast,
+                        description: expected_description.into(),
+                    }],
+                    "{model}: {description}, {profile:?}, enabled={enabled}, fast={fast}"
                 );
             }
-        }
-        // An untouched Astra row next to a user-added Sol 6 row is dropped
-        // rather than duplicating Sol 6.
-        let both = format!(
-            r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-6-sol","description":"Mine."}},{{"provider":"codex","model":"gpt-6-astra","description":{},"enabled":true,"fast":false}}]}}"#,
-            serde_json::to_string(DEFAULT_GPT_6_EXECUTION_DEFINITION).unwrap()
-        );
-        let migrated: OrchestrateSettings = serde_json::from_str(&both).unwrap();
-        assert_eq!(migrated.child_models.len(), 1);
-        assert_eq!(migrated.child_models[0].description, "Mine.");
-    }
-
-    #[test]
-    fn orchestrate_preserves_every_customized_sol_shape() {
-        let customized = [
-            r#"{"description":"custom","enabled":true,"fast":false}"#,
-            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","profile_id":"custom","enabled":true,"fast":false}"#,
-            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":false,"fast":false}"#,
-            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":true,"fast":true}"#,
-        ];
-        for row in customized {
-            let expected: serde_json::Value = serde_json::from_str(row).unwrap();
-            let old_json = format!(
-                r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-5.6-sol",{}}}]}}"#,
-                &row[1..row.len() - 1]
-            );
-            let migrated: OrchestrateSettings = serde_json::from_str(&old_json).unwrap();
-            assert_eq!(migrated.child_models.len(), 1, "input: {row}");
-            let actual = &migrated.child_models[0];
-            assert_eq!(actual.model, "gpt-5.6-sol", "input: {row}");
+            let migrated: OrchestrateSettings = serde_json::from_value(serde_json::json!({
+                "decision_models": [],
+                "child_models": [source, {
+                    "provider": "codex", "model": "gpt-6-sol", "profile_id": "custom-codex",
+                    "enabled": false, "fast": true, "description": "User execution guidance"
+                }]
+            }))
+            .unwrap();
             assert_eq!(
-                actual.description,
-                expected["description"].as_str().unwrap(),
-                "input: {row}"
-            );
-            assert_eq!(
-                actual.enabled,
-                expected["enabled"].as_bool().unwrap(),
-                "input: {row}"
-            );
-            assert_eq!(
-                actual.fast,
-                expected["fast"].as_bool().unwrap(),
-                "input: {row}"
-            );
-            assert_eq!(
-                actual.profile_id.as_deref(),
-                expected["profile_id"].as_str(),
-                "input: {row}"
+                migrated.child_models,
+                [OrchestrateChildModel {
+                    provider: ProviderKind::Codex,
+                    model: "gpt-6-sol".into(),
+                    profile_id: Some("custom-codex".into()),
+                    enabled: false,
+                    fast: true,
+                    description: "User execution guidance".into(),
+                }],
+                "{model}: existing destination stays unchanged"
             );
         }
-    }
-
-    #[test]
-    fn orchestrate_migration_does_not_duplicate_existing_execution_sol_6() {
-        let old_json = r#"{
-            "decision_models": [],
-            "child_models": [
-                {
-                    "provider": "codex",
-                    "model": "gpt-5.6-sol",
-                    "enabled": true,
-                    "fast": false,
-                    "description": "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely."
-                },
-                {
-                    "provider": "codex",
-                    "model": "gpt-6-sol",
-                    "profile_id": "custom-codex",
-                    "enabled": false,
-                    "fast": true,
-                    "description": "User execution guidance"
-                }
-            ]
-        }"#;
-        let migrated: OrchestrateSettings = serde_json::from_str(old_json).unwrap();
-
-        assert_eq!(migrated.child_models.len(), 1);
-        assert_eq!(migrated.child_models[0].model, "gpt-6-sol");
-        assert_eq!(
-            migrated.child_models[0].profile_id.as_deref(),
-            Some("custom-codex")
-        );
-        assert_eq!(
-            migrated.child_models[0].description,
-            "User execution guidance"
-        );
-        assert!(!migrated.child_models[0].enabled);
-        assert!(migrated.child_models[0].fast);
     }
 
     #[test]

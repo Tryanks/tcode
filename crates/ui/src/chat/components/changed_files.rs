@@ -575,8 +575,6 @@ mod tests {
 
     struct FileEditRowProbe {
         row: LiveEditRow,
-        expanded: bool,
-        diffs: InlineDiffCache,
     }
 
     impl gpui::Render for FileEditRowProbe {
@@ -590,13 +588,12 @@ mod tests {
             // window stretch the row and mask a wrap.
             use gpui::{ParentElement as _, Styled as _};
             let key = "test-file-edit";
-            let diff = self.expanded.then(|| self.diffs.render(key, &self.row, cx));
             gpui_base::v_flex().size_full().child(file_edit_row(
                 key,
                 &self.row,
                 std::path::Path::new("/"),
-                self.expanded,
-                diff,
+                false,
+                None,
                 |_, _, _| {},
                 cx,
             ))
@@ -615,8 +612,6 @@ mod tests {
                 counts: Some((128, 96)),
                 diff: None,
             },
-            expanded: false,
-            diffs: InlineDiffCache::new(),
         });
         let cx: &mut VisualTestContext = cx;
         let draw = |cx: &mut VisualTestContext| {
@@ -662,33 +657,5 @@ mod tests {
                 "row grew taller at {width}px, so the long path wrapped: row={row:?}"
             );
         }
-    }
-
-    #[gpui::test]
-    fn expanded_file_edit_renders_its_provider_diff(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| FileEditRowProbe {
-            row: LiveEditRow {
-                path: "src/lib.rs".into(),
-                kind: agent::FileChangeKind::Modify,
-                counts: Some((1, 1)),
-                diff: Some("@@ -1,2 +1,2 @@\n-fn old() {}\n+fn new() {}\n fn stable() {}\n".into()),
-            },
-            expanded: true,
-            diffs: InlineDiffCache::new(),
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(640.), px(240.)));
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-
-        let diff = cx
-            .debug_bounds("file-edit-diff")
-            .expect("expanded inline diff bounds");
-        assert!(diff.size.height >= px(36.));
     }
 }

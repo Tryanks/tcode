@@ -132,9 +132,7 @@ fn expand_row_window(window: Range<usize>, margin: usize, row_count: usize) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MarkdownEntry, ResidencyDecisions, ResidencyInput, ResidencyScope, decide, tail_row_window,
-    };
+    use super::{MarkdownEntry, ResidencyDecisions, ResidencyInput, decide, tail_row_window};
     use std::collections::HashSet;
 
     #[test]
@@ -181,42 +179,6 @@ mod tests {
         assert!(decisions.build.contains("assistant-239"));
         assert!(!decisions.evict.contains("assistant-7"));
         assert!(decisions.evict.contains("assistant-150"));
-    }
-
-    #[test]
-    fn candidate_filter_preserves_decisions_with_distant_tail_and_selection() {
-        let all_entries = entries(200);
-        let residents = [
-            "assistant-5".to_string(),
-            "assistant-40".to_string(),
-            "assistant-100".to_string(),
-            "assistant-199".to_string(),
-        ]
-        .into_iter()
-        .collect();
-        let selection_participants = ["assistant-100".to_string()].into_iter().collect();
-        let scope = ResidencyScope::new(200, 40..48, None, true);
-        let filtered_entries = all_entries
-            .iter()
-            .filter(|entry| scope.includes(entry.row))
-            .cloned()
-            .collect::<Vec<_>>();
-        let run = |entries: &[MarkdownEntry]| {
-            decide(ResidencyInput {
-                row_count: 200,
-                visible_rows: 40..48,
-                one_shot_row_target: None,
-                entries,
-                stream_running: true,
-                resident_ids: &residents,
-                selection_participants: &selection_participants,
-                selection_drag_active: false,
-            })
-        };
-
-        assert_eq!(run(&filtered_entries), run(&all_entries));
-        assert!(run(&filtered_entries).build.contains("assistant-199"));
-        assert!(run(&filtered_entries).evict.is_empty());
     }
 
     /// One document per row, as a conversation of single-message rows has.

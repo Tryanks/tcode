@@ -261,28 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn query_matching_is_case_insensitive_and_generates_a_bounded_snippet() {
-        let text = format!("{} AUTH.rs {}", "before ".repeat(20), "after ".repeat(20));
-        let snippet = match_snippet(&text, "auth.RS", 60).expect("match");
-        assert!(snippet.contains("AUTH.rs"));
-        assert!(snippet.chars().count() <= 62); // up to two ellipses
-        assert!(match_snippet(&text, "missing", 60).is_none());
-        for (text, query, expected) in [
-            ("  中文\nCAFÉ\t😀 ", " café ", Some("中文 CAFÉ 😀")),
-            ("İstanbul", "i\u{307}stan", Some("İstanbul")),
-            ("中文", "文", Some("中文")),
-            ("visible", "  ", None),
-            ("   ", "visible", None),
-        ] {
-            assert_eq!(
-                match_snippet(text, query, 60).as_deref(),
-                expected,
-                "{text:?}: {query:?}"
-            );
-        }
-    }
-
-    #[test]
     fn search_indexes_final_visible_content_and_refreshes_after_append_or_removal() {
         let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
@@ -404,6 +382,54 @@ mod tests {
         assert_eq!(updated[4].turn, 1);
         fs::remove_file(root.join(format!("{}.jsonl", meta.id))).unwrap();
         assert!(search.search(sessions, "auth.rs", 10).is_empty());
+        for (text, query, expected) in [
+            ("  中文\nCAFÉ\t😀 ", " café ", Some("中文 CAFÉ 😀")),
+            ("İstanbul", "i\u{307}stan", Some("İstanbul")),
+            ("中文", "文", Some("中文")),
+            ("visible", "  ", None),
+            ("   ", "visible", None),
+            ("visible", "missing", None),
+        ] {
+            let snippet_meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+            store
+                .append_event(
+                    &snippet_meta.id,
+                    4,
+                    &completed(
+                        "snippet",
+                        ItemContent::AssistantMessage { text: text.into() },
+                    )
+                    .event,
+                )
+                .unwrap();
+            let hits = search.search(std::slice::from_ref(&snippet_meta), query, 10);
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| hit.snippet.as_str())
+                    .collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>(),
+                "{text:?}: {query:?}"
+            );
+        }
+        let snippet_meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        store
+            .append_event(
+                &snippet_meta.id,
+                5,
+                &completed(
+                    "long",
+                    ItemContent::AssistantMessage {
+                        text: format!("{} AUTH.rs {}", "before ".repeat(40), "after ".repeat(40)),
+                    },
+                )
+                .event,
+            )
+            .unwrap();
+        let hits = search.search(std::slice::from_ref(&snippet_meta), "auth.RS", 10);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("AUTH.rs"));
+        assert!(hits[0].snippet.chars().count() <= 142);
+        assert!(hits[0].snippet.starts_with('…') && hits[0].snippet.ends_with('…'));
         fs::remove_dir_all(root).unwrap();
     }
 }

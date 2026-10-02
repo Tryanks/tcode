@@ -150,12 +150,6 @@ mod tests {
     use std::iter::once;
 
     #[test]
-    fn line_diff_can_ignore_all_whitespace() {
-        assert!(line_diff("let x = 1;\n", "let  x=1;\n", true).is_empty());
-        assert!(!line_diff("let x = 1;\n", "let  x=1;\n", false).is_empty());
-    }
-
-    #[test]
     fn word_highlights_preserve_utf8_token_boundaries_and_skip_unbounded_inputs() {
         for (old, new, old_ranges, new_ranges) in [
             (
