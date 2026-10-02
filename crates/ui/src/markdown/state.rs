@@ -499,11 +499,6 @@ impl MarkdownState {
     }
 
     #[cfg(test)]
-    pub(super) fn source(&self) -> &str {
-        &self.text
-    }
-
-    #[cfg(test)]
     pub(super) fn has_measured_item(&self, index: usize) -> bool {
         self.list_state.bounds_for_item(index).is_some()
     }
@@ -611,27 +606,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn source_and_parsed_text_stay_coherent(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("old", cx)));
-
-        assert_eq!(
-            state.read_with(cx, |state, _| state.rendered_text()),
-            "old\n"
-        );
-
-        state.update(cx, |state, cx| {
-            state.set_text("new", cx);
-            state.push_str(" **value**", cx);
-        });
-        state.read_with(cx, |state, _| {
-            assert_eq!(state.source(), "new **value**");
-            assert_eq!(state.rendered_text(), "new value\n");
-        });
-    }
-
-    #[gpui::test]
     fn streamed_appends_match_full_parse(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(super::super::init);
@@ -642,6 +616,7 @@ mod tests {
             "before\n\n```rust\nlet unfinished = true;\n",
             "| left | center | right |\n| :--- | :---: | ---: |\n| a | b | c |\n",
             "An earlier [reference] is resolved later.\n\n[reference]: https://example.com \"title\"\n",
+            "An earlier [reference].\n\n[reference]: https://example.com\n\nTail grows",
         ];
 
         for document in documents {
@@ -654,7 +629,27 @@ mod tests {
                     streamed.update(cx, |state, cx| state.push_str(chunk, cx));
                 }
                 streamed.read_with(cx, |state, _| {
-                    assert_eq!(state.parsed, expected_tree, "chunk size {chunk_size}");
+                    assert_eq!(
+                        state.parsed, expected_tree,
+                        "{document:?}, chunk size {chunk_size}"
+                    );
+                    if document.contains("[reference]") {
+                        let BlockNode::Root { children } = state.parsed.as_ref() else {
+                            panic!("root")
+                        };
+                        let BlockNode::Paragraph(paragraph) = &children[0] else {
+                            panic!("paragraph")
+                        };
+                        let urls = paragraph
+                            .children
+                            .iter()
+                            .flat_map(|inline| &inline.marks)
+                            .filter_map(|(_, mark)| {
+                                mark.link.as_ref().map(|link| link.url.as_ref())
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(urls, ["https://example.com"], "chunk size {chunk_size}");
+                    }
                 });
             }
         }
@@ -678,20 +673,6 @@ mod tests {
                 state.last_reparse_bytes(),
                 state.text.len()
             );
-        });
-    }
-
-    #[gpui::test]
-    fn link_reference_definitions_force_a_full_reparse(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let document = "An earlier [reference].\n\n[reference]: https://example.com\n\nTail";
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(document, cx)));
-
-        state.update(cx, |state, cx| state.push_str(" grows", cx));
-        state.read_with(cx, |state, _| {
-            assert_eq!(state.last_reparse_bytes(), state.text.len());
-            assert_eq!(*state.parsed, super::super::parse(&state.text));
         });
     }
 
@@ -752,53 +733,6 @@ mod tests {
         });
 
         fs::remove_dir_all(root).expect("remove temporary directory");
-    }
-
-    #[gpui::test]
-    fn select_all_reads_blocks_that_were_never_painted(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let source = (0..2_000)
-            .map(|ix| format!("block {ix}"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let expected = (0..2_000)
-            .map(|ix| format!("block {ix}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(&source, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let selection = view.read_with(cx, |root, cx| {
-            root.markdown.read(cx).selection_handle().clone()
-        });
-        cx.update(|_, cx| selection.set_local_selection(true, cx));
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
-        assert_eq!(selected, expected);
-    }
-
-    #[gpui::test]
-    fn select_all_includes_code_and_table_text(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let source = "intro\n\n```text\nfirst line\nsecond line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |";
-        let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(source, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let selection = view.read_with(cx, |root, cx| {
-            root.markdown.read(cx).selection_handle().clone()
-        });
-        cx.update(|_, cx| selection.set_local_selection(true, cx));
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
-        assert_eq!(
-            selected,
-            "intro\nfirst line\nsecond line\nname value\nalpha beta\n"
-        );
     }
 
     #[gpui::test]

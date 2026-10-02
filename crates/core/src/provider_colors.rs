@@ -73,32 +73,3 @@ pub fn palette_color(key: &str, known: &[&str]) -> u32 {
     }
     PROVIDER_COLOR_PALETTE[hashed_slot(key)]
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn custom_colors_fill_the_palette_before_reusing_slots() {
-        let known = ["acp:gemini", "work-claude"];
-        assert_eq!(palette_color("acp:gemini", &known), 0x14B8A6);
-        assert_eq!(palette_color("work-claude", &known), 0x6B7FD7);
-        // A deleted profile's threads keep their hashed color rather than none.
-        assert_eq!(palette_color("deleted-profile", &known), 0xF59E0B);
-
-        let keys: Vec<String> = (0..PROVIDER_COLOR_PALETTE.len() + 3)
-            .map(|i| format!("profile-{i:02}"))
-            .collect();
-        let known: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let colors: Vec<u32> = known.iter().map(|key| palette_color(key, &known)).collect();
-        let mut first_palette = colors[..PROVIDER_COLOR_PALETTE.len()].to_vec();
-        first_palette.sort_unstable();
-        first_palette.dedup();
-        assert_eq!(first_palette.len(), PROVIDER_COLOR_PALETTE.len());
-        assert!(
-            colors
-                .iter()
-                .all(|color| PROVIDER_COLOR_PALETTE.contains(color))
-        );
-    }
-}

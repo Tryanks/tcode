@@ -241,31 +241,18 @@ mod tests {
             "<div>not html</div>",
         ];
 
-        for input in cases {
-            let markdown = plain_text_as_markdown(input);
-            let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&markdown, cx)));
-            assert_eq!(
-                rendered(&state, cx),
-                format!("{input}\n"),
-                "input: {input:?}"
-            );
-        }
-    }
-
-    #[gpui::test]
-    fn plain_text_markdown_preserves_lines_and_indentation(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let cases = [
-            ("line one\nline two", "line one\nline two\n"),
-            ("para one\n\npara two", "para one\npara two\n"),
-            (
-                "    let x = 1;\n        nested();",
-                "    let x = 1;\n        nested();\n",
-            ),
-            ("\tindented with a tab", "\tindented with a tab\n"),
-        ];
-
+        let cases = cases
+            .into_iter()
+            .map(|input| (input, format!("{input}\n")))
+            .chain([
+                ("line one\nline two", "line one\nline two\n".into()),
+                ("para one\n\npara two", "para one\npara two\n".into()),
+                (
+                    "    let x = 1;\n        nested();",
+                    "    let x = 1;\n        nested();\n".into(),
+                ),
+                ("\tindented with a tab", "\tindented with a tab\n".into()),
+            ]);
         for (input, expected) in cases {
             let markdown = plain_text_as_markdown(input);
             let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&markdown, cx)));
@@ -287,6 +274,8 @@ mod tests {
             ("Seed tail 文", "Seed tail 文\n"),
             ("Replacement", "Replacement\n"),
             ("Replace", "Replace\n"),
+            ("new", "new\n"),
+            ("new **value**", "new value\n"),
             ("", ""),
         ] {
             cx.update(|cx| md.sync(text.into(), cx));

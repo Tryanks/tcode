@@ -571,18 +571,32 @@ fn applying_a_delta_replaces_rows_and_trims_history_at_the_cap() {
         fg: TerminalColor::Indexed(1),
         ..TerminalStyle::default()
     };
+    let blue = TerminalStyle {
+        fg: TerminalColor::Indexed(4),
+        ..TerminalStyle::default()
+    };
+    let row = |text: String, style| TerminalRow {
+        cells: vec![TerminalCell {
+            text,
+            style,
+            ..TerminalCell::default()
+        }],
+        wrapped: false,
+    };
     let mut frame = TerminalFrame {
         cols: 2,
         rows: 2,
-        styles: vec![TerminalStyle::default()],
-        visible: vec![TerminalRow::default(), TerminalRow::default()],
-        history: (0..HISTORY_LIMIT).map(|_| TerminalRow::default()).collect(),
+        styles: vec![TerminalStyle::default(), blue],
+        visible: vec![row("unchanged".into(), 1), TerminalRow::default()],
+        history: (0..HISTORY_LIMIT)
+            .map(|index| row(format!("old-{index}"), 0))
+            .collect(),
         ..TerminalFrame::default()
     };
     frame.apply(&TerminalDelta {
         cols: 2,
         rows: 2,
-        // The delta's own table puts the new style at index 1.
+        // Local style 1 is red here but blue in the retained frame.
         styles: vec![TerminalStyle::default(), red],
         rows_replaced: vec![TerminalRowUpdate {
             index: 1,
@@ -595,22 +609,23 @@ fn applying_a_delta_replaces_rows_and_trims_history_at_the_cap() {
                 wrapped: false,
             },
         }],
-        history: Some(TerminalHistoryUpdate::Appended(vec![TerminalRow {
-            cells: vec![TerminalCell {
-                text: "old".into(),
-                ..TerminalCell::default()
-            }],
-            wrapped: false,
-        }])),
+        history: Some(TerminalHistoryUpdate::Appended(vec![row("new".into(), 0)])),
         ..TerminalDelta::default()
     });
 
-    assert!(frame.visible[0].cells.is_empty());
+    assert_eq!(frame.visible[0].cells[0].text, "unchanged");
+    assert_eq!(frame.style(&frame.visible[0].cells[0]), blue);
+    assert_eq!(frame.visible[1].cells[0].text, "x");
     assert_eq!(frame.style(&frame.visible[1].cells[0]), red);
     assert_eq!(frame.history.len(), HISTORY_LIMIT);
+    assert_eq!(frame.history[0].cells[0].text, "old-1");
+    assert_eq!(
+        frame.history[HISTORY_LIMIT - 2].cells[0].text,
+        format!("old-{}", HISTORY_LIMIT - 1)
+    );
     assert_eq!(
         frame.history[HISTORY_LIMIT - 1].cells[0].text,
-        "old",
+        "new",
         "the newest scrollback row is kept and the oldest dropped"
     );
 }

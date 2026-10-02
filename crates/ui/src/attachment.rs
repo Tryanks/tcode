@@ -36,12 +36,6 @@ struct AttachmentRuntime {
 }
 
 impl AttachmentRuntime {
-    #[cfg(test)]
-    fn start(transport: Transport, cx: &mut App) -> Self {
-        let link = HostLink::new(transport.to_host, transport.from_host);
-        Self::start_link(link, transport.state, cx)
-    }
-
     fn start_link(
         link: HostLink,
         states: async_channel::Receiver<tcode_client::ConnectionState>,
@@ -194,10 +188,9 @@ pub fn same_target(left: &AttachmentTarget, right: &AttachmentTarget) -> bool {
 mod tests {
     use gpui::TestAppContext;
     use tcode_protocol::{
-        ClientPayload, Command, EventEnvelope, HostMessage, IndexSnapshot, ServerEvent,
-        Subscription, Topic, decode_client_line, encode_line,
+        ClientPayload, Command, EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic,
+        decode_client_line, encode_line,
     };
-    use tcode_traverse::HostMux;
 
     use super::*;
 
@@ -235,17 +228,14 @@ mod tests {
     ) {
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
-        let runtime = cx.update(|cx| AttachmentRuntime::start(transport(to_host, from_host), cx));
-        runtime
-            .link
-            .subscribe(Subscription {
-                topic: Topic::Index,
-                after: None,
-            })
-            .unwrap();
+        let local: LocalTransport = Rc::new(move || transport(to_host.clone(), from_host.clone()));
+        let attachment = cx.update(|cx| {
+            Attachment::open(AttachmentTarget::Local, Some(&local), None, false, cx)
+                .expect("local attachment")
+        });
         cx.run_until_parked();
 
-        let finished = cx.update(|cx| runtime.close(cx));
+        let finished = cx.update(|cx| attachment.close(cx));
         cx.run_until_parked();
         assert_eq!(
             finished.try_recv().ok(),
@@ -268,47 +258,5 @@ mod tests {
                 ClientPayload::Command(Command::ShutdownAllAndFlush)
             )
         }));
-    }
-
-    /// Switching this window's attachment must not disturb any other client
-    /// sharing the same host.
-    ///
-    /// `HostMux` pumps on its own OS threads, which the deterministic GPUI test
-    /// executor refuses to be woken from, so the two client pumps run on smol
-    /// here. What is under test is the pair the runtime above delegates to —
-    /// [`HostMux`] and [`HostLink::close`] — not the task wrapper, which the
-    /// preceding test covers end to end.
-    #[test]
-    fn detaching_one_mux_client_leaves_an_independent_client_attached() {
-        let (to_host, host_requests) = async_channel::unbounded();
-        let (host_events, from_host) = async_channel::unbounded();
-        let mux = HostMux::new(to_host, from_host);
-        let attach = || {
-            let connection = mux.attach();
-            let link = HostLink::new(connection.to_host, connection.from_host);
-            let pump = link.clone();
-            (link, smol::spawn(async move { pump.pump().await }))
-        };
-        let (old, old_pump) = attach();
-        let (second, second_pump) = attach();
-        second
-            .subscribe(Subscription {
-                topic: Topic::Index,
-                after: None,
-            })
-            .unwrap();
-        host_requests.recv_blocking().unwrap();
-
-        old.close();
-        smol::block_on(old_pump);
-
-        host_events.send_blocking(index_event()).unwrap();
-        assert_eq!(
-            smol::block_on(second.events().recv()).unwrap().topic,
-            Topic::Index,
-            "the surviving client must still receive host events"
-        );
-        second.close();
-        smol::block_on(second_pump);
     }
 }

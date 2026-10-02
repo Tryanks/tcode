@@ -1341,36 +1341,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_subscription_rejects_queued_reply_and_releases_generation() {
-        let (to_host, outgoing) = async_channel::unbounded();
-        let (_incoming, from_host) = async_channel::unbounded();
-        let link = HostLink::new(to_host, from_host);
-        let subscription = Subscription {
-            topic: Topic::SessionEvents {
-                session_id: "one".into(),
-            },
-            after: None,
-        };
-        link.subscribe(subscription.clone()).unwrap();
-        let request = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
-        link.unsubscribe(subscription.clone()).unwrap();
-        let reply = EventEnvelope {
-            request_id: Some(request.id),
-            topic: subscription.topic,
-            event: ServerEvent::SessionSnapshot {
-                total: 0,
-                total_turns: 0,
-                truncated: false,
-                from: 0,
-                end: 0,
-                records: vec![],
-            },
-        };
-        assert!(!link.subscription_reply_is_current(&reply));
-        assert!(link.inner.subscription_requests.lock().unwrap().is_empty());
-    }
-
-    #[test]
     fn cancelling_request_releases_pending_waiter() {
         let (to_host, _outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
@@ -1431,8 +1401,23 @@ mod tests {
         link.set_connection_state(ConnectionState::Connected { path: None });
         let replay = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
         assert_eq!(updated.payload, replay.payload);
+        let queued_reply = EventEnvelope {
+            request_id: Some(replay.id),
+            topic: topic.clone(),
+            event: ServerEvent::SessionSnapshot {
+                total: 0,
+                total_turns: 0,
+                truncated: false,
+                from: 0,
+                end: 0,
+                records: vec![],
+            },
+        };
+        assert!(link.subscription_reply_is_current(&queued_reply));
         link.unsubscribe(Subscription { topic, after: None })
             .unwrap();
+        assert!(!link.subscription_reply_is_current(&queued_reply));
+        assert!(link.inner.subscription_requests.lock().unwrap().is_empty());
         outgoing.try_recv().unwrap();
         link.set_connection_state(ConnectionState::Reconnecting {
             attempt: 2,

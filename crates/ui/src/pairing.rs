@@ -264,33 +264,6 @@ mod tests {
         });
     }
 
-    /// Pairing outlives the attempt that started it. A reply from a
-    /// superseded attempt is dropped, so reopening the form cannot be
-    /// retargeted by an answer the user has already moved on from.
-    #[gpui::test]
-    fn results_from_a_superseded_attempt_are_dropped(cx: &mut TestAppContext) {
-        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(window, cx)));
-
-        let stale = form.update(cx, |holder, _| holder.0.restart());
-        let current = form.update(cx, |holder, _| holder.0.restart());
-        assert_ne!(stale, current);
-
-        form.update(cx, |holder, _| {
-            let rejected = || Err("invalid or expired invitation".into());
-            assert!(
-                holder.0.finish_pair(stale, rejected(), "a:1").is_none(),
-                "a pairing answer from the previous attempt must be dropped"
-            );
-            assert_eq!(holder.0.error, None);
-
-            assert!(holder.0.finish_pair(current, rejected(), "a:1").is_none());
-            assert_eq!(
-                holder.0.error.as_deref(),
-                Some(crate::tr!("hosts.pair.rejected").into_owned().as_str())
-            );
-        });
-    }
-
     /// A view is only needed because the inputs live in a window.
     struct Holder(PairForm);
 

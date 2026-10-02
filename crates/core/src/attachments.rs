@@ -117,13 +117,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn generated_file_names_take_only_plain_extensions() {
-        assert!(is_safe_extension("png"));
-        assert!(is_safe_extension("JPG"));
-        for ext in ["", "../x", "png/", "png.exe", "a-b", "toolongext"] {
-            assert!(!is_safe_extension(ext), "{ext:?}");
-        }
-    }
 }

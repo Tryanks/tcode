@@ -550,64 +550,129 @@ mod tests {
         }
     }
 
-    struct KeyBarProbe {
-        terminal_focused: bool,
-        bar: Entity<TerminalKeyBar>,
-    }
-
-    impl Render for KeyBarProbe {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().when(
-                should_show_terminal_key_bar(self.terminal_focused, cx),
-                |root| root.child(self.bar.clone()),
-            )
-        }
-    }
-
     #[gpui::test]
     fn bar_renders_only_for_a_focused_soft_keyboard_terminal(cx: &mut TestAppContext) {
+        use gpui::Focusable as _;
+        use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
         cx.update(crate::theme::init);
-        let (probe, cx) = cx.add_window_view(|_, cx| {
-            let focus = cx.focus_handle();
-            let bar_focus = focus.clone();
-            KeyBarProbe {
-                terminal_focused: false,
-                bar: cx.new(|_| TerminalKeyBar::new(bar_focus)),
-            }
+        let root = std::env::temp_dir().join(format!(
+            "tcode-terminal-keybar-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let mut status = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("terminal".into(), std::env::temp_dir(), cx);
+            state.session_status_snapshot(&id).unwrap()
+        }))
+        .unwrap();
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        status.terminals = vec![tcode_protocol::TerminalStatus {
+            id: 7,
+            title: "shell".into(),
+            exited: false,
+        }];
+        status.active_terminal_id = Some(7);
+        status.terminal_open = true;
+        let session_id = status.session_id.clone();
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
         });
-        let cx: &mut VisualTestContext = cx;
-        let draw = |cx: &mut VisualTestContext| {
+        let store = cx.new(|cx| {
+            crate::store::WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        let (drawer, cx) = cx.add_window_view(|window, cx| {
+            crate::terminal_drawer::TerminalDrawer::new(store.clone(), window, cx)
+        });
+        for (topic, event) in [
+            (
+                Topic::SessionStatus { session_id },
+                ServerEvent::SessionStatusReplaced(status),
+            ),
+            (
+                Topic::Terminal { terminal_id: 7 },
+                ServerEvent::TerminalFrame {
+                    terminal_id: 7,
+                    frame: Box::new(tcode_protocol::terminal::TerminalFrame {
+                        cols: 1,
+                        rows: 1,
+                        styles: vec![tcode_protocol::terminal::TerminalStyle::default()],
+                        visible: vec![tcode_protocol::terminal::TerminalRow {
+                            cells: vec![tcode_protocol::terminal::TerminalCell {
+                                text: "x".into(),
+                                ..Default::default()
+                            }],
+                            wrapped: false,
+                        }],
+                        ..Default::default()
+                    }),
+                },
+            ),
+        ] {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.with_terminal_workspace(|workspace| {
+                workspace.active().map(|entry| entry.id)
+            })),
+            Some(Some(7)),
+            "the drawer must have a replicated active terminal before focus is tested"
+        );
+        let focus = drawer.read_with(cx, |drawer, cx| drawer.focus_handle(cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        for (mobile, focused, visible) in [
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            cx.update(|window, cx| {
+                crate::window_seam::override_mobile_for_test(cx, mobile);
+                if focused {
+                    focus.focus(window, cx);
+                } else {
+                    window.blur(cx);
+                }
+                window.refresh();
+            });
+            cx.run_until_parked();
             cx.update(|window, cx| {
                 _ = window.draw(cx);
             });
-        };
-
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        probe.update(cx, |probe, cx| {
-            probe.terminal_focused = true;
-            cx.notify();
-        });
-        draw(cx);
-        assert!(cx.debug_bounds("terminal-key-bar").is_none());
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, true));
-        probe.update(cx, |probe, cx| {
-            probe.terminal_focused = false;
-            cx.notify();
-        });
-        draw(cx);
-        assert!(cx.debug_bounds("terminal-key-bar").is_none());
-
-        probe.update(cx, |probe, cx| {
-            probe.terminal_focused = true;
-            cx.notify();
-        });
-        draw(cx);
-        assert_eq!(
-            cx.debug_bounds("terminal-key-bar")
-                .expect("focused phone terminal key bar")
-                .size
-                .height,
-            px(KEY_BAR_HEIGHT)
-        );
+            let bar = cx.debug_bounds("terminal-key-bar");
+            assert_eq!(bar.is_some(), visible, "mobile={mobile}, focused={focused}");
+            if let Some(bar) = bar {
+                assert_eq!(bar.size.height, px(KEY_BAR_HEIGHT));
+            }
+        }
     }
 }

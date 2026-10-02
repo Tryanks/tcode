@@ -4190,7 +4190,9 @@ mod tests {
         project.id = "project".into();
         let mut active = session("active", None);
         active.project_id = Some(project.id.clone());
-        let mut settled = session("settled", None);
+        let mut active_child = session("active-child", Some("active"));
+        active_child.project_id = Some(project.id.clone());
+        let mut settled = session("settled", Some("active"));
         settled.project_id = Some(project.id.clone());
         settled.settled_at = Some(1);
         let send = |topic, event| {
@@ -4209,8 +4211,8 @@ mod tests {
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
                 summary: Default::default(),
-                sessions: vec![active, settled],
-                projects: vec![project],
+                sessions: vec![active.clone(), active_child.clone(), settled.clone()],
+                projects: vec![project.clone()],
             }),
         );
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -4236,82 +4238,148 @@ mod tests {
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(1000.)));
-        for compact in [false, true] {
-            for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
-                let settings = tcode_core::settings::Settings {
-                    sidebar_layout: layout,
-                    auto_archive_disabled: true,
-                    ..Default::default()
-                };
-                send(Topic::Settings, ServerEvent::SettingsSnapshot(settings));
-                window_state.update(cx, |state, _| state.compact = compact);
-                store.update(cx, |store, _| store.select_session("active".into()));
-                sidebar.update(cx, |sidebar, cx| {
-                    sidebar.expanded_settled.clear();
-                    sidebar.compact_model_dirty = true;
-                    cx.notify();
-                });
-                draw(cx);
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-                draw(cx);
-                assert!(
-                    !store.read_with(cx, |store, _| store.threads_loading()),
-                    "thread index and settings ready"
-                );
-                assert_eq!(
-                    store.read_with(cx, |store, _| store.sidebar_sessions().len()),
-                    2
-                );
-                let key = if layout == SidebarLayout::Flat {
-                    "settled-recent"
-                } else {
-                    "settled-project"
-                };
-                assert!(
-                    cx.debug_bounds(key).is_some(),
-                    "settled header, compact={compact}, layout={layout:?}"
-                );
-                let row = if compact {
-                    "compact-row-settled"
-                } else {
-                    "sidebar-thread-settled"
-                };
-                assert!(cx.debug_bounds(row).is_none(), "settled starts collapsed");
-                assert_eq!(
-                    sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
-                    ["active"]
-                );
-                let header = cx.debug_bounds(key).unwrap();
-                cx.simulate_click(header.center(), gpui::Modifiers::default());
-                draw(cx);
-                assert!(
-                    cx.debug_bounds(row).is_some(),
-                    "expansion exposes settled thread"
-                );
-                assert_eq!(
-                    sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
-                    ["active", "settled"]
-                );
-                let header = cx.debug_bounds(key).unwrap();
-                cx.simulate_click(header.center(), gpui::Modifiers::default());
-                draw(cx);
-                assert!(cx.debug_bounds(row).is_none());
-                store.update(cx, |store, _| store.select_session("settled".into()));
-                sidebar.update(cx, |_, cx| cx.notify());
-                draw(cx);
-                assert!(
-                    cx.debug_bounds(row).is_some(),
-                    "navigation expands settled group"
-                );
-                assert!(store.read_with(cx, |store, _| {
-                    store
-                        .sidebar_sessions()
-                        .iter()
-                        .find(|meta| meta.id == "settled")
-                        .unwrap()
-                        .settled_at
-                        .is_some()
-                }));
+        for settled_parent in [false, true] {
+            for compact in [false, true] {
+                for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
+                    let mut parent = active.clone();
+                    parent.settled_at = settled_parent.then_some(1);
+                    send(
+                        Topic::Index,
+                        ServerEvent::IndexSnapshot(IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: vec![parent, active_child.clone(), settled.clone()],
+                            projects: vec![project.clone()],
+                        }),
+                    );
+                    let settings = tcode_core::settings::Settings {
+                        sidebar_layout: layout,
+                        collapsed_threads: vec!["active".into()],
+                        auto_archive_disabled: true,
+                        ..Default::default()
+                    };
+                    send(Topic::Settings, ServerEvent::SettingsSnapshot(settings));
+                    // Keep this a selected-thread fixture: applying Index to
+                    // an empty workspace would request an unrelated draft from
+                    // the fake host. Apply its queued metadata before drawing,
+                    // so reveal reads this case rather than the previous one.
+                    store.update(cx, |store, _| store.select_session("active".into()));
+                    cx.run_until_parked();
+                    store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                    assert_eq!(
+                        store.read_with(cx, |store, _| {
+                            store
+                                .sidebar_sessions()
+                                .iter()
+                                .find(|meta| meta.id == "active")
+                                .unwrap()
+                                .settled_at
+                        }),
+                        settled_parent.then_some(1),
+                        "applied fixture: ancestor={settled_parent}, compact={compact}, layout={layout:?}"
+                    );
+                    window_state.update(cx, |state, _| state.compact = compact);
+                    sidebar.update(cx, |sidebar, cx| {
+                        sidebar.expanded_settled.clear();
+                        sidebar.compact_model_dirty = true;
+                        cx.notify();
+                    });
+                    draw(cx);
+                    store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                    draw(cx);
+                    assert!(
+                        !store.read_with(cx, |store, _| store.threads_loading()),
+                        "thread index and settings ready"
+                    );
+                    assert_eq!(
+                        store.read_with(cx, |store, _| store.sidebar_sessions().len()),
+                        3
+                    );
+                    let key = if layout == SidebarLayout::Flat {
+                        "settled-recent"
+                    } else {
+                        "settled-project"
+                    };
+                    assert!(
+                        cx.debug_bounds(key).is_some(),
+                        "settled header, compact={compact}, layout={layout:?}"
+                    );
+                    let row = if compact {
+                        "compact-row-settled"
+                    } else {
+                        "sidebar-thread-settled"
+                    };
+                    if settled_parent && cx.debug_bounds(row).is_some() {
+                        // This case proves settled-ancestor partitioning. An
+                        // Index replacement need not trigger a new selection
+                        // reveal, so start it collapsed via the real disclosure.
+                        let header = cx.debug_bounds(key).unwrap();
+                        cx.simulate_click(header.center(), gpui::Modifiers::default());
+                        draw(cx);
+                    }
+                    assert!(
+                        cx.debug_bounds(row).is_none(),
+                        "settled group collapsed: ancestor={settled_parent}, compact={compact}, layout={layout:?}"
+                    );
+                    assert_eq!(
+                        sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
+                        ["active"]
+                    );
+                    let header = cx.debug_bounds(key).unwrap();
+                    cx.simulate_click(header.center(), gpui::Modifiers::default());
+                    draw(cx);
+                    assert!(
+                        cx.debug_bounds(row).is_some(),
+                        "expansion exposes settled thread"
+                    );
+                    assert_eq!(
+                        sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
+                        ["active", "settled"]
+                    );
+                    let header = cx.debug_bounds(key).unwrap();
+                    cx.simulate_click(header.center(), gpui::Modifiers::default());
+                    draw(cx);
+                    assert!(cx.debug_bounds(row).is_none());
+                    store.update(cx, |store, _| store.select_session("settled".into()));
+                    sidebar.update(cx, |_, cx| cx.notify());
+                    draw(cx);
+                    assert!(
+                        cx.debug_bounds(row).is_some(),
+                        "navigation expands settled group"
+                    );
+                    assert!(store.read_with(cx, |store, _| {
+                        store
+                            .sidebar_sessions()
+                            .iter()
+                            .find(|meta| meta.id == "settled")
+                            .unwrap()
+                            .settled_at
+                            .is_some()
+                    }));
+                    // A settled ancestor is kept by its active descendant. The
+                    // separately settled sibling is visible even while its parent
+                    // is folded; opening that parent also restores its active child.
+                    send(
+                        Topic::Settings,
+                        ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                            sidebar_layout: layout,
+                            auto_archive_disabled: true,
+                            ..Default::default()
+                        }),
+                    );
+                    draw(cx);
+                    store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                    draw(cx);
+                    assert_eq!(
+                        sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
+                        ["active", "active-child", "settled"]
+                    );
+                    let child_row = if compact {
+                        "compact-row-active-child"
+                    } else {
+                        "sidebar-thread-active-child"
+                    };
+                    assert!(cx.debug_bounds(child_row).is_some());
+                }
             }
         }
 
@@ -4434,33 +4502,163 @@ mod tests {
                 "shortcut order for {layout:?}"
             );
         }
-    }
 
-    #[test]
-    fn settled_partition_keeps_active_descendants_visible_and_orders_families() {
-        let mut parent = session("parent", None);
-        parent.settled_at = Some(1);
-        let child = session("child", Some("parent"));
-        let mut sibling = session("settled-child", Some("parent"));
-        sibling.settled_at = Some(1);
-        let (active, settled) = partition_settled(&[parent, child, sibling]);
-        assert_eq!(
-            active
+        let make_sessions = |entries: &[(&str, Option<&str>, u64)]| {
+            entries
                 .iter()
-                .map(|meta| meta.id.as_str())
-                .collect::<Vec<_>>(),
-            ["parent", "child"]
-        );
-        let collapsed = HashSet::from(["parent".into()]);
-        assert_eq!(visible_threads(&settled, &collapsed)[0].id, "settled-child");
-        assert_eq!(
-            flat_visible_threads(&settled, &collapsed, None, &HashMap::new())[0].id,
-            "settled-child"
-        );
-        assert_eq!(
-            compact_visible_threads(&settled, &collapsed, None)[0].id,
-            "settled-child"
-        );
+                .map(|(id, parent, updated)| {
+                    let mut meta = session(id, *parent);
+                    meta.project_id = Some("project".into());
+                    meta.updated_at = *updated;
+                    meta
+                })
+                .collect::<Vec<_>>()
+        };
+        let budget = make_sessions(&[
+            ("parent", None, 100),
+            ("child-0", Some("parent"), 99),
+            ("child-1", Some("parent"), 98),
+            ("child-2", Some("parent"), 97),
+            ("child-3", Some("parent"), 96),
+            ("child-4", Some("parent"), 95),
+            ("child-5", Some("parent"), 94),
+            ("child-6", Some("parent"), 93),
+            ("thread-0", None, 80),
+            ("thread-1", None, 79),
+            ("thread-2", None, 78),
+            ("thread-3", None, 77),
+            ("thread-4", None, 76),
+        ]);
+        let attention = make_sessions(&[
+            ("working-root", None, 40),
+            ("waiting-root", None, 10),
+            ("waiting-child", Some("waiting-root"), 11),
+            ("idle-old", None, 20),
+            ("idle-new", None, 30),
+        ]);
+        let lifted = make_sessions(&[
+            ("working-root", None, 100),
+            ("lifted-root", None, 1),
+            ("lifted-child", Some("lifted-root"), 2),
+        ]);
+        for (layout, sessions, activity, folded, expected, show_more) in [
+            (
+                SidebarLayout::Grouped,
+                budget.clone(),
+                HashMap::new(),
+                true,
+                vec![
+                    "parent", "thread-0", "thread-1", "thread-2", "thread-3", "thread-4",
+                ],
+                false,
+            ),
+            (
+                SidebarLayout::Grouped,
+                budget,
+                HashMap::new(),
+                false,
+                vec![
+                    "parent", "child-0", "child-1", "child-2", "child-3", "child-4", "child-5",
+                    "child-6", "thread-0", "thread-1", "thread-2", "thread-3", "thread-4",
+                ],
+                true,
+            ),
+            (
+                SidebarLayout::Flat,
+                attention,
+                HashMap::from([
+                    ("waiting-root".to_string(), (false, true, false, false)),
+                    ("working-root".to_string(), (true, false, false, false)),
+                ]),
+                false,
+                vec![
+                    "waiting-root",
+                    "waiting-child",
+                    "working-root",
+                    "idle-new",
+                    "idle-old",
+                ],
+                false,
+            ),
+            (
+                SidebarLayout::Flat,
+                lifted,
+                HashMap::from([
+                    ("lifted-child".to_string(), (false, false, true, false)),
+                    ("working-root".to_string(), (true, false, false, false)),
+                ]),
+                false,
+                vec!["lifted-root", "lifted-child", "working-root"],
+                false,
+            ),
+        ] {
+            let selectors = sessions
+                .iter()
+                .map(|meta| {
+                    let selector: &'static str =
+                        Box::leak(format!("sidebar-thread-{}", meta.id).into_boxed_str());
+                    (meta.id.clone(), selector)
+                })
+                .collect::<Vec<_>>();
+            send(
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: tcode_protocol::IndexSummary {
+                        activity,
+                        ..Default::default()
+                    },
+                    sessions,
+                    projects: store.read_with(cx, |store, _| store.projects()),
+                }),
+            );
+            send(
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                    sidebar_layout: layout,
+                    collapsed_threads: if folded {
+                        vec!["parent".into()]
+                    } else {
+                        vec![]
+                    },
+                    auto_archive_disabled: true,
+                    ..Default::default()
+                }),
+            );
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.project_filter = None;
+                sidebar.expanded_groups.clear();
+                if !folded {
+                    sidebar.expanded_groups.insert("project".into());
+                }
+                cx.notify();
+            });
+            draw(cx);
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            let mut rendered = selectors
+                .iter()
+                .filter_map(|(id, selector)| {
+                    cx.debug_bounds(selector)
+                        .map(|bounds| (id.as_str(), bounds.top()))
+                })
+                .collect::<Vec<_>>();
+            rendered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            assert_eq!(
+                rendered.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
+                expected
+            );
+            if layout == SidebarLayout::Grouped {
+                assert_eq!(
+                    cx.debug_bounds("show-more-project").is_some(),
+                    show_more,
+                    "hidden children must not consume the six visible-row slots"
+                );
+            }
+        }
     }
 
     #[gpui::test]
@@ -4677,6 +4875,7 @@ mod tests {
 
     #[gpui::test]
     fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-sidebar-rename-test-{}",
             tcode_services::store::now_millis()
@@ -4697,18 +4896,32 @@ mod tests {
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
-        let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));
-        let (_, cx) = cx.add_window_view(|_, _| WorkingThreadRowProbe);
+        let (sidebar, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store, window_state.clone(), cx));
         let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(360.), px(800.)));
+        draw(cx);
         cx.update(|window, cx| {
             sidebar.update(cx, |sidebar, cx| {
                 sidebar.on_rename(&ThreadRename(session_id.clone()), window, cx);
                 let input = sidebar.renaming.as_ref().unwrap().input.clone();
                 input.update(cx, |input, cx| input.set_value("Unsaved title", window, cx));
-                sidebar.cancel_rename(cx);
             });
         });
 
+        draw(cx);
+        sidebar.read_with(cx, |sidebar, cx| {
+            let input = &sidebar
+                .renaming
+                .as_ref()
+                .expect("mounted rename editor")
+                .input;
+            assert_eq!(input.read(cx).value().as_str(), "Unsaved title");
+        });
+        // This is the supported cancellation path: pointer-down outside the
+        // mounted Input triggers its owning row's cancel handler.
+        cx.simulate_click(gpui::point(px(340.), px(760.)), gpui::Modifiers::default());
+        draw(cx);
         cx.update(|_, cx| {
             assert!(sidebar.read(cx).renaming.is_none());
         });
@@ -4717,6 +4930,7 @@ mod tests {
                 .expect("read host title");
         assert_eq!(title, "Original title");
 
+        host.shutdown_blocking().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5891,6 +6105,12 @@ mod tests {
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(size(px(393.), px(852.)));
         for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
+            // The desktop leaf-click case below changes the selection. Each
+            // layout starts from the original disclosure fixture's parent.
+            store.update(cx, |store, cx| {
+                store.select_session("parent".into());
+                cx.notify();
+            });
             let settings = tcode_core::settings::Settings {
                 sidebar_layout: layout,
                 collapsed_threads: vec!["archived".into(), "missing".into()],
@@ -5980,38 +6200,119 @@ mod tests {
             assert_eq!(fold_request(cx), Some(("parent".to_string(), false)));
             host_folds(false, cx);
             assert!(cx.debug_bounds("compact-row-running-child").is_some());
+
+            // Desktop row clicks share the host fold policy: first selects,
+            // repeat parent toggles, and even a selected leaf never folds.
+            window_state.update(cx, |state, cx| {
+                state.compact = false;
+                cx.notify();
+            });
+            store.update(cx, |store, cx| {
+                store.select_session("other".into());
+                cx.notify();
+            });
+            draw(cx);
+            fold_request(cx);
+            let parent = cx.debug_bounds("sidebar-thread-parent").unwrap().center();
+            cx.simulate_click(parent, gpui::Modifiers::default());
+            draw(cx);
+            assert_eq!(fold_request(cx), None, "first click only selects");
+            assert_eq!(
+                store
+                    .read_with(cx, |store, _| store.active_session_id())
+                    .as_deref(),
+                Some("parent")
+            );
+            cx.simulate_click(parent, gpui::Modifiers::default());
+            draw(cx);
+            assert_eq!(fold_request(cx), Some(("parent".to_string(), true)));
+            host_folds(true, cx);
+            assert!(cx.debug_bounds("sidebar-thread-running-child").is_none());
+            cx.simulate_click(parent, gpui::Modifiers::default());
+            draw(cx);
+            assert_eq!(fold_request(cx), Some(("parent".to_string(), false)));
+            host_folds(false, cx);
+            assert!(cx.debug_bounds("sidebar-thread-running-child").is_some());
+            let other = cx.debug_bounds("sidebar-thread-other").unwrap().center();
+            for _ in 0..2 {
+                cx.simulate_click(other, gpui::Modifiers::default());
+                draw(cx);
+                assert_eq!(fold_request(cx), None, "a leaf has no children to fold");
+            }
+            window_state.update(cx, |state, cx| {
+                state.compact = true;
+                cx.notify();
+            });
         }
     }
 
     #[test]
-    fn child_unread_is_suppressed_by_render_state_derivation() {
-        let parent = session("parent", None);
-        let child = session("child", Some("parent"));
-        let sessions = vec![parent, child.clone()];
-
-        let flags = thread_flags(&[(
-            "child",
-            ThreadFlags {
-                unread: true,
-                ..ThreadFlags::default()
-            },
-        )]);
-        let state = derive_thread_render_state(&child, &sessions, &flags);
-
-        assert!(state.is_child);
-        assert!(!state.show_unread);
-
-        let orphan = session("orphan-child", Some("missing-parent"));
-        let flags = thread_flags(&[(
-            "orphan-child",
-            ThreadFlags {
-                unread: true,
-                ..ThreadFlags::default()
-            },
-        )]);
-        let state = derive_thread_render_state(&orphan, std::slice::from_ref(&orphan), &flags);
-        assert!(!state.is_child);
-        assert!(!state.show_unread);
+    fn thread_render_state_suppresses_child_unread_and_counts_direct_children() {
+        let sessions = vec![
+            session("parent", None),
+            session("child-working", Some("parent")),
+            session("child-idle", Some("parent")),
+            session("grandchild-working", Some("child-working")),
+            session("orphan-child", Some("missing-parent")),
+        ];
+        let flags = thread_flags(&[
+            (
+                "parent",
+                ThreadFlags {
+                    unread: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "child-working",
+                ThreadFlags {
+                    working: true,
+                    unread: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "child-idle",
+                ThreadFlags {
+                    unread: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "grandchild-working",
+                ThreadFlags {
+                    working: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "orphan-child",
+                ThreadFlags {
+                    unread: true,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        for (id, is_child, show_unread, direct, active) in [
+            ("parent", false, true, 2, 1),
+            ("child-working", true, false, 1, 1),
+            ("child-idle", true, false, 0, 0),
+            ("grandchild-working", true, false, 0, 0),
+            ("orphan-child", false, false, 0, 0),
+        ] {
+            let meta = sessions.iter().find(|meta| meta.id == id).unwrap();
+            let state = derive_thread_render_state(meta, &sessions, &flags);
+            assert_eq!(
+                (
+                    state.is_child,
+                    state.show_unread,
+                    state.direct_children,
+                    state.active_direct_children
+                ),
+                (is_child, show_unread, direct, active),
+                "{id}"
+            );
+        }
     }
 
     #[gpui::test]
@@ -6071,176 +6372,5 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn repeat_click_on_selected_parent_toggles_direct_child_rows() {
-        let open = HashSet::new();
-        let folded = HashSet::from(["parent".to_string()]);
-
-        assert_eq!(
-            toggle_parent_for_row_click(&open, "parent", false, true),
-            None,
-            "first click only selects"
-        );
-        assert_eq!(
-            toggle_parent_for_row_click(&open, "parent", true, false),
-            None,
-            "a leaf has nothing to fold"
-        );
-        assert_eq!(
-            toggle_parent_for_row_click(&open, "parent", true, true),
-            Some(true)
-        );
-        assert_eq!(
-            toggle_parent_for_row_click(&folded, "parent", true, true),
-            Some(false),
-            "repeat click restores rows"
-        );
-    }
-
-    #[test]
-    fn active_direct_child_count_excludes_grandchildren() {
-        let parent = session("parent", None);
-        let child_working = session("child-working", Some("parent"));
-        let child_idle = session("child-idle", Some("parent"));
-        let grandchild_working = session("grandchild-working", Some("child-working"));
-        let sessions = vec![
-            parent.clone(),
-            child_working,
-            child_idle,
-            grandchild_working,
-        ];
-
-        let flags = thread_flags(&[
-            (
-                "child-working",
-                ThreadFlags {
-                    working: true,
-                    ..ThreadFlags::default()
-                },
-            ),
-            (
-                "grandchild-working",
-                ThreadFlags {
-                    working: true,
-                    ..ThreadFlags::default()
-                },
-            ),
-        ]);
-        let state = derive_thread_render_state(&parent, &sessions, &flags);
-
-        assert_eq!(state.direct_children, 2);
-        assert_eq!(state.active_direct_children, 1);
-    }
-
-    #[test]
-    fn collapsed_children_do_not_consume_thread_list_slots() {
-        let mut sessions = vec![session("parent", None)];
-        for i in 0..7 {
-            sessions.push(session(&format!("child-{i}"), Some("parent")));
-        }
-        for i in 0..5 {
-            sessions.push(session(&format!("thread-{i}"), None));
-        }
-
-        let collapsed = HashSet::from(["parent".to_string()]);
-        let threads = visible_threads(&sessions, &collapsed);
-
-        // Parent plus the five ordinary threads all fit inside the collapsed
-        // limit once the hidden children stop counting toward it.
-        assert_eq!(threads.len(), THREADS_COLLAPSED_LIMIT);
-        assert!(threads.iter().all(|meta| meta.parent_session_id.is_none()));
-        assert_eq!(
-            thread_list_toggle_label(threads.len(), false),
-            None,
-            "no Show more row when every visible thread already fits"
-        );
-
-        // Expanding the parent brings the children back into the count.
-        let expanded = visible_threads(&sessions, &HashSet::new());
-        assert_eq!(expanded.len(), sessions.len());
-    }
-
-    #[test]
-    fn flat_blocks_sort_by_attention_then_recency_and_keep_children_adjacent() {
-        let mut waiting_root = session("waiting-root", None);
-        waiting_root.updated_at = 10;
-        let mut waiting_child = session("waiting-child", Some("waiting-root"));
-        waiting_child.updated_at = 11;
-        let mut working_root = session("working-root", None);
-        working_root.updated_at = 40;
-        let mut idle_new = session("idle-new", None);
-        idle_new.updated_at = 30;
-        let mut idle_old = session("idle-old", None);
-        idle_old.updated_at = 20;
-        let sessions = vec![
-            working_root,
-            waiting_root,
-            waiting_child,
-            idle_old,
-            idle_new,
-        ];
-
-        let flags = thread_flags(&[
-            (
-                "waiting-root",
-                ThreadFlags {
-                    waiting_for_approval: true,
-                    ..ThreadFlags::default()
-                },
-            ),
-            (
-                "working-root",
-                ThreadFlags {
-                    working: true,
-                    ..ThreadFlags::default()
-                },
-            ),
-        ]);
-        let visible = flat_visible_threads(&sessions, &HashSet::new(), None, &flags);
-        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
-
-        assert_eq!(
-            ids,
-            vec![
-                "waiting-root",
-                "waiting-child",
-                "working-root",
-                "idle-new",
-                "idle-old"
-            ]
-        );
-    }
-
-    #[test]
-    fn flat_block_attention_is_lifted_from_a_waiting_child() {
-        let mut lifted_root = session("lifted-root", None);
-        lifted_root.updated_at = 1;
-        let lifted_child = session("lifted-child", Some("lifted-root"));
-        let mut working_root = session("working-root", None);
-        working_root.updated_at = 100;
-        let sessions = vec![working_root, lifted_root, lifted_child];
-
-        let flags = thread_flags(&[
-            (
-                "lifted-child",
-                ThreadFlags {
-                    waiting_for_input: true,
-                    ..ThreadFlags::default()
-                },
-            ),
-            (
-                "working-root",
-                ThreadFlags {
-                    working: true,
-                    ..ThreadFlags::default()
-                },
-            ),
-        ]);
-        let visible = flat_visible_threads(&sessions, &HashSet::new(), None, &flags);
-        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
-
-        assert_eq!(ids, vec!["lifted-root", "lifted-child", "working-root"]);
     }
 }

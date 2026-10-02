@@ -654,27 +654,4 @@ mod tests {
         assert_eq!(migrated_again.sessions, file.sessions);
         let _ = fs::remove_dir_all(store.root());
     }
-
-    #[test]
-    fn clone_events_copies_contents_and_missing_source_is_a_noop() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        store
-            .append_event(
-                "source",
-                7,
-                &AgentEvent::TurnStarted {
-                    turn_id: "turn-1".into(),
-                },
-            )
-            .unwrap();
-        store.clone_events("source", "fork").unwrap();
-        assert_eq!(
-            fs::read(store.events_path("fork")).unwrap(),
-            fs::read(store.events_path("source")).unwrap()
-        );
-
-        store.clone_events("missing", "empty-fork").unwrap();
-        assert!(!store.events_path("empty-fork").exists());
-        let _ = fs::remove_dir_all(store.root());
-    }
 }

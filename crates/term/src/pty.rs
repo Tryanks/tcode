@@ -49,12 +49,6 @@ fn initial_window_size() -> WindowSize {
     }
 }
 
-thread_local! {
-    static SPAWN_CWD_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
 /// Data emitted by the host-side PTY.
 ///
 /// Receivers see raw child output before terminal emulation. Foreground process
@@ -96,21 +90,10 @@ pub(crate) struct PtyHandle {
 }
 
 impl PtyHandle {
-    /// Resolve the cwd that a subsequent [`PtyHandle::spawn`] should use.
-    ///
-    /// Call this before moving PTY creation to another thread so the
-    /// thread-local test/UI override is captured on the calling thread.
-    pub fn resolve_spawn_cwd(cwd: impl AsRef<Path>) -> PathBuf {
-        SPAWN_CWD_OVERRIDE
-            .with(|override_cwd| override_cwd.borrow().clone())
-            .unwrap_or_else(|| cwd.as_ref().to_path_buf())
-    }
-
     /// Spawn the platform's default interactive shell in `cwd`.
     pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
         let (shell, args) = default_shell();
         let shell_name = shell_label(&shell);
-        let cwd = Self::resolve_spawn_cwd(cwd);
         Self::spawn_command(cwd, shell, args, shell_name)
     }
 
@@ -205,21 +188,6 @@ impl PtyHandle {
             pty_info,
             refresh_running,
         })
-    }
-
-    /// Apply a cwd override to [`PtyHandle::spawn`] calls made synchronously by `f`.
-    pub fn with_spawn_cwd<R>(cwd: impl Into<PathBuf>, f: impl FnOnce() -> R) -> R {
-        struct Reset(Option<PathBuf>);
-
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                SPAWN_CWD_OVERRIDE.with(|slot| *slot.borrow_mut() = self.0.take());
-            }
-        }
-
-        let previous = SPAWN_CWD_OVERRIDE.with(|slot| slot.borrow_mut().replace(cwd.into()));
-        let _reset = Reset(previous);
-        f()
     }
 
     /// Return the raw PTY event stream.

@@ -20,33 +20,36 @@ pub(super) fn physical_bounds(
 mod tests {
     use super::*;
     use gpui::{point, px, size};
+
     #[test]
     fn physical_child_tracks_safe_content_without_double_inset() {
-        // Portrait: 24 logical pixels of status bar + 100 of shell chrome.
-        let portrait = Bounds {
-            origin: point(px(8.), px(100.)),
-            size: size(px(384.), px(500.)),
-        };
-        assert_eq!(
-            physical_bounds(portrait, point(px(0.), px(24.)), 3.),
-            [24, 372, 1152, 1500]
-        );
-        // Landscape cutout moves to the left; the canvas already moved with it.
-        let landscape = Bounds {
-            origin: point(px(8.), px(100.)),
-            size: size(px(700.), px(240.)),
-        };
-        assert_eq!(
-            physical_bounds(landscape, point(px(44.), px(0.)), 2.),
-            [104, 200, 1400, 480]
-        );
-    }
-    #[test]
-    fn fractional_scale_rounds_edges_and_collapsed_view_has_no_area() {
-        let bounds = Bounds {
-            origin: point(px(1.), px(1.)),
-            size: size(px(1.), px(0.)),
-        };
-        assert_eq!(physical_bounds(bounds, Point::default(), 1.5), [2, 2, 1, 0]);
+        for (origin, extent, safe, scale, expected) in [
+            // Portrait status bar, then landscape cutout; neither is applied twice.
+            (
+                (8., 100.),
+                (384., 500.),
+                (0., 24.),
+                3.,
+                [24, 372, 1152, 1500],
+            ),
+            (
+                (8., 100.),
+                (700., 240.),
+                (44., 0.),
+                2.,
+                [104, 200, 1400, 480],
+            ),
+            // Round edges independently; a collapsed child still has no area.
+            ((1., 1.), (1., 0.), (0., 0.), 1.5, [2, 2, 1, 0]),
+        ] {
+            let bounds = Bounds {
+                origin: point(px(origin.0), px(origin.1)),
+                size: size(px(extent.0), px(extent.1)),
+            };
+            assert_eq!(
+                physical_bounds(bounds, point(px(safe.0), px(safe.1)), scale),
+                expected
+            );
+        }
     }
 }

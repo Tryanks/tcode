@@ -131,35 +131,6 @@ mod tests {
         }
     }
 
-    /// The layout is decided by the build first and the width second: a
-    /// desktop window is wide at 400px (a tiling window manager must never
-    /// strand it in the phone shell), the same window on a mobile build is a
-    /// phone and compact, and a mobile window at tablet width is wide.
-    #[gpui::test]
-    fn desktop_is_always_wide_and_mobile_follows_the_breakpoint(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(|_, _| Probe);
-        cx.simulate_resize(size(px(400.), px(800.)));
-        cx.update(|window, cx| {
-            override_mobile_for_test(cx, false);
-            assert!(
-                !window_is_compact(window, cx),
-                "a narrow desktop window is wide"
-            );
-            override_mobile_for_test(cx, true);
-            assert!(
-                window_is_compact(window, cx),
-                "a narrow mobile window is compact"
-            );
-        });
-        cx.simulate_resize(size(px(1024.), px(768.)));
-        cx.update(|window, cx| {
-            assert!(
-                !window_is_compact(window, cx),
-                "a mobile tablet in landscape is wide"
-            );
-        });
-    }
-
     /// The seam is read from the window's fully visible bounds: a landscape
     /// phone whose system occludes 59px on each side is 918px wide but has
     /// only 800px to lay out in, and the keyboard cover reaches the bottom

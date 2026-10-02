@@ -323,9 +323,9 @@ fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
 
 /// A device's relays are those of its machines' Traverse instances: a
 /// device whose only machine is Off carries none, a machine on the official
-/// service brings the official relays, and removing the last such machine
-/// takes them away again. Nothing is contacted for this: the official
-/// manifest is a cache newer than the bundle, fetched just now.
+/// service brings the official relays, a custom instance adds its own, and
+/// removing those machines takes their relays away again. Fresh manifest
+/// caches keep discovery local to the test.
 #[test]
 fn device_relays_follow_the_traverse_instances_of_its_machines() {
     let off_dir = TestDir::new("relays-off-host");
@@ -334,6 +334,9 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     let official_dir = TestDir::new("relays-official-host");
     let (mux, _, _) = fake_host();
     let official_host = start_host(mux, &official_dir, None);
+    let custom_dir = TestDir::new("relays-custom-host");
+    let (mux, _, _) = fake_host();
+    let custom_host = start_host(mux, &custom_dir, None);
     let dir = TestDir::new("relays-phone");
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -353,6 +356,21 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
         .to_string(),
     )
     .unwrap();
+    let custom_base: url::Url = "https://custom.traverse.test/".parse().unwrap();
+    std::fs::write(
+        tcode_traverse::manifest::ManifestSource::Custom(custom_base.clone()).cache_path(&dir.0),
+        json!({
+            "fetchedAtMs": now_ms,
+            "manifest": {
+                "version": 1,
+                "updatedAt": "2999-01-01T00:00:00Z",
+                "relays": [{"url": "https://custom.relay.test/"}],
+                "pkarr": ["https://custom.lookup.test/pkarr"]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
     let phone = device(&dir, "phone");
 
     let minted = off_host.new_invitation();
@@ -363,7 +381,6 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     );
     let off = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&off)).unwrap();
-    phone.hosts_changed();
     wait_relays(&phone, &[]);
 
     // The test machine runs Off; its invitation is rewritten to claim the
@@ -376,11 +393,19 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     let official = tcode_traverse::pair_blocking(&invite, &phone).unwrap();
     assert_eq!(official.traverse, None);
     wait_relays(&phone, &["https://official.relay.test/"]);
-    tcode_traverse::hosts::save_hosts(&dir.0, &[off.clone(), official]).unwrap();
+    // Pair this machine while Off, so its custom source can only be loaded
+    // by the saved-host reconciliation below, not by pairing itself.
+    let mut custom =
+        tcode_traverse::pair_blocking(&custom_host.new_invitation().invite, &phone).unwrap();
+    custom.traverse = Some(custom_base.to_string());
+    tcode_traverse::hosts::save_hosts(&dir.0, &[off.clone(), official, custom]).unwrap();
     phone.hosts_changed();
-    // Reconciling runs in the background; give it time to get it wrong.
-    std::thread::sleep(Duration::from_millis(200));
-    wait_relays(&phone, &["https://official.relay.test/"]);
+    // The new relay proves reconciliation ran; the saved official source
+    // must survive that same update.
+    wait_relays(
+        &phone,
+        &["https://custom.relay.test/", "https://official.relay.test/"],
+    );
 
     tcode_traverse::hosts::save_hosts(&dir.0, &[off]).unwrap();
     phone.hosts_changed();
@@ -400,6 +425,7 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     wait_relays(&phone, &[]);
     off_host.shutdown();
     official_host.shutdown();
+    custom_host.shutdown();
 }
 
 /// A self-hosted instance that cannot be reached is not a reason to stay
@@ -647,6 +673,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     let host = start_host(mux.clone(), &host_dir, Some(port));
     let dir = TestDir::new("restart-phone");
     let phone = device(&dir, "phone");
+    phone.set_details("phone".into(), Some("Android 15".into()));
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
@@ -656,6 +683,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     wait_state(&client, connected_directly());
     let endpoint_id = host.endpoint_id();
 
+    host.set_pairing_enabled(false);
     host.shutdown();
     wait_state(
         &client,
@@ -672,12 +700,39 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
                 .to_string(),
         )
         .unwrap();
-    let restarted = start_host(mux, &host_dir, Some(port));
+    let restarted = TraverseHost::start(
+        mux,
+        HostConfig {
+            host_name: "Renamed".into(),
+            data_dir: host_dir.0.clone(),
+            traverse: TraverseMode::Off,
+            pairing_enabled: true,
+            bind_port: Some(port),
+        },
+    )
+    .unwrap();
     assert_eq!(
         restarted.endpoint_id(),
         endpoint_id,
         "same key, same identity"
     );
+    assert!(!restarted.pairing_enabled());
+    let identity_path = host_dir.0.join("traverse.json");
+    let stored: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    assert_eq!(stored["v"], 2);
+    assert_eq!(stored["host_name"], "Renamed");
+    assert_eq!(stored["pairing_enabled"], false);
+    assert_eq!(stored["devices"][0]["id"], phone.endpoint_id().to_string());
+    assert_eq!(stored["devices"][0]["platform"], "Android 15");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&identity_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
     wait_state(&client, connected_directly());
     let deadline = Instant::now() + Duration::from_secs(5);
     while subscribe_count.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {

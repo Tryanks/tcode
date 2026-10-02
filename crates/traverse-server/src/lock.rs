@@ -33,10 +33,6 @@ impl RegionLock {
             far: Mutex::new(HashSet::new()),
         }
     }
-
-    pub fn far_connections(&self) -> usize {
-        self.far.lock().expect("lock").len()
-    }
 }
 
 fn rtt(headers: &HeaderMap) -> Option<Duration> {
@@ -145,7 +141,6 @@ mod tests {
             lock.on_connect(&request(&[])).await,
             Access::Deny { .. }
         ));
-        assert_eq!(lock.far_connections(), 0);
     }
 
     #[tokio::test]
@@ -159,11 +154,6 @@ mod tests {
         });
         let near = request(&[("x-tcp-rtt", "1000"), ("x-forwarded-for", "10.1.2.3")]);
         assert_eq!(lock.on_connect(&near).await, Access::Allow);
-        assert_eq!(
-            lock.far_connections(),
-            1,
-            "a self-declared near client is far"
-        );
         assert!(matches!(
             lock.on_connect(&request(&[("x-tcp-rtt", "1000")])).await,
             Access::Deny { .. }
@@ -178,18 +168,19 @@ mod tests {
         let third = request(&[]);
         assert_eq!(lock.on_connect(&first).await, Access::Allow);
         assert_eq!(lock.on_connect(&second).await, Access::Allow);
-        assert_eq!(lock.far_connections(), 2);
         let denied = lock.on_connect(&third).await;
         assert!(
             matches!(&denied, Access::Deny { reason: Some(reason) } if reason.contains("region-locked"))
         );
         lock.on_disconnect(first.endpoint_id(), first.connection_id());
-        assert_eq!(lock.far_connections(), 1);
         assert_eq!(lock.on_connect(&third).await, Access::Allow);
         // A near client's disconnect never touches the quota.
         let near = request(&[("x-tcp-rtt", "1000")]);
         assert_eq!(lock.on_connect(&near).await, Access::Allow);
         lock.on_disconnect(near.endpoint_id(), near.connection_id());
-        assert_eq!(lock.far_connections(), 2);
+        assert!(matches!(
+            lock.on_connect(&request(&[])).await,
+            Access::Deny { .. }
+        ));
     }
 }

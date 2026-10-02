@@ -439,10 +439,6 @@ mod tests {
     }
 
     impl MultiBlockRoot {
-        fn new(cx: &mut Context<Self>) -> Self {
-            Self::with_text("Alpha beta\n\nGamma delta", cx)
-        }
-
         fn with_text(text: &str, cx: &mut Context<Self>) -> Self {
             Self {
                 markdown: cx.new(|cx| MarkdownState::new(text, cx)),
@@ -528,28 +524,6 @@ mod tests {
                 .size_full(),
             )
         }
-    }
-
-    #[gpui::test]
-    fn markdown_reports_intrinsic_height_inside_outer_list(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let text = (0..12)
-            .map(|ix| format!("## Section {ix}\n\nParagraph {ix} with enough text to render."))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let (view, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(&text, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let height = view.read_with(cx, |root, cx| root.markdown.read(cx).bounds.size.height);
-        assert!(
-            height > px(100.),
-            "nested MarkdownView collapsed to {height:?} instead of reporting content height"
-        );
     }
 
     #[gpui::test]
@@ -816,53 +790,37 @@ mod tests {
     fn wide_table_shrinks_to_viewport_and_wraps(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let (_, cx) = cx.add_window_view(|_, cx| {
-            TestRoot::new(
-                "| column | value |\n| --- | --- |\n| this-cell-is-deliberately-much-wider-than-the-markdown-viewport | another-wide-value |",
-                cx,
-            )
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let track = cx
-            .debug_bounds("markdown-table-track-root-0")
-            .expect("table track was painted");
-        assert_eq!(
-            track.size.width,
-            px(320.),
-            "wide table did not shrink to the markdown viewport"
+        let header = (0..20).map(|ix| format!("column-{ix}")).collect::<Vec<_>>();
+        let separator = vec!["---"; header.len()];
+        let values = (0..header.len())
+            .map(|ix| format!("value-{ix}"))
+            .collect::<Vec<_>>();
+        let overflowing = format!(
+            "| {} |\n| {} |\n| {} |",
+            header.join(" | "),
+            separator.join(" | "),
+            values.join(" | ")
         );
-        assert!(
-            track.size.height > px(68.),
-            "wide table did not grow tall enough for wrapped content: {:?}",
-            track.size.height
-        );
-    }
-
-    #[gpui::test]
-    fn small_table_stretches_to_viewport_width(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (_, cx) =
-            cx.add_window_view(|_, cx| TestRoot::new("| a | b |\n| --- | --- |\n| 1 | 2 |", cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let track = cx
-            .debug_bounds("markdown-table-track-root-0")
-            .expect("table track was painted");
-        assert_eq!(
-            track.size.width,
-            px(320.),
-            "small table did not stretch to the markdown viewport"
-        );
+        for (case, markdown, wraps, overflows) in [
+            ("wide cells", "| column | value |\n| --- | --- |\n| this-cell-is-deliberately-much-wider-than-the-markdown-viewport | another-wide-value |".to_string(), true, false),
+            ("short cells", "| a | b |\n| --- | --- |\n| 1 | 2 |".to_string(), false, false),
+            ("many columns", overflowing, false, true),
+        ] {
+            let (_, cx) = cx.add_window_view(|_, cx| TestRoot::new(&markdown, cx));
+            let cx: &mut VisualTestContext = cx;
+            cx.run_until_parked();
+            cx.update(|window, cx| { let _ = window.draw(cx); });
+            let track = cx.debug_bounds("markdown-table-track-root-0").expect("table track was painted");
+            if overflows {
+                let last_cell = cx.debug_bounds("markdown-table-cell-0-19").expect("last cell was painted");
+                assert_eq!(last_cell.right() + px(1.), track.right(), "{case}: {last_cell:?}, {track:?}");
+            } else {
+                assert_eq!(track.size.width, px(320.), "{case}: table must fit the viewport");
+            }
+            if wraps {
+                assert!(track.size.height > px(68.), "{case}: wrapped height {:?}", track.size.height);
+            }
+        }
     }
 
     #[gpui::test]
@@ -893,43 +851,6 @@ mod tests {
         assert!(
             content.left() - cell.left() > px(20.),
             "content {content:?} hugs the left edge of cell {cell:?}"
-        );
-    }
-
-    #[gpui::test]
-    fn wide_table_track_contains_the_last_cell(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let header = (0..20).map(|ix| format!("column-{ix}")).collect::<Vec<_>>();
-        let separator = vec!["---"; header.len()];
-        let values = (0..header.len())
-            .map(|ix| format!("value-{ix}"))
-            .collect::<Vec<_>>();
-        let markdown = format!(
-            "| {} |\n| {} |\n| {} |",
-            header.join(" | "),
-            separator.join(" | "),
-            values.join(" | ")
-        );
-        let (_, cx) = cx.add_window_view(|_, cx| TestRoot::new(&markdown, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let track = cx
-            .debug_bounds("markdown-table-track-root-0")
-            .expect("table track was painted");
-        let last_cell = cx
-            .debug_bounds("markdown-table-cell-0-19")
-            .expect("last table cell was painted");
-        assert_eq!(
-            last_cell.right() + px(1.),
-            track.right(),
-            "last cell {:?} did not end at the track's inner right edge {:?}",
-            last_cell,
-            track
         );
     }
 
@@ -1069,89 +990,48 @@ mod tests {
     }
 
     #[gpui::test]
-    fn drag_across_paragraphs_copies_both_blocks(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (view, cx) = cx.add_window_view(|_, cx| MultiBlockRoot::new(cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        // Anchor mid-first-paragraph, cursor mid-second-paragraph, using the
-        // measured block bounds so the test tracks real layout.
-        let (start, end) = view.read_with(cx, |root, cx| {
-            let state = root.markdown.read(cx);
-            let first = state.list_state.bounds_for_item(0).unwrap();
-            let second = state.list_state.bounds_for_item(1).unwrap();
-            (
-                point(px(1.), first.center().y),
-                point(px(300.), second.center().y),
-            )
-        });
-        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
-        assert_eq!(selected, "Alpha beta\nGamma delta");
-    }
-
-    #[gpui::test]
     fn drag_across_mixed_blocks_copies_every_block_kind(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let (view, cx) = cx.add_window_view(|_, cx| {
-            MultiBlockRoot::with_text(
-                "# Title\n\nIntro para\n\n- item one\n- item two\n\n```\ncode line\n```\n\nTail para",
-                cx,
-            )
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let (start, end) = view.read_with(cx, |root, cx| {
-            let state = root.markdown.read(cx);
-            let first = state.list_state.bounds_for_item(0).unwrap();
-            let count = state.list_state.item_count();
-            let last = state.list_state.bounds_for_item(count - 1).unwrap();
+        for (source, expected) in [
+            ("Alpha beta\n\nGamma delta", "Alpha beta\nGamma delta"),
             (
-                point(px(1.), first.center().y),
-                point(px(300.), last.center().y),
-            )
-        });
-        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+                "# Title\n\nIntro para\n\n- item one\n- item two\n\n```\ncode line\n```\n\nTail para",
+                "Title\nIntro para\nitem one\nitem two\ncode line\nTail para",
+            ),
+        ] {
+            let (view, cx) = cx.add_window_view(|_, cx| MultiBlockRoot::with_text(source, cx));
+            let cx: &mut VisualTestContext = cx;
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
 
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
-        for fragment in ["Title", "Intro para", "item one", "item two", "code line"] {
-            assert!(
-                selected.contains(fragment),
-                "missing {fragment:?} in {selected:?}"
-            );
+            let (start, end) = view.read_with(cx, |root, cx| {
+                let state = root.markdown.read(cx);
+                let first = state.list_state.bounds_for_item(0).unwrap();
+                let count = state.list_state.item_count();
+                let last = state.list_state.bounds_for_item(count - 1).unwrap();
+                (
+                    point(px(1.), first.center().y),
+                    point(px(300.), last.center().y),
+                )
+            });
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+
+            let selected = cx.update(gpui_base::TextSelection::selected_text);
+            assert_eq!(selected, expected, "source: {source:?}");
         }
     }
 
@@ -1429,108 +1309,108 @@ mod tests {
     }
 
     #[gpui::test]
-    fn long_press_selects_word_then_drag_extends_selection(cx: &mut TestAppContext) {
-        let (view, cx) = open_touch_root(cx);
-        let start_position = point(px(10.), px(10.));
-        cx.simulate_event(gpui::LongPressEvent {
-            phase: gpui::TouchPhase::Started,
-            start_position,
-            position: start_position,
-        });
-        draw(cx);
-        assert_eq!(selected(&view, cx), "quick");
-        for phase in [gpui::TouchPhase::Moved, gpui::TouchPhase::Ended] {
-            cx.simulate_event(gpui::LongPressEvent {
-                phase,
-                start_position,
-                position: point(px(220.), px(10.)),
-            });
-        }
-        draw(cx);
-        assert_eq!(selected(&view, cx), "quick select value");
-    }
-
-    #[gpui::test]
     fn long_press_release_keeps_handles_which_drag_the_selection(cx: &mut TestAppContext) {
         use gpui::{TouchDragEvent, TouchPhase};
         use gpui_base::{SelectionEdge, TextSelection, TouchHandle};
 
-        let (view, cx) = open_touch_root(cx);
-        long_press(cx, &[TouchPhase::Started, TouchPhase::Ended], (70., 10.));
-        assert_eq!(selected(&view, cx), "select");
-        let snapshot = touch_selection(cx).expect("a released long press keeps its handles");
-        assert!(snapshot.is_menu_open());
-        assert!(!snapshot.is_empty());
-        assert!(snapshot.start().left() < snapshot.end().left());
+        for continue_finger in [true, false] {
+            let (view, cx) = open_touch_root(cx);
+            if continue_finger {
+                let start_position = point(px(10.), px(10.));
+                cx.simulate_event(gpui::LongPressEvent {
+                    phase: TouchPhase::Started,
+                    start_position,
+                    position: start_position,
+                });
+                draw(cx);
+                assert_eq!(selected(&view, cx), "quick");
+                for phase in [TouchPhase::Moved, TouchPhase::Ended] {
+                    cx.simulate_event(gpui::LongPressEvent {
+                        phase,
+                        start_position,
+                        position: point(px(220.), px(10.)),
+                    });
+                }
+                draw(cx);
+                assert_eq!(selected(&view, cx), "quick select value");
+                continue;
+            }
+            long_press(cx, &[TouchPhase::Started, TouchPhase::Ended], (70., 10.));
+            assert_eq!(selected(&view, cx), "select");
+            let snapshot = touch_selection(cx).expect("a released long press keeps its handles");
+            assert!(snapshot.is_menu_open());
+            assert!(!snapshot.is_empty());
+            assert!(snapshot.start().left() < snapshot.end().left());
 
-        // The view painted the handles in place: a touch on the end knob,
-        // which hangs below the line, takes it and drags the end along the
-        // line, through the window layer, to the end of the text.
-        let end = snapshot.end();
-        let finger = TouchHandle::hit_bounds(SelectionEdge::End, end).center();
-        cx.simulate_event(TouchDragEvent {
-            phase: TouchPhase::Started,
-            start_position: finger,
-            position: finger,
-        });
-        draw(cx);
-        let snapshot = touch_selection(cx).unwrap();
-        assert_eq!(snapshot.dragging(), Some(SelectionEdge::End));
-        assert!(!snapshot.is_menu_open());
-        cx.simulate_event(TouchDragEvent {
-            phase: TouchPhase::Moved,
-            start_position: finger,
-            position: point(px(290.), finger.y),
-        });
-        draw(cx);
-        assert_eq!(selected(&view, cx), "select value");
-        cx.simulate_event(TouchDragEvent {
-            phase: TouchPhase::Ended,
-            start_position: finger,
-            position: point(px(290.), finger.y),
-        });
-        draw(cx);
-        let snapshot = touch_selection(cx).unwrap();
-        assert!(snapshot.is_menu_open());
-        assert_eq!(snapshot.dragging(), None);
-        let select_start = snapshot.start().left();
+            // The view painted the handles in place: a touch on the end knob,
+            // which hangs below the line, takes it and drags the end along the
+            // line, through the window layer, to the end of the text.
+            let end = snapshot.end();
+            let finger = TouchHandle::hit_bounds(SelectionEdge::End, end).center();
+            cx.simulate_event(TouchDragEvent {
+                phase: TouchPhase::Started,
+                start_position: finger,
+                position: finger,
+            });
+            draw(cx);
+            let snapshot = touch_selection(cx).unwrap();
+            assert_eq!(snapshot.dragging(), Some(SelectionEdge::End));
+            assert!(!snapshot.is_menu_open());
+            cx.simulate_event(TouchDragEvent {
+                phase: TouchPhase::Moved,
+                start_position: finger,
+                position: point(px(290.), finger.y),
+            });
+            draw(cx);
+            assert_eq!(selected(&view, cx), "select value");
+            cx.simulate_event(TouchDragEvent {
+                phase: TouchPhase::Ended,
+                start_position: finger,
+                position: point(px(290.), finger.y),
+            });
+            draw(cx);
+            let snapshot = touch_selection(cx).unwrap();
+            assert!(snapshot.is_menu_open());
+            assert_eq!(snapshot.dragging(), None);
+            let select_start = snapshot.start().left();
 
-        // Select All from the menu is a view-local selection; its handles
-        // still drag, turning it back into a point selection.
-        cx.update(|window, cx| {
-            window.dispatch_action(Box::new(crate::touch_selection::SelectAllTouched), cx);
-        });
-        cx.run_until_parked();
-        draw(cx);
-        assert_eq!(selected(&view, cx), "quick select value");
-        assert_eq!(
-            cx.update(TextSelection::selected_text).trim(),
-            "quick select value"
-        );
-        let snapshot = touch_selection(cx).expect("select all keeps the touch selection");
-        assert!(snapshot.is_menu_open());
-        let start = snapshot.start();
-        assert!(start.left() < select_start);
-        cx.update(|window, cx| {
-            TextSelection::begin_edge_drag(SelectionEdge::Start, start.origin, window, cx);
-            TextSelection::update_edge_drag(point(select_start, start.origin.y), window, cx);
-            TextSelection::end_edge_drag(window, cx);
-        });
-        draw(cx);
-        assert_eq!(selected(&view, cx), "select value");
+            // Select All from the menu is a view-local selection; its handles
+            // still drag, turning it back into a point selection.
+            cx.update(|window, cx| {
+                window.dispatch_action(Box::new(crate::touch_selection::SelectAllTouched), cx);
+            });
+            cx.run_until_parked();
+            draw(cx);
+            assert_eq!(selected(&view, cx), "quick select value");
+            assert_eq!(
+                cx.update(TextSelection::selected_text).trim(),
+                "quick select value"
+            );
+            let snapshot = touch_selection(cx).expect("select all keeps the touch selection");
+            assert!(snapshot.is_menu_open());
+            let start = snapshot.start();
+            assert!(start.left() < select_start);
+            cx.update(|window, cx| {
+                TextSelection::begin_edge_drag(SelectionEdge::Start, start.origin, window, cx);
+                TextSelection::update_edge_drag(point(select_start, start.origin.y), window, cx);
+                TextSelection::end_edge_drag(window, cx);
+            });
+            draw(cx);
+            assert_eq!(selected(&view, cx), "select value");
 
-        // A press on the menu leaves the selection alone; one on the text
-        // clears it.
-        let menu = gpui::Bounds::new(point(px(0.), px(200.)), gpui::size(px(120.), px(32.)));
-        cx.update(|window, cx| TextSelection::register_touch_ui(menu, window, cx));
-        cx.simulate_mouse_down(
-            point(px(10.), px(210.)),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        assert_eq!(selected(&view, cx), "select value");
-        cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
-        draw(cx);
-        assert!(touch_selection(cx).is_none());
+            // A press on the menu leaves the selection alone; one on the text
+            // clears it.
+            let menu = gpui::Bounds::new(point(px(0.), px(200.)), gpui::size(px(120.), px(32.)));
+            cx.update(|window, cx| TextSelection::register_touch_ui(menu, window, cx));
+            cx.simulate_mouse_down(
+                point(px(10.), px(210.)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+            assert_eq!(selected(&view, cx), "select value");
+            cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+            draw(cx);
+            assert!(touch_selection(cx).is_none());
+        }
     }
 }

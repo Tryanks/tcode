@@ -298,9 +298,6 @@ impl AppState {
             .or_default()
             .insert(spawn_id, action);
 
-        // Capture the thread-local cwd override before the work moves to the
-        // background executor.
-        let cwd = term::Terminal::resolve_spawn_cwd(cwd);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx.unblock(move || term::Terminal::spawn(cwd)).await;

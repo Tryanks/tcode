@@ -536,44 +536,47 @@ mod tests {
                 Some("acp raw\0detail")
             );
 
-            assert_eq!(
-                present_runtime_event(&RuntimeEvent::Error(RuntimeError::External(
-                    "external\0diagnostic".into()
-                )))
-                .message,
-                "external\0diagnostic"
-            );
-            assert_eq!(
-                present_runtime_event(&RuntimeEvent::Error(RuntimeError::ProviderMessage(
-                    "provider-error\0diagnostic".into()
-                )))
-                .message,
-                "provider-error\0diagnostic"
-            );
-            assert_eq!(
-                present_runtime_event(&RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(
-                    "provider-warning\0diagnostic".into()
-                )))
-                .message,
-                "provider-warning\0diagnostic"
-            );
+            for (event, severity, raw_message) in [
+                (
+                    RuntimeEvent::Error(RuntimeError::External("external\0diagnostic".into())),
+                    RuntimeEventSeverity::Error,
+                    Some("external\0diagnostic"),
+                ),
+                (
+                    RuntimeEvent::Error(RuntimeError::ProviderMessage(
+                        "provider-error\0diagnostic".into(),
+                    )),
+                    RuntimeEventSeverity::Error,
+                    Some("provider-error\0diagnostic"),
+                ),
+                (
+                    RuntimeEvent::Error(RuntimeError::ProcessGone),
+                    RuntimeEventSeverity::Error,
+                    None,
+                ),
+                (
+                    RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(
+                        "provider-warning\0diagnostic".into(),
+                    )),
+                    RuntimeEventSeverity::Warning,
+                    Some("provider-warning\0diagnostic"),
+                ),
+                (
+                    RuntimeEvent::Notice(RuntimeNotice::UpdateDone {
+                        provider: ProviderKind::Codex,
+                    }),
+                    RuntimeEventSeverity::Success,
+                    None,
+                ),
+            ] {
+                let presented = present_runtime_event(&event);
+                assert_eq!(presented.severity, severity);
+                if let Some(raw_message) = raw_message {
+                    assert_eq!(presented.message, raw_message);
+                }
+            }
         }
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-    }
-
-    #[test]
-    fn representative_event_severities_are_presented() {
-        let error = present_runtime_event(&RuntimeEvent::Error(RuntimeError::ProcessGone));
-        let warning = present_runtime_event(&RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(
-            "pi MCP tools unavailable".into(),
-        )));
-        let success = present_runtime_event(&RuntimeEvent::Notice(RuntimeNotice::UpdateDone {
-            provider: ProviderKind::Codex,
-        }));
-
-        assert_eq!(error.severity, RuntimeEventSeverity::Error);
-        assert_eq!(warning.severity, RuntimeEventSeverity::Warning);
-        assert_eq!(success.severity, RuntimeEventSeverity::Success);
     }
 }

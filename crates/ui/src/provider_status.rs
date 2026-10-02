@@ -415,26 +415,6 @@ mod tests {
             summarize(Some(&diagnostic_with_message), true).detail,
             "precise message"
         );
-    }
-
-    #[test]
-    fn redacts_email_but_keeps_shape() {
-        for (email, expected) in [
-            ("developer@example.com", "d••••••••@•••••••.com"),
-            ("张三@例子.com", "张•@••.com"),
-            ("a@localhost", "a•@•••••••••"),
-            ("@", "•@•"),
-            ("invalid", "•••••••"),
-            ("", "•"),
-        ] {
-            assert_eq!(redact_email(email), expected, "{email}");
-        }
-    }
-
-    #[test]
-    fn probe_diagnostic_messages_cover_every_variant() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let provider = ProviderKind::Codex;
         for (locale, expected) in [
             (
                 crate::LANGUAGE_ENGLISH,
@@ -465,9 +445,28 @@ mod tests {
             .into_iter()
             .zip(expected)
             {
-                assert_eq!(probe_diagnostic_message(provider, diagnostic), expected);
+                let status = ProviderSnapshot {
+                    diagnostic: Some(diagnostic),
+                    message: Some("  ".into()),
+                    ..snapshot()
+                };
+                assert_eq!(summarize(Some(&status), true).detail, expected);
             }
         }
         crate::set_locale(crate::LANGUAGE_ENGLISH);
+    }
+
+    #[test]
+    fn redacts_email_but_keeps_shape() {
+        for (email, expected) in [
+            ("developer@example.com", "d••••••••@•••••••.com"),
+            ("张三@例子.com", "张•@••.com"),
+            ("a@localhost", "a•@•••••••••"),
+            ("@", "•@•"),
+            ("invalid", "•••••••"),
+            ("", "•"),
+        ] {
+            assert_eq!(redact_email(email), expected, "{email}");
+        }
     }
 }
