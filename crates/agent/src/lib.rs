@@ -9,6 +9,8 @@
 #[cfg(feature = "process")]
 pub mod acp;
 #[cfg(feature = "process")]
+mod acp_session;
+#[cfg(feature = "process")]
 mod actor;
 #[cfg(feature = "process")]
 pub mod claude;
