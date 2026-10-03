@@ -25,6 +25,44 @@ struct EventEnvelope {
     event: AgentEvent,
 }
 
+/// Which installation a cached command list belongs to. Native commands
+/// depend on the provider's home (its plugins, skills and settings), so two
+/// profiles with different homes never seed each other's menus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandsCacheKey {
+    /// `home` is the profile's home override; `None` is the CLI's default.
+    Native {
+        provider: ProviderKind,
+        home: Option<PathBuf>,
+    },
+    Acp {
+        agent_id: String,
+    },
+}
+
+impl CommandsCacheKey {
+    /// `None` for an ACP session without an agent id.
+    pub fn new(
+        provider: ProviderKind,
+        home: Option<PathBuf>,
+        acp_agent_id: Option<&str>,
+    ) -> Option<Self> {
+        match provider {
+            ProviderKind::Acp => acp_agent_id.map(|agent_id| Self::Acp {
+                agent_id: agent_id.to_string(),
+            }),
+            provider => Some(Self::Native { provider, home }),
+        }
+    }
+}
+
+/// 64-bit FNV-1a: a short, stable file-name segment for a home path.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// Cheap, cloneable handle to the on-disk data directory.
 #[derive(Debug, Clone)]
 pub struct SessionStore {
@@ -107,18 +145,27 @@ impl SessionStore {
         self.root.join(format!("models-{name}.json"))
     }
 
-    fn commands_path(&self, provider: ProviderKind, acp_agent_id: Option<&str>) -> Option<PathBuf> {
-        let name = match provider {
-            ProviderKind::Codex => "codex".to_string(),
-            ProviderKind::ClaudeCode => "claude".to_string(),
-            ProviderKind::Pi => "pi".to_string(),
-            ProviderKind::OpenCode => "opencode".to_string(),
-            ProviderKind::Acp => {
-                let id = acp_agent_id?;
+    fn commands_path(&self, key: &CommandsCacheKey) -> PathBuf {
+        let name = match key {
+            CommandsCacheKey::Native { provider, home } => {
+                let provider = match provider {
+                    ProviderKind::Codex => "codex",
+                    ProviderKind::ClaudeCode => "claude",
+                    ProviderKind::Pi => "pi",
+                    ProviderKind::OpenCode => "opencode",
+                    ProviderKind::Acp => "acp",
+                };
+                let home = home.as_deref().map_or_else(
+                    || "default".to_string(),
+                    |home| format!("{:016x}", fnv1a(home.as_os_str().as_encoded_bytes())),
+                );
+                format!("{provider}-{home}")
+            }
+            CommandsCacheKey::Acp { agent_id } => {
                 // Registry ids are external input and may contain path separators.
                 // Hex keeps the filename reversible and collision-free without
                 // allowing an id to escape the data directory.
-                let encoded = id
+                let encoded = agent_id
                     .as_bytes()
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
@@ -126,7 +173,7 @@ impl SessionStore {
                 format!("acp-{encoded}")
             }
         };
-        Some(self.root.join(format!("commands-{name}.json")))
+        self.root.join(format!("commands-{name}.json"))
     }
 
     /// Load the last-fetched model catalog for `provider` so the picker is
@@ -148,43 +195,37 @@ impl SessionStore {
         fs::rename(&tmp, path)
     }
 
-    /// Load the most recently reported command/skill list for a native provider
-    /// or one specific ACP agent. Empty when missing, unreadable, or when an ACP
-    /// agent id was not supplied.
-    pub fn load_commands(
-        &self,
-        provider: ProviderKind,
-        acp_agent_id: Option<&str>,
-    ) -> Vec<ProviderCommand> {
-        let Some(path) = self.commands_path(provider, acp_agent_id) else {
-            return Vec::new();
-        };
-        let Ok(bytes) = fs::read(path) else {
+    /// Load the most recently reported command/skill list for one native
+    /// installation or ACP agent. Empty when missing or unreadable.
+    pub fn load_commands(&self, key: &CommandsCacheKey) -> Vec<ProviderCommand> {
+        let Ok(bytes) = fs::read(self.commands_path(key)) else {
             return Vec::new();
         };
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
-    /// Atomically persist the complete command/skill list reported by a native
-    /// provider or one specific ACP agent. Empty lists are meaningful: they
+    /// Atomically persist the complete command/skill list reported by one
+    /// native installation or ACP agent. Empty lists are meaningful: they
     /// replace a stale non-empty cache.
     pub fn save_commands(
         &self,
-        provider: ProviderKind,
-        acp_agent_id: Option<&str>,
+        key: &CommandsCacheKey,
         commands: &[ProviderCommand],
     ) -> std::io::Result<()> {
-        let path = self.commands_path(provider, acp_agent_id).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "ACP command cache requires an agent id",
-            )
-        })?;
+        let path = self.commands_path(key);
         let tmp = path.with_extension("json.tmp");
         let data = serde_json::to_vec_pretty(commands)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(&tmp, data)?;
         fs::rename(&tmp, path)
+    }
+
+    /// Forget a cached command list after the installation changed under it.
+    pub fn invalidate_commands(&self, key: &CommandsCacheKey) -> std::io::Result<()> {
+        match fs::remove_file(self.commands_path(key)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Load the whole index file (projects + sessions), tolerating the old
@@ -505,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn command_cache_roundtrips_per_provider_and_acp_agent() {
+    fn command_cache_is_kept_per_native_home_and_acp_agent() {
         let root = temp_root();
         let store = SessionStore::open_at(root.clone()).unwrap();
         let native = vec![ProviderCommand {
@@ -518,33 +559,42 @@ mod tests {
             description: None,
             kind: ProviderCommandKind::Skill,
         }];
-        store
-            .save_commands(ProviderKind::ClaudeCode, None, &native)
-            .unwrap();
-        store
-            .save_commands(ProviderKind::Acp, Some("vendor/agent"), &acp)
-            .unwrap();
+        let default_home = CommandsCacheKey::Native {
+            provider: ProviderKind::ClaudeCode,
+            home: None,
+        };
+        let shadow_home = CommandsCacheKey::Native {
+            provider: ProviderKind::ClaudeCode,
+            home: Some(PathBuf::from("/tmp/claude-shadow")),
+        };
+        let agent = CommandsCacheKey::Acp {
+            agent_id: "vendor/agent".into(),
+        };
+        store.save_commands(&default_home, &native).unwrap();
+        store.save_commands(&agent, &acp).unwrap();
 
         // Reopen the store to prove the values come from disk, not memory.
         let reopened = SessionStore::open_at(root.clone()).unwrap();
-        assert_eq!(
-            reopened.load_commands(ProviderKind::ClaudeCode, None),
-            native
-        );
-        assert_eq!(
-            reopened.load_commands(ProviderKind::Acp, Some("vendor/agent")),
-            acp
-        );
+        assert_eq!(reopened.load_commands(&default_home), native);
+        assert!(reopened.load_commands(&shadow_home).is_empty());
+        assert_eq!(reopened.load_commands(&agent), acp);
         assert!(
             reopened
-                .load_commands(ProviderKind::Acp, Some("different-agent"))
+                .load_commands(&CommandsCacheKey::Acp {
+                    agent_id: "different-agent".into()
+                })
                 .is_empty()
         );
-        assert!(root.join("commands-claude.json").is_file());
         assert!(
             root.join("commands-acp-76656e646f722f6167656e74.json")
                 .is_file()
         );
+
+        reopened.save_commands(&shadow_home, &native).unwrap();
+        reopened.invalidate_commands(&default_home).unwrap();
+        reopened.invalidate_commands(&default_home).unwrap();
+        assert!(reopened.load_commands(&default_home).is_empty());
+        assert_eq!(reopened.load_commands(&shadow_home), native);
         let _ = fs::remove_dir_all(root);
     }
 

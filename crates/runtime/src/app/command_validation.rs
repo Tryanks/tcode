@@ -11,6 +11,7 @@ impl AppState {
             code: code.into(),
             message: message.into(),
         };
+        self.validate_plugin_command(command)?;
         match command {
             Command::DeleteProfile { profile_id }
                 if Settings::is_builtin_profile_id(profile_id) =>

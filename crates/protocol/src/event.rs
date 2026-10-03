@@ -190,6 +190,104 @@ pub struct ProvidersStatus {
     /// Environment-variable names present for each profile. Values never cross
     /// the protocol boundary.
     pub secret_names: HashMap<String, HashSet<String>>,
+    /// Native plugin catalogs of the profiles a client asked about.
+    #[serde(default)]
+    pub plugins: Vec<ProviderPluginCatalog>,
+}
+
+/// One provider profile's native plugin catalog. The native CLI's own files
+/// are the truth; the host only keeps the last listing in memory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderPluginCatalog {
+    pub profile_id: String,
+    /// The project directory the catalog was listed from; `None` lists from
+    /// outside any project, so only user scope is offered.
+    #[serde(default)]
+    pub context_cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub marketplaces: Vec<agent::ProviderPluginMarketplace>,
+    #[serde(default)]
+    pub marketplace_actions: Vec<agent::MarketplaceAction>,
+    #[serde(default)]
+    pub entries: Vec<agent::ProviderPluginEntry>,
+    /// Native errors for parts of the catalog that could not be read; the
+    /// rest of the listing still stands.
+    #[serde(default)]
+    pub errors: Vec<String>,
+    pub state: PluginCatalogState,
+    #[serde(default)]
+    pub loading: bool,
+    /// Plugin ids or marketplace names with an operation in flight.
+    #[serde(default)]
+    pub pending: Vec<String>,
+    #[serde(default)]
+    pub challenges: Vec<PluginChallenge>,
+}
+
+/// How far the entries can be trusted. A failed listing keeps the last
+/// known entries rather than clearing them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum PluginCatalogState {
+    Fresh,
+    Stale { reason: PluginStaleReason },
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginStaleReason {
+    NotLoaded,
+    /// Listed for another directory or profile configuration.
+    ContextChanged,
+    /// A native change went through and has not been listed yet.
+    Changed,
+}
+
+/// A native confirmation an operation is waiting on. It is answered with
+/// [`crate::Command::ResolvePluginChallenge`]; a command the CLI shows again
+/// arrives as a new challenge with a new `op_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginChallenge {
+    pub op_id: RuntimeOperationId,
+    pub profile_id: String,
+    /// The plugin id or marketplace name the operation targets.
+    pub entry_id: String,
+    pub kind: PluginChallengeKind,
+    #[serde(default)]
+    pub native_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum PluginChallengeKind {
+    /// Run this marketplace-declared command.
+    AcceptCommand {
+        command: String,
+        sha256: String,
+        #[serde(default)]
+        mode: Option<String>,
+    },
+    /// The native operation has no confirmation of its own but removes more
+    /// than its target: these installed plugins, in every scope.
+    ConfirmDestructive { uninstalls: Vec<String> },
+}
+
+/// The native operation a plugin toast reports on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum PluginOperationTarget {
+    Plugin {
+        action: agent::PluginActionKind,
+        scope: agent::PluginScope,
+        plugin: String,
+    },
+    AddMarketplace {
+        source: String,
+    },
+    RemoveMarketplace {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -433,6 +531,22 @@ pub enum RuntimeToast {
     AcpInstallFailed {
         operation: RuntimeOperationId,
         name: String,
+        detail: String,
+    },
+    PluginOperationStarted {
+        operation: RuntimeOperationId,
+        profile_id: String,
+        target: PluginOperationTarget,
+    },
+    PluginOperationSucceeded {
+        operation: RuntimeOperationId,
+        profile_id: String,
+        target: PluginOperationTarget,
+    },
+    PluginOperationFailed {
+        operation: RuntimeOperationId,
+        profile_id: String,
+        target: PluginOperationTarget,
         detail: String,
     },
 }
