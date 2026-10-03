@@ -551,9 +551,20 @@ async fn run_actor<D: Dialect>(
         .await;
 
     // The connection closure owns the protocol shutdown; this is the hard
-    // process boundary for both graceful shutdowns and broken transports.
+    // process boundary for both graceful shutdowns and broken transports. A
+    // startup failure is reported only once the agent is gone, so a caller
+    // that gives up on the error leaves no process behind.
     let _ = child.kill();
+    let _ = child.status().await;
 
+    let connection_result = match connection_result {
+        Ok(Exit::StartFailed(err)) => {
+            let _ = ready.send(Err(err)).await;
+            return;
+        }
+        Ok(Exit::Closed(reason)) => Ok(reason),
+        Err(err) => Err(err),
+    };
     if !session_started.load(Ordering::Acquire) {
         if let Err(err) = connection_result {
             let message = format!("ACP transport error: {}", describe(&err));
@@ -575,6 +586,12 @@ async fn run_actor<D: Dialect>(
         .await;
 }
 
+enum Exit {
+    StartFailed(AgentError),
+    /// The session ended, with a reason unless it was asked to.
+    Closed(Option<String>),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn connected_actor<D: Dialect>(
     executor: &Rc<smol::LocalExecutor<'static>>,
@@ -590,7 +607,7 @@ async fn connected_actor<D: Dialect>(
     io_done: &Receiver<String>,
     session_started: &AtomicBool,
     pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
-) -> Result<Option<String>, acp::Error> {
+) -> Result<Exit, acp::Error> {
     enum Startup {
         Handshake(Result<(Established, bool), AgentError>),
         Io(String),
@@ -620,13 +637,11 @@ async fn connected_actor<D: Dialect>(
                 }
                 other => other,
             };
-            let _ = ready.send(Err(err)).await;
-            return Ok(None);
+            return Ok(Exit::StartFailed(err));
         }
         Startup::Io(reason) => {
             let message = stderr_tail.append_to(reason, "\n");
-            let _ = ready.send(Err(AgentError::Protocol(message))).await;
-            return Ok(None);
+            return Ok(Exit::StartFailed(AgentError::Protocol(message)));
         }
     };
     let session_id = established.session_id;
@@ -645,7 +660,7 @@ async fn connected_actor<D: Dialect>(
         .await;
     emit_provider_options(state, events, false).await;
     if ready.send(Ok(())).await.is_err() {
-        return Ok(None);
+        return Ok(Exit::Closed(None));
     }
     session_started.store(true, Ordering::Release);
 
@@ -716,7 +731,7 @@ async fn connected_actor<D: Dialect>(
         }
     }
 
-    Ok(close_reason)
+    Ok(Exit::Closed(close_reason))
 }
 
 struct TurnOutcome {
