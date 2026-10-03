@@ -4,7 +4,7 @@
 //! The protocol machinery is [`crate::acp_session`]; this module is Grok's
 //! dialect.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use crate::acp_session::{
     self, Dialect, Established, Launch, Session, Setup, State, TurnEnd, describe, is_auth_required,
-    prompt_status,
+    prompt_status, stop_reason_status,
 };
 use crate::{
     AgentError, AgentEvent, ApprovalMode, Attachment, Compaction, InteractionMode, ItemContent,
@@ -30,6 +30,8 @@ const ASK_USER_QUESTION: &str = "_x.ai/ask_user_question";
 const EXIT_PLAN_MODE: &str = "_x.ai/exit_plan_mode";
 const INTERJECT: &str = "_x.ai/interject";
 const INTERJECTION: &str = "_x.ai/session/interjection";
+const QUEUE_CHANGED: &str = "_x.ai/queue/changed";
+const TASK_BACKGROUNDED: &str = "_x.ai/task_backgrounded";
 const SESSION_NOTIFICATION: &str = "_x.ai/session_notification";
 const FORK: &str = "_x.ai/session/fork";
 
@@ -118,6 +120,35 @@ struct Grok {
     /// them back as consumed.
     steers: Mutex<VecDeque<(String, String)>>,
     models: Mutex<Models>,
+    activity: Mutex<Activity>,
+}
+
+/// What Grok runs: its prompts, as `_x.ai/queue/changed` reports them, and
+/// its background tasks. Grok runs prompts one at a time and starts some
+/// itself: when a background task finishes it runs a prompt reporting it,
+/// which no `session/prompt` answers.
+#[derive(Default)]
+struct Activity {
+    /// Prompts the client queued, until they run.
+    queued: HashSet<String>,
+    /// The running prompt the client sent.
+    client: Option<String>,
+    /// The running prompt Grok started itself; its turn has its id.
+    agent: Option<String>,
+    /// Shell tool calls whose command went on in the background. Grok streams
+    /// their later output as running updates and never completes them again.
+    backgrounded: HashSet<String>,
+    background_tasks: usize,
+    /// A drop to no background tasks, withheld while a sent turn is open:
+    /// Grok follows that turn with one reporting the finished task, and the
+    /// runtime must not take the process for idle in between.
+    drained: bool,
+}
+
+impl Activity {
+    fn sent_turn_open(&self, state: &State) -> bool {
+        state.turn().is_some() && state.turn() != self.agent.as_deref()
+    }
 }
 
 /// What usage reporting needs to know about the session's models.
@@ -127,11 +158,19 @@ struct Models {
     windows: HashMap<String, u64>,
     /// The model serving the session.
     current: Option<String>,
+    /// The latest model call's usage.
+    last_call: Option<TokenUsage>,
 }
 
 impl Grok {
     fn models(&self) -> MutexGuard<'_, Models> {
         self.models
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn activity(&self) -> MutexGuard<'_, Activity> {
+        self.activity
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -149,8 +188,8 @@ impl Grok {
         let prompt = count("input_tokens")
             + count("cache_read_input_tokens")
             + count("cache_creation_input_tokens");
-        let models = self.models();
-        TokenUsage {
+        let mut models = self.models();
+        let usage = TokenUsage {
             freshness: crate::ContextFreshness::Current,
             input_tokens: Some(prompt),
             cached_input_tokens: Some(count("cache_read_input_tokens")),
@@ -158,7 +197,101 @@ impl Grok {
             used_tokens: Some(prompt + count("output_tokens")),
             context_window: models.window(),
             ..TokenUsage::default()
+        };
+        models.last_call = Some(usage);
+        usage
+    }
+
+    /// A turn's end as `turn_completed` reports it: its stop reason, and the
+    /// turn's usage on top of its last model call's.
+    fn reported_turn_end(&self, update: &Value) -> TurnEnd {
+        let (status, message) = match update.get("stop_reason").and_then(Value::as_str) {
+            Some("error") => (
+                TurnStatus::Failed,
+                Some(
+                    update
+                        .get("agent_result")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Grok's turn failed")
+                        .to_string(),
+                ),
+            ),
+            Some(reason) => serde_json::from_value::<acp::StopReason>(json!(reason))
+                .map(stop_reason_status)
+                .unwrap_or_else(|_| {
+                    (
+                        TurnStatus::Failed,
+                        Some(format!("The agent stopped: {reason}")),
+                    )
+                }),
+            None => (TurnStatus::Completed, None),
+        };
+        let models = self.models();
+        let usage = update.get("usage").map(|usage| TokenUsage {
+            freshness: crate::ContextFreshness::Current,
+            turn_processed_tokens: usage.get("totalTokens").and_then(Value::as_u64),
+            context_window: models.window(),
+            ..models.last_call.unwrap_or_default()
+        });
+        TurnEnd {
+            status,
+            message,
+            usage,
         }
+    }
+
+    /// A running prompt the client did not queue opens a turn of its own.
+    fn queue_changed(&self, state: &mut State, params: &Value) -> Vec<AgentEvent> {
+        let mut activity = self.activity();
+        for entry in params
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = entry.get("id").and_then(Value::as_str) {
+                activity.queued.insert(id.to_string());
+            }
+        }
+        let Some(running) = params.get("runningPromptId").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        if [&activity.client, &activity.agent]
+            .iter()
+            .any(|prompt| prompt.as_deref() == Some(running))
+        {
+            return Vec::new();
+        }
+        if activity.queued.remove(running) {
+            activity.client = Some(running.to_string());
+            return Vec::new();
+        }
+        activity.agent = Some(running.to_string());
+        state.begin_agent_turn(running)
+    }
+
+    /// `turn_completed` ends the turn of the prompt it names, in order with
+    /// everything else Grok sends; a sent turn's later `session/prompt`
+    /// result then completes nothing.
+    fn turn_completed(&self, state: &mut State, update: &Value) -> Vec<AgentEvent> {
+        let Some(prompt) = update.get("prompt_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let end = self.reported_turn_end(update);
+        let mut activity = self.activity();
+        if activity.agent.as_deref() == Some(prompt) {
+            activity.agent = None;
+            return state.end_turn(prompt, end);
+        }
+        if activity.client.as_deref() == Some(prompt) {
+            activity.client = None;
+            if let Some(turn) = state.turn().map(str::to_string)
+                && activity.sent_turn_open(state)
+            {
+                return state.end_turn(&turn, end);
+            }
+        }
+        Vec::new()
     }
 
     /// The `session/prompt` result's `_meta`: the last model call's figures
@@ -185,7 +318,7 @@ impl Grok {
     }
 
     /// One `_x.ai/session_notification` update.
-    fn session_notification(&self, update: &Value) -> Vec<AgentEvent> {
+    fn session_notification(&self, state: &mut State, update: &Value) -> Vec<AgentEvent> {
         let count = |key: &str| update.get(key).and_then(Value::as_u64);
         match update.get("sessionUpdate").and_then(Value::as_str) {
             Some("response_completed") => update
@@ -224,8 +357,16 @@ impl Grok {
                     .flatten()
                     .filter(|task| task.get("status").and_then(Value::as_str) == Some("running"))
                     .count();
+                let mut activity = self.activity();
+                let drained = running == 0 && activity.background_tasks > 0;
+                activity.background_tasks = running;
+                activity.drained = drained && activity.sent_turn_open(state);
+                if activity.drained {
+                    return Vec::new();
+                }
                 vec![AgentEvent::BackgroundTasksChanged { count: running }]
             }
+            Some("turn_completed") => self.turn_completed(state, update),
             Some("auto_compact_started") => vec![AgentEvent::ContextCompacted(Compaction {
                 in_progress: true,
                 trigger: Some("auto".into()),
@@ -469,7 +610,18 @@ impl Dialect for Grok {
         }
         let mut update = notification.update;
         let shell = match &mut update {
-            acp::SessionUpdate::ToolCallUpdate(update) => prepare_tool_update(update),
+            acp::SessionUpdate::ToolCallUpdate(update) => {
+                let output = update.fields.raw_output.as_ref();
+                if output.and_then(|raw| raw.get("type")) == Some(&json!("Bash"))
+                    && self
+                        .activity()
+                        .backgrounded
+                        .contains(update.tool_call_id.0.as_ref())
+                {
+                    update.fields.status = None;
+                }
+                prepare_tool_update(update)
+            }
             _ => None,
         };
         let mut events = state.apply_update(update);
@@ -589,15 +741,31 @@ impl Dialect for Grok {
         })
     }
 
-    fn notification(&self, _state: &mut State, method: &str, params: Value) -> Vec<AgentEvent> {
-        match method {
+    fn notification(&self, state: &mut State, method: &str, params: Value) -> Vec<AgentEvent> {
+        let mut events = match method {
             INTERJECTION => self.steer_accepted(&params),
+            QUEUE_CHANGED => self.queue_changed(state, &params),
+            TASK_BACKGROUNDED => {
+                if let Some(id) = params
+                    .pointer("/update/tool_call_id")
+                    .and_then(Value::as_str)
+                {
+                    self.activity().backgrounded.insert(id.to_string());
+                }
+                Vec::new()
+            }
             SESSION_NOTIFICATION => params
                 .get("update")
-                .map(|update| self.session_notification(update))
+                .map(|update| self.session_notification(state, update))
                 .unwrap_or_default(),
             _ => Vec::new(),
+        };
+        let mut activity = self.activity();
+        if activity.drained && !activity.sent_turn_open(state) {
+            activity.drained = false;
+            events.push(AgentEvent::BackgroundTasksChanged { count: 0 });
         }
+        events
     }
 }
 
@@ -814,20 +982,24 @@ mod tests {
         McpRegistration, OptionSelection, SessionCommand, ThreadItem,
     };
 
-    /// A resumed Grok 1.0.46 session under AutoAcceptEdits, recorded on the
-    /// wire in both directions (provenance: `tests/fixtures/grok/README.md`).
+    // Grok 1.0.46 sessions recorded on the wire in both directions
+    // (provenance: `tests/fixtures/grok/README.md`).
+    /// A resumed session under AutoAcceptEdits.
     const RESUMED_TURN: &str = include_str!("../tests/fixtures/grok/resumed_turn.jsonl");
+    /// A background task finishing during a sent turn, the turn Grok starts
+    /// to report it, then another sent turn.
+    const AGENT_STARTED_TURN: &str =
+        include_str!("../tests/fixtures/grok/agent_started_turn.jsonl");
     const REPLAY_AGENT: &str = "TCODE_GROK_REPLAY_AGENT";
-    const TEST_NAME: &str = "grok::tests::recorded_resumed_turn_maps_to_the_canonical_stream";
 
     /// Stand in for `grok agent stdio`: answer the client with the recorded
     /// agent messages, and require the client to send what Tcode sent, with
     /// the same answers to Grok's own requests.
-    fn replay_agent() {
+    fn replay_agent(fixture: &str) {
         let mut client = std::io::stdin().lock().lines();
         let mut agent = std::io::stdout().lock();
         let mut live_ids: HashMap<String, Value> = HashMap::new();
-        for record in RESUMED_TURN.lines() {
+        for record in fixture.lines() {
             let record: Value = serde_json::from_str(record).unwrap();
             let recorded = &record["message"];
             if record["from"] == "agent" {
@@ -865,16 +1037,17 @@ mod tests {
         for _ in client {}
     }
 
-    /// A stand-in `grok` that runs this test as [`replay_agent`]; whatever
-    /// arguments Tcode launches Grok with are left unread.
-    fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
+    /// A stand-in `grok` that runs the test `test` as [`replay_agent`];
+    /// whatever arguments Tcode launches Grok with are left unread.
+    fn stand_in_binary(dir: &std::path::Path, test: &str) -> PathBuf {
+        let test = format!("grok::tests::{test}");
         let exe = std::env::current_exe().unwrap();
         let exe = exe.display();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             let path = dir.join("grok");
-            let script = format!("#!/bin/sh\nexec '{exe}' --exact {TEST_NAME} --nocapture\n");
+            let script = format!("#!/bin/sh\nexec '{exe}' --exact {test} --nocapture\n");
             std::fs::write(&path, script).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
@@ -882,11 +1055,7 @@ mod tests {
         #[cfg(windows)]
         {
             let path = dir.join("grok.cmd");
-            std::fs::write(
-                &path,
-                format!("@\"{exe}\" --exact {TEST_NAME} --nocapture\r\n"),
-            )
-            .unwrap();
+            std::fs::write(&path, format!("@\"{exe}\" --exact {test} --nocapture\r\n")).unwrap();
             path
         }
     }
@@ -924,6 +1093,19 @@ mod tests {
             .unwrap_or_else(|| panic!("{id} never completed: {events:#?}"))
     }
 
+    fn completed_last<'a>(events: &'a [AgentEvent], id: &str) -> &'a ItemContent {
+        events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id: item, content, ..
+                }) if item == id => Some(content),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{id} never completed: {events:#?}"))
+    }
+
     fn streamed(events: &[AgentEvent], id: &str) -> String {
         events
             .iter()
@@ -934,54 +1116,54 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn recorded_resumed_turn_maps_to_the_canonical_stream() {
-        if std::env::var_os(REPLAY_AGENT).is_some() {
-            return replay_agent();
-        }
-        let dir = std::env::temp_dir().join(format!("tcode-grok-replay-{}", std::process::id()));
+    /// Options for a session against a stand-in Grok running `test`, in a
+    /// fresh directory.
+    fn stand_in_options(test: &str) -> SessionOptions {
+        let dir =
+            std::env::temp_dir().join(format!("tcode-grok-replay-{}-{test}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let opts = SessionOptions {
-            cwd: dir.clone(),
+        SessionOptions {
+            binary_path: Some(stand_in_binary(&dir, test)),
+            cwd: dir,
             model: None,
-            resume: Some(ResumeCursor(
-                json!({ "session_id": "01a10095-e65c-7983-a817-6884b010f1ae" }),
-            )),
+            resume: None,
             fork: false,
-            binary_path: Some(stand_in_binary(&dir)),
-            approval_mode: ApprovalMode::AutoAcceptEdits,
-            option_selections: vec![OptionSelection {
-                id: "acp:cfg:reasoning_effort".into(),
-                value: json!("low"),
-            }],
+            approval_mode: ApprovalMode::FullAccess,
+            option_selections: Vec::new(),
             interaction_mode: InteractionMode::Build,
-            mcp_servers: vec![McpRegistration {
-                name: "tcode_probe".into(),
-                url: "http://127.0.0.1:18433/mcp".into(),
-                bearer_token: "tcode-secret".into(),
-            }],
+            mcp_servers: Vec::new(),
             launch_env: LaunchEnv {
                 env: vec![(REPLAY_AGENT.into(), "1".into())],
                 home: None,
             },
             extra_args: Vec::new(),
             acp: None,
-        };
+        }
+    }
 
+    /// What the person driving a replayed session does after a turn completes.
+    enum Next {
+        Wait,
+        Send(&'static str),
+        Close,
+    }
+
+    /// Run a session as the app does: send `first`, approve once and answer
+    /// questions with their first option, and after the `n`th completed turn
+    /// do `next(n)`. Returns every event through the close.
+    fn replay(opts: SessionOptions, first: &str, next: impl Fn(usize) -> Next) -> Vec<AgentEvent> {
+        let dir = opts.cwd.clone();
         let events = smol::block_on(smol::future::or(
             async {
                 let handle = start(opts).await.unwrap();
-                handle
-                    .commands
-                    .send(SessionCommand::SendTurn {
-                        delivery_id: 7,
-                        text: "Count, edit, ask and echo".into(),
-                        options: None,
-                        attachments: Vec::new(),
-                    })
-                    .await
-                    .unwrap();
-                let mut events = Vec::new();
+                let send = |delivery_id, text: &str| SessionCommand::SendTurn {
+                    delivery_id,
+                    text: text.into(),
+                    options: None,
+                    attachments: Vec::new(),
+                };
+                handle.commands.send(send(1, first)).await.unwrap();
+                let (mut events, mut completed) = (Vec::new(), 0);
                 while let Ok(event) = handle.events.recv().await {
                     let command = match &event {
                         AgentEvent::ApprovalRequested(request) => {
@@ -1003,7 +1185,14 @@ mod tests {
                                 })
                                 .collect(),
                         }),
-                        AgentEvent::TurnCompleted { .. } => Some(SessionCommand::Shutdown),
+                        AgentEvent::TurnCompleted { .. } => {
+                            completed += 1;
+                            match next(completed) {
+                                Next::Wait => None,
+                                Next::Send(text) => Some(send(completed as u64 + 1, text)),
+                                Next::Close => Some(SessionCommand::Shutdown),
+                            }
+                        }
                         _ => None,
                     };
                     let closed = matches!(event, AgentEvent::SessionClosed { .. });
@@ -1023,7 +1212,6 @@ mod tests {
             },
         ));
         let _ = std::fs::remove_dir_all(&dir);
-
         // Every client message and answer matched the recording, or the
         // stand-in would have hung up before the close.
         assert!(
@@ -1033,6 +1221,32 @@ mod tests {
             ),
             "{events:#?}"
         );
+        events
+    }
+
+    #[test]
+    fn recorded_resumed_turn_maps_to_the_canonical_stream() {
+        if std::env::var_os(REPLAY_AGENT).is_some() {
+            return replay_agent(RESUMED_TURN);
+        }
+        let opts = SessionOptions {
+            resume: Some(ResumeCursor(
+                json!({ "session_id": "01a10095-e65c-7983-a817-6884b010f1ae" }),
+            )),
+            approval_mode: ApprovalMode::AutoAcceptEdits,
+            option_selections: vec![OptionSelection {
+                id: "acp:cfg:reasoning_effort".into(),
+                value: json!("low"),
+            }],
+            mcp_servers: vec![McpRegistration {
+                name: "tcode_probe".into(),
+                url: "http://127.0.0.1:18433/mcp".into(),
+                bearer_token: "tcode-secret".into(),
+            }],
+            ..stand_in_options("recorded_resumed_turn_maps_to_the_canonical_stream")
+        };
+        let events = replay(opts, "Count, edit, ask and echo", |_| Next::Close);
+
         let started = events
             .iter()
             .position(|event| matches!(event, AgentEvent::TurnStarted { .. }))
@@ -1123,5 +1337,94 @@ mod tests {
         assert_eq!(usage.turn_processed_tokens, Some(7404));
         assert_eq!(usage.used_tokens, Some(1234));
         assert_eq!(usage.context_window, Some(500_000));
+    }
+
+    /// Grok reports a background task that finished during a sent turn with
+    /// a turn of its own, which no `session/prompt` answers. It starts while
+    /// the sent turn's result is still on its way.
+    #[test]
+    fn a_turn_grok_starts_itself_runs_between_the_sent_turns() {
+        if std::env::var_os(REPLAY_AGENT).is_some() {
+            return replay_agent(AGENT_STARTED_TURN);
+        }
+        let opts = stand_in_options("a_turn_grok_starts_itself_runs_between_the_sent_turns");
+        let events = replay(
+            opts,
+            "Background then foreground",
+            |completed| match completed {
+                1 => Next::Wait,
+                2 => Next::Send("And now?"),
+                _ => Next::Close,
+            },
+        );
+
+        let agent = "task-completed-01a100c2-37c5-7fc2-b92a-c0f8b2c3659b";
+        let at = |wanted: &dyn Fn(&AgentEvent) -> bool| {
+            events
+                .iter()
+                .position(wanted)
+                .unwrap_or_else(|| panic!("{events:#?}"))
+        };
+        let lifecycle: Vec<(&str, &str, Option<u64>)> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnStarted { turn_id } => Some(("started", turn_id.as_str(), None)),
+                AgentEvent::TurnCompleted { turn_id, usage, .. } => Some((
+                    "completed",
+                    turn_id.as_str(),
+                    usage.and_then(|usage| usage.turn_processed_tokens),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lifecycle,
+            [
+                ("started", "turn-1", None),
+                ("completed", "turn-1", Some(3702)),
+                ("started", agent, None),
+                ("completed", agent, Some(1234)),
+                ("started", "turn-2", None),
+                ("completed", "turn-2", Some(1234)),
+            ]
+        );
+
+        let reply = at(&|event| {
+            matches!(event, AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::AssistantMessage { text }, ..
+            }) if text == "The background task printed bgdone.")
+        });
+        let agent_started =
+            at(&|event| matches!(event, AgentEvent::TurnStarted { turn_id } if turn_id == agent));
+        let agent_completed = at(
+            &|event| matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == agent),
+        );
+        assert!(agent_started < reply && reply < agent_completed);
+
+        // The runtime must not take the process for idle before Grok's turn.
+        let sent_completed = at(
+            &|event| matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "turn-1"),
+        );
+        let drained = at(&|event| matches!(event, AgentEvent::BackgroundTasksChanged { count: 0 }));
+        assert!(sent_completed < drained, "{events:#?}");
+
+        // The backgrounded command's later output leaves its card completed.
+        let background = events
+            .iter()
+            .filter(|event| {
+                matches!(event, AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item)
+                    if item.id == "call_68_0")
+            })
+            .skip_while(|event| !matches!(event, AgentEvent::ItemCompleted(_)))
+            .collect::<Vec<_>>();
+        assert!(
+            background
+                .iter()
+                .all(|event| matches!(event, AgentEvent::ItemCompleted(_))),
+            "{background:#?}"
+        );
+        assert!(matches!(completed_last(&events, "call_68_0"),
+            ItemContent::CommandExecution { output, status: ItemStatus::Completed, .. }
+                if output == "bgdone\n"));
     }
 }
