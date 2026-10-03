@@ -1572,6 +1572,14 @@ impl OptionRegistry {
                 Value::String(modes.current_mode_id.0.to_string()),
             );
         }
+        // Each list is the agent's complete set: an option it no longer
+        // offers (a parameter of the previous model) goes.
+        if let Some(config) = config {
+            self.records.retain(|record| match &record.origin {
+                OptionOrigin::Config(id) => config.iter().any(|option| &option.id == id),
+                OptionOrigin::Mode => true,
+            });
+        }
         for option in config.unwrap_or_default() {
             // Protocol 1.2 replaced the standalone model state/set-model RPC
             // with categorized config options. Preserve tcode's canonical ids
