@@ -159,7 +159,7 @@ impl AppState {
     /// at app start and after a binary-path change). Results update
     /// `model_catalogs` and are persisted so the next launch is instant.
     pub fn refresh_model_catalogs(&mut self, cx: &mut HostCx) {
-        for provider in NATIVE_PROVIDER_KINDS {
+        for provider in ProviderKind::NATIVE {
             let binary = self.settings.provider(provider).binary_path;
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
@@ -238,7 +238,7 @@ impl AppState {
     /// Every selectable native profile, grouped by kind. ACP is handled
     /// separately through the installed-agent list.
     pub(super) fn all_profiles(&self) -> Vec<ResolvedProfile> {
-        NATIVE_PROVIDER_KINDS
+        ProviderKind::NATIVE
             .iter()
             .flat_map(|kind| self.settings.profiles_for_kind(*kind))
             .collect()
@@ -530,7 +530,7 @@ impl AppState {
     /// Check every provider and the running tcode build in the background,
     /// storing results and toasting once for each newly available update.
     pub fn check_provider_versions(&mut self, cx: &mut HostCx) {
-        for provider in NATIVE_PROVIDER_KINDS {
+        for provider in ProviderKind::NATIVE {
             let binary = self.resolve_provider_binary(provider);
             let status = self
                 .providers
@@ -803,24 +803,19 @@ pub(super) fn provider_secret_names(
     settings: &Settings,
     settings_store: &SettingsStore,
 ) -> HashMap<String, HashSet<String>> {
-    [
-        ProviderKind::Codex,
-        ProviderKind::ClaudeCode,
-        ProviderKind::Pi,
-        ProviderKind::OpenCode,
-    ]
-    .into_iter()
-    .flat_map(|kind| settings.profiles_for_kind(kind))
-    .map(|profile| {
-        let id = profile.id;
-        let names = launch_env_for_profile(settings, &id, settings_store.profile_secrets(&id))
-            .env
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-        (id, names)
-    })
-    .collect()
+    ProviderKind::NATIVE
+        .into_iter()
+        .flat_map(|kind| settings.profiles_for_kind(kind))
+        .map(|profile| {
+            let id = profile.id;
+            let names = launch_env_for_profile(settings, &id, settings_store.profile_secrets(&id))
+                .env
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            (id, names)
+        })
+        .collect()
 }
 
 pub(super) fn session_launch_env(

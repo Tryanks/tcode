@@ -93,12 +93,6 @@ const RESIDENT_IDLE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// the primary bound, while this comfortably preserves typical orchestrate
 /// fleets whose idle children may be re-messaged.
 const MAX_IDLE_RESIDENTS: usize = 16;
-const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
-    ProviderKind::ClaudeCode,
-    ProviderKind::Codex,
-    ProviderKind::Pi,
-    ProviderKind::OpenCode,
-];
 
 type ProviderLaunchFuture =
     Pin<Box<dyn Future<Output = Result<SessionHandle, AgentError>> + Send + 'static>>;
@@ -479,7 +473,7 @@ impl AppState {
         // works offline; a background refresh (see `refresh_model_catalogs`)
         // updates it once the providers respond.
         let mut model_catalogs = HashMap::new();
-        for provider in NATIVE_PROVIDER_KINDS {
+        for provider in ProviderKind::NATIVE {
             let cached = store.load_models(provider);
             if !cached.is_empty() {
                 model_catalogs.insert(provider, cached);

@@ -1254,16 +1254,10 @@ impl WorkspaceStore {
     }
 
     pub fn all_provider_profiles(&self) -> Vec<ResolvedProfile> {
-        let mut profiles = Vec::new();
-        for kind in [
-            agent::ProviderKind::Codex,
-            agent::ProviderKind::ClaudeCode,
-            agent::ProviderKind::Pi,
-            agent::ProviderKind::OpenCode,
-        ] {
-            profiles.extend(self.settings_replica.profiles_for_kind(kind));
-        }
-        profiles
+        agent::ProviderKind::NATIVE
+            .into_iter()
+            .flat_map(|kind| self.settings_replica.profiles_for_kind(kind))
+            .collect()
     }
 
     pub fn enabled_profiles(&self) -> Vec<ResolvedProfile> {
