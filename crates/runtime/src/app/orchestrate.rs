@@ -1434,6 +1434,8 @@ fn resolve_orchestrate_profiles(
         "codex" => ProviderKind::Codex,
         "pi" => ProviderKind::Pi,
         "opencode" | "open_code" | "open-code" => ProviderKind::OpenCode,
+        "cursor" => ProviderKind::Cursor,
+        "grok" => ProviderKind::Grok,
         "acp" => {
             return Err(
                 "ACP child dispatch is not available yet; configure a native-provider child model"
@@ -1579,6 +1581,8 @@ pub(super) fn provider_name(provider: ProviderKind) -> &'static str {
         ProviderKind::ClaudeCode => "claude",
         ProviderKind::Pi => "pi",
         ProviderKind::OpenCode => "opencode",
+        ProviderKind::Cursor => "cursor",
+        ProviderKind::Grok => "grok",
         ProviderKind::Acp => "acp",
     }
 }

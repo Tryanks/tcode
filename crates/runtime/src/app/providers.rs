@@ -231,8 +231,8 @@ impl AppState {
     }
 
     // A *profile* is a named configuration on top of a protocol `ProviderKind`.
-    // The built-in native-provider cards are profiles too (with stable ids such
-    // as "claude", "codex", "pi", and "opencode").
+    // The built-in native-provider cards are profiles too, with the stable ids
+    // of `Settings::builtin_profile_id`.
     // The model catalog and update-check version stay keyed by kind; status
     // probes and card config (env, binary, home, accent, custom/hidden models)
     // are profile-specific, as are secrets.
@@ -736,7 +736,9 @@ impl AppState {
             ProviderKind::Codex
             | ProviderKind::ClaudeCode
             | ProviderKind::Pi
-            | ProviderKind::OpenCode => self
+            | ProviderKind::OpenCode
+            | ProviderKind::Cursor
+            | ProviderKind::Grok => self
                 .settings
                 .resolved_profile(
                     profile_id.unwrap_or_else(|| Settings::builtin_profile_id(provider)),
@@ -864,7 +866,9 @@ pub(super) fn session_launch_env(
         ProviderKind::Codex
         | ProviderKind::ClaudeCode
         | ProviderKind::Pi
-        | ProviderKind::OpenCode => {
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok => {
             let profile_id = meta
                 .profile_id
                 .clone()
@@ -957,7 +961,10 @@ pub(super) fn session_options(
         // an ACP agent carries its own from the installed-agent card.
         extra_args: if meta.provider.caps().launch_args {
             match meta.provider {
-                ProviderKind::ClaudeCode | ProviderKind::OpenCode => provider_settings.extra_args(),
+                ProviderKind::ClaudeCode
+                | ProviderKind::OpenCode
+                | ProviderKind::Cursor
+                | ProviderKind::Grok => provider_settings.extra_args(),
                 ProviderKind::Pi => {
                     let mut extra_args = provider_settings.extra_args();
                     if provider_settings.pi.trust_project_extensions {

@@ -36,7 +36,7 @@ use crate::{
     InteractionMode, ItemContent, ItemStatus, McpRegistration, OptionDescriptor, OptionSelection,
     PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
     SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnStatus,
+    TurnStatus, UserInputDelivery, UserInputQuestion,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -268,8 +268,39 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    /// The established session's id.
+    pub(crate) fn id(&self) -> Option<acp::SessionId> {
+        self.with_state(|state| state.session_id.clone())
+    }
+
     pub(crate) async fn emit(&self, event: AgentEvent) {
         let _ = self.events.send(event).await;
+    }
+
+    pub(crate) fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+        f(&mut self.state.lock_recover())
+    }
+
+    /// Ask the user and wait for [`SessionCommand::RespondUserInput`]. `None`
+    /// when the request was cancelled by an interrupt or shutdown.
+    pub(crate) async fn ask_user(
+        &self,
+        questions: Vec<UserInputQuestion>,
+    ) -> Option<Map<String, Value>> {
+        let (answer, answered) = smol::channel::bounded(1);
+        let request_id = self.with_state(|state| {
+            state.input_seq += 1;
+            let request_id = format!("acp-input-{}", state.input_seq);
+            state.inputs.insert(request_id.clone(), answer);
+            request_id
+        });
+        self.emit(AgentEvent::UserInputRequested {
+            request_id,
+            questions,
+            delivery: UserInputDelivery::Blocking,
+        })
+        .await;
+        answered.recv().await.ok()
     }
 }
 
@@ -315,6 +346,70 @@ pub(crate) async fn start<D: Dialect>(
         commands: commands_tx,
         events: events_rx,
     })
+}
+
+/// Run `query` against a freshly started and initialized agent outside any
+/// session, then tear the agent down. Model catalogs use it.
+pub(crate) async fn query<D, R>(
+    provider: ProviderKind,
+    dialect: D,
+    opts: SessionOptions,
+    query: impl AsyncFnOnce(&Connection, &acp::InitializeResponse) -> Result<R, AgentError>
+    + Send
+    + 'static,
+) -> Result<R, AgentError>
+where
+    D: Dialect,
+    R: Send + 'static,
+{
+    let (result_tx, result) = smol::channel::bounded(1);
+    std::thread::Builder::new()
+        .name("acp-query".into())
+        .spawn(move || {
+            let outcome = smol::block_on(async move {
+                let launch = dialect.launch(&opts)?;
+                let name = dialect.name().to_string();
+                let mut child = spawn_agent(&name, provider, &launch, &opts)?;
+                let (Some(stdin), Some(stdout), Some(stderr)) =
+                    (child.stdin.take(), child.stdout.take(), child.stderr.take())
+                else {
+                    let _ = child.kill();
+                    return Err(AgentError::Spawn(format!(
+                        "ACP agent `{name}` started without piped stdio"
+                    )));
+                };
+                // Drained so a chatty agent never blocks on a full stderr pipe.
+                smol::spawn(async move {
+                    let mut lines = smol::io::BufReader::new(stderr).lines();
+                    while let Some(Ok(_)) = lines.next().await {}
+                })
+                .detach();
+                let outcome = sdk::Client
+                    .builder()
+                    .name(format!("tcode-acp-query-{name}"))
+                    .connect_with(sdk::ByteStreams::new(stdin, stdout), async |connection| {
+                        Ok(match initialize(&connection, &name, &launch).await {
+                            Ok(init) => query(&connection, &init).await,
+                            Err(err) => Err(err),
+                        })
+                    })
+                    .await;
+                let _ = child.kill();
+                let _ = child.status().await;
+                outcome.unwrap_or_else(|err| {
+                    Err(AgentError::Protocol(format!(
+                        "ACP transport error: {}",
+                        describe(&err)
+                    )))
+                })
+            });
+            let _ = result_tx.send_blocking(outcome);
+        })
+        .map_err(|err| AgentError::Spawn(format!("could not start the ACP query thread: {err}")))?;
+    result
+        .recv()
+        .await
+        .map_err(|_| AgentError::Protocol("ACP query exited without a result".into()))?
 }
 
 fn spawn_agent(
@@ -749,6 +844,25 @@ async fn handshake<D: Dialect>(
     events: &Sender<AgentEvent>,
 ) -> Result<(Established, bool), AgentError> {
     let name = dialect.name();
+    let init = initialize(connection, name, launch).await?;
+    let setup = Setup {
+        connection,
+        opts,
+        init: &init,
+        name,
+        state,
+        events,
+    };
+    let established = dialect.establish(&setup).await?;
+    let can_close = init.agent_capabilities.session_capabilities.close.is_some();
+    Ok((established, can_close))
+}
+
+async fn initialize(
+    connection: &Connection,
+    name: &str,
+    launch: &Launch,
+) -> Result<acp::InitializeResponse, AgentError> {
     let mut client_capabilities = acp::ClientCapabilities::new()
         .fs(acp::FileSystemCapabilities::new()
             .read_text_file(true)
@@ -795,17 +909,7 @@ async fn handshake<D: Dialect>(
             )));
         }
     };
-    let setup = Setup {
-        connection,
-        opts,
-        init: &init,
-        name,
-        state,
-        events,
-    };
-    let established = dialect.establish(&setup).await?;
-    let can_close = init.agent_capabilities.session_capabilities.close.is_some();
-    Ok((established, can_close))
+    Ok(init)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1592,6 +1696,7 @@ pub(crate) struct State {
     approvals: HashMap<String, (Sender<acp::RequestPermissionOutcome>, Vec<ApprovalOption>)>,
     approval_seq: u64,
     inputs: HashMap<String, Sender<Map<String, Value>>>,
+    input_seq: u64,
     text_seq: u64,
     terminal_seq: u64,
     terminals: HashMap<String, Arc<Terminal>>,
@@ -1613,6 +1718,7 @@ impl State {
             approvals: HashMap::new(),
             approval_seq: 0,
             inputs: HashMap::new(),
+            input_seq: 0,
             text_seq: 0,
             terminal_seq: 0,
             terminals: HashMap::new(),
@@ -1626,6 +1732,11 @@ impl State {
     /// Whether `session/load` is still answering.
     pub(crate) fn loading(&self) -> bool {
         self.loading
+    }
+
+    /// The running turn's id.
+    pub(crate) fn turn(&self) -> Option<&str> {
+        self.turn.as_deref()
     }
 
     /// The latest `usage_update` context figure.
@@ -1819,7 +1930,7 @@ impl State {
                 events
             }
             acp::SessionUpdate::Plan(plan) => vec![AgentEvent::PlanUpdated {
-                turn_id: self.turn.clone(),
+                turn_id: self.turn().map(str::to_owned),
                 explanation: None,
                 steps: plan.entries.iter().map(plan_step).collect(),
             }],
@@ -2258,7 +2369,7 @@ impl Client {
             state.approval_seq += 1;
             (
                 format!("acp-approval-{}", state.approval_seq),
-                state.turn.clone(),
+                state.turn().map(str::to_owned),
             )
         };
         let request = approval_request(request_id.clone(), turn, &args.tool_call, &args.options);

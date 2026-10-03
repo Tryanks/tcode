@@ -178,6 +178,8 @@ pub fn probe_diagnostic_message(
             ProviderKind::ClaudeCode => crate::tr!("providers.probe.claude_missing").into_owned(),
             ProviderKind::Pi => crate::tr!("providers.probe.pi_missing").into_owned(),
             ProviderKind::OpenCode => crate::tr!("providers.probe.opencode_missing").into_owned(),
+            ProviderKind::Cursor => crate::tr!("providers.probe.cursor_missing").into_owned(),
+            ProviderKind::Grok => crate::tr!("providers.probe.grok_missing").into_owned(),
             ProviderKind::Acp => String::new(),
         },
         ProviderProbeDiagnostic::FailedCli => crate::tr!(
@@ -194,6 +196,8 @@ pub fn probe_diagnostic_message(
             ProviderKind::OpenCode => {
                 crate::tr!("providers.probe.opencode_signed_out").into_owned()
             }
+            ProviderKind::Cursor => crate::tr!("providers.probe.cursor_signed_out").into_owned(),
+            ProviderKind::Grok => crate::tr!("providers.probe.grok_signed_out").into_owned(),
             ProviderKind::Acp => String::new(),
         },
         ProviderProbeDiagnostic::IndeterminateAuth => crate::tr!(

@@ -50,14 +50,17 @@ impl ProjectSort {
     }
 }
 
-/// The stable settings-file key for a provider. It keys
-/// both `settings.json`'s `providers` map and `secrets.json`.
+/// The stable settings-file key for a provider: its entry in `settings.json`'s
+/// `providers` map. Profile-keyed data such as `secrets.json` uses
+/// [`Settings::builtin_profile_id`].
 pub fn provider_key(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
         ProviderKind::Pi => "pi",
         ProviderKind::OpenCode => "opencode",
+        ProviderKind::Cursor => "cursor",
+        ProviderKind::Grok => "grok",
         // ACP agents are not one provider but many: their per-agent settings
         // live in `Settings::acp_agents`, keyed by registry id. This bucket only
         // ever holds the shared fallbacks (it is never written by the ACP card).
@@ -78,6 +81,8 @@ pub fn provider_label(provider: ProviderKind) -> &'static str {
         ProviderKind::ClaudeCode => "Claude",
         ProviderKind::Pi => "pi",
         ProviderKind::OpenCode => "OpenCode",
+        ProviderKind::Cursor => "Cursor",
+        ProviderKind::Grok => "Grok",
         ProviderKind::Acp => "ACP",
     }
 }
@@ -115,8 +120,8 @@ pub struct ProviderSettings {
     /// Override for the CLI binary (`None` = resolve from PATH).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<PathBuf>,
-    /// Claude: `HOME`; Codex: `CODEX_HOME`; pi: `PI_CODING_AGENT_DIR`.
-    /// OpenCode ignores this field because it has no single-home override.
+    /// The provider's home variable ([`agent::LaunchEnv::home`]). OpenCode
+    /// ignores this field because it has no single-home override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_path: Option<PathBuf>,
     /// Native-provider CLI arguments appended on session start (ignored for Codex).
@@ -221,8 +226,7 @@ impl ProviderSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderProfile {
     /// The protocol this profile drives. Determines which native adapter
-    /// (`claude` / `codex` / `pi` / `opencode`) spawns it and how its native
-    /// protocol is normalized.
+    /// spawns it and how its native protocol is normalized.
     pub kind: ProviderKind,
     /// The card configuration (env, binary, home, models, display name, …).
     /// Flattened so a profile's JSON is a superset of a provider card's.
@@ -1259,11 +1263,23 @@ impl Settings {
             .or_default()
     }
 
-    /// The built-in profile id for a native protocol (its [`provider_key`]).
-    /// This is the id a session carries when it uses the default, non-custom
-    /// configuration for its kind.
+    /// The built-in profile id for a native protocol. This is the id a session
+    /// carries when it uses the default, non-custom configuration for its kind.
+    ///
+    /// Built-in ids resolve before user profiles, whose ids are slugs of ASCII
+    /// alphanumerics and hyphens. Providers added after user profiles existed
+    /// therefore take a `native:` id no slug can produce, so a user profile
+    /// that already has the provider's name keeps resolving to itself.
     pub fn builtin_profile_id(kind: ProviderKind) -> &'static str {
-        provider_key(kind)
+        match kind {
+            ProviderKind::Cursor => "native:cursor",
+            ProviderKind::Grok => "native:grok",
+            ProviderKind::ClaudeCode
+            | ProviderKind::Codex
+            | ProviderKind::Pi
+            | ProviderKind::OpenCode
+            | ProviderKind::Acp => provider_key(kind),
+        }
     }
 
     /// Whether `id` names a built-in provider profile.
@@ -1274,14 +1290,10 @@ impl Settings {
     /// The protocol kind of a built-in profile id, if it is one. Used to route a
     /// mutation of a built-in profile back to its `providers` card.
     pub fn builtin_kind_from_id(id: &str) -> Option<ProviderKind> {
-        match id {
-            "claude" => Some(ProviderKind::ClaudeCode),
-            "codex" => Some(ProviderKind::Codex),
-            "pi" => Some(ProviderKind::Pi),
-            "opencode" => Some(ProviderKind::OpenCode),
-            "acp" => Some(ProviderKind::Acp),
-            _ => None,
-        }
+        ProviderKind::NATIVE
+            .into_iter()
+            .chain([ProviderKind::Acp])
+            .find(|kind| Self::builtin_profile_id(*kind) == id)
     }
 
     /// Resolve a profile id to its protocol kind and effective card settings.
@@ -1307,7 +1319,7 @@ impl Settings {
     /// picker iterates.
     pub fn profiles_for_kind(&self, kind: ProviderKind) -> Vec<ResolvedProfile> {
         let mut out = vec![ResolvedProfile {
-            id: provider_key(kind).to_string(),
+            id: Self::builtin_profile_id(kind).to_string(),
             kind,
             settings: self.provider(kind),
         }];
@@ -2055,6 +2067,36 @@ mod tests {
 
         // A second profile of the same name gets a distinct id.
         assert_eq!(settings.allocate_profile_id("Klaude Kode"), "klaude-kode-2");
+    }
+
+    #[test]
+    fn a_user_profile_named_after_a_new_native_provider_keeps_its_identity() {
+        // Saved before Cursor was native: a Claude profile the user named "Cursor".
+        let settings: Settings = serde_json::from_str(
+            r##"{"profiles":{"cursor":{"kind":"claude_code","display_name":"Cursor","accent_color":"#123456"}}}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.resolved_profile("cursor").unwrap().kind,
+            ProviderKind::ClaudeCode
+        );
+        let [builtin] = settings
+            .profiles_for_kind(ProviderKind::Cursor)
+            .try_into()
+            .unwrap();
+        assert_eq!(builtin.kind, ProviderKind::Cursor);
+        assert_eq!(
+            settings.resolved_profile(&builtin.id).unwrap().kind,
+            ProviderKind::Cursor
+        );
+        assert!(!Settings::is_builtin_profile_id(
+            &settings.allocate_profile_id(&builtin.id)
+        ));
+        let thread = crate::project::SessionMeta::new(ProviderKind::Cursor, "/x".into(), None);
+        assert_ne!(
+            settings.provider_color(&thread.provider_color_key()),
+            0x123456
+        );
     }
 
     /// A build that predates a field must not destroy it: unknown keys survive a

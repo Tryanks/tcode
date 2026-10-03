@@ -16,12 +16,14 @@ pub fn builtin_provider_color(kind: ProviderKind) -> Option<u32> {
         ProviderKind::Codex => Some(0x8B5CF6),
         ProviderKind::Pi => Some(0x4D9ABF),
         ProviderKind::OpenCode => Some(0x22A06B),
+        ProviderKind::Cursor => Some(0x9CA3AF),
+        ProviderKind::Grok => Some(0x71717A),
         ProviderKind::Acp => None,
     }
 }
 
-/// Hues for user-added providers (`0xRRGGBB`). They stay clear of the four
-/// brand colors above so a custom endpoint never masquerades as a built-in.
+/// Hues for user-added providers (`0xRRGGBB`). They stay clear of the brand
+/// colors above so a custom endpoint never masquerades as a built-in.
 pub const PROVIDER_COLOR_PALETTE: [u32; 10] = [
     0xF59E0B, // amber
     0x84CC16, // lime

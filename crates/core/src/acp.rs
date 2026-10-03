@@ -42,6 +42,13 @@ fn default_true() -> bool {
 }
 
 impl InstalledAcpAgent {
+    /// Whether new sessions may use this agent. An agent that duplicates a
+    /// native integration stays installed, so its existing sessions resume and
+    /// it can be removed, but new sessions use the native provider.
+    pub fn offered_for_new_sessions(&self) -> bool {
+        !agent::HIDDEN_ACP_AGENT_IDS.contains(&self.id.as_str())
+    }
+
     /// The whitespace-split launch arguments (mirrors Claude's "Launch arguments").
     pub fn extra_args(&self) -> Vec<String> {
         self.launch_args

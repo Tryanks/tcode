@@ -195,7 +195,7 @@ impl Composer {
         let acp_rail_agents: Vec<(String, String)> = store
             .settings_installed_acp_agents()
             .into_iter()
-            .filter(|agent| agent.enabled)
+            .filter(|agent| agent.enabled && agent.offered_for_new_sessions())
             .map(|agent| (agent.id.clone(), agent.name.clone()))
             .collect();
 
