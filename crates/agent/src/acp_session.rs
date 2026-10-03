@@ -845,7 +845,6 @@ async fn connected_actor<D: Dialect>(
 
     let session = client.session(connection.clone());
     let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
-    let mut turn_id: Option<String> = None;
     let mut turn_seq: u64 = 0;
 
     let close_reason = loop {
@@ -881,18 +880,12 @@ async fn connected_actor<D: Dialect>(
                     &session,
                     &session_id,
                     &turn_tx,
-                    &mut turn_id,
                     &mut turn_seq,
                     pending_deliveries,
                 )
                 .await;
             }
-            Input::Turn(outcome) => {
-                let id = turn_id
-                    .take()
-                    .expect("turn outcome requires an active turn");
-                finish_turn(dialect, state, events, &id, outcome).await;
-            }
+            Input::Turn(outcome) => finish_turn(dialect, state, events, outcome).await,
             Input::Io(reason) => break Some(reason),
         }
     };
@@ -914,6 +907,7 @@ async fn connected_actor<D: Dialect>(
 }
 
 struct TurnOutcome {
+    turn_id: String,
     result: Result<acp::PromptResponse, acp::Error>,
 }
 
@@ -1005,7 +999,6 @@ async fn handle_command<D: Dialect>(
     session: &Session,
     session_id: &acp::SessionId,
     turn_tx: &Sender<TurnOutcome>,
-    turn_id: &mut Option<String>,
     turn_seq: &mut u64,
     pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
 ) {
@@ -1026,7 +1019,6 @@ async fn handle_command<D: Dialect>(
         } => {
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
-            *turn_id = Some(id.clone());
             state.lock_recover().turn = Some(id.clone());
 
             let request =
@@ -1044,12 +1036,18 @@ async fn handle_command<D: Dialect>(
             executor
                 .spawn(async move {
                     let result = request.block_task().await;
-                    let _ = turn_tx.send(TurnOutcome { result }).await;
+                    let _ = turn_tx
+                        .send(TurnOutcome {
+                            turn_id: id,
+                            result,
+                        })
+                        .await;
                 })
                 .detach();
         }
         SessionCommand::Interrupt => {
-            if turn_id.is_none() {
+            // The open turn may be one the agent started itself.
+            if state.lock_recover().turn.is_none() {
                 return;
             }
             // Every in-flight permission request must be answered with
@@ -1190,39 +1188,25 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
     }
 }
 
+/// Complete a sent turn with its `session/prompt` result, unless the dialect
+/// already completed it from the agent's own signal ([`State::end_turn`]).
 async fn finish_turn<D: Dialect>(
     dialect: &D,
     state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
-    turn_id: &str,
     outcome: TurnOutcome,
 ) {
-    let end = {
+    let completion = {
         let mut state = state.lock_recover();
-        let tail = state.flush_text();
-        state.turn = None;
+        if state.turn.as_deref() != Some(outcome.turn_id.as_str()) {
+            return;
+        }
         let end = dialect.turn_end(&mut state, outcome.result);
-        (tail, end)
+        state.complete_turn(&outcome.turn_id, end)
     };
-    let (tail, end) = end;
-    for event in tail {
+    for event in completion {
         let _ = events.send(event).await;
     }
-    if let Some(message) = end.message {
-        let _ = events
-            .send(AgentEvent::Error {
-                message,
-                fatal: false,
-            })
-            .await;
-    }
-    let _ = events
-        .send(AgentEvent::TurnCompleted {
-            turn_id: turn_id.to_string(),
-            status: end.status,
-            usage: end.usage,
-        })
-        .await;
 }
 
 /// The status and message of a `session/prompt` result. A `-32800
@@ -1806,6 +1790,8 @@ pub(crate) struct State {
     options: OptionRegistry,
     /// [`Dialect::owned_config_options`].
     owned_options: &'static [&'static str],
+    /// A turn the agent started while another was still open.
+    next_turn: Option<String>,
     modes: Option<acp::SessionModeState>,
     previous_non_plan_mode: Option<acp::SessionModeId>,
 }
@@ -1829,6 +1815,7 @@ impl State {
             usage: None,
             options: OptionRegistry::default(),
             owned_options: &[],
+            next_turn: None,
             modes: None,
             previous_non_plan_mode: None,
         }
@@ -1847,6 +1834,55 @@ impl State {
     /// The latest `usage_update` context figure.
     pub(crate) fn usage(&self) -> Option<TokenUsage> {
         self.usage
+    }
+
+    /// Open a turn the agent started on its own, which no `session/prompt`
+    /// answers. While another turn is still open it opens as soon as that one
+    /// completes.
+    pub(crate) fn begin_agent_turn(&mut self, turn_id: &str) -> Vec<AgentEvent> {
+        if self.turn.is_some() {
+            self.next_turn = Some(turn_id.to_string());
+            return Vec::new();
+        }
+        self.turn = Some(turn_id.to_string());
+        vec![AgentEvent::TurnStarted {
+            turn_id: turn_id.to_string(),
+        }]
+    }
+
+    /// Complete `turn_id` from the agent's own signal if it is still the open
+    /// turn. A sent turn completed this way ignores its later `session/prompt`
+    /// result. A turn the client sent while an agent-started one ran has taken
+    /// its place and completes as sent turns do; only the ended turn's streamed
+    /// text is closed.
+    pub(crate) fn end_turn(&mut self, turn_id: &str, end: TurnEnd) -> Vec<AgentEvent> {
+        if self.next_turn.as_deref() == Some(turn_id) {
+            self.next_turn = None;
+        }
+        if self.turn.as_deref() != Some(turn_id) {
+            return self.flush_text();
+        }
+        self.complete_turn(turn_id, end)
+    }
+
+    /// Close the open turn: its streaming text, the end's message and its
+    /// completion, then open the agent-started turn waiting behind it.
+    fn complete_turn(&mut self, turn_id: &str, end: TurnEnd) -> Vec<AgentEvent> {
+        let mut events = self.flush_text();
+        self.turn = None;
+        events.extend(end.message.map(|message| AgentEvent::Error {
+            message,
+            fatal: false,
+        }));
+        events.push(AgentEvent::TurnCompleted {
+            turn_id: turn_id.to_string(),
+            status: end.status,
+            usage: end.usage,
+        });
+        if let Some(next) = self.next_turn.take() {
+            events.extend(self.begin_agent_turn(&next));
+        }
+        events
     }
 
     fn ingest_modes(&mut self, modes: Option<&acp::SessionModeState>) {
