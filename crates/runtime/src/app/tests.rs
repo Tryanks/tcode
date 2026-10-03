@@ -4947,8 +4947,6 @@ fn send_routing_matrix() {
     assert_eq!(dead.route(true), SendRouting::QueueUnsupported);
 }
 
-/// Steering must not disturb the turn bookkeeping: it joins the turn already
-/// in flight, so no queue entry is consumed and no new turn is opened.
 /// Ultrathink is per-send: it rides with the message it was armed for, not
 /// with whatever happens to be dispatched later.
 #[test]
