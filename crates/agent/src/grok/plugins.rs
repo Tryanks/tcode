@@ -5,7 +5,7 @@
 //! user scope. Enablement is left out: no `grok plugin` read reports it, and
 //! `grok inspect` reports a disabled plugin as enabled.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -320,8 +320,6 @@ struct Listed {
     repo_key: Option<String>,
     #[serde(default)]
     path: Option<PathBuf>,
-    #[serde(default)]
-    source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -372,16 +370,18 @@ fn parse_marketplaces(stdout: &str) -> Result<Vec<ProviderPluginMarketplace>, Ag
 }
 
 fn listing(listed: Vec<Listed>, marketplaces: Vec<ProviderPluginMarketplace>) -> PluginListing {
-    let source_kind = |plugin: &Listed| match &plugin.marketplace {
-        Some(name) => marketplaces
-            .iter()
-            .find(|marketplace| marketplace.name == *name)
-            .map_or(PluginSourceKind::Unknown, |marketplace| marketplace.kind),
-        None => match plugin.source.as_deref() {
-            Some(source) if Path::new(source).is_absolute() => PluginSourceKind::LocalPath,
-            Some(_) => PluginSourceKind::Git,
-            None => PluginSourceKind::Unknown,
-        },
+    // A plugin installed from a path or a URL takes its kind from its details
+    // ([`apply_details`]).
+    let source_kind = |plugin: &Listed| {
+        plugin
+            .marketplace
+            .as_ref()
+            .and_then(|name| {
+                marketplaces
+                    .iter()
+                    .find(|marketplace| marketplace.name == *name)
+            })
+            .map_or(PluginSourceKind::Unknown, |marketplace| marketplace.kind)
     };
     let repositories: Vec<&str> = listed
         .iter()
@@ -476,13 +476,24 @@ fn listing(listed: Vec<Listed>, marketplaces: Vec<ProviderPluginMarketplace>) ->
 }
 
 /// `plugin details` has no `--json`, and it counts component directories
-/// rather than naming components, so its text stays a native diagnostic.
+/// rather than naming components, so its text stays a native diagnostic. Its
+/// `kind:` line (`local: <path>` or `git: <url>`) is the only place Grok says
+/// what a plugin installed from a path or a URL is.
 fn apply_details(entry: &mut ProviderPluginEntry, text: &str) {
+    let detail = |key: &str| {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(key))
+            .map(str::trim)
+    };
     if entry.description.is_none() {
-        entry.description = text
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("description:"))
-            .map(|description| description.trim().to_string());
+        entry.description = detail("description:").map(str::to_string);
+    }
+    if entry.source.marketplace.is_none() {
+        entry.source.kind = match detail("kind:").and_then(|kind| kind.split_once(':')) {
+            Some(("local", _)) => PluginSourceKind::LocalPath,
+            Some(("git", _)) => PluginSourceKind::Git,
+            _ => PluginSourceKind::Unknown,
+        };
     }
     entry
         .diagnostics
@@ -576,11 +587,15 @@ mod tests {
         assert_eq!(listing.entries[3].source.kind, PluginSourceKind::Git);
 
         // Each plugin of a path-installed repository is a live link that
-        // `update` leaves alone, and uninstalling one needs `--confirm`.
-        for multi in &listing.entries[1..3] {
+        // `update` leaves alone, and uninstalling one needs `--confirm`. As in
+        // `list`, its kind comes from its details, which Grok prints per
+        // repository.
+        for multi in &mut listing.entries[1..3] {
+            apply_details(multi, &fixture("details-delta.txt"));
             assert_eq!(multi.source.kind, PluginSourceKind::LocalPath);
             assert!(multi.actions.is_empty(), "{multi:?}");
         }
+        assert_eq!(listing.entries[2].description, None);
 
         let beta = &listing.entries[4];
         assert!(beta.installations.is_empty());
@@ -615,8 +630,19 @@ mod tests {
         assert!(matches!(alpha.diagnostics.as_slice(),
             [(key, text)] if key == "details"
                 && text.contains("components: 1 skill dir(s), 1 command dir(s)")));
-        apply_details(&mut listing.entries[2], &fixture("details-delta.txt"));
-        assert_eq!(listing.entries[2].description, None);
+    }
+
+    /// Recorded after installing the same two-plugin repository from a
+    /// `file://` URL instead of its path.
+    #[test]
+    fn a_repository_installed_from_a_url_is_a_git_checkout() {
+        let listed = parse_listed(&fixture("plugin-list-git-install.json")).unwrap();
+        let mut listing = listing(listed, Vec::new());
+        assert_eq!(listing.entries.len(), 2);
+        for entry in &mut listing.entries {
+            apply_details(entry, &fixture("details-git-install.txt"));
+            assert_eq!(entry.source.kind, PluginSourceKind::Git);
+        }
     }
 
     #[test]
