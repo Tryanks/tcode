@@ -113,6 +113,7 @@ markdown:
   path_copy_relative: "Copy relative path"
   code_copy: "Copy code"
   image_copy_address: "Copy image address"
+  mermaid_diagram: "Mermaid diagram"
 sidebar:
   parent_unavailable: "(parent unavailable)"
   collapse: "Collapse sidebar"
