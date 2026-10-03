@@ -24,6 +24,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agent_client_protocol::{self as sdk, schema::ProtocolVersion, schema::v1 as acp};
+use serde::Deserialize as _;
 use serde_json::{Map, Value};
 use smol::channel::{Receiver, Sender};
 use smol::future;
@@ -168,9 +169,10 @@ pub(crate) trait Dialect: Send + Sync + 'static {
         async move { Err(acp::Error::method_not_found().data(method)) }
     }
 
-    /// An agent→client notification other than `session/update`, by its
-    /// literal method name with raw params. Runs in arrival order with the
-    /// session updates.
+    /// An agent→client notification other than a `session/update` the schema
+    /// knows (a vendor `sessionUpdate` kind arrives here as `session/update`),
+    /// by its literal method name with raw params. Runs in arrival order with
+    /// the session updates.
     fn notification(&self, _state: &mut State, _method: &str, _params: Value) -> Vec<AgentEvent> {
         Vec::new()
     }
@@ -589,12 +591,24 @@ async fn run_actor<D: Dialect>(
     let connection_result = sdk::Client
         .builder()
         .name(format!("tcode-acp-{name}"))
+        // Untyped, so a `sessionUpdate` kind the schema does not know reaches
+        // the dialect instead of failing to parse and being dropped.
         .on_receive_notification(
             {
                 let client = client.clone();
                 let dialect = dialect.clone();
-                async move |args: acp::SessionNotification, _connection| {
-                    let events = dialect.session_update(&mut client.state.lock_recover(), args);
+                async move |notification: sdk::UntypedMessage, _connection| {
+                    let (method, params) = notification.into_parts();
+                    let update = (method == "session/update")
+                        .then(|| acp::SessionNotification::deserialize(&params).ok())
+                        .flatten();
+                    let events = {
+                        let mut state = client.state.lock_recover();
+                        match update {
+                            Some(update) => dialect.session_update(&mut state, update),
+                            None => dialect.notification(&mut state, &method, params),
+                        }
+                    };
                     client.emit_all(events).await;
                     Ok(())
                 }
@@ -688,20 +702,6 @@ async fn run_actor<D: Dialect>(
                 }
             },
             sdk::on_receive_request!(),
-        )
-        .on_receive_notification(
-            {
-                let client = client.clone();
-                let dialect = dialect.clone();
-                async move |notification: sdk::UntypedMessage, _connection| {
-                    let (method, params) = notification.into_parts();
-                    let events =
-                        dialect.notification(&mut client.state.lock_recover(), &method, params);
-                    client.emit_all(events).await;
-                    Ok(())
-                }
-            },
-            sdk::on_receive_notification!(),
         )
         .connect_with(transport, {
             let session_started = session_started.clone();
@@ -1811,7 +1811,7 @@ pub(crate) struct State {
 }
 
 impl State {
-    fn new(cwd: PathBuf) -> Self {
+    pub(crate) fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
             session_id: None,
@@ -1898,7 +1898,7 @@ impl State {
     }
 
     /// Close the open text block, emitting its final `ItemCompleted`.
-    fn flush_text(&mut self) -> Vec<AgentEvent> {
+    pub(crate) fn flush_text(&mut self) -> Vec<AgentEvent> {
         let Some(stream) = self.text.take() else {
             return Vec::new();
         };
