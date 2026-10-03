@@ -328,7 +328,8 @@ const OLD_DEFAULT_SOL_DEFINITION: &str = "Execution model for scoped implementat
 const OLD_DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review. Consider it alongside Sol across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
 const OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Baseline execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Default to low effort for a clear brief; raise effort only when a specific piece demonstrably needs more depth. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
 const DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, evidence gathering, and computer use. It is exceptionally strong at driving and reading real UIs (find_roots → observe_ui → search_ui / inspect_ui / read_text, and act_ui / wait_for when the brief allows), so route eyes-on-screen verification and UI-driving work here first. Always dispatch it at low effort: low outperforms the former Sol executor at xhigh on quality and at a fraction of the token cost, so medium or higher is never justified for this profile and only wastes money; a task that seems to need more depth needs a better brief, not more effort. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
-const DEFAULT_SOL_6_DEFINITION: &str = "Primary execution model: dispatch ordinary implementation, debugging with a reproduction, migrations, code review, data analysis, evidence gathering, and computer use here first. GPT-6 Sol follows a brief closely and reliably reaches the stated goal, at a lower cost than Opus; it is built for complex coding and agentic workflows, with about half the factual errors of GPT-5.6 Sol and fewer misleading claims about its own work, and it is strong at driving and reading real UIs, so eyes-on-screen verification and UI-driving work go here. Start at medium, the recommended default for everyday and complex work; use low for narrow mechanical edits, and raise to high or xhigh only for work that needs more planning, analysis, or checking across many steps, sources, or tradeoffs; reserve max for the hardest well-defined problems. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
+const PREVIOUS_DEFAULT_SOL_6_DEFINITION: &str = "Primary execution model: dispatch ordinary implementation, debugging with a reproduction, migrations, code review, data analysis, evidence gathering, and computer use here first. GPT-6 Sol follows a brief closely and reliably reaches the stated goal, at a lower cost than Opus; it is built for complex coding and agentic workflows, with about half the factual errors of GPT-5.6 Sol and fewer misleading claims about its own work, and it is strong at driving and reading real UIs, so eyes-on-screen verification and UI-driving work go here. Start at medium, the recommended default for everyday and complex work; use low for narrow mechanical edits, and raise to high or xhigh only for work that needs more planning, analysis, or checking across many steps, sources, or tradeoffs; reserve max for the hardest well-defined problems. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
+const DEFAULT_SOL_6_1_DEFINITION: &str = "Primary execution model: dispatch ordinary implementation, debugging with a reproduction, migrations, code review, data analysis, evidence gathering, and computer use here first. GPT-6.1 Sol follows a brief closely and reliably reaches the stated goal, at a lower cost than Opus; it is built for complex coding and agentic workflows, and it is strong at driving and reading real UIs, so eyes-on-screen verification and UI-driving work go here. Start at medium, the recommended default for everyday and complex work; use low for narrow mechanical edits, and raise to high or xhigh only for work that needs more planning, analysis, or checking across many steps, sources, or tradeoffs; reserve max for the hardest well-defined problems. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
 const PREVIOUS_DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
 const DEFAULT_OPUS_DEFINITION: &str = "Execution model for UI design and creative or investigative work: choose Opus 5.5 first for visual and interaction design, layout, copywriting and user-facing text, design exploration, open-ended research, and ideation where taste and breadth matter; it also gives a strong second implementation or review across providers. For ordinary implementation and verification prefer Sol, which follows briefs more closely at lower cost. Use medium for clear bounded work, high for substantial design or research, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
 const DEFAULT_ASTRA_DEFINITION: &str = include_str!("../../../assets/orchestrate/astra.md");
@@ -357,7 +358,7 @@ pub fn orchestrate_efforts(
             .unwrap_or_default()
     } else {
         let fallback: &[&str] = match (provider, model) {
-            (ProviderKind::Codex, "gpt-5.6-sol" | "gpt-6-sol" | "gpt-6-astra") => {
+            (ProviderKind::Codex, "gpt-5.6-sol" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-astra") => {
                 &["low", "medium", "high", "xhigh", "max", "ultra"]
             }
             (
@@ -433,7 +434,11 @@ impl Default for OrchestrateSettings {
                 ),
             ],
             child_models: vec![
-                builtin_model(ProviderKind::Codex, "gpt-6-sol", DEFAULT_SOL_6_DEFINITION),
+                builtin_model(
+                    ProviderKind::Codex,
+                    "gpt-6.1-sol",
+                    DEFAULT_SOL_6_1_DEFINITION,
+                ),
                 builtin_model(
                     ProviderKind::ClaudeCode,
                     "claude-opus-5-5",
@@ -473,8 +478,8 @@ impl LegacyOrchestrateModel {
         replace_untouched_sol: bool,
         replace_untouched_opus: bool,
     ) -> Option<OrchestrateChildModel> {
-        // An untouched bundled Codex executor (Sol 5.6, then Astra) follows
-        // the bundle to GPT-6 Sol unless the user already added it; rows with
+        // An untouched bundled Codex executor (Sol 5.6, Astra, then Sol 6)
+        // follows the bundle to GPT-6.1 Sol unless the user already added it; rows with
         // custom guidance, an endpoint profile, or changed switches stay.
         let untouched_codex_executor = !collaboration
             && self.effort.is_none()
@@ -484,6 +489,7 @@ impl LegacyOrchestrateModel {
             && !self.entry.fast
             && match self.entry.model.as_str() {
                 "gpt-5.6-sol" => self.entry.description == OLD_DEFAULT_SOL_DEFINITION,
+                "gpt-6-sol" => self.entry.description == PREVIOUS_DEFAULT_SOL_6_DEFINITION,
                 "gpt-6-astra" => {
                     self.entry.description == OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION
                         || self.entry.description == DEFAULT_GPT_6_EXECUTION_DEFINITION
@@ -492,7 +498,11 @@ impl LegacyOrchestrateModel {
             };
         if untouched_codex_executor {
             return replace_untouched_sol.then(|| {
-                builtin_model(ProviderKind::Codex, "gpt-6-sol", DEFAULT_SOL_6_DEFINITION)
+                builtin_model(
+                    ProviderKind::Codex,
+                    "gpt-6.1-sol",
+                    DEFAULT_SOL_6_1_DEFINITION,
+                )
             });
         }
         if !collaboration
@@ -608,7 +618,7 @@ impl From<OrchestrateSettingsData> for OrchestrateSettings {
                     .iter()
                     .any(|entry| entry.entry.provider == provider && entry.entry.model == model)
             };
-            let has_execution_sol_6 = has_execution(ProviderKind::Codex, "gpt-6-sol");
+            let has_execution_sol_6_1 = has_execution(ProviderKind::Codex, "gpt-6.1-sol");
             let has_execution_opus_5_5 = has_execution(ProviderKind::ClaudeCode, "claude-opus-5-5");
             (
                 decisions
@@ -618,7 +628,7 @@ impl From<OrchestrateSettingsData> for OrchestrateSettings {
                 data.child_models
                     .into_iter()
                     .filter_map(|entry| {
-                        entry.migrate(false, !has_execution_sol_6, !has_execution_opus_5_5)
+                        entry.migrate(false, !has_execution_sol_6_1, !has_execution_opus_5_5)
                     })
                     .collect(),
             )
@@ -689,7 +699,8 @@ impl OrchestrateSettings {
 
     pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
         match (provider, model) {
-            (ProviderKind::Codex, "gpt-6-sol") => Some(DEFAULT_SOL_6_DEFINITION),
+            (ProviderKind::Codex, "gpt-6.1-sol") => Some(DEFAULT_SOL_6_1_DEFINITION),
+            (ProviderKind::Codex, "gpt-6-sol") => Some(PREVIOUS_DEFAULT_SOL_6_DEFINITION),
             (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_GPT_6_EXECUTION_DEFINITION),
             (ProviderKind::ClaudeCode, "claude-opus-5-5" | "claude-opus-5") => {
                 Some(DEFAULT_OPUS_DEFINITION)
@@ -1661,7 +1672,7 @@ mod tests {
             ["gpt-6-astra", "claude-fable-5-1"]
         );
         assert_eq!(defaults.child_models.len(), 2);
-        assert_eq!(defaults.child_models[0].model, "gpt-6-sol");
+        assert_eq!(defaults.child_models[0].model, "gpt-6.1-sol");
         assert_eq!(defaults.child_models[0].provider, ProviderKind::Codex);
         assert!(!defaults.child_models[0].fast);
         assert!(
@@ -1819,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn orchestrate_moves_untouched_astra_executors_to_sol_6() {
+    fn orchestrate_moves_untouched_codex_executors_to_sol_6_1() {
         let old_sol_text = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
         for (model, text, retained_default_text) in [
             ("gpt-5.6-sol", old_sol_text, old_sol_text),
@@ -1832,6 +1843,11 @@ mod tests {
                 "gpt-6-astra",
                 DEFAULT_GPT_6_EXECUTION_DEFINITION,
                 DEFAULT_GPT_6_EXECUTION_DEFINITION,
+            ),
+            (
+                "gpt-6-sol",
+                PREVIOUS_DEFAULT_SOL_6_DEFINITION,
+                PREVIOUS_DEFAULT_SOL_6_DEFINITION,
             ),
         ] {
             let source = serde_json::json!({
@@ -1846,8 +1862,8 @@ mod tests {
                 migrated.child_models,
                 [builtin_model(
                     ProviderKind::Codex,
-                    "gpt-6-sol",
-                    DEFAULT_SOL_6_DEFINITION
+                    "gpt-6.1-sol",
+                    DEFAULT_SOL_6_1_DEFINITION
                 )]
             );
             for (description, expected_description, profile, enabled, fast) in [
@@ -1880,7 +1896,7 @@ mod tests {
             let migrated: OrchestrateSettings = serde_json::from_value(serde_json::json!({
                 "decision_models": [],
                 "child_models": [source, {
-                    "provider": "codex", "model": "gpt-6-sol", "profile_id": "custom-codex",
+                    "provider": "codex", "model": "gpt-6.1-sol", "profile_id": "custom-codex",
                     "enabled": false, "fast": true, "description": "User execution guidance"
                 }]
             }))
@@ -1889,7 +1905,7 @@ mod tests {
                 migrated.child_models,
                 [OrchestrateChildModel {
                     provider: ProviderKind::Codex,
-                    model: "gpt-6-sol".into(),
+                    model: "gpt-6.1-sol".into(),
                     profile_id: Some("custom-codex".into()),
                     enabled: false,
                     fast: true,

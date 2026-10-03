@@ -17,7 +17,7 @@ struct DispatchParams {
     provider: String,
     #[serde(default)]
     #[schemars(
-        description = "Model ID from the current Orchestrate configuration, for example gpt-6-sol. This is separate from the provider endpoint profile ID."
+        description = "Model ID from the current Orchestrate configuration, for example gpt-6.1-sol. This is separate from the provider endpoint profile ID."
     )]
     model: Option<String>,
     #[serde(default)]
@@ -77,7 +77,7 @@ struct CollaborateParams {
     provider: String,
     #[serde(default)]
     #[schemars(
-        description = "Model ID from the current Orchestrate configuration, for example gpt-6-sol. This is separate from the provider endpoint profile ID."
+        description = "Model ID from the current Orchestrate configuration, for example gpt-6.1-sol. This is separate from the provider endpoint profile ID."
     )]
     model: Option<String>,
     #[serde(default)]
