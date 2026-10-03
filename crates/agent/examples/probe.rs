@@ -1,17 +1,23 @@
 //! Headless end-to-end probe for provider clients.
 //!
-//! Catalog mode: `probe --list-models <codex|claude|pi|opencode>`.
+//! Catalog mode: `probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]`.
 //! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
-//! Flags are `--mode plan`, `--effort <value>`, `--interrupt-after <seconds>`,
-//! `--steer <message>`, and `--image <path>`. Only one of the last three may be used.
+//! Flags are `--binary <path>`, `--model <id>`, `--mode plan`, `--effort <value>`,
+//! `--resume <cursor-json>`, `--fork`, `--leave-questions` (user-input requests
+//! stay unanswered), `--mcp <name> <url> <token>` (an HTTP MCP server registered
+//! as tcode registers its own), `--linger <seconds>` (stay open until no turn has
+//! run for that long, to see turns the agent starts itself), `--follow-up
+//! <seconds> <prompt>` (send another turn that long after the first completes,
+//! running turn or not), `--interrupt-after <seconds>`, `--steer <message>`, and
+//! `--image <path>`. Only one of the last three may be used.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent::{
     AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
-    ItemContent, OptionSelection, ProviderKind, SessionCommand, SessionOptions, TurnOptions,
-    TurnStatus, list_models, start_session,
+    ItemContent, McpRegistration, OptionSelection, ProviderKind, ResumeCursor, SessionCommand,
+    SessionOptions, TurnOptions, TurnStatus, list_models, start_session,
 };
 use base64::Engine as _;
 
@@ -29,10 +35,12 @@ enum ProbeMode {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: probe <codex|claude|pi|opencode|acp> <prompt> [cwd] \
-         [supervised|auto_edits|full_access] [acp-command args…] [flags]"
+        "usage: probe <codex|claude|pi|opencode|cursor|grok|acp> <prompt> [cwd] \
+         [supervised|read_only|auto_edits|full_access] [acp-command args…] [flags]"
     );
-    eprintln!("       probe --list-models <codex|claude|pi|opencode>");
+    eprintln!(
+        "       probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]"
+    );
     std::process::exit(2);
 }
 
@@ -42,6 +50,8 @@ fn parse_provider(arg: Option<&str>) -> ProviderKind {
         Some("claude") => ProviderKind::ClaudeCode,
         Some("pi") => ProviderKind::Pi,
         Some("opencode") => ProviderKind::OpenCode,
+        Some("cursor") => ProviderKind::Cursor,
+        Some("grok") => ProviderKind::Grok,
         Some("acp") => ProviderKind::Acp,
         _ => usage(),
     }
@@ -91,8 +101,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--list-models") {
         let provider = parse_provider(args.get(1).map(String::as_str));
+        let binary = match args.get(2).map(String::as_str) {
+            Some("--binary") => Some(args.get(3).map(PathBuf::from).unwrap_or_else(|| usage())),
+            Some(_) => usage(),
+            None => None,
+        };
         let exit_code = smol::block_on(async move {
-            match list_models(provider, None, Default::default(), Default::default()).await {
+            match list_models(provider, binary, Default::default(), Default::default()).await {
                 Ok(models) => {
                     println!("{}", serde_json::to_string_pretty(&models).unwrap());
                     0
@@ -107,7 +122,14 @@ fn main() {
     }
 
     let mut interaction_mode = InteractionMode::Build;
+    let mut binary = None;
+    let mut model = None;
     let mut effort = None;
+    let mut resume = None;
+    let mut fork = false;
+    let mut leave_questions = false;
+    let mut mcp_servers = Vec::new();
+    let mut continuation = Continuation::default();
     let mut probe_mode = ProbeMode::Standard;
     let mut positional = Vec::new();
     let mut args = args.into_iter();
@@ -124,7 +146,38 @@ fn main() {
                     None => usage(),
                 };
             }
+            "--binary" => binary = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage())),
+            "--model" => model = Some(args.next().unwrap_or_else(|| usage())),
             "--effort" => effort = Some(args.next().unwrap_or_else(|| usage())),
+            "--resume" => {
+                let cursor = args.next().unwrap_or_else(|| usage());
+                resume = Some(ResumeCursor(serde_json::from_str(&cursor).unwrap_or_else(
+                    |error| {
+                        eprintln!("--resume takes the JSON of a resume cursor: {error}");
+                        std::process::exit(2);
+                    },
+                )));
+            }
+            "--fork" => fork = true,
+            "--leave-questions" => leave_questions = true,
+            "--linger" => {
+                let seconds = args.next().and_then(|value| value.parse().ok());
+                continuation.linger = Some(Duration::from_secs(seconds.unwrap_or_else(|| usage())));
+            }
+            "--follow-up" => {
+                let seconds = args.next().and_then(|value| value.parse().ok());
+                let seconds = seconds.unwrap_or_else(|| usage());
+                let prompt = args.next().unwrap_or_else(|| usage());
+                continuation.follow_up = Some((Duration::from_secs(seconds), prompt));
+            }
+            "--mcp" => {
+                let mut next = || args.next().unwrap_or_else(|| usage());
+                mcp_servers.push(McpRegistration {
+                    name: next(),
+                    url: next(),
+                    bearer_token: next(),
+                });
+            }
             "--interrupt-after" => {
                 let seconds = args
                     .next()
@@ -162,15 +215,20 @@ fn main() {
     });
     let mut remaining: Vec<String> = positional.collect();
     let approval_mode = match remaining.first().map(String::as_str) {
-        Some("supervised" | "auto_edits" | "full_access") => match remaining.remove(0).as_str() {
-            "supervised" => ApprovalMode::Supervised,
-            "auto_edits" => ApprovalMode::AutoAcceptEdits,
-            _ => ApprovalMode::FullAccess,
-        },
+        Some("supervised" | "read_only" | "auto_edits" | "full_access") => {
+            match remaining.remove(0).as_str() {
+                "supervised" => ApprovalMode::Supervised,
+                "read_only" => ApprovalMode::ReadOnly,
+                "auto_edits" => ApprovalMode::AutoAcceptEdits,
+                _ => ApprovalMode::FullAccess,
+            }
+        }
         None => ApprovalMode::Supervised,
         Some(_) if provider == ProviderKind::Acp => ApprovalMode::Supervised,
         Some(other) => {
-            eprintln!("unknown approval mode {other:?}; use supervised|auto_edits|full_access");
+            eprintln!(
+                "unknown approval mode {other:?}; use supervised|read_only|auto_edits|full_access"
+            );
             std::process::exit(2);
         }
     };
@@ -210,8 +268,29 @@ fn main() {
         effort,
         probe_mode,
         acp,
+        mcp_servers,
+        continuation,
+        Resumption {
+            resume,
+            fork,
+            leave_questions,
+        },
+        binary,
+        model,
     ));
     std::process::exit(exit_code);
+}
+
+struct Resumption {
+    resume: Option<ResumeCursor>,
+    fork: bool,
+    leave_questions: bool,
+}
+
+#[derive(Default)]
+struct Continuation {
+    linger: Option<Duration>,
+    follow_up: Option<(Duration, String)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -224,28 +303,38 @@ async fn run_probe(
     effort: Option<String>,
     probe_mode: ProbeMode,
     acp: Option<AcpAgent>,
+    mcp_servers: Vec<McpRegistration>,
+    continuation: Continuation,
+    resumption: Resumption,
+    binary_path: Option<PathBuf>,
+    model: Option<String>,
 ) -> i32 {
+    // Grok's effort is its wire config option, persisted under its option id.
+    let effort_id = match provider {
+        ProviderKind::Grok => "acp:cfg:reasoning_effort",
+        _ => "reasoningEffort",
+    };
     let option_selections = effort
         .iter()
         .map(|value| OptionSelection {
-            id: "reasoningEffort".into(),
+            id: effort_id.into(),
             value: serde_json::Value::String(value.clone()),
         })
         .collect();
-    let model = match (provider, effort.is_some()) {
+    let model = model.or_else(|| match (provider, effort.is_some()) {
         (ProviderKind::ClaudeCode, true) => Some("claude-opus-4-8".to_string()),
         _ => None,
-    };
+    });
     let opts = SessionOptions {
         cwd,
         model,
-        resume: None,
-        fork: false,
-        binary_path: None,
+        resume: resumption.resume,
+        fork: resumption.fork,
+        binary_path,
         approval_mode,
         option_selections,
         interaction_mode,
-        mcp_servers: Vec::new(),
+        mcp_servers,
         launch_env: Default::default(),
         extra_args: Vec::new(),
         acp,
@@ -318,18 +407,46 @@ async fn run_probe(
     let mut turns_completed = 0;
     let mut first_status = None;
     let mut steer_accepted = false;
+    let lingering = continuation
+        .linger
+        .or(continuation.follow_up.as_ref().map(|_| PHANTOM_TURN_GRACE));
+    let mut follow_up = continuation.follow_up;
+    let mut open_until = None;
+    let mut running = false;
+    let mut closing = false;
     loop {
-        let event = if matches!(probe_mode, ProbeMode::Steer(_)) && turns_completed > 0 {
-            smol::future::or(handle.events.recv(), async {
-                smol::Timer::after(PHANTOM_TURN_GRACE).await;
-                Err(smol::channel::RecvError)
-            })
-            .await
-            .ok()
-        } else {
-            handle.events.recv().await.ok()
+        let quiet = match lingering {
+            Some(linger) if turns_completed > 0 && !running && !closing => Some(linger),
+            _ if matches!(probe_mode, ProbeMode::Steer(_)) && turns_completed > 0 => {
+                Some(PHANTOM_TURN_GRACE)
+            }
+            _ => None,
+        };
+        let event = match quiet {
+            Some(quiet) => {
+                let event = smol::future::or(handle.events.recv(), async {
+                    smol::Timer::after(quiet).await;
+                    Err(smol::channel::RecvError)
+                })
+                .await
+                .ok();
+                if event.is_none() {
+                    if open_until.is_none_or(|until| Instant::now() >= until) {
+                        closing = true;
+                        handle.commands.send(SessionCommand::Shutdown).await.ok();
+                    }
+                    continue;
+                }
+                event
+            }
+            None => handle.events.recv().await.ok(),
         };
         let Some(event) = event else { break };
+        match &event {
+            AgentEvent::TurnStarted { .. } => running = true,
+            AgentEvent::TurnCompleted { .. } => running = false,
+            _ => {}
+        }
 
         if provider == ProviderKind::Acp {
             match &event {
@@ -359,6 +476,9 @@ async fn run_probe(
                     })
                     .await
                     .ok();
+            }
+            AgentEvent::UserInputRequested { questions, .. } if resumption.leave_questions => {
+                eprintln!("probe: leaving {} question(s) unanswered", questions.len());
             }
             AgentEvent::UserInputRequested {
                 request_id,
@@ -440,7 +560,25 @@ async fn run_probe(
                         "probe: TurnCompleted {turn_id} status={status:?} (#{turns_completed})"
                     );
                 }
-                if !matches!(probe_mode, ProbeMode::Steer(_)) {
+                if let Some((delay, text)) = follow_up.take() {
+                    open_until = Some(Instant::now() + delay + Duration::from_secs(1));
+                    let commands = handle.commands.clone();
+                    smol::spawn(async move {
+                        smol::Timer::after(delay).await;
+                        eprintln!("probe: FOLLOW-UP -> {text:?}");
+                        commands
+                            .send(SessionCommand::SendTurn {
+                                delivery_id: 1,
+                                text,
+                                options: None,
+                                attachments: Vec::new(),
+                            })
+                            .await
+                            .ok();
+                    })
+                    .detach();
+                }
+                if !matches!(probe_mode, ProbeMode::Steer(_)) && lingering.is_none() {
                     handle.commands.send(SessionCommand::Shutdown).await.ok();
                 }
             }

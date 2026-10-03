@@ -83,6 +83,21 @@ impl AppState {
             {
                 return Err(error("unknown_acp_agent", "This agent is not installed."));
             }
+            Command::SetActiveAcpAgent { session_id, id }
+                if self
+                    .settings
+                    .acp_agents
+                    .get(id)
+                    .is_some_and(|agent| !agent.offered_for_new_sessions())
+                    && self.resident(session_id).is_none_or(|session| {
+                        session.meta.acp_agent_id.as_deref() != Some(id.as_str())
+                    }) =>
+            {
+                return Err(error(
+                    "native_acp_agent",
+                    "This agent duplicates a native provider; use that provider for new sessions.",
+                ));
+            }
             Command::MergeWorktree { session_id } => {
                 return match self.find_meta(session_id) {
                     None => Err(error(

@@ -81,12 +81,6 @@ use crate::usage::{METER_BLUE, METER_RED};
 /// File mentions are potentially unbounded; command and skill feeds are not
 /// capped and instead use the trigger menu's scrolling viewport.
 const FILE_MENU_ROW_CAP: usize = 50;
-const PICKER_PROVIDER_KINDS: [ProviderKind; 4] = [
-    ProviderKind::ClaudeCode,
-    ProviderKind::Codex,
-    ProviderKind::Pi,
-    ProviderKind::OpenCode,
-];
 
 /// Stop-button red-orange.
 const STOP_TINT: u32 = 0xF4562E;

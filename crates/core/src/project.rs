@@ -8,7 +8,7 @@ use std::{
 use agent::{ApprovalMode, InteractionMode, OptionSelection, ProviderKind, ResumeCursor};
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{ProjectSort, Settings, acp_color_key, provider_key};
+use crate::settings::{ProjectSort, Settings, acp_color_key};
 
 /// A project groups sessions (threads) that share a working-directory root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,8 +156,8 @@ impl SessionMeta {
     }
 
     /// The key [`Settings::provider_color`] resolves this thread's color from:
-    /// a user profile id, an ACP agent (`acp:<id>`), or the built-in
-    /// [`provider_key`]. A user profile is its own provider to the user even
+    /// a user profile id, an ACP agent (`acp:<id>`), or the built-in profile
+    /// id. A user profile is its own provider to the user even
     /// when it drives a built-in protocol, so it never inherits the brand color.
     pub fn provider_color_key(&self) -> String {
         if let Some(profile_id) = self
@@ -172,7 +172,7 @@ impl SessionMeta {
         {
             return acp_color_key(agent_id);
         }
-        provider_key(self.provider).to_string()
+        Settings::builtin_profile_id(self.provider).to_string()
     }
 
     #[cfg(feature = "process")]

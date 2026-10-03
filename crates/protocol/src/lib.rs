@@ -38,8 +38,10 @@ pub use wire::{
 // authentication into the transport, so hello carries no token; version 6
 // sends index and history changes instead of whole replacements and
 // compresses the native transport; version 7 carries the running turn and
-// the requests it waits on in the session status.
-pub const PROTOCOL_VERSION: u32 = 7;
+// the requests it waits on in the session status; version 8 adds the Cursor
+// and Grok provider kinds, which an older peer cannot decode because
+// `ProviderKind` has no unknown fallback.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]
 mod tests;
