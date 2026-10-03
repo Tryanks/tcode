@@ -1083,7 +1083,7 @@ impl UserInputDelivery {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputQuestion {
     /// The answer key. Claude and Grok: the complete question text (both index
-    /// answers by question text). Codex: the native question id.
+    /// answers by question text). Codex and Cursor: the native question id.
     pub id: String,
     pub header: String,
     pub question: String,
