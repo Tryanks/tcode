@@ -97,10 +97,11 @@ is derived from it. **Process** is how to build, check and submit work.
 ### Reporting bugs and asking for features
 
 Open an [issue](https://github.com/Tryanks/tcode/issues). For a bug, include
-your OS, which agent (Claude Code / Codex / which ACP agent), what you did, what
-happened and what you expected. A screenshot beats a paragraph for anything
-visual. If you are unsure whether something is a bug or intended, open an issue
-anyway — the answer is worth writing down either way.
+your OS, which agent (Claude Code, Codex, pi, OpenCode, Cursor, Grok, or which
+ACP agent), what you did, what happened and what you expected. A screenshot
+beats a paragraph for anything visual. If you are unsure whether something is a
+bug or intended, open an issue anyway — the answer is worth writing down either
+way.
 
 ### Building
 
