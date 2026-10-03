@@ -12,8 +12,9 @@ use smol::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufR
 use smol::net::{TcpListener, TcpStream};
 
 use crate::{
-    AgentEvent, ApprovalMode, InteractionMode, ItemContent, ItemStatus, LaunchEnv, PlanStepStatus,
-    ResumeCursor, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TurnStatus,
+    AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, InteractionMode, ItemContent,
+    ItemStatus, LaunchEnv, OptionSelection, PlanStepStatus, ResumeCursor, SessionCommand,
+    SessionHandle, SessionOptions, ThreadItem, TurnStatus,
 };
 
 const RECORDED: &str = include_str!("../../tests/fixtures/cursor/recorded_signed_out.jsonl");
@@ -374,11 +375,17 @@ fn catalog_ids_are_the_model_values_cursor_accepts() {
 }
 
 #[test]
-fn the_composers_model_is_selected_and_its_parameters_replace_the_last_models() {
+fn the_composers_model_and_the_sessions_parameters_are_selected_at_start() {
     smol::block_on(bounded(async {
         let mut agent = Agent::new().await;
         let mut opts = agent.options();
         opts.model = Some("gpt-5".into());
+        opts.option_selections = [("acp:cfg:reasoning", "high"), ("acp:cfg:fast", "true")]
+            .map(|(id, value)| OptionSelection {
+                id: id.into(),
+                value: json!(value),
+            })
+            .into();
         let mut starting = smol::spawn(super::start(opts));
         agent.connect(&mut starting).await;
         agent.new_session().await;
@@ -388,6 +395,13 @@ fn the_composers_model_is_selected_and_its_parameters_replace_the_last_models() 
             json!({ "sessionId": SESSION, "configId": "model", "value": "gpt-5" })
         );
         agent.reply(&select, source("set_model_gpt5")).await;
+        // The new model has no `fast`: only its own parameter is restored.
+        let restore = agent.expect("session/set_config_option").await;
+        assert_eq!(
+            restore["params"],
+            json!({ "sessionId": SESSION, "configId": "reasoning", "value": "high" })
+        );
+        agent.reply(&restore, source("set_reasoning_high")).await;
         let handle = starting.await.unwrap();
         let events = events_until(&handle, |event| {
             matches!(event, AgentEvent::ProviderOptions { .. })
@@ -400,14 +414,14 @@ fn the_composers_model_is_selected_and_its_parameters_replace_the_last_models() 
         let Some(AgentEvent::ProviderOptions { selections, .. }) = events.last() else {
             unreachable!();
         };
-        let ids: Vec<_> = selections
+        let selections: Vec<_> = selections
             .iter()
-            .map(|selection| selection.id.as_str())
+            .map(|selection| (selection.id.as_str(), selection.value.as_str().unwrap()))
             .collect();
-        assert!(ids.contains(&"acp:cfg:reasoning"), "{ids:?}");
-        assert!(
-            !ids.contains(&"acp:cfg:fast"),
-            "the previous model's parameter is gone: {ids:?}"
+        assert_eq!(
+            selections,
+            [("acp:mode", "agent"), ("acp:cfg:reasoning", "high")],
+            "the model is the composer's, and the last model's parameter is gone"
         );
         agent.finish(Some(handle)).await;
 
@@ -673,6 +687,93 @@ fn an_interrupt_cancels_a_pending_question() {
             .await;
         let events = events_until(&handle, turn_completed).await;
         assert_eq!(turn_status(&events), TurnStatus::Interrupted);
+        agent.finish(Some(handle)).await;
+    }));
+}
+
+#[test]
+fn permissions_are_granted_once_by_kind_and_otherwise_asked() {
+    smol::block_on(bounded(async {
+        for (mode, granted, asked) in [
+            (ApprovalMode::ReadOnly, "permission_read", "permission_edit"),
+            (
+                ApprovalMode::AutoAcceptEdits,
+                "permission_edit",
+                "permission_shell",
+            ),
+            (ApprovalMode::Supervised, "", "permission_read"),
+        ] {
+            let mut agent = Agent::new().await;
+            let mut opts = agent.options();
+            opts.approval_mode = mode;
+            let handle = agent.start(opts).await;
+            assert_eq!(agent.argv, "acp", "{mode:?}");
+            send_turn(&handle, "Go").await;
+            let prompt = agent.expect("session/prompt").await;
+
+            if !granted.is_empty() {
+                let mut params = source(granted);
+                params["sessionId"] = json!(SESSION);
+                let id = agent.request("session/request_permission", params).await;
+                assert_eq!(
+                    agent.answer(&id).await["result"],
+                    json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }),
+                    "{mode:?}"
+                );
+            }
+
+            let mut params = source(asked);
+            params["sessionId"] = json!(SESSION);
+            let id = agent.request("session/request_permission", params).await;
+            let events = events_until(&handle, |event| {
+                matches!(event, AgentEvent::ApprovalRequested(_))
+            })
+            .await;
+            let approvals: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ApprovalRequested(request) => Some(request),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                approvals.len(),
+                1,
+                "{mode:?}: only {asked} is asked: {events:#?}"
+            );
+            let request = approvals[0];
+            let expected_kind = match asked {
+                "permission_edit" => matches!(request.kind, ApprovalKind::FileChange { .. }),
+                "permission_shell" => matches!(request.kind, ApprovalKind::ExecCommand { .. }),
+                _ => matches!(request.kind, ApprovalKind::FileRead { .. }),
+            };
+            assert!(expected_kind, "{mode:?}: {request:?}");
+            handle
+                .commands
+                .send(SessionCommand::RespondApproval {
+                    request_id: request.id.clone(),
+                    decision: ApprovalDecision::ApproveForSession,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                agent.answer(&id).await["result"],
+                json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }),
+                "{mode:?}: a session-wide approval never writes Cursor's allowlist"
+            );
+            agent
+                .reply(&prompt, json!({ "stopReason": "end_turn" }))
+                .await;
+            events_until(&handle, turn_completed).await;
+            agent.finish(Some(handle)).await;
+        }
+
+        let mut agent = Agent::new().await;
+        let mut opts = agent.options();
+        opts.approval_mode = ApprovalMode::FullAccess;
+        opts.extra_args = vec!["--sandbox".into(), "disabled".into()];
+        let handle = agent.start(opts).await;
+        assert_eq!(agent.argv, "--force --sandbox disabled acp");
         agent.finish(Some(handle)).await;
     }));
 }

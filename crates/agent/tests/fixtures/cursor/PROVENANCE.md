@@ -39,9 +39,10 @@ backend.
   (1821-1844): the `mode` and `model` selects (1682-1704) and one select per
   model parameter (1649-1671), booleans as `"false"`/`"true"` (1518-1540),
   categorised `thought_level` or `model_config` (1504-1517, 1656-1658, 2011).
-- `set_model_gpt5` — `session/set_config_option` answers with the full
-  refreshed `configOptions` (1412-1446); a new model brings its own
-  parameters (1705-1731).
+- `set_model_gpt5`, `set_reasoning_high` — `session/set_config_option`
+  answers with the full refreshed `configOptions` (1412-1446); a new model
+  brings its own parameters (1705-1731), a parameter keeps the model
+  (1733-1756).
 - `list_available_models` — `cursor/list_available_models` (1457-1458,
   1575-1592).
 - `session_load` — the `session/load` result (1354-1358), sent after the
