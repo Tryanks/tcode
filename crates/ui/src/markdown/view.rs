@@ -630,6 +630,18 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn code_block_copy_button_copies_the_whole_fence(cx: &mut TestAppContext) {
+        let lines = (0..100).map(|ix| format!("line {ix}")).collect::<Vec<_>>();
+        let source = format!("```text\n{}\n```", lines.join("\n"));
+        let (_, cx) = open_timeline_row(&source, cx);
+        let button = cx.debug_bounds("markdown-code-copy-root-0").unwrap();
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(copied.as_deref(), Some(lines.join("\n").as_str()));
+    }
+
     fn open_timeline_row<'a>(
         source: &str,
         cx: &'a mut TestAppContext,

@@ -3,13 +3,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::copy::copy_button;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Context, Div,
     Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _,
@@ -174,45 +169,6 @@ pub(crate) fn reserve_action_row(
 ///
 /// The icon carries its own muted color because a Ghost button paints
 /// `foreground` over any color set on the button itself.
-pub(crate) fn action_button(
-    id: impl Into<SharedString>,
-    icon: IconName,
-    label: impl Into<SharedString>,
-    cx: &App,
-) -> Button {
-    Button::new(id.into())
-        .ghost()
-        .small()
-        .rounded(crate::material::radius_chip(cx))
-        .icon(Icon::new(icon).text_color(cx.theme().muted_foreground))
-        .tooltip(label.into())
-}
-
-pub(crate) fn copy_button(
-    key: &str,
-    copied: bool,
-    compact: bool,
-    on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> impl IntoElement {
-    action_button(
-        SharedString::from(format!("copy-{key}")),
-        if copied {
-            IconName::Check
-        } else {
-            IconName::Copy
-        },
-        if copied {
-            crate::tr!("chat.copied").into_owned()
-        } else {
-            crate::tr!("chat.copy").into_owned()
-        },
-        cx,
-    )
-    .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)))
-    .on_click(on_copy)
-}
-
 #[cfg(test)]
 mod tests {
     use super::MdState;

@@ -3,6 +3,7 @@ pub(crate) type ToggleHandler = std::rc::Rc<dyn Fn(&bool, &mut gpui::Window, &mu
 
 pub mod button;
 pub mod checkbox;
+pub(crate) mod copy;
 pub mod input;
 pub mod kbd;
 pub mod menu;
