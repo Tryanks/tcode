@@ -393,8 +393,7 @@ impl AppState {
         );
         self.upsert_session_in_memory(meta.clone());
         let id = meta.id.clone();
-        let provider_commands =
-            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
+        let provider_commands = self.cached_provider_commands_for(&meta);
         let mut child = Self::build_draft_session(
             meta.project_id.clone().unwrap_or_default(),
             meta.cwd.clone(),
@@ -823,7 +822,7 @@ impl AppState {
 
     pub(super) fn load_background_session(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         let thread_id = meta.id.clone();
-        let commands = self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
+        let commands = self.cached_provider_commands_for(&meta);
         let mut child = Self::build_draft_session(
             meta.project_id.clone().unwrap_or_default(),
             meta.cwd.clone(),

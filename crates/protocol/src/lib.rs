@@ -16,10 +16,11 @@ pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, Th
 pub use event::{
     AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, GitActionRequest,
     GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure, NoticeSeverity,
-    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionEventRecord, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, Topic,
+    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
+    PluginStaleReason, ProviderPluginCatalog, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
@@ -38,8 +39,9 @@ pub use wire::{
 // authentication into the transport, so hello carries no token; version 6
 // sends index and history changes instead of whole replacements and
 // compresses the native transport; version 7 carries the running turn and
-// the requests it waits on in the session status.
-pub const PROTOCOL_VERSION: u32 = 7;
+// the requests it waits on in the session status; version 8 adds provider
+// plugin catalogs, their commands and challenges.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]
 mod tests;

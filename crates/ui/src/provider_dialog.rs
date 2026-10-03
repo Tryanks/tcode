@@ -8,6 +8,7 @@
 
 use crate::scroll::ScrollableElement as _;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use crate::overlay::{DialogButtons, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
@@ -72,6 +73,8 @@ pub struct ProviderDialog {
     original_secret_names: Vec<String>,
     custom_models: Vec<String>,
     hidden_models: Vec<String>,
+    /// Leaves the dialog for this profile's section of Settings → Plugins.
+    manage_plugins: Rc<dyn Fn(&mut App)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -80,6 +83,7 @@ impl ProviderDialog {
         store: Entity<WorkspaceStore>,
         provider: ProviderKind,
         profile_id: String,
+        manage_plugins: Rc<dyn Fn(&mut App)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -190,6 +194,7 @@ impl ProviderDialog {
             original_secret_names,
             custom_models: settings.custom_models.clone(),
             hidden_models: settings.hidden_models.clone(),
+            manage_plugins,
             _subscriptions: subscriptions,
         };
         dialog.rebuild_env_rows(&seeds, window, cx);
@@ -903,13 +908,28 @@ pub fn render_footer(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (is_user, profile_id, store) = {
+    let (is_user, profile_id, store, manage_plugins) = {
         let d = dialog.read(cx);
-        (d.is_user_profile(), d.profile_id.clone(), d.store.clone())
+        (
+            d.is_user_profile(),
+            d.profile_id.clone(),
+            d.store.clone(),
+            d.manage_plugins.clone(),
+        )
     };
     let save_dialog = dialog.clone();
 
-    let mut left = div().flex_1();
+    let mut left = h_flex().flex_1().flex_wrap().gap_2().child(
+        Button::new("provider-manage-plugins")
+            .debug_selector(|| "provider-manage-plugins".into())
+            .ghost()
+            .icon(IconName::Puzzle)
+            .label(crate::tr!("providers.plugins.manage").into_owned())
+            .on_click(move |_, window, cx| {
+                window.close_dialog(cx);
+                manage_plugins(cx);
+            }),
+    );
     if is_user {
         let delete_id = profile_id.clone();
         let delete_store = store.clone();

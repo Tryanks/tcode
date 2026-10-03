@@ -19,10 +19,10 @@ pub(super) enum StoreWrite {
         completion: smol::channel::Sender<Result<(), String>>,
     },
     SaveCommands {
-        provider: ProviderKind,
-        acp_agent_id: Option<String>,
+        key: CommandsCacheKey,
         commands: Vec<ProviderCommand>,
     },
+    InvalidateCommands(CommandsCacheKey),
     WriteTerminalUi(Vec<u8>),
     WriteSettings(Vec<u8>),
     SetProfileSecret {
@@ -91,18 +91,14 @@ pub(super) fn run_store_write(
             let _ = completion.try_send(result);
             None
         }
-        StoreWrite::SaveCommands {
-            provider,
-            acp_agent_id,
-            commands,
-        } => store
-            .save_commands(provider, acp_agent_id.as_deref(), &commands)
+        StoreWrite::SaveCommands { key, commands } => store
+            .save_commands(&key, &commands)
             .err()
-            .map(|err| {
-                Err(format!(
-                    "failed to persist {provider:?} command cache: {err}"
-                ))
-            }),
+            .map(|err| Err(format!("failed to persist {key:?} command cache: {err}"))),
+        StoreWrite::InvalidateCommands(key) => store
+            .invalidate_commands(&key)
+            .err()
+            .map(|err| Err(format!("failed to invalidate {key:?} command cache: {err}"))),
         StoreWrite::WriteTerminalUi(bytes) => {
             atomic_write(terminal_preferences_path.to_path_buf(), bytes)
                 .err()

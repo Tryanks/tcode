@@ -1353,7 +1353,8 @@ impl AppState {
         }
         let (provider, model, acp_agent_id, profile_id, reasoning_effort) =
             self.draft_defaults(&project_id);
-        let provider_commands = self.cached_provider_commands(provider, acp_agent_id.as_deref());
+        let provider_commands =
+            self.cached_provider_commands(provider, profile_id.as_deref(), acp_agent_id.as_deref());
         let mut draft = Self::build_draft_session(
             project_id,
             cwd,
@@ -1578,8 +1579,7 @@ impl AppState {
             meta.resume_cursor.is_some()
         );
         let session_id = meta.id.clone();
-        let provider_commands =
-            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
+        let provider_commands = self.cached_provider_commands_for(&meta);
         let mut active = ActiveSession::new(meta, false, provider_commands);
         let terminal_preferences = self.terminal_preferences_for(&active);
         let restored_terminal = self.restore_terminal_workspace(&mut active);

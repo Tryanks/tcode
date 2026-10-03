@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use agent::{ApprovalDecision, ApprovalMode, InteractionMode, ProviderKind, RewindMode};
+use agent::{
+    ApprovalDecision, ApprovalMode, InteractionMode, PluginScope, ProviderKind, RewindMode,
+};
 use serde::{Deserialize, Serialize};
 use tcode_core::{
     acp::AcpAgentPatch,
@@ -12,7 +14,7 @@ use tcode_core::{
 
 pub use tcode_core::settings::SettingsPatch;
 
-use crate::ExternalThread;
+use crate::{ExternalThread, RuntimeOperationId};
 
 /// Fallback cell metrics matching the host emulator's own defaults, used when
 /// a client resizes without knowing its physical cell size.
@@ -143,6 +145,58 @@ pub enum Command {
     SetActiveAcpAgent {
         session_id: String,
         id: String,
+    },
+    /// List a profile's native plugins as seen from `cwd` (a project
+    /// directory), or from outside any project when `cwd` is `None`.
+    RefreshProviderPlugins {
+        profile_id: String,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    InstallProviderPlugin {
+        profile_id: String,
+        entry_id: String,
+        scope: PluginScope,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    UninstallProviderPlugin {
+        profile_id: String,
+        entry_id: String,
+        scope: PluginScope,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    SetProviderPluginEnabled {
+        profile_id: String,
+        entry_id: String,
+        scope: PluginScope,
+        enabled: bool,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    UpdateProviderPlugin {
+        profile_id: String,
+        entry_id: String,
+        scope: PluginScope,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    AddProviderMarketplace {
+        profile_id: String,
+        source: String,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    RemoveProviderMarketplace {
+        profile_id: String,
+        name: String,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    ResolvePluginChallenge {
+        op_id: RuntimeOperationId,
+        accept: bool,
     },
     ResetSettings,
     WriteRelaunchMarker {
@@ -476,6 +530,7 @@ impl Command {
                 | Self::RefreshProviderUsage
                 | Self::CheckProviderVersions
                 | Self::RefreshAcpRegistry
+                | Self::RefreshProviderPlugins { .. }
                 | Self::LoadBranches { .. }
                 | Self::CopyPlan { .. }
                 | Self::DownloadPlan { .. }

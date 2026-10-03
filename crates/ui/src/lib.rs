@@ -35,6 +35,7 @@ pub mod pairing;
 pub mod palette;
 mod pasteboard;
 mod plan_panel;
+mod plugins_settings;
 mod preview_panel;
 mod project_icon;
 pub(crate) mod provider_card;

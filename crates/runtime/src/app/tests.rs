@@ -2955,11 +2955,17 @@ fn reopened_command_cache_seeds_a_draft_before_provider_start() {
         kind: agent::ProviderCommandKind::Command,
     }];
     store
-        .save_commands(ProviderKind::ClaudeCode, None, &commands)
+        .save_commands(
+            &CommandsCacheKey::Native {
+                provider: ProviderKind::ClaudeCode,
+                home: None,
+            },
+            &commands,
+        )
         .unwrap();
 
     let state = TestClientState::new(SessionStore::open_at(root.clone()).unwrap());
-    let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None);
+    let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None, None);
     let draft = AppState::build_draft_session(
         "project".into(),
         PathBuf::from("/tmp/project"),

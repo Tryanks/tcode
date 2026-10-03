@@ -2133,6 +2133,23 @@ impl WorkspaceStore {
         items
     }
 
+    pub fn provider_plugin_catalog(
+        &self,
+        profile_id: &str,
+    ) -> Option<&tcode_protocol::ProviderPluginCatalog> {
+        self.providers_replica
+            .plugins
+            .iter()
+            .find(|catalog| catalog.profile_id == profile_id)
+    }
+
+    /// The working directory of the thread or draft the window has open.
+    pub fn active_session_cwd(&self) -> Option<PathBuf> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.cwd.clone())
+    }
+
     pub fn acp_registry_loading(&self) -> bool {
         self.providers_replica.acp_registry_loading
     }
