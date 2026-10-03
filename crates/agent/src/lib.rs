@@ -97,6 +97,15 @@ pub enum OptionDescriptors {
 }
 
 impl ProviderKind {
+    /// The natively maintained providers, in the order provider lists present
+    /// them.
+    pub const NATIVE: [ProviderKind; 4] = [
+        ProviderKind::ClaudeCode,
+        ProviderKind::Codex,
+        ProviderKind::Pi,
+        ProviderKind::OpenCode,
+    ];
+
     /// Provider behavior consumed by runtime and UI policy.
     ///
     /// This is deliberately one exhaustive table so adding a provider forces a
