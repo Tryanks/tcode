@@ -549,6 +549,8 @@ impl ProviderDialog {
                     cx,
                 ),
             );
+        }
+        if provider.caps().downgrade_approval_without_native_approvals {
             blocks.push(
                 self.field_block(
                     crate::tr!("providers.pi_native_approvals")
