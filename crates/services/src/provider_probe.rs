@@ -16,6 +16,8 @@ pub fn default_program(provider: ProviderKind) -> String {
         ProviderKind::ClaudeCode => "claude".into(),
         ProviderKind::Pi => "pi".into(),
         ProviderKind::OpenCode => "opencode".into(),
+        ProviderKind::Cursor => "cursor-agent".into(),
+        ProviderKind::Grok => "grok".into(),
         // ACP agents carry their own registry launch recipe.
         ProviderKind::Acp => String::new(),
     }
@@ -122,8 +124,10 @@ pub async fn probe_provider(
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_aggregator_auth)
         }
-        // ACP authentication is surfaced by its session protocol.
-        ProviderKind::Acp => None,
+        // Authentication over ACP is surfaced by the session protocol.
+        // `cursor-agent status` ignores CURSOR_API_KEY, so it cannot tell a
+        // signed-out Cursor from one using an API key.
+        ProviderKind::Cursor | ProviderKind::Grok | ProviderKind::Acp => None,
     };
 
     finalize_probe(checked_at, version, auth)

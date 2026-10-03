@@ -1,17 +1,19 @@
 //! Headless end-to-end probe for provider clients.
 //!
-//! Catalog mode: `probe --list-models <codex|claude|pi|opencode>`.
+//! Catalog mode: `probe --list-models <codex|claude|pi|opencode|cursor|grok>`.
 //! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
-//! Flags are `--mode plan`, `--effort <value>`, `--interrupt-after <seconds>`,
-//! `--steer <message>`, and `--image <path>`. Only one of the last three may be used.
+//! Flags are `--mode plan`, `--effort <value>`, `--resume <cursor-json>`, `--fork`,
+//! `--leave-questions` (user-input requests stay unanswered), `--interrupt-after
+//! <seconds>`, `--steer <message>`, and `--image <path>`. Only one of the last
+//! three may be used.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use agent::{
     AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
-    ItemContent, OptionSelection, ProviderKind, SessionCommand, SessionOptions, TurnOptions,
-    TurnStatus, list_models, start_session,
+    ItemContent, OptionSelection, ProviderKind, ResumeCursor, SessionCommand, SessionOptions,
+    TurnOptions, TurnStatus, list_models, start_session,
 };
 use base64::Engine as _;
 
@@ -29,10 +31,10 @@ enum ProbeMode {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: probe <codex|claude|pi|opencode|acp> <prompt> [cwd] \
+        "usage: probe <codex|claude|pi|opencode|cursor|grok|acp> <prompt> [cwd] \
          [supervised|auto_edits|full_access] [acp-command args…] [flags]"
     );
-    eprintln!("       probe --list-models <codex|claude|pi|opencode>");
+    eprintln!("       probe --list-models <codex|claude|pi|opencode|cursor|grok>");
     std::process::exit(2);
 }
 
@@ -42,6 +44,8 @@ fn parse_provider(arg: Option<&str>) -> ProviderKind {
         Some("claude") => ProviderKind::ClaudeCode,
         Some("pi") => ProviderKind::Pi,
         Some("opencode") => ProviderKind::OpenCode,
+        Some("cursor") => ProviderKind::Cursor,
+        Some("grok") => ProviderKind::Grok,
         Some("acp") => ProviderKind::Acp,
         _ => usage(),
     }
@@ -108,6 +112,9 @@ fn main() {
 
     let mut interaction_mode = InteractionMode::Build;
     let mut effort = None;
+    let mut resume = None;
+    let mut fork = false;
+    let mut leave_questions = false;
     let mut probe_mode = ProbeMode::Standard;
     let mut positional = Vec::new();
     let mut args = args.into_iter();
@@ -125,6 +132,17 @@ fn main() {
                 };
             }
             "--effort" => effort = Some(args.next().unwrap_or_else(|| usage())),
+            "--resume" => {
+                let cursor = args.next().unwrap_or_else(|| usage());
+                resume = Some(ResumeCursor(serde_json::from_str(&cursor).unwrap_or_else(
+                    |error| {
+                        eprintln!("--resume takes the JSON of a resume cursor: {error}");
+                        std::process::exit(2);
+                    },
+                )));
+            }
+            "--fork" => fork = true,
+            "--leave-questions" => leave_questions = true,
             "--interrupt-after" => {
                 let seconds = args
                     .next()
@@ -210,8 +228,19 @@ fn main() {
         effort,
         probe_mode,
         acp,
+        Resumption {
+            resume,
+            fork,
+            leave_questions,
+        },
     ));
     std::process::exit(exit_code);
+}
+
+struct Resumption {
+    resume: Option<ResumeCursor>,
+    fork: bool,
+    leave_questions: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -224,6 +253,7 @@ async fn run_probe(
     effort: Option<String>,
     probe_mode: ProbeMode,
     acp: Option<AcpAgent>,
+    resumption: Resumption,
 ) -> i32 {
     let option_selections = effort
         .iter()
@@ -239,8 +269,8 @@ async fn run_probe(
     let opts = SessionOptions {
         cwd,
         model,
-        resume: None,
-        fork: false,
+        resume: resumption.resume,
+        fork: resumption.fork,
         binary_path: None,
         approval_mode,
         option_selections,
@@ -359,6 +389,9 @@ async fn run_probe(
                     })
                     .await
                     .ok();
+            }
+            AgentEvent::UserInputRequested { questions, .. } if resumption.leave_questions => {
+                eprintln!("probe: leaving {} question(s) unanswered", questions.len());
             }
             AgentEvent::UserInputRequested {
                 request_id,

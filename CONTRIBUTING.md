@@ -121,8 +121,8 @@ Platform prerequisites:
   `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`).
   The embedded preview browser is compiled out on Linux.
 
-Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`) and
-can be overridden in **Settings → Providers**.
+Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`,
+`cursor-agent`, `grok`) and can be overridden in **Settings → Providers**.
 
 ### Before you open a pull request
 
@@ -275,7 +275,8 @@ crates/ios, crates/android, crates/web
                          `tcode_ui::run_shell`
 crates/platform/*        GPUI platform backends for iOS and Android
 crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, pi.rs,
-                         opencode.rs, acp.rs
+                         opencode.rs, cursor.rs, grok.rs, acp.rs; the ACP
+                         session they share is acp_session.rs
 crates/term              terminal implementation (PTY, host-side emulator)
 crates/mcp-host          shared authenticated loopback host for in-process MCP servers
 crates/preview-mcp       MCP server exposing the preview browser to the agent

@@ -1812,6 +1812,70 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
 }
 
 #[test]
+fn installed_acp_duplicates_of_native_providers_only_serve_their_existing_sessions() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-native-acp-duplicates");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let installed = |id: &str| InstalledAgent {
+        id: id.into(),
+        name: id.into(),
+        version: String::new(),
+        icon: None,
+        launch: agent::AcpLaunch::Custom {
+            command: id.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        },
+        enabled: true,
+        env: Vec::new(),
+        launch_args: None,
+    };
+    let draft = state.update(cx, |state, cx| {
+        for id in ["cursor", "grok-build", "gemini"] {
+            state.settings.acp_agents.insert(id.into(), installed(id));
+        }
+        state.start_draft("project".into(), PathBuf::from("/tmp/project"), cx);
+        state.selected.clone().unwrap()
+    });
+    for (request, id, selected) in [
+        (1, "cursor", None),
+        (2, "grok-build", None),
+        (3, "gemini", Some("gemini")),
+    ] {
+        state.dispatch_command(
+            cx,
+            request,
+            Command::SetActiveAcpAgent {
+                session_id: draft.clone(),
+                id: id.into(),
+            },
+        );
+        state.read(|state| {
+            assert_eq!(
+                state.resident(&draft).unwrap().meta.acp_agent_id.as_deref(),
+                selected,
+                "{id}"
+            );
+        });
+    }
+
+    let mut existing = SessionMeta::new(ProviderKind::Acp, PathBuf::from("/tmp/project"), None);
+    existing.acp_agent_id = Some("cursor".into());
+    state.read(|state| {
+        let opts = session_options(
+            &existing,
+            &state.settings,
+            LaunchEnv::default(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(opts.acp.map(|agent| agent.id).as_deref(), Some("cursor"));
+    });
+}
+
+#[test]
 fn marketplace_items_are_runtime_owned_views() {
     let test_store = TestStore::new("tcode-marketplace-view-test");
     let store = (*test_store).clone();
