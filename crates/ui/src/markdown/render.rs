@@ -13,6 +13,7 @@ use std::{
 use crate::highlight::HighlightTheme;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
+use crate::widgets::copy::copy_button;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
@@ -301,7 +302,7 @@ fn render_root_item(
     let options = RenderOptions::default().child(item.block, item.block + 1 == children.len());
     let content = match (&children[item.block], item.span.clone()) {
         (BlockNode::CodeBlock(code), Some(span)) => {
-            render_code_block(code, Some(span), &options, state, cx)
+            render_code_block(code, Some(span), &options, state, window, cx)
         }
         (
             BlockNode::List {
@@ -554,7 +555,7 @@ fn render_block(
             cx,
         ),
         BlockNode::ListItem { .. } => render_list_item(node, 0, options, state, window, cx),
-        BlockNode::CodeBlock(code) => render_code_block(code, None, &options, state, cx),
+        BlockNode::CodeBlock(code) => render_code_block(code, None, &options, state, window, cx),
         BlockNode::Table(table) => render_table(table, &options, state, window, cx),
         BlockNode::HorizontalRule => div()
             .id(options.path)
@@ -1024,6 +1025,7 @@ fn render_code_block(
     span: Option<Range<usize>>,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
+    window: &Window,
     cx: &mut App,
 ) -> AnyElement {
     let lang = code.lang.as_deref().unwrap_or("text");
@@ -1092,6 +1094,38 @@ fn render_code_block(
         .unwrap_or(code_text)
         .to_string();
     let context_view = view.clone();
+    // One button per fence, on the item that paints its first line.
+    let copy = first.then(|| {
+        let copied = view.read(cx).copied.is(&options.path);
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let (view, path, code) = (view.clone(), options.path.clone(), whole_code.clone());
+        let button = copy_button(
+            &format!("code-{}", options.path),
+            copied,
+            compact,
+            move |_, window, cx| {
+                gpui_base::TextSelection::end(window, cx);
+                cx.stop_propagation();
+                view.update(cx, |state, cx| {
+                    state.copy_code(path.clone(), code.clone(), cx)
+                });
+            },
+            cx,
+        );
+        let corner = div()
+            .absolute()
+            .top_1()
+            .right_1()
+            .rounded(cx.theme().tokens.radius.md)
+            .bg(cx.theme().tokens.colors.muted)
+            .child(button);
+        #[cfg(test)]
+        let corner = {
+            let path = options.path.clone();
+            corner.debug_selector(move || format!("markdown-code-copy-{path}"))
+        };
+        corner
+    });
     div()
         .id(span_id(&options.path, &span))
         .when(last && !options.is_last, |block| block.pb(rems(1.)))
@@ -1109,7 +1143,9 @@ fn render_code_block(
                 .when(first, |block| block.pt_3().rounded_t(radius))
                 .when(last, |block| block.pb_3().rounded_b(radius))
                 .bg(cx.theme().tokens.colors.muted)
-                .child(v_flex().w_full().children(rendered_lines)),
+                .relative()
+                .child(v_flex().w_full().children(rendered_lines))
+                .children(copy),
         )
         .into_any_element()
 }
