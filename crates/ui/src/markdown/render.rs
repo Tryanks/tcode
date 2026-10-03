@@ -4,6 +4,7 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
+    hash::Hash,
     ops::Range,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -15,10 +16,11 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
-    GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ListState, MouseButton, ObjectFit, ParentElement as _, Pixels, Rems, Role,
-    SharedString, StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, Window,
-    div, img, prelude::FluentBuilder as _, px, relative, rems, size,
+    GlobalElementId, HighlightStyle, Image, ImageSource, InspectorElementId,
+    InteractiveElement as _, IntoElement, LayoutId, ListState, MouseButton, ObjectFit,
+    ParentElement as _, Pixels, Rems, Role, SharedString, StatefulInteractiveElement as _, Style,
+    Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px, relative,
+    rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -28,6 +30,7 @@ use super::{
     inline::{Inline, InlineState},
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
     link_target::LinkTarget,
+    mermaid,
     nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
     state::{MarkdownState, PendingContextTarget},
     utils::list_item_prefix,
@@ -55,14 +58,43 @@ struct CodeCacheKey {
     theme: HighlightTheme,
 }
 
-#[derive(Default)]
-struct CodeHighlightCache {
-    entries: HashMap<CodeCacheKey, SharedHighlightRuns>,
-    order: VecDeque<CodeCacheKey>,
+/// The most recent results of a render step keyed by its inputs, so a repaint
+/// reuses the work and a long conversation does not keep every result.
+pub(super) struct RecentCache<K, V> {
+    capacity: usize,
+    entries: HashMap<K, V>,
+    order: VecDeque<K>,
+}
+
+impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    pub(super) fn get_or_insert_with(&mut self, key: K, compute: impl FnOnce() -> V) -> V {
+        if let Some(value) = self.entries.get(&key) {
+            return value.clone();
+        }
+        let value = compute();
+        while self.entries.len() >= self.capacity {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, value.clone());
+        value
+    }
 }
 
 thread_local! {
-    static CODE_HIGHLIGHTS: RefCell<CodeHighlightCache> = RefCell::new(CodeHighlightCache::default());
+    static CODE_HIGHLIGHTS: RefCell<RecentCache<CodeCacheKey, SharedHighlightRuns>> =
+        RefCell::new(RecentCache::new(CODE_CACHE_CAPACITY));
 }
 
 #[derive(Clone)]
@@ -122,6 +154,7 @@ pub(super) fn push_root_items(blocks: &[BlockNode], first_block: usize, items: &
     for (offset, block) in blocks.iter().enumerate() {
         let block_ix = first_block + offset;
         let (len, per_item) = match block {
+            BlockNode::CodeBlock(code) if mermaid::is_mermaid(code.lang.as_deref()) => (0, 1),
             BlockNode::CodeBlock(code) => (code_lines(&code.code).len(), CODE_LINES_PER_ITEM),
             BlockNode::List { children, .. } => (children.len(), LIST_ITEMS_PER_ITEM),
             _ => (0, 1),
@@ -969,20 +1002,9 @@ fn cached_highlights(code: &str, lang: &str, theme: &HighlightTheme) -> SharedHi
         theme: theme.clone(),
     };
     CODE_HIGHLIGHTS.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(styles) = cache.entries.get(&key) {
-            return styles.clone();
-        }
-        let styles = Arc::new(highlight::highlight_source(code, lang, theme));
-        while cache.entries.len() >= CODE_CACHE_CAPACITY {
-            let Some(oldest) = cache.order.pop_front() else {
-                break;
-            };
-            cache.entries.remove(&oldest);
-        }
-        cache.order.push_back(key.clone());
-        cache.entries.insert(key, styles.clone());
-        styles
+        cache.borrow_mut().get_or_insert_with(key, || {
+            Arc::new(highlight::highlight_source(code, lang, theme))
+        })
     })
 }
 
@@ -1016,6 +1038,11 @@ fn render_code_block(
     } else {
         &code.code
     };
+    if mermaid::is_mermaid(code.lang.as_deref())
+        && let Some(image) = mermaid::diagram(code_text, cx.theme().mode.is_dark())
+    {
+        return render_diagram(image, code_text, options, view, cx);
+    }
     let all_runs = cached_highlights(code_text, lang, &cx.theme().highlight_theme);
     let lines = code_lines(code_text);
     let span = span.unwrap_or(0..lines.len());
@@ -1085,6 +1112,68 @@ fn render_code_block(
                 .child(v_flex().w_full().children(rendered_lines)),
         )
         .into_any_element()
+}
+
+/// A Mermaid fence whose source laid out: the picture replaces the code, and
+/// the context menu still copies the source a reader would otherwise see.
+fn render_diagram(
+    image: Arc<Image>,
+    source: &str,
+    options: &RenderOptions,
+    view: &Entity<MarkdownState>,
+    cx: &mut App,
+) -> AnyElement {
+    let whole_code = source.strip_suffix('\n').unwrap_or(source).to_string();
+    let context_view = view.clone();
+    let label: SharedString = crate::tr!("markdown.mermaid_diagram").into_owned().into();
+    let lightbox_label = label.clone();
+    let source = ImageSource::Image(image);
+    let lightbox_source = source.clone();
+    let diagram = crate::material::accessible_clickable(
+        img(source),
+        SharedString::from(format!("markdown-mermaid-{}", options.path)),
+        Role::Button,
+        label,
+        cx,
+    )
+    .object_fit(ObjectFit::Contain)
+    .max_w(relative(1.))
+    .max_h(px(720.))
+    .cursor_pointer()
+    .on_click(move |_, window, cx| {
+        gpui_base::TextSelection::end(window, cx);
+        cx.stop_propagation();
+        crate::attachments::open_image_lightbox(
+            lightbox_source.clone(),
+            lightbox_label.to_string(),
+            window,
+            cx,
+        );
+    });
+    let block = div()
+        .id(options.path.clone())
+        .when(!options.is_last, |block| block.pb(rems(1.)))
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            context_view.update(cx, |state, cx| {
+                state.set_pending_context(
+                    Some(PendingContextTarget::CodeBlock(whole_code.clone())),
+                    cx,
+                )
+            });
+        })
+        .child(
+            div()
+                .p_3()
+                .rounded(cx.theme().tokens.radius.md)
+                .bg(cx.theme().tokens.colors.muted)
+                .child(diagram),
+        );
+    #[cfg(test)]
+    let block = {
+        let path = options.path.clone();
+        block.debug_selector(move || format!("markdown-mermaid-{path}"))
+    };
+    block.into_any_element()
 }
 
 fn render_table(
