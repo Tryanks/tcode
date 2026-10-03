@@ -98,15 +98,25 @@ impl AppState {
             // into the timeline or the persisted JSONL log. Parked sessions still
             // receive provider updates, so update/cache those too.
             AgentEvent::ProviderCommands { commands } => {
-                let cache_key = self.resident_mut(session_id).map(|resident| {
+                let owner = self.resident_mut(session_id).map(|resident| {
                     resident.provider_commands.clone_from(commands);
-                    (resident.meta.provider, resident.meta.acp_agent_id.clone())
+                    (
+                        resident.meta.provider,
+                        resident.meta.profile_id.clone(),
+                        resident.meta.acp_agent_id.clone(),
+                    )
                 });
-                if let Some((provider, acp_agent_id)) = cache_key {
+                let key = owner.and_then(|(provider, profile_id, acp_agent_id)| {
+                    self.commands_cache_key(
+                        provider,
+                        profile_id.as_deref(),
+                        acp_agent_id.as_deref(),
+                    )
+                });
+                if let Some(key) = key {
                     self.enqueue_store_write(
                         StoreWrite::SaveCommands {
-                            provider,
-                            acp_agent_id,
+                            key,
                             commands: commands.clone(),
                         },
                         cx,
