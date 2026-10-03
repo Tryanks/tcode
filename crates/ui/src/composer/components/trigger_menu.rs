@@ -9,10 +9,6 @@ impl Composer {
     /// highlight (and un-dismissing) when the trigger identity changes, and
     /// lazily loading the workspace listing for `@`-mentions.
     pub(in super::super) fn recompute_trigger(&mut self, cx: &mut Context<Self>) {
-        if self.compact {
-            self.active_trigger = None;
-            return;
-        }
         let (text, cursor) = {
             let state = self.input.read(cx);
             (state.value().to_string(), state.cursor())
@@ -411,10 +407,16 @@ fn render_menu_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, size};
+    use gpui::{TestAppContext, VisualTestContext, size};
 
-    #[gpui::test]
-    fn arrow_keys_keep_the_highlighted_mention_laid_out(cx: &mut TestAppContext) {
+    fn composer_window(
+        compact: bool,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        Entity<Composer>,
+        &mut VisualTestContext,
+    ) {
         cx.update(crate::theme::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
@@ -436,8 +438,37 @@ mod tests {
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new_with_layout(store.clone(), compact, window, cx)
+        });
+        (store, composer, cx)
+    }
+
+    #[gpui::test]
+    fn the_phone_composer_opens_the_same_trigger_menus(cx: &mut TestAppContext) {
+        let (store, composer, cx) = composer_window(true, cx);
+        cx.simulate_resize(size(px(393.), px(852.)));
+        composer.update_in(cx, |composer, window, cx| {
+            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            composer.workspace = Some((cwd, vec![PathEntry::from_rel("file.rs".into(), false)]));
+            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        });
+        for (trigger, first_row) in [("/", "/model"), ("@", "file.rs")] {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_draft("", window, cx)
+            });
+            cx.simulate_input(trigger);
+            cx.update(|window, cx| _ = window.draw(cx));
+            assert!(cx.debug_bounds("menu-row-0").is_some(), "{trigger}");
+            composer.read_with(cx, |composer, cx| {
+                assert_eq!(composer.menu_rows(cx).0[0].primary, first_row, "{trigger}");
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn arrow_keys_keep_the_highlighted_mention_laid_out(cx: &mut TestAppContext) {
+        let (store, composer, cx) = composer_window(false, cx);
         cx.simulate_resize(size(px(800.), px(600.)));
         composer.update_in(cx, |composer, window, cx| {
             let cwd = store.read(cx).composer_state().active_cwd.unwrap();

@@ -612,8 +612,7 @@ impl Composer {
             window.push_notification(Notification::info(crate::tr!("composer.no_session")), cx);
             return;
         }
-        if !self.compact
-            && terminal_contexts.is_empty()
+        if terminal_contexts.is_empty()
             && let Some(later) = parse_later(&text, Local::now())
         {
             let Ok((fire_at_unix_secs, message)) = later else {
