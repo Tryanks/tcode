@@ -11,11 +11,14 @@
 //! Flags are `--mode plan`, `--effort <value>`, `--resume <cursor-json>`, `--fork`,
 //! `--leave-questions` (user-input requests stay unanswered), `--mcp <name> <url>
 //! <token>` (an HTTP MCP server registered as tcode registers its own),
+//! `--linger <seconds>` (stay open until no turn has run for that long, to see
+//! turns the agent starts itself), `--follow-up <seconds> <prompt>` (send another
+//! turn that long after the first completes, running turn or not),
 //! `--interrupt-after <seconds>`, `--steer <message>`, and `--image <path>`. Only
 //! one of the last three may be used.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent::{
     AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
@@ -225,6 +228,7 @@ fn main() {
     let mut fork = false;
     let mut leave_questions = false;
     let mut mcp_servers = Vec::new();
+    let mut continuation = Continuation::default();
     let mut probe_mode = ProbeMode::Standard;
     let mut positional = Vec::new();
     let mut args = args.into_iter();
@@ -253,6 +257,16 @@ fn main() {
             }
             "--fork" => fork = true,
             "--leave-questions" => leave_questions = true,
+            "--linger" => {
+                let seconds = args.next().and_then(|value| value.parse().ok());
+                continuation.linger = Some(Duration::from_secs(seconds.unwrap_or_else(|| usage())));
+            }
+            "--follow-up" => {
+                let seconds = args.next().and_then(|value| value.parse().ok());
+                let seconds = seconds.unwrap_or_else(|| usage());
+                let prompt = args.next().unwrap_or_else(|| usage());
+                continuation.follow_up = Some((Duration::from_secs(seconds), prompt));
+            }
             "--mcp" => {
                 let mut next = || args.next().unwrap_or_else(|| usage());
                 mcp_servers.push(McpRegistration {
@@ -347,6 +361,7 @@ fn main() {
         probe_mode,
         acp,
         mcp_servers,
+        continuation,
         Resumption {
             resume,
             fork,
@@ -362,6 +377,12 @@ struct Resumption {
     leave_questions: bool,
 }
 
+#[derive(Default)]
+struct Continuation {
+    linger: Option<Duration>,
+    follow_up: Option<(Duration, String)>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_probe(
     provider: ProviderKind,
@@ -373,6 +394,7 @@ async fn run_probe(
     probe_mode: ProbeMode,
     acp: Option<AcpAgent>,
     mcp_servers: Vec<McpRegistration>,
+    continuation: Continuation,
     resumption: Resumption,
 ) -> i32 {
     // Grok's effort is its wire config option, persisted under its option id.
@@ -473,18 +495,46 @@ async fn run_probe(
     let mut turns_completed = 0;
     let mut first_status = None;
     let mut steer_accepted = false;
+    let lingering = continuation
+        .linger
+        .or(continuation.follow_up.as_ref().map(|_| PHANTOM_TURN_GRACE));
+    let mut follow_up = continuation.follow_up;
+    let mut open_until = None;
+    let mut running = false;
+    let mut closing = false;
     loop {
-        let event = if matches!(probe_mode, ProbeMode::Steer(_)) && turns_completed > 0 {
-            smol::future::or(handle.events.recv(), async {
-                smol::Timer::after(PHANTOM_TURN_GRACE).await;
-                Err(smol::channel::RecvError)
-            })
-            .await
-            .ok()
-        } else {
-            handle.events.recv().await.ok()
+        let quiet = match lingering {
+            Some(linger) if turns_completed > 0 && !running && !closing => Some(linger),
+            _ if matches!(probe_mode, ProbeMode::Steer(_)) && turns_completed > 0 => {
+                Some(PHANTOM_TURN_GRACE)
+            }
+            _ => None,
+        };
+        let event = match quiet {
+            Some(quiet) => {
+                let event = smol::future::or(handle.events.recv(), async {
+                    smol::Timer::after(quiet).await;
+                    Err(smol::channel::RecvError)
+                })
+                .await
+                .ok();
+                if event.is_none() {
+                    if open_until.is_none_or(|until| Instant::now() >= until) {
+                        closing = true;
+                        handle.commands.send(SessionCommand::Shutdown).await.ok();
+                    }
+                    continue;
+                }
+                event
+            }
+            None => handle.events.recv().await.ok(),
         };
         let Some(event) = event else { break };
+        match &event {
+            AgentEvent::TurnStarted { .. } => running = true,
+            AgentEvent::TurnCompleted { .. } => running = false,
+            _ => {}
+        }
 
         if provider == ProviderKind::Acp {
             match &event {
@@ -598,7 +648,25 @@ async fn run_probe(
                         "probe: TurnCompleted {turn_id} status={status:?} (#{turns_completed})"
                     );
                 }
-                if !matches!(probe_mode, ProbeMode::Steer(_)) {
+                if let Some((delay, text)) = follow_up.take() {
+                    open_until = Some(Instant::now() + delay + Duration::from_secs(1));
+                    let commands = handle.commands.clone();
+                    smol::spawn(async move {
+                        smol::Timer::after(delay).await;
+                        eprintln!("probe: FOLLOW-UP -> {text:?}");
+                        commands
+                            .send(SessionCommand::SendTurn {
+                                delivery_id: 1,
+                                text,
+                                options: None,
+                                attachments: Vec::new(),
+                            })
+                            .await
+                            .ok();
+                    })
+                    .detach();
+                }
+                if !matches!(probe_mode, ProbeMode::Steer(_)) && lingering.is_none() {
                     handle.commands.send(SessionCommand::Shutdown).await.ok();
                 }
             }
