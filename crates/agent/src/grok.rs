@@ -4,9 +4,9 @@
 //! The protocol machinery is [`crate::acp_session`]; this module is Grok's
 //! dialect.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use agent_client_protocol::{UntypedMessage, schema::v1 as acp};
 use serde_json::{Map, Value, json};
@@ -16,8 +16,9 @@ use crate::acp_session::{
     prompt_status,
 };
 use crate::{
-    AgentError, AgentEvent, ApprovalMode, Attachment, InteractionMode, LaunchEnv, ModelSpec,
-    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, UserInputOption, UserInputQuestion,
+    AgentError, AgentEvent, ApprovalMode, Attachment, Compaction, InteractionMode, ItemContent,
+    LaunchEnv, ModelSpec, ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TokenUsage,
+    TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 /// The non-interactive auth method: it validates `XAI_API_KEY` (or the key in
@@ -26,13 +27,26 @@ use crate::{
 const API_KEY_AUTH_METHOD: &str = "xai.api_key";
 
 const ASK_USER_QUESTION: &str = "_x.ai/ask_user_question";
+const EXIT_PLAN_MODE: &str = "_x.ai/exit_plan_mode";
 const INTERJECT: &str = "_x.ai/interject";
 const INTERJECTION: &str = "_x.ai/session/interjection";
+const SESSION_NOTIFICATION: &str = "_x.ai/session_notification";
 const FORK: &str = "_x.ai/session/fork";
+
+/// Grok's session modes, by the ids `session/set_mode` takes and
+/// `current_mode_update` reports. Grok does not list them in `modes`.
+const DEFAULT_MODE: &str = "default";
+const PLAN_MODE: &str = "plan";
+
+pub(crate) mod plugins;
 
 /// Start (or resume, or fork) a Grok session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    acp_session::start(ProviderKind::Grok, Grok::default(), opts).await
+    let grok = Grok {
+        approval_mode: opts.approval_mode,
+        ..Grok::default()
+    };
+    acp_session::start(ProviderKind::Grok, grok, opts).await
 }
 
 /// The models Grok's `initialize` advertises. Their options arrive over the
@@ -66,15 +80,11 @@ pub async fn list_models(
 
 /// `initialize`'s `_meta.modelState`.
 fn catalog(init: &acp::InitializeResponse) -> Vec<ModelSpec> {
-    let Some(state) = init.meta.as_ref().and_then(|meta| meta.get("modelState")) else {
+    let Some(state) = model_state(init) else {
         return Vec::new();
     };
     let current = state.get("currentModelId").and_then(Value::as_str);
-    state
-        .get("availableModels")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+    available_models(state)
         .filter_map(|model| {
             let id = model.get("modelId")?.as_str()?;
             Some(ModelSpec {
@@ -91,11 +101,168 @@ fn catalog(init: &acp::InitializeResponse) -> Vec<ModelSpec> {
         .collect()
 }
 
+fn model_state(init: &acp::InitializeResponse) -> Option<&Value> {
+    init.meta.as_ref()?.get("modelState")
+}
+
+fn available_models(state: &Value) -> impl Iterator<Item = &Value> {
+    state
+        .get("availableModels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
 #[derive(Default)]
 struct Grok {
+    approval_mode: ApprovalMode,
     /// Steers sent with `_x.ai/interject`, oldest first, until Grok echoes
     /// them back as consumed.
     steers: Mutex<VecDeque<(String, String)>>,
+    models: Mutex<Models>,
+}
+
+/// What usage reporting needs to know about the session's models.
+#[derive(Default)]
+struct Models {
+    /// `totalContextTokens` by model id.
+    windows: HashMap<String, u64>,
+    /// The model serving the session.
+    current: Option<String>,
+}
+
+impl Grok {
+    fn models(&self) -> MutexGuard<'_, Models> {
+        self.models
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn steers(&self) -> MutexGuard<'_, VecDeque<(String, String)>> {
+        self.steers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// One model call's `response_completed` usage, whose `input_tokens`
+    /// excludes the cached prompt.
+    fn call_usage(&self, usage: &Value) -> TokenUsage {
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let prompt = count("input_tokens")
+            + count("cache_read_input_tokens")
+            + count("cache_creation_input_tokens");
+        let models = self.models();
+        TokenUsage {
+            freshness: crate::ContextFreshness::Current,
+            input_tokens: Some(prompt),
+            cached_input_tokens: Some(count("cache_read_input_tokens")),
+            output_tokens: Some(count("output_tokens")),
+            used_tokens: Some(prompt + count("output_tokens")),
+            context_window: models.window(),
+            ..TokenUsage::default()
+        }
+    }
+
+    /// The `session/prompt` result's `_meta`: the last model call's figures
+    /// (whose `totalTokens` is the context in use) and the turn's `usage`.
+    fn turn_usage(&self, meta: &acp::Meta) -> TokenUsage {
+        let count = |value: Option<&Value>| value.and_then(Value::as_u64);
+        let mut models = self.models();
+        if let Some(model) = meta.get("modelId").and_then(Value::as_str) {
+            models.current = Some(model.to_string());
+        }
+        TokenUsage {
+            freshness: crate::ContextFreshness::Current,
+            turn_processed_tokens: count(
+                meta.get("usage").and_then(|usage| usage.get("totalTokens")),
+            ),
+            input_tokens: count(meta.get("inputTokens")),
+            cached_input_tokens: count(meta.get("cachedReadTokens")),
+            output_tokens: count(meta.get("outputTokens")),
+            // `/compact` reports 0: nothing has been measured since.
+            used_tokens: count(meta.get("totalTokens")).filter(|tokens| *tokens > 0),
+            context_window: models.window(),
+            ..TokenUsage::default()
+        }
+    }
+
+    /// One `_x.ai/session_notification` update.
+    fn session_notification(&self, update: &Value) -> Vec<AgentEvent> {
+        let count = |key: &str| update.get(key).and_then(Value::as_u64);
+        match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("response_completed") => update
+                .get("usage")
+                .map(|usage| vec![AgentEvent::TokenUsage(self.call_usage(usage))])
+                .unwrap_or_default(),
+            // A request that failed for good ends the turn, which reports it.
+            Some("retry_state")
+                if update.get("type").and_then(Value::as_str) == Some("retrying") =>
+            {
+                vec![AgentEvent::Error {
+                    message: retry_message(update),
+                    fatal: false,
+                }]
+            }
+            Some("image_dropped") => {
+                let notes: Vec<&str> = update
+                    .get("notes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                if notes.is_empty() {
+                    return Vec::new();
+                }
+                vec![AgentEvent::Warning {
+                    message: notes.join("\n"),
+                }]
+            }
+            Some("background_tasks") => {
+                let running = update
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|task| task.get("status").and_then(Value::as_str) == Some("running"))
+                    .count();
+                vec![AgentEvent::BackgroundTasksChanged { count: running }]
+            }
+            Some("auto_compact_started") => vec![AgentEvent::ContextCompacted(Compaction {
+                in_progress: true,
+                trigger: Some("auto".into()),
+                pre_tokens: count("tokens_used"),
+                ..Compaction::default()
+            })],
+            Some("auto_compact_completed") => vec![AgentEvent::ContextCompacted(Compaction {
+                in_progress: false,
+                pre_tokens: count("tokens_before"),
+                post_tokens: count("tokens_after"),
+                duration_ms: count("elapsed_ms"),
+                ..Compaction::default()
+            })],
+            _ => Vec::new(),
+        }
+    }
+
+    fn steer_accepted(&self, params: &Value) -> Vec<AgentEvent> {
+        let text = params.get("text").and_then(Value::as_str);
+        let mut steers = self.steers();
+        let Some(position) = steers
+            .iter()
+            .position(|(sent, _)| Some(sent.as_str()) == text)
+        else {
+            return Vec::new();
+        };
+        let (_, request_id) = steers.remove(position).expect("position is in range");
+        vec![AgentEvent::SteerAccepted { request_id }]
+    }
+}
+
+impl Models {
+    fn window(&self) -> Option<u64> {
+        self.windows.get(self.current.as_deref()?).copied()
+    }
 }
 
 impl Dialect for Grok {
@@ -105,9 +272,13 @@ impl Dialect for Grok {
 
     fn launch(&self, opts: &SessionOptions) -> Result<Launch, AgentError> {
         let program = crate::resolve_binary(opts.binary_path.as_deref(), "grok")?;
+        // `acceptEdits` at launch still asks before every edit, so
+        // AutoAcceptEdits runs in `default` and approves edits itself
+        // (`auto_approves`). `default` already runs reads unprompted.
         let permission_mode = match opts.approval_mode {
-            ApprovalMode::Supervised | ApprovalMode::ReadOnly => "default",
-            ApprovalMode::AutoAcceptEdits => "acceptEdits",
+            ApprovalMode::Supervised | ApprovalMode::ReadOnly | ApprovalMode::AutoAcceptEdits => {
+                "default"
+            }
             ApprovalMode::FullAccess => "bypassPermissions",
         };
         let mut args = vec![
@@ -117,6 +288,11 @@ impl Dialect for Grok {
         ];
         if let Some(model) = &opts.model {
             args.extend(["--model".to_string(), model.clone()]);
+        }
+        if let Some(effort) =
+            acp_session::config_selection(&opts.option_selections, "reasoning_effort")
+        {
+            args.extend(["--reasoning-effort".to_string(), effort.to_string()]);
         }
         args.extend(opts.extra_args.iter().cloned());
         args.push("stdio".to_string());
@@ -130,6 +306,22 @@ impl Dialect for Grok {
 
     async fn establish(&self, setup: &Setup<'_>) -> Result<Established, AgentError> {
         let (connection, opts) = (setup.connection, setup.opts);
+        if let Some(state) = model_state(setup.init) {
+            let mut models = self.models();
+            models.windows = available_models(state)
+                .filter_map(|model| {
+                    let id = model.get("modelId")?.as_str()?;
+                    let window = model.pointer("/_meta/totalContextTokens")?.as_u64()?;
+                    Some((id.to_string(), window))
+                })
+                .collect();
+            models.current = opts.model.clone().or_else(|| {
+                state
+                    .get("currentModelId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+        }
         let offers_api_key = setup.init.auth_methods.iter().any(|method| {
             let id = match method {
                 acp::AuthMethod::Agent(method) => &method.id,
@@ -164,7 +356,7 @@ impl Dialect for Grok {
             .as_ref()
             .and_then(|cursor| cursor.str_field(&["session_id"]))
             .map(str::to_string);
-        let (session_id, modes, config_options) = match resumed {
+        let (session_id, modes, config_options, existing) = match resumed {
             Some(source) => {
                 let session_id = if opts.fork {
                     fork(connection, &source, opts).await?
@@ -192,6 +384,7 @@ impl Dialect for Grok {
                     acp::SessionId::new(session_id),
                     resumed.modes,
                     resumed.config_options,
+                    true,
                 )
             }
             None => {
@@ -211,15 +404,49 @@ impl Dialect for Grok {
                             ))
                         }
                     })?;
-                (created.session_id, created.modes, created.config_options)
+                (
+                    created.session_id,
+                    created.modes,
+                    created.config_options,
+                    false,
+                )
             }
         };
-        setup.adopt(modes.as_ref(), config_options.as_deref());
-        if opts.interaction_mode == InteractionMode::Plan || setup.in_plan_mode() {
-            setup
-                .apply_interaction_mode(&session_id, opts.interaction_mode)
+
+        let mut mode = match opts.interaction_mode {
+            InteractionMode::Plan => PLAN_MODE,
+            InteractionMode::Build => DEFAULT_MODE,
+        };
+        // Grok keeps a session's plan mode across processes without reporting
+        // it, so a continued session is always told its mode.
+        if existing || mode == PLAN_MODE {
+            let applied = connection
+                .send_request(acp::SetSessionModeRequest::new(
+                    session_id.clone(),
+                    acp::SessionModeId::new(mode),
+                ))
+                .block_task()
                 .await;
+            if let Err(err) = applied {
+                setup
+                    .warn(format!(
+                        "Grok did not switch to its {mode} mode: {}",
+                        describe(&err)
+                    ))
+                    .await;
+                mode = DEFAULT_MODE;
+            }
         }
+        let modes = modes.unwrap_or_else(|| {
+            acp::SessionModeState::new(
+                mode,
+                vec![
+                    acp::SessionMode::new(DEFAULT_MODE, "Default"),
+                    acp::SessionMode::new(PLAN_MODE, "Plan"),
+                ],
+            )
+        });
+        setup.adopt(Some(&modes), config_options.as_deref());
         Ok(Established {
             resume: ResumeCursor(json!({ "session_id": session_id.0.to_string() })),
             session_id,
@@ -242,7 +469,16 @@ impl Dialect for Grok {
         if replayed {
             return Vec::new();
         }
-        state.apply_update(notification.update)
+        let mut update = notification.update;
+        let shell = match &mut update {
+            acp::SessionUpdate::ToolCallUpdate(update) => prepare_tool_update(update),
+            _ => None,
+        };
+        let mut events = state.apply_update(update);
+        if let Some(shell) = shell {
+            events.iter_mut().for_each(|event| shell.render(event));
+        }
+        events
     }
 
     fn turn_end(
@@ -250,11 +486,18 @@ impl Dialect for Grok {
         _state: &mut State,
         result: Result<acp::PromptResponse, acp::Error>,
     ) -> TurnEnd {
-        let (status, message) = prompt_status(&result);
+        let (status, message) = match (prompt_status(&result), &result) {
+            ((TurnStatus::Failed, _), Err(err)) => (TurnStatus::Failed, Some(failure_message(err))),
+            (outcome, _) => outcome,
+        };
         TurnEnd {
             status,
             message,
-            usage: None,
+            usage: result
+                .as_ref()
+                .ok()
+                .and_then(|response| response.meta.as_ref())
+                .map(|meta| self.turn_usage(meta)),
         }
     }
 
@@ -268,10 +511,7 @@ impl Dialect for Grok {
         let Some(session_id) = session.id() else {
             return;
         };
-        self.steers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back((text.clone(), request_id.clone()));
+        self.steers().push_back((text.clone(), request_id.clone()));
         let sent = session
             .connection
             .send_request(UntypedMessage {
@@ -281,10 +521,7 @@ impl Dialect for Grok {
             .block_task()
             .await;
         if let Err(err) = sent {
-            self.steers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retain(|(_, pending)| pending != &request_id);
+            self.steers().retain(|(_, pending)| pending != &request_id);
             session
                 .emit(AgentEvent::Warning {
                     message: format!("Grok did not accept the steer: {}", describe(&err)),
@@ -298,8 +535,26 @@ impl Dialect for Grok {
         // for the next turn.
     }
 
+    /// Offered `fs/*` and `terminal/*`, Grok runs every read, write and
+    /// command through them instead of its own tools.
+    fn client_services(&self) -> bool {
+        false
+    }
+
+    fn owned_config_options(&self) -> &'static [&'static str] {
+        &["model"]
+    }
+
+    fn auto_approves(&self, tool_call: &acp::ToolCallUpdate) -> bool {
+        self.approval_mode == ApprovalMode::AutoAcceptEdits
+            && matches!(
+                tool_call.fields.kind,
+                Some(acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move)
+            )
+    }
+
     fn handles_request(&self, method: &str) -> bool {
-        method == ASK_USER_QUESTION
+        matches!(method, ASK_USER_QUESTION | EXIT_PLAN_MODE)
     }
 
     async fn request(
@@ -308,7 +563,27 @@ impl Dialect for Grok {
         method: String,
         params: Value,
     ) -> Result<Value, acp::Error> {
-        debug_assert_eq!(method, ASK_USER_QUESTION);
+        if method == EXIT_PLAN_MODE {
+            let item_id = params.get("toolCallId").and_then(Value::as_str);
+            let markdown = params
+                .get("planContent")
+                .and_then(Value::as_str)
+                .filter(|plan| !plan.trim().is_empty());
+            if let (Some(item_id), Some(markdown)) = (item_id, markdown) {
+                session
+                    .emit(AgentEvent::ProposedPlan {
+                        item_id: item_id.to_string(),
+                        markdown: markdown.to_string(),
+                    })
+                    .await;
+            }
+            // The decision is the user's, through tcode's plan flow, which
+            // implements in a later Build-mode turn. Approving here would let
+            // Grok implement before that, and holding the request would keep
+            // the turn open under it; every outcome but approval and
+            // abandonment keeps Grok planning.
+            return Ok(json!({ "outcome": "request_changes" }));
+        }
         let questions = questions(&params)?;
         Ok(match session.ask_user(questions).await {
             Some(answers) => json!({ "outcome": "accepted", "answers": answer_lists(answers) }),
@@ -317,24 +592,130 @@ impl Dialect for Grok {
     }
 
     fn notification(&self, _state: &mut State, method: &str, params: Value) -> Vec<AgentEvent> {
-        if method != INTERJECTION {
-            log::trace!("grok: {method} {params}");
-            return Vec::new();
+        match method {
+            INTERJECTION => self.steer_accepted(&params),
+            SESSION_NOTIFICATION => params
+                .get("update")
+                .map(|update| self.session_notification(update))
+                .unwrap_or_default(),
+            _ => Vec::new(),
         }
-        let text = params.get("text").and_then(Value::as_str);
-        let mut steers = self
-            .steers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(position) = steers
-            .iter()
-            .position(|(sent, _)| Some(sent.as_str()) == text)
-        else {
-            return Vec::new();
-        };
-        let (_, request_id) = steers.remove(position).expect("position is in range");
-        vec![AgentEvent::SteerAccepted { request_id }]
     }
+}
+
+/// Grok fails a turn with `-32603 Internal error`, its own words in `data`.
+fn failure_message(err: &acp::Error) -> String {
+    err.data
+        .as_ref()
+        .and_then(|data| data.get("message"))
+        .and_then(Value::as_str)
+        .map_or_else(|| describe(err), str::to_string)
+}
+
+fn retry_message(update: &Value) -> String {
+    let reason = update
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("Grok's model request failed");
+    match (
+        update.get("attempt").and_then(Value::as_u64),
+        update.get("max_retries").and_then(Value::as_u64),
+    ) {
+        (Some(attempt), Some(max)) => format!("{reason} (retry {attempt} of {max})"),
+        _ => reason.to_string(),
+    }
+}
+
+/// Grok's shell tool resends the command's whole output with every update.
+struct ShellResult {
+    item_id: String,
+    output: String,
+    exit_code: Option<i32>,
+}
+
+impl ShellResult {
+    fn render(&self, event: &mut AgentEvent) {
+        if let AgentEvent::ItemStarted(item)
+        | AgentEvent::ItemUpdated(item)
+        | AgentEvent::ItemCompleted(item) = event
+            && item.id == self.item_id
+            && let ItemContent::CommandExecution {
+                output, exit_code, ..
+            } = &mut item.content
+        {
+            output.clone_from(&self.output);
+            *exit_code = self.exit_code;
+        }
+    }
+}
+
+/// Bring a `tool_call_update` into the shape the standard mapping renders
+/// faithfully. Grok's `rawOutput` is its typed tool result, not display text,
+/// so it must never become an item's output. Returns the shell result the
+/// mapped item shows instead.
+fn prepare_tool_update(update: &mut acp::ToolCallUpdate) -> Option<ShellResult> {
+    let fields = &mut update.fields;
+    let raw_type = fields
+        .raw_output
+        .as_ref()
+        .and_then(|raw| raw.get("type"))
+        .and_then(Value::as_str);
+    match raw_type {
+        Some("Bash") => {
+            let finished = matches!(
+                fields.status,
+                Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+            );
+            // Running updates carry a placeholder exit code.
+            let exit_code = fields
+                .raw_output
+                .as_ref()
+                .and_then(|raw| raw.get("exit_code"))
+                .and_then(Value::as_i64)
+                .filter(|_| finished)
+                .map(|code| code as i32);
+            Some(ShellResult {
+                item_id: update.tool_call_id.0.to_string(),
+                output: text_of(fields.content.as_deref().unwrap_or_default()),
+                exit_code,
+            })
+        }
+        Some("MCP") => {
+            let text = fields
+                .raw_output
+                .as_ref()
+                .and_then(|raw| raw.pointer("/output/OkayOutput"))
+                .map(|output| match output {
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                });
+            if fields.content.is_none()
+                && let Some(text) = text
+            {
+                fields.content = Some(vec![text.into()]);
+            }
+            None
+        }
+        // Before a command runs, its content is the model's description of it.
+        None if fields.kind == Some(acp::ToolKind::Execute) => {
+            fields.content = None;
+            None
+        }
+        _ => None,
+    }
+}
+
+fn text_of(content: &[acp::ToolCallContent]) -> String {
+    content
+        .iter()
+        .filter_map(|content| match content {
+            acp::ToolCallContent::Content(block) => match &block.content {
+                acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// Fork `source` into a new Grok session in the same directory.
@@ -421,4 +802,328 @@ fn answer_lists(answers: Map<String, Value>) -> Map<String, Value> {
             (question, answer)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::io::{BufRead as _, Write as _};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        ApprovalDecision, ApprovalKind, ContextFreshness, FileChangeKind, ItemStatus,
+        McpRegistration, OptionSelection, SessionCommand, ThreadItem,
+    };
+
+    /// A resumed Grok 1.0.46 session under AutoAcceptEdits, recorded on the
+    /// wire in both directions (provenance: `tests/fixtures/grok/README.md`).
+    const RESUMED_TURN: &str = include_str!("../tests/fixtures/grok/resumed_turn.jsonl");
+    const REPLAY_AGENT: &str = "TCODE_GROK_REPLAY_AGENT";
+    const TEST_NAME: &str = "grok::tests::recorded_resumed_turn_maps_to_the_canonical_stream";
+
+    /// Stand in for `grok agent stdio`: answer the client with the recorded
+    /// agent messages, and require the client to send what Tcode sent, with
+    /// the same answers to Grok's own requests.
+    fn replay_agent() {
+        let mut client = std::io::stdin().lock().lines();
+        let mut agent = std::io::stdout().lock();
+        let mut live_ids: HashMap<String, Value> = HashMap::new();
+        for record in RESUMED_TURN.lines() {
+            let record: Value = serde_json::from_str(record).unwrap();
+            let recorded = &record["message"];
+            if record["from"] == "agent" {
+                let mut message = recorded.clone();
+                if message.get("method").is_none() {
+                    message["id"] = live_ids[&message["id"].to_string()].clone();
+                }
+                writeln!(agent, "{message}").unwrap();
+                agent.flush().unwrap();
+                continue;
+            }
+            let live = loop {
+                let line = client.next().expect("the client hung up early").unwrap();
+                // The client's protocol errors about the test harness's own
+                // non-JSON output carry no id.
+                if let Ok(live) = serde_json::from_str::<Value>(&line)
+                    && !live.get("id").is_some_and(Value::is_null)
+                {
+                    break live;
+                }
+            };
+            assert_eq!(live.get("method"), recorded.get("method"), "{live}");
+            if recorded["method"] == "initialize" {
+                let capabilities =
+                    |message: &Value| message["params"]["clientCapabilities"].clone();
+                assert_eq!(capabilities(&live), capabilities(recorded), "{live}");
+            }
+            match recorded.get("id") {
+                Some(id) if recorded.get("method").is_some() => {
+                    live_ids.insert(id.to_string(), live["id"].clone());
+                }
+                _ => assert_eq!(live["result"], recorded["result"], "{live}"),
+            }
+        }
+        for _ in client {}
+    }
+
+    /// A stand-in `grok` that runs this test as [`replay_agent`]; whatever
+    /// arguments Tcode launches Grok with are left unread.
+    fn stand_in_binary(dir: &std::path::Path) -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.display();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = dir.join("grok");
+            let script = format!("#!/bin/sh\nexec '{exe}' --exact {TEST_NAME} --nocapture\n");
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+        #[cfg(windows)]
+        {
+            let path = dir.join("grok.cmd");
+            std::fs::write(
+                &path,
+                format!("@\"{exe}\" --exact {TEST_NAME} --nocapture\r\n"),
+            )
+            .unwrap();
+            path
+        }
+    }
+
+    fn command_outputs<'a>(events: &'a [AgentEvent], id: &str) -> Vec<(&'a str, Option<i32>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item)
+                    if item.id == id =>
+                {
+                    match &item.content {
+                        ItemContent::CommandExecution {
+                            output, exit_code, ..
+                        } => Some((output.as_str(), *exit_code)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn completed<'a>(events: &'a [AgentEvent], id: &str) -> &'a ItemContent {
+        events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id: item, content, ..
+                }) if item == id => Some(content),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{id} never completed: {events:#?}"))
+    }
+
+    fn streamed(events: &[AgentEvent], id: &str) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Delta { item_id, text, .. } if item_id == id => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recorded_resumed_turn_maps_to_the_canonical_stream() {
+        if std::env::var_os(REPLAY_AGENT).is_some() {
+            return replay_agent();
+        }
+        let dir = std::env::temp_dir().join(format!("tcode-grok-replay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = SessionOptions {
+            cwd: dir.clone(),
+            model: None,
+            resume: Some(ResumeCursor(
+                json!({ "session_id": "01a10095-e65c-7983-a817-6884b010f1ae" }),
+            )),
+            fork: false,
+            binary_path: Some(stand_in_binary(&dir)),
+            approval_mode: ApprovalMode::AutoAcceptEdits,
+            option_selections: vec![OptionSelection {
+                id: "acp:cfg:reasoning_effort".into(),
+                value: json!("low"),
+            }],
+            interaction_mode: InteractionMode::Build,
+            mcp_servers: vec![McpRegistration {
+                name: "tcode_probe".into(),
+                url: "http://127.0.0.1:18433/mcp".into(),
+                bearer_token: "tcode-secret".into(),
+            }],
+            launch_env: LaunchEnv {
+                env: vec![(REPLAY_AGENT.into(), "1".into())],
+                home: None,
+            },
+            extra_args: Vec::new(),
+            acp: None,
+        };
+
+        let events = smol::block_on(smol::future::or(
+            async {
+                let handle = start(opts).await.unwrap();
+                handle
+                    .commands
+                    .send(SessionCommand::SendTurn {
+                        delivery_id: 7,
+                        text: "Count, edit, ask and echo".into(),
+                        options: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .unwrap();
+                let mut events = Vec::new();
+                while let Ok(event) = handle.events.recv().await {
+                    let command = match &event {
+                        AgentEvent::ApprovalRequested(request) => {
+                            Some(SessionCommand::RespondApproval {
+                                request_id: request.id.clone(),
+                                decision: ApprovalDecision::Approve,
+                            })
+                        }
+                        AgentEvent::UserInputRequested {
+                            request_id,
+                            questions,
+                            ..
+                        } => Some(SessionCommand::RespondUserInput {
+                            request_id: request_id.clone(),
+                            answers: questions
+                                .iter()
+                                .map(|question| {
+                                    (question.id.clone(), json!(question.options[0].label))
+                                })
+                                .collect(),
+                        }),
+                        AgentEvent::TurnCompleted { .. } => Some(SessionCommand::Shutdown),
+                        _ => None,
+                    };
+                    let closed = matches!(event, AgentEvent::SessionClosed { .. });
+                    events.push(event);
+                    if let Some(command) = command {
+                        handle.commands.send(command).await.unwrap();
+                    }
+                    if closed {
+                        break;
+                    }
+                }
+                events
+            },
+            async {
+                smol::Timer::after(Duration::from_secs(60)).await;
+                panic!("the replayed session did not finish");
+            },
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Every client message and answer matched the recording, or the
+        // stand-in would have hung up before the close.
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::SessionClosed { reason: None })
+            ),
+            "{events:#?}"
+        );
+        let started = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::TurnStarted { .. }))
+            .unwrap();
+        assert!(
+            !events[..started].iter().any(|event| matches!(
+                event,
+                AgentEvent::Delta { .. }
+                    | AgentEvent::ItemStarted(_)
+                    | AgentEvent::ItemUpdated(_)
+                    | AgentEvent::ItemCompleted(_)
+            )),
+            "a resumed session replays no history: {:#?}",
+            &events[..started]
+        );
+
+        assert_eq!(streamed(&events, "thought-1"), "Counting first.");
+        assert!(matches!(completed(&events, "thought-1"),
+            ItemContent::Reasoning { text } if text == "Counting first."));
+
+        // Each shell update carries the whole output so far; the item shows
+        // it, never the command's description or Grok's typed result.
+        let shell = command_outputs(&events, "call_33_1");
+        assert_eq!(
+            shell.last(),
+            Some(&("line1\nline2\nline3\n", Some(0))),
+            "{shell:?}"
+        );
+        assert!(
+            shell
+                .windows(2)
+                .all(|pair| pair[1].0.starts_with(pair[0].0) && pair[0].1.is_none()),
+            "{shell:?}"
+        );
+        assert!(shell.iter().any(|(output, _)| *output == "line1\n"));
+        assert_eq!(
+            command_outputs(&events, "call_34_0").last(),
+            Some(&("", Some(0)))
+        );
+
+        assert!(matches!(completed(&events, "call_35_0"),
+            ItemContent::FileChange { changes, status: ItemStatus::Completed }
+                if changes.len() == 1 && changes[0].kind == FileChangeKind::Modify
+                    && changes[0].path.ends_with("/in.txt")));
+        let approvals: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ApprovalRequested(request) => Some(&request.kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(approvals.as_slice(), [
+                ApprovalKind::ExecCommand { command, .. },
+                ApprovalKind::ToolUse { name, .. },
+            ] if command.starts_with("for i in") && name == "tcode_probe__echo_upper"),
+            "AutoAcceptEdits approves the edit itself: {approvals:#?}"
+        );
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::UserInputRequested { questions, .. }
+                if questions[0].id == "Which greeting should I use?")));
+        assert!(matches!(completed(&events, "call_37_0"),
+            ItemContent::ToolCall { name, output: Some(output), status: ItemStatus::Completed, .. }
+                if name == "tcode_probe__echo_upper" && output == "HELLO MCP"));
+
+        assert_eq!(
+            streamed(&events, "msg-2"),
+            "Counted, edited, asked and echoed."
+        );
+        assert!(matches!(completed(&events, "msg-2"),
+            ItemContent::AssistantMessage { text } if text == "Counted, edited, asked and echoed."));
+
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::TokenUsage(usage)
+                if usage.context_window == Some(500_000) && usage.used_tokens == Some(1234))));
+        let completions: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TurnCompleted { status, usage, .. } => Some((*status, *usage)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completions.len(), 1, "{completions:?}");
+        let (status, usage) = completions[0];
+        assert_eq!(status, TurnStatus::Completed);
+        let usage = usage.expect("the turn reports its usage");
+        assert_eq!(usage.freshness, ContextFreshness::Current);
+        assert_eq!(usage.turn_processed_tokens, Some(7404));
+        assert_eq!(usage.used_tokens, Some(1234));
+        assert_eq!(usage.context_window, Some(500_000));
+    }
 }

@@ -251,7 +251,15 @@ impl ProviderKind {
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
-                plugin_management: PluginManagement::NONE,
+                plugin_management: PluginManagement {
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Update,
+                    ],
+                    marketplaces: true,
+                    apply: ApplyNote::ReloadOrNextSession,
+                },
             },
         }
     }
@@ -297,6 +305,9 @@ pub enum ApplyNote {
     /// session or in the next session; MCP servers only in the next session;
     /// updates need a restart.
     ReloadOrRestart,
+    /// Every change, MCP servers and updates included, applies after
+    /// `/reload-plugins` in a running session or in the next session.
+    ReloadOrNextSession,
     /// Sessions started afterwards see the change; what a running session
     /// picks up is not established.
     NextSession,
@@ -569,11 +580,10 @@ pub async fn list_plugins(
     match provider {
         ProviderKind::ClaudeCode => claude_plugins::list(context).await,
         ProviderKind::Codex => codex::plugins::list(context).await,
-        ProviderKind::Pi
-        | ProviderKind::OpenCode
-        | ProviderKind::Cursor
-        | ProviderKind::Grok
-        | ProviderKind::Acp => Err(no_plugin_management(provider)),
+        ProviderKind::Grok => grok::plugins::list(context).await,
+        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
+            Err(no_plugin_management(provider))
+        }
     }
 }
 
@@ -587,11 +597,10 @@ pub async fn run_plugin_op(
     match provider {
         ProviderKind::ClaudeCode => claude_plugins::run(context, op).await,
         ProviderKind::Codex => codex::plugins::run(context, op).await,
-        ProviderKind::Pi
-        | ProviderKind::OpenCode
-        | ProviderKind::Cursor
-        | ProviderKind::Grok
-        | ProviderKind::Acp => Err(no_plugin_management(provider)),
+        ProviderKind::Grok => grok::plugins::run(context, op).await,
+        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
+            Err(no_plugin_management(provider))
+        }
     }
 }
 
@@ -1188,7 +1197,8 @@ pub async fn list_models(
 ///   (mid-session switch may require a resume-restart).
 /// - pi: a bundled fail-closed tool-call extension in front of RPC extension UI.
 /// - OpenCode: `OPENCODE_PERMISSION` rules plus permission reply endpoints.
-/// - Grok: its `--permission-mode` at launch.
+/// - Grok: `--permission-mode` default / bypassPermissions at launch; under
+///   AutoAcceptEdits tcode approves Grok's edit permission requests once.
 /// - Cursor: `--force` at launch for FullAccess; otherwise its own permission
 ///   requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

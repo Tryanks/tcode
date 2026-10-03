@@ -671,6 +671,7 @@ providers:
     add: "Add"
     remove: "Remove"
     apply_reload_or_restart: "Skills, commands and hooks apply after /reload-plugins in a running session or in the next session; MCP servers apply in the next session; updates need a restart."
+    apply_reload_or_next_session: "Changes, MCP servers and updates included, apply after /reload-plugins in a running session or in the next session."
     apply_next_session: "Changes apply to sessions started afterwards; whether a running session picks them up is not verified."
     apply_unverified: "Whether a running session picks up changes is not verified; start a new session."
     manage: "Manage plugins"

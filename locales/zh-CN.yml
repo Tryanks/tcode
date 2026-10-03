@@ -664,6 +664,7 @@ providers:
     add: "添加"
     remove: "移除"
     apply_reload_or_restart: "技能、命令和钩子在运行中的会话执行 /reload-plugins 后或在下一个会话中生效；MCP 服务器在下一个会话中生效；更新需要重启。"
+    apply_reload_or_next_session: "所有变更（包括 MCP 服务器和更新）在运行中的会话执行 /reload-plugins 后或在下一个会话中生效。"
     apply_next_session: "变更对之后开始的会话生效；尚未验证运行中的会话是否会应用。"
     apply_unverified: "尚未验证运行中的会话是否会应用变更；请开始新会话。"
     manage: "管理插件"

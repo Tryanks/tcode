@@ -5,23 +5,23 @@
 //! lists the native plugin catalog after running the optional operation:
 //! `install|update <id> <scope> [--accept <sha256>]`, `uninstall|enable|disable <id> <scope>`,
 //! `add-marketplace <source>` or `remove-marketplace <name>`. `--home` isolates
-//! the provider's native state (`CODEX_HOME` for Codex; for Claude Code `HOME`
-//! and `CLAUDE_CONFIG_DIR`).
+//! the provider's native state (`CODEX_HOME` for Codex, `GROK_HOME` for Grok;
+//! for Claude Code `HOME` and `CLAUDE_CONFIG_DIR`).
 //! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
 //! Flags are `--binary <path>`, `--model <id>`, `--mode plan`, `--effort <value>`,
-//! `--resume <cursor-json>`, `--fork`,
-//! `--leave-questions` (user-input requests stay unanswered), `--interrupt-after
-//! <seconds>`, `--steer <message>`, and `--image <path>`. Only one of the last
-//! three may be used.
+//! `--resume <cursor-json>`, `--fork`, `--leave-questions` (user-input requests
+//! stay unanswered), `--mcp <name> <url> <token>` (an HTTP MCP server registered
+//! as tcode registers its own), `--interrupt-after <seconds>`, `--steer
+//! <message>`, and `--image <path>`. Only one of the last three may be used.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use agent::{
     AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
-    ItemContent, LaunchEnv, OptionSelection, PluginContext, PluginOp, PluginScope, ProviderKind,
-    ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus, list_models,
-    list_plugins, run_plugin_op, start_session,
+    ItemContent, LaunchEnv, McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope,
+    ProviderKind, ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus,
+    list_models, list_plugins, run_plugin_op, start_session,
 };
 use base64::Engine as _;
 
@@ -233,6 +233,7 @@ fn main() {
     let mut resume = None;
     let mut fork = false;
     let mut leave_questions = false;
+    let mut mcp_servers = Vec::new();
     let mut probe_mode = ProbeMode::Standard;
     let mut positional = Vec::new();
     let mut args = args.into_iter();
@@ -263,6 +264,14 @@ fn main() {
             }
             "--fork" => fork = true,
             "--leave-questions" => leave_questions = true,
+            "--mcp" => {
+                let mut next = || args.next().unwrap_or_else(|| usage());
+                mcp_servers.push(McpRegistration {
+                    name: next(),
+                    url: next(),
+                    bearer_token: next(),
+                });
+            }
             "--interrupt-after" => {
                 let seconds = args
                     .next()
@@ -353,6 +362,7 @@ fn main() {
         effort,
         probe_mode,
         acp,
+        mcp_servers,
         Resumption {
             resume,
             fork,
@@ -380,14 +390,20 @@ async fn run_probe(
     effort: Option<String>,
     probe_mode: ProbeMode,
     acp: Option<AcpAgent>,
+    mcp_servers: Vec<McpRegistration>,
     resumption: Resumption,
     binary_path: Option<PathBuf>,
     model: Option<String>,
 ) -> i32 {
+    // Grok's effort is its wire config option, persisted under its option id.
+    let effort_id = match provider {
+        ProviderKind::Grok => "acp:cfg:reasoning_effort",
+        _ => "reasoningEffort",
+    };
     let option_selections = effort
         .iter()
         .map(|value| OptionSelection {
-            id: "reasoningEffort".into(),
+            id: effort_id.into(),
             value: serde_json::Value::String(value.clone()),
         })
         .collect();
@@ -404,7 +420,7 @@ async fn run_probe(
         approval_mode,
         option_selections,
         interaction_mode,
-        mcp_servers: Vec::new(),
+        mcp_servers,
         launch_env: Default::default(),
         extra_args: Vec::new(),
         acp,
