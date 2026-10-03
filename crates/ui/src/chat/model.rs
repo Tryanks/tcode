@@ -1540,9 +1540,6 @@ mod tests {
     use tcode_core::project::{Project, SessionMeta};
     use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
 
-    /// The snapshot of a long conversation can hold a single partial turn.
-    /// The first page then completes it and adds earlier turns; nothing in
-    /// the old list keeps its identity, but the newest entry does.
     const REAL_DIFF: &str = "--- a/src/foo.rs\n\
                              +++ b/src/foo.rs\n\
                              @@ -1,3 +1,4 @@\n\
