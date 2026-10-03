@@ -1,6 +1,6 @@
 //! Headless end-to-end probe for provider clients.
 //!
-//! Catalog mode: `probe --list-models <codex|claude|pi|opencode|cursor|grok>`.
+//! Catalog mode: `probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]`.
 //! Plugin mode: `probe plugins <provider> [--home <dir>] [--project <dir>] [<op> …]`
 //! lists the native plugin catalog after running the optional operation:
 //! `install|update <id> <scope> [--accept <sha256>]`, `uninstall|enable|disable <id> <scope>`,
@@ -8,7 +8,8 @@
 //! the provider's native state (`CODEX_HOME` for Codex; for Claude Code `HOME`
 //! and `CLAUDE_CONFIG_DIR`).
 //! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
-//! Flags are `--mode plan`, `--effort <value>`, `--resume <cursor-json>`, `--fork`,
+//! Flags are `--binary <path>`, `--model <id>`, `--mode plan`, `--effort <value>`,
+//! `--resume <cursor-json>`, `--fork`,
 //! `--leave-questions` (user-input requests stay unanswered), `--interrupt-after
 //! <seconds>`, `--steer <message>`, and `--image <path>`. Only one of the last
 //! three may be used.
@@ -39,9 +40,11 @@ enum ProbeMode {
 fn usage() -> ! {
     eprintln!(
         "usage: probe <codex|claude|pi|opencode|cursor|grok|acp> <prompt> [cwd] \
-         [supervised|auto_edits|full_access] [acp-command args…] [flags]"
+         [supervised|read_only|auto_edits|full_access] [acp-command args…] [flags]"
     );
-    eprintln!("       probe --list-models <codex|claude|pi|opencode|cursor|grok>");
+    eprintln!(
+        "       probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]"
+    );
     eprintln!("       probe plugins <provider> [--home <dir>] [--project <dir>] [<op> …]");
     std::process::exit(2);
 }
@@ -203,8 +206,13 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("--list-models") {
         let provider = parse_provider(args.get(1).map(String::as_str));
+        let binary = match args.get(2).map(String::as_str) {
+            Some("--binary") => Some(args.get(3).map(PathBuf::from).unwrap_or_else(|| usage())),
+            Some(_) => usage(),
+            None => None,
+        };
         let exit_code = smol::block_on(async move {
-            match list_models(provider, None, Default::default(), Default::default()).await {
+            match list_models(provider, binary, Default::default(), Default::default()).await {
                 Ok(models) => {
                     println!("{}", serde_json::to_string_pretty(&models).unwrap());
                     0
@@ -219,6 +227,8 @@ fn main() {
     }
 
     let mut interaction_mode = InteractionMode::Build;
+    let mut binary = None;
+    let mut model = None;
     let mut effort = None;
     let mut resume = None;
     let mut fork = false;
@@ -239,6 +249,8 @@ fn main() {
                     None => usage(),
                 };
             }
+            "--binary" => binary = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage())),
+            "--model" => model = Some(args.next().unwrap_or_else(|| usage())),
             "--effort" => effort = Some(args.next().unwrap_or_else(|| usage())),
             "--resume" => {
                 let cursor = args.next().unwrap_or_else(|| usage());
@@ -288,15 +300,20 @@ fn main() {
     });
     let mut remaining: Vec<String> = positional.collect();
     let approval_mode = match remaining.first().map(String::as_str) {
-        Some("supervised" | "auto_edits" | "full_access") => match remaining.remove(0).as_str() {
-            "supervised" => ApprovalMode::Supervised,
-            "auto_edits" => ApprovalMode::AutoAcceptEdits,
-            _ => ApprovalMode::FullAccess,
-        },
+        Some("supervised" | "read_only" | "auto_edits" | "full_access") => {
+            match remaining.remove(0).as_str() {
+                "supervised" => ApprovalMode::Supervised,
+                "read_only" => ApprovalMode::ReadOnly,
+                "auto_edits" => ApprovalMode::AutoAcceptEdits,
+                _ => ApprovalMode::FullAccess,
+            }
+        }
         None => ApprovalMode::Supervised,
         Some(_) if provider == ProviderKind::Acp => ApprovalMode::Supervised,
         Some(other) => {
-            eprintln!("unknown approval mode {other:?}; use supervised|auto_edits|full_access");
+            eprintln!(
+                "unknown approval mode {other:?}; use supervised|read_only|auto_edits|full_access"
+            );
             std::process::exit(2);
         }
     };
@@ -341,6 +358,8 @@ fn main() {
             fork,
             leave_questions,
         },
+        binary,
+        model,
     ));
     std::process::exit(exit_code);
 }
@@ -362,6 +381,8 @@ async fn run_probe(
     probe_mode: ProbeMode,
     acp: Option<AcpAgent>,
     resumption: Resumption,
+    binary_path: Option<PathBuf>,
+    model: Option<String>,
 ) -> i32 {
     let option_selections = effort
         .iter()
@@ -370,16 +391,16 @@ async fn run_probe(
             value: serde_json::Value::String(value.clone()),
         })
         .collect();
-    let model = match (provider, effort.is_some()) {
+    let model = model.or_else(|| match (provider, effort.is_some()) {
         (ProviderKind::ClaudeCode, true) => Some("claude-opus-4-8".to_string()),
         _ => None,
-    };
+    });
     let opts = SessionOptions {
         cwd,
         model,
         resume: resumption.resume,
         fork: resumption.fork,
-        binary_path: None,
+        binary_path,
         approval_mode,
         option_selections,
         interaction_mode,

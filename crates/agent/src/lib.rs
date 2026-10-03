@@ -1189,6 +1189,8 @@ pub async fn list_models(
 /// - pi: a bundled fail-closed tool-call extension in front of RPC extension UI.
 /// - OpenCode: `OPENCODE_PERMISSION` rules plus permission reply endpoints.
 /// - Grok: its `--permission-mode` at launch.
+/// - Cursor: `--force` at launch for FullAccess; otherwise its own permission
+///   requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
