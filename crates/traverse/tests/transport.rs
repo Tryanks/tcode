@@ -1,4 +1,4 @@
-//! Two in-process endpoints over loopback: no relay, no discovery, no network.
+//! Two in-process endpoints using native direct-path selection, without a relay.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -113,38 +113,48 @@ fn device(dir: &TestDir, name: &str) -> DeviceIdentity {
     device
 }
 
-/// Loopback links are carried directly, and the state says so.
-fn connected_directly() -> ConnectionState {
-    ConnectionState::Connected {
-        path: Some(tcode_protocol::PathInfo {
-            direct: true,
-            relay: None,
-            lan: true,
-            probing_direct: false,
-        }),
-    }
+// Native multipath may select a global interface even between local peers.
+fn connected_directly(state: &ConnectionState) -> bool {
+    matches!(
+        state,
+        ConnectionState::Connected {
+            path: Some(tcode_protocol::PathInfo {
+                direct: true,
+                relay: None,
+                probing_direct: false,
+                ..
+            }),
+        }
+    )
 }
 
-fn syncing_directly() -> ConnectionState {
-    let ConnectionState::Connected { path } = connected_directly() else {
-        unreachable!()
-    };
-    ConnectionState::Syncing { path }
+fn syncing_directly(state: &ConnectionState) -> bool {
+    matches!(
+        state,
+        ConnectionState::Syncing {
+            path: Some(tcode_protocol::PathInfo {
+                direct: true,
+                relay: None,
+                probing_direct: false,
+                ..
+            }),
+        }
+    )
 }
 
-fn wait_state(transport: &Transport, wanted: ConnectionState) {
+fn wait_state(transport: &Transport, wanted: impl Fn(&ConnectionState) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
     while Instant::now() < deadline {
         if let Ok(state) = transport.state.try_recv() {
-            if state == wanted {
+            if wanted(&state) {
                 return;
             }
             seen.push(state);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("did not observe state {wanted:?}; saw {seen:?}");
+    panic!("did not observe the wanted state; saw {seen:?}");
 }
 
 fn recv_type(transport: &Transport, kind: &str, id: Option<u64>) -> Value {
@@ -242,12 +252,12 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     assert_eq!(stored["devices"][0]["id"], phone.endpoint_id().to_string());
 
     let stranger = tcode_traverse::connect(&paired, &other);
-    wait_state(
-        &stranger,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
-        },
-    );
+    wait_state(&stranger, |state| {
+        state
+            == &ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected,
+            }
+    });
     stranger.to_host.close();
 
     host.set_pairing_enabled(false);
@@ -431,7 +441,7 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
 /// A self-hosted instance that cannot be reached is not a reason to stay
 /// off the LAN: the machine hosts with no relay and no lookup, the device
 /// fetches the same manifest and fails the same way, and pairing and
-/// connecting over loopback still work. The official service is never
+/// direct connections still work. The official service is never
 /// substituted on either side.
 #[test]
 fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
@@ -458,10 +468,10 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     assert_eq!(paired.traverse.as_deref(), Some(dead.as_str()));
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, syncing_directly());
+    wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "ack", Some(1));
-    wait_state(&client, connected_directly());
+    wait_state(&client, connected_directly);
     assert!(
         phone.relays().is_empty(),
         "the device took no relay from anywhere"
@@ -485,14 +495,17 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, syncing_directly());
+    wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "ack", Some(1));
-    wait_state(&client, connected_directly());
+    wait_state(&client, connected_directly);
 
     std::thread::sleep(Duration::from_millis(NATIVE_IDLE_MS + 2_000));
     while let Ok(state) = client.state.try_recv() {
-        assert_eq!(state, connected_directly(), "the idle link stayed up");
+        assert!(
+            connected_directly(&state),
+            "the idle link stayed up: {state:?}"
+        );
     }
     let ping = json!({"id": 2, "payload": {"type": "query", "content": {"type": "ping"}}});
     client.to_host.send_blocking(ping.to_string()).unwrap();
@@ -516,21 +529,21 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     let host_b = tcode_traverse::pair_blocking(&minted.invite, &device_b).unwrap();
     let client_a = tcode_traverse::connect(&host_a, &device_a);
     let client_b = tcode_traverse::connect(&host_b, &device_b);
-    wait_state(&client_a, syncing_directly());
-    wait_state(&client_b, syncing_directly());
+    wait_state(&client_a, syncing_directly);
+    wait_state(&client_b, syncing_directly);
     client_a.to_host.send_blocking(subscribe(10)).unwrap();
     client_b.to_host.send_blocking(subscribe(20)).unwrap();
     recv_type(&client_a, "event", None);
     recv_type(&client_b, "event", None);
     recv_type(&client_a, "ack", Some(10));
     recv_type(&client_b, "ack", Some(20));
-    wait_state(&client_a, connected_directly());
-    wait_state(&client_b, connected_directly());
+    wait_state(&client_a, connected_directly);
+    wait_state(&client_b, connected_directly);
     let live = host.devices();
     assert!(
         live.iter()
             .all(|device| device.live.as_ref().is_some_and(|live| live.direct)),
-        "loopback connections are direct: {live:?}"
+        "the connections are direct: {live:?}"
     );
 
     let create = json!({
@@ -611,7 +624,7 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, syncing_directly());
+    wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "ack", Some(1));
     assert!(host.devices()[0].live.is_some());
@@ -638,26 +651,26 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     client.to_host.send_blocking(subscribe(2)).unwrap();
     recv_type(&client, "ack", Some(2));
     let again = tcode_traverse::connect(&paired, &phone);
-    wait_state(&again, syncing_directly());
+    wait_state(&again, syncing_directly);
     again.to_host.close();
     std::fs::remove_dir(&blocker).unwrap();
 
     host.revoke(&phone.endpoint_id().to_string()).unwrap();
-    wait_state(
-        &client,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
-        },
-    );
+    wait_state(&client, |state| {
+        state
+            == &ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected,
+            }
+    });
     assert!(host.devices().is_empty());
     client.to_host.close();
     let again = tcode_traverse::connect(&paired, &phone);
-    wait_state(
-        &again,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
-        },
-    );
+    wait_state(&again, |state| {
+        state
+            == &ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected,
+            }
+    });
     again.to_host.close();
     host.shutdown();
 }
@@ -677,22 +690,22 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     let minted = host.new_invitation();
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
-    wait_state(&client, syncing_directly());
+    wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
     recv_type(&client, "event", None);
-    wait_state(&client, connected_directly());
+    wait_state(&client, connected_directly);
     let endpoint_id = host.endpoint_id();
 
     host.set_pairing_enabled(false);
     host.shutdown();
-    wait_state(
-        &client,
-        ConnectionState::Reconnecting {
-            // This link lived less than 30 seconds, so it must not reset retry history.
-            attempt: 2,
-            reason: Some(ConnectionFailure::HostClosed),
-        },
-    );
+    wait_state(&client, |state| {
+        state
+            == &ConnectionState::Reconnecting {
+                // This link lived less than 30 seconds, so it must not reset retry history.
+                attempt: 2,
+                reason: Some(ConnectionFailure::HostClosed),
+            }
+    });
     client
         .to_host
         .send_blocking(
@@ -733,7 +746,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-    wait_state(&client, connected_directly());
+    wait_state(&client, connected_directly);
     let deadline = Instant::now() + Duration::from_secs(5);
     while subscribe_count.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
