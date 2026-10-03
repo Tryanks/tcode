@@ -702,7 +702,7 @@ impl UserInputDelivery {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputQuestion {
     /// The answer key. Claude and Grok: the complete question text (both index
-    /// answers by question text). Codex: the native question id.
+    /// answers by question text). Codex and Cursor: the native question id.
     pub id: String,
     pub header: String,
     pub question: String,
@@ -818,6 +818,8 @@ pub async fn list_models(
 /// - OpenCode: `OPENCODE_PERMISSION` rules plus permission reply endpoints.
 /// - Grok: `--permission-mode` default / bypassPermissions at launch; under
 ///   AutoAcceptEdits tcode approves Grok's edit permission requests once.
+/// - Cursor: `--force` at launch for FullAccess; otherwise its own permission
+///   requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
