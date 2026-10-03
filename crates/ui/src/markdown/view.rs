@@ -615,6 +615,21 @@ mod tests {
         assert_eq!(selected, lines[5..].join("\n"));
     }
 
+    #[gpui::test]
+    fn mermaid_fence_paints_a_diagram_and_unparsable_source_stays_code(cx: &mut TestAppContext) {
+        let (_, cx) = open_timeline_row(
+            "```mermaid\nflowchart LR\n  A --> B\n```\n\n```mermaid\nnot a diagram\n```",
+            cx,
+        );
+        assert!(cx.debug_bounds("markdown-mermaid-root-0").is_some());
+        assert!(cx.debug_bounds("markdown-mermaid-root-1").is_none());
+        let fallback = cx.debug_bounds("markdown-code-line-0");
+        assert!(
+            fallback.is_some(),
+            "the fence that does not parse keeps its code"
+        );
+    }
+
     fn open_timeline_row<'a>(
         source: &str,
         cx: &'a mut TestAppContext,

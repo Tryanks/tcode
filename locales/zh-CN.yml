@@ -113,6 +113,7 @@ markdown:
   path_copy_relative: "复制相对路径"
   code_copy: "复制代码"
   image_copy_address: "复制图片地址"
+  mermaid_diagram: "Mermaid 图表"
 sidebar:
   parent_unavailable: "（父对话不可用）"
   collapse: "折叠侧边栏"
