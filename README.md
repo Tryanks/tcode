@@ -6,7 +6,7 @@
 
 **A native GUI for the terminal coding agents you already use.**
 
-Claude Code, Codex, pi, OpenCode, and any agent that speaks ACP — one window,
+Claude Code, Codex, pi, OpenCode, Cursor, Grok, and any agent that speaks ACP — one window,
 on your desktop, your phone, or in a browser.
 
 [Download](https://github.com/Tryanks/tcode/releases) ·
@@ -78,6 +78,8 @@ and a live plan/task panel.
 | [Codex](https://developers.openai.com/codex/cli) | `codex` on your `PATH` |
 | [pi](https://github.com/earendil-works/pi) | `pi` on your `PATH` |
 | [OpenCode](https://opencode.ai) | `opencode` on your `PATH` |
+| [Cursor](https://cursor.com/cli) | `cursor-agent` on your `PATH` (sessions are not available yet) |
+| [Grok](https://x.ai) | `grok` on your `PATH` |
 
 **Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
 marketplace backed by the official ACP registry.
@@ -179,7 +181,7 @@ also include a `SHA256SUMS.txt` file.
 | Browser | Embedded in the headless release; open the HTTP link it prints (HTTPS only through your own tunnel). No separate signed app package |
 
 **2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.
-Make sure `claude`, `codex`, `pi` or `opencode` is on your `PATH` — or install an ACP agent from
+Make sure `claude`, `codex`, `pi`, `opencode` or `grok` is on your `PATH` — or install an ACP agent from
 the marketplace once Tcode is running.
 
 **3. Add a project and start a thread.** Point Tcode at a directory, type, send.

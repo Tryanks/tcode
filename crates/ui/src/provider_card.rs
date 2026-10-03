@@ -431,6 +431,8 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
         ProviderKind::Codex => ("icons/openai.svg", None),
         ProviderKind::Pi => ("icons/pi.svg", None),
         ProviderKind::OpenCode => ("icons/opencode.svg", None),
+        ProviderKind::Cursor => ("icons/cursor.svg", None),
+        ProviderKind::Grok => ("icons/grok.svg", None),
         ProviderKind::Acp => return Icon::empty(),
     };
     Icon::empty()
