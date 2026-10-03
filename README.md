@@ -78,7 +78,7 @@ and a live plan/task panel.
 | [Codex](https://developers.openai.com/codex/cli) | `codex` on your `PATH` |
 | [pi](https://github.com/earendil-works/pi) | `pi` on your `PATH` |
 | [OpenCode](https://opencode.ai) | `opencode` on your `PATH` |
-| [Cursor](https://cursor.com/cli) | `cursor-agent` on your `PATH` (sessions are not available yet) |
+| [Cursor](https://cursor.com/cli) | `cursor-agent` on your `PATH` |
 | [Grok](https://x.ai) | `grok` on your `PATH` |
 
 **Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
