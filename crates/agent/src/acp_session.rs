@@ -1223,9 +1223,9 @@ pub(crate) fn prompt_status(
 }
 
 /// Reports an agent closing (or breaking) stdout while still handing the bytes
-/// to the SDK transport. The 1.2 `ByteStreams` component treats a clean EOF as
-/// a completed input stream, so observing it here preserves tcode's immediate
-/// `SessionClosed` behavior instead of leaving the command loop waiting.
+/// to the SDK transport. The SDK's `ByteStreams` treats a clean EOF as a
+/// completed input stream, which does not end the command loop; observed here,
+/// it closes the session at once.
 struct ObservedReader {
     inner: smol::process::ChildStdout,
     done: Sender<String>,
@@ -1488,8 +1488,8 @@ fn missing_mode_warning(mode: InteractionMode) -> AgentEvent {
     }
 }
 
-/// Map our four fixed decisions onto the agent's own permission options (so the
-/// existing approval UI keeps working), and pass an offered `Option(id)` through.
+/// Map the approval UI's four fixed decisions onto the agent's own permission
+/// options, and pass an offered `Option(id)` through.
 ///
 /// An agent's `allow_always`/`reject_always` options record a rule in its own
 /// persistent allowlist, beyond this session. Only the user's explicit choice of
@@ -1641,9 +1641,9 @@ impl OptionRegistry {
             });
         }
         for option in config.unwrap_or_default() {
-            // Protocol 1.2 replaced the standalone model state/set-model RPC
-            // with categorized config options. Preserve tcode's canonical ids
-            // while routing both model and config changes through the config RPC.
+            // The mode and model categories keep tcode's canonical ids (the
+            // runtime reads `acp:mode`); every option, whatever its category,
+            // is set through `session/set_config_option`.
             let id = match option.category.as_ref() {
                 Some(acp::SessionConfigOptionCategory::Mode) => MODE_OPTION_ID.to_string(),
                 Some(acp::SessionConfigOptionCategory::Model) => MODEL_OPTION_ID.to_string(),
@@ -1979,9 +1979,8 @@ impl State {
         events
     }
 
-    /// Map one `session/update` onto canonical events, merging our tool-call and
-    /// option state along the way. Pure w.r.t. the outside world — this is the
-    /// function the mapping tests drive.
+    /// Map one `session/update` onto canonical events, merging the tool-call and
+    /// option state along the way.
     pub(crate) fn apply_update(&mut self, update: acp::SessionUpdate) -> Vec<AgentEvent> {
         match update {
             // The app synthesizes the canonical user message at send time;

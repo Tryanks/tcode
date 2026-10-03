@@ -208,7 +208,7 @@ impl Dialect for Registry {
 /// The resolved command line for a launch recipe.
 ///
 /// `Npx` becomes `npm exec --yes -- <package> <args…>` (the registry's own
-/// contract, and what zed runs); `Binary` / `Custom` run as given.
+/// contract); `Binary` / `Custom` run as given.
 fn launch_command(launch: &AcpLaunch) -> Result<(PathBuf, Vec<String>), AgentError> {
     match launch {
         AcpLaunch::Npx { package, args, .. } => {
