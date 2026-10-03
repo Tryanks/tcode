@@ -924,9 +924,9 @@ pub enum SessionCommand {
     /// native Plan mode.
     SetInteractionMode(InteractionMode),
     /// Set one of the agent's self-described options (see
-    /// [`AgentEvent::ProviderOptions`]). ACP routes it to `session/set_mode`,
-    /// `session/set_model` or `session/set_config_option` by the descriptor's
-    /// origin; the native providers ignore ids they do not know.
+    /// [`AgentEvent::ProviderOptions`]). An agent speaking ACP gets
+    /// `session/set_mode` or `session/set_config_option` by the descriptor's
+    /// origin; the other providers ignore ids they do not know.
     SetOption {
         id: String,
         value: serde_json::Value,
@@ -1491,10 +1491,10 @@ pub struct ApprovalRequest {
     pub id: String,
     pub turn_id: Option<String>,
     pub kind: ApprovalKind,
-    /// Agent-supplied choices. ACP agents send their own option list
-    /// (`session/request_permission`), so the UI renders exactly those buttons.
-    /// Empty for the native providers, whose four fixed decisions
-    /// ([`ApprovalDecision`]) apply instead.
+    /// Agent-supplied choices. An agent speaking ACP (a registry agent, Cursor
+    /// or Grok) sends its own option list (`session/request_permission`), so the
+    /// UI renders exactly those buttons. Empty for the other providers, whose
+    /// four fixed decisions ([`ApprovalDecision`]) apply instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ApprovalOption>,
 }
@@ -1554,7 +1554,7 @@ pub enum ApprovalDecision {
     /// `"User cancelled tool execution."` (no interrupt); Codex maps it to the
     /// protocol `{decision:"cancel"}` (deny + immediate turn interruption).
     Cancel,
-    /// Pick one of the agent's own [`ApprovalOption`]s (ACP only).
+    /// Pick one of the agent's own [`ApprovalOption`]s (agents speaking ACP).
     Option(String),
 }
 
