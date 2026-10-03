@@ -124,13 +124,33 @@ pub async fn probe_provider(
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_aggregator_auth)
         }
+        ProviderKind::Grok => run_capture_env(&program, &["models"], &env)
+            .await
+            .as_deref()
+            .and_then(parse_grok_models_auth),
         // Authentication over ACP is surfaced by the session protocol.
         // `cursor-agent status` ignores CURSOR_API_KEY, so it cannot tell a
         // signed-out Cursor from one using an API key.
-        ProviderKind::Cursor | ProviderKind::Grok | ProviderKind::Acp => None,
+        ProviderKind::Cursor | ProviderKind::Acp => None,
     };
 
     finalize_probe(checked_at, version, auth)
+}
+
+/// The first line of `grok models`. Only the states observed from Grok 1.0.46
+/// are recognized; the API-key line reports a configured key, which Grok does
+/// not validate there.
+fn parse_grok_models_auth(output: &str) -> Option<ProviderAuth> {
+    let (status, label) = match output.lines().next()?.trim() {
+        "You are not authenticated." => (AuthStatus::Unauthenticated, None),
+        "You are using XAI_API_KEY." => (AuthStatus::Authenticated, Some("xAI API Key")),
+        _ => return None,
+    };
+    Some(ProviderAuth {
+        status,
+        label: label.map(str::to_string),
+        email: None,
+    })
 }
 
 fn finalize_probe(
