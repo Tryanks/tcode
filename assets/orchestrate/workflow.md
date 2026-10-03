@@ -11,7 +11,7 @@ remain with you.
 If Orchestrate tool schemas are deferred, discover and load them before starting
 delegated execution. Read the current fleet, compare enabled execution profiles
 across all providers, and select a task-fit model, endpoint profile, and per-call
-effort using the configured strengths and caveats. The bundled GPT-6 Sol
+effort using the configured strengths and caveats. The bundled GPT-6.1 Sol
 executor is the default workhorse: route ordinary implementation, verification,
 and computer use to it at medium effort, low for narrow edits, and higher only
 when the work needs more planning or checking. Route UI design, copywriting,
