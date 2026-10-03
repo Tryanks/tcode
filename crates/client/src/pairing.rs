@@ -232,24 +232,6 @@ mod tests {
     const SECRET: &str = "AAECAwQFBgcICQoLDA0ODw";
 
     #[test]
-    fn secrets_are_sixteen_bytes_as_unpadded_base64url() {
-        assert_eq!(encode_secret(&std::array::from_fn(|i| i as u8)), SECRET);
-        assert!(valid_invitation_secret(SECRET));
-        assert!(valid_invitation_secret("__-_AAAAAAAAAAAAAAAAAA"));
-        for bad in [
-            "",
-            "123456",
-            "AAECAwQFBgcICQoLDA0OD",    // 15 bytes and a half
-            "AAECAwQFBgcICQoLDA0ODw==", // padded
-            "AAECAwQFBgcICQoLDA0ODx",   // non-canonical trailing bits
-            "AAECAwQFBgcICQoLDA0OD+",   // standard alphabet
-            "AAECAwQFBgcICQoLDA0ODwAA", // 18 bytes
-        ] {
-            assert!(!valid_invitation_secret(bad), "{bad:?}");
-        }
-    }
-
-    #[test]
     fn invitations_round_trip_and_reject_malformed_fields() {
         let wire = format!(
             "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&traverse=https%3A%2F%2Ftraverse.example%2F&relay=https%3A%2F%2Frelay.example%2F&addr=192.168.1.2%3A47420&addr=%5Bfd00%3A%3A2%5D%3A47420"
@@ -260,13 +242,34 @@ mod tests {
             PairInvite {
                 host_id: ID.into(),
                 name: "Desk".into(),
-                secret: SECRET.into(),
+                secret: encode_secret(&std::array::from_fn(|i| i as u8)),
                 traverse: Some("https://traverse.example/".into()),
                 relay: Some("https://relay.example/".into()),
                 addrs: vec!["192.168.1.2:47420".into(), "[fd00::2]:47420".into()],
             }
         );
         assert_eq!(pair_url(&invite), wire);
+        let url_safe_secret = "__-_AAAAAAAAAAAAAAAAAA";
+        assert_eq!(
+            parse_pair_url(&wire.replace(SECRET, url_safe_secret))
+                .unwrap()
+                .secret,
+            url_safe_secret
+        );
+        for bad in [
+            "",
+            "123456",
+            "AAECAwQFBgcICQoLDA0OD",
+            "AAECAwQFBgcICQoLDA0ODw%3D%3D",
+            "AAECAwQFBgcICQoLDA0ODx",
+            "AAECAwQFBgcICQoLDA0OD%2B",
+            "AAECAwQFBgcICQoLDA0ODwAA",
+        ] {
+            assert!(
+                parse_pair_url(&wire.replace(SECRET, bad)).is_none(),
+                "{bad:?}"
+            );
+        }
         let lan_only = parse_pair_url(&format!(
             "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&addr=10.0.0.4%3A5000&addr=10.0.0.4%3A5000"
         ))
@@ -284,11 +287,6 @@ mod tests {
             ("tcode://", "https://"),
             // A link from before the secret carried a six-digit code.
             (&format!("secret={SECRET}"), "code=123456"),
-            (&format!("secret={SECRET}"), "secret=123456"),
-            (
-                &format!("secret={SECRET}"),
-                "secret=AAECAwQFBgcICQoLDA0ODw%3D%3D",
-            ),
             (&format!("id={ID}"), "id=desk"),
             ("addr=192.168.1.2%3A47420", "addr=192.168.1.2"),
             ("addr=192.168.1.2%3A47420", "addr=192.168.1.2%3A0"),

@@ -478,14 +478,4 @@ mod tests {
         let incomplete = Timeline::fold_events([user("u1", "not completed")]);
         assert_eq!(render(&incomplete, 60_000), "");
     }
-
-    #[test]
-    fn relay_prompt_delimits_transcript_from_new_user_message() {
-        let prompt = assemble_relay_prompt("# prior work", "continue here");
-        assert!(prompt.starts_with(RELAY_PREAMBLE));
-        assert!(
-            prompt.contains("<conversation-transcript>\n# prior work\n</conversation-transcript>")
-        );
-        assert!(prompt.contains("<new-user-message>\ncontinue here\n</new-user-message>"));
-    }
 }

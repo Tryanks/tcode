@@ -2741,20 +2741,6 @@ mod tests {
     }
 
     #[test]
-    fn unselected_default_grid_has_no_selection_or_ansi_background_paint() {
-        let state = model(vec![cell('x', CellWidth::Narrow)]);
-        let palette = TerminalPalette {
-            foreground: rgb(0xffffff).into(),
-            background: rgb(0x000000).into(),
-            selection: rgb(0x336699).into(),
-        };
-
-        let paint = layout_grid(&state, palette, false, None, true, true);
-        assert!(paint.selections.is_empty());
-        assert!(paint.backgrounds.is_empty());
-    }
-
-    #[test]
     fn shell_quotes_paths() {
         assert_eq!(shell_quote("/tmp/a"), "'/tmp/a'");
         assert_eq!(shell_quote("/tmp/a b"), "'/tmp/a b'");
@@ -2831,35 +2817,67 @@ mod tests {
     }
 
     #[test]
-    fn batches_mixed_cjk_at_physical_column_boundaries() {
-        let cells = vec![
-            cell('a', CellWidth::Narrow),
-            cell('中', CellWidth::Wide),
-            cell(' ', CellWidth::Spacer),
-            cell('b', CellWidth::Narrow),
-            cell('文', CellWidth::Wide),
-            cell(' ', CellWidth::Spacer),
-            cell('c', CellWidth::Narrow),
-        ];
-        let state = model(cells);
+    fn grid_paint_preserves_column_boundaries_and_style() {
+        let mut undercurl = cell('x', CellWidth::Narrow);
+        undercurl.style = 1;
         let palette = TerminalPalette {
             foreground: rgb(0xffffff).into(),
             background: rgb(0x000000).into(),
             selection: rgb(0x336699).into(),
         };
-
-        let runs = layout_grid(&state, palette, false, None, true, true).text_runs;
-        let boundaries = runs
-            .iter()
-            .map(|run| (run.start_col, run.text.as_str(), run.cell_count))
-            .collect::<Vec<_>>();
-        assert_eq!(boundaries, vec![(0, "a中", 2), (3, "b文", 2), (6, "c", 1)]);
+        for (state, expected, wavy) in [
+            (
+                model(vec![
+                    cell('a', CellWidth::Narrow),
+                    cell('中', CellWidth::Wide),
+                    cell(' ', CellWidth::Spacer),
+                    cell('b', CellWidth::Narrow),
+                    cell('文', CellWidth::Wide),
+                    cell(' ', CellWidth::Spacer),
+                    cell('c', CellWidth::Narrow),
+                ]),
+                vec![(0, "a中", 2), (3, "b文", 2), (6, "c", 1)],
+                false,
+            ),
+            (
+                model(vec![cell('x', CellWidth::Narrow)]),
+                vec![(0, "x", 1)],
+                false,
+            ),
+            (
+                model_with_styles(
+                    vec![undercurl],
+                    vec![
+                        TerminalStyle::default(),
+                        TerminalStyle {
+                            flags: CellFlags::UNDERCURL.bits(),
+                            ..TerminalStyle::default()
+                        },
+                    ],
+                ),
+                vec![(0, "x", 1)],
+                true,
+            ),
+        ] {
+            let paint = layout_grid(&state, palette, false, None, true, true);
+            let boundaries = paint
+                .text_runs
+                .iter()
+                .map(|run| (run.start_col, run.text.as_str(), run.cell_count))
+                .collect::<Vec<_>>();
+            assert_eq!(boundaries, expected);
+            assert!(paint.selections.is_empty());
+            assert!(paint.backgrounds.is_empty());
+            for run in &paint.text_runs {
+                assert_eq!(run.style.underline, wavy);
+                assert_eq!(run.style.underline_wavy, wavy);
+            }
+        }
     }
 
-    /// A row the host did not replace keeps its cached layout; the delta that
-    /// does replace it forces a rebuild.
+    /// Clean deltas preserve painted text; replacement deltas update it.
     #[test]
-    fn row_cache_reuses_clean_rows_and_rebuilds_damaged_rows() {
+    fn cached_grid_paint_tracks_clean_and_replaced_rows() {
         let palette = TerminalPalette {
             foreground: rgb(0xffffff).into(),
             background: rgb(0x000000).into(),
@@ -2870,7 +2888,7 @@ mod tests {
         let first = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
         assert_eq!(first.text_runs[0].text, "a");
 
-        // A delta that changes nothing on this row leaves the cache alone.
+        // A delta that changes nothing on this row preserves its painted text.
         state.clear_damage();
         state.apply_delta(&idle_delta(1, 1));
         let cached = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
@@ -2897,33 +2915,6 @@ mod tests {
             rows,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn undercurl_maps_to_wavy_underline() {
-        let mut styled = cell('x', CellWidth::Narrow);
-        styled.style = 1;
-        let state = model_with_styles(
-            vec![styled],
-            vec![
-                TerminalStyle::default(),
-                TerminalStyle {
-                    flags: CellFlags::UNDERCURL.bits(),
-                    ..TerminalStyle::default()
-                },
-            ],
-        );
-        let palette = TerminalPalette {
-            foreground: rgb(0xffffff).into(),
-            background: rgb(0x000000).into(),
-            selection: rgb(0x336699).into(),
-        };
-
-        let run = layout_grid(&state, palette, false, None, true, true)
-            .text_runs
-            .remove(0);
-        assert!(run.style.underline);
-        assert!(run.style.underline_wavy);
     }
 
     #[test]

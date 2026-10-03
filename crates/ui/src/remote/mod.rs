@@ -1152,23 +1152,32 @@ mod tests {
                 )
             }
         }
+        let state = cx.new(|_| WindowState::new(false));
         let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            HostsProbe(cx.new(|cx| RemotePanel::new(None, state.clone(), window, cx)))
         });
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
         let draw = |cx: &mut gpui::VisualTestContext| {
             cx.run_until_parked();
             cx.update(|window, cx| {
+                window.refresh();
                 _ = window.draw(cx);
             });
         };
-        draw(cx);
-        assert!(
-            cx.debug_bounds("hosts-remote-settings").is_some(),
-            "with hosting off, the page leads to the setting"
-        );
-        assert!(cx.debug_bounds("remote-invitation").is_none());
+        for width in [1024., 393.] {
+            cx.simulate_resize(gpui::size(px(width), px(852.)));
+            state.update(cx, |state, cx| {
+                state.compact = width < 900.;
+                cx.notify();
+            });
+            draw(cx);
+            assert!(
+                cx.debug_bounds("hosts-remote-settings").is_some(),
+                "with hosting off, the page leads to the setting"
+            );
+            assert!(cx.debug_bounds("remote-invitation").is_none());
+            assert!(cx.debug_bounds("hosting-settings").is_none());
+        }
 
         let host = TraverseHost::start(
             mux,
@@ -1185,28 +1194,43 @@ mod tests {
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.adopt_host(host));
         });
-        draw(cx);
-        assert!(
-            cx.debug_bounds("remote-invitation").is_some(),
-            "hosting and accepting devices, the invitation is on the page"
-        );
-        assert!(cx.debug_bounds("hosts-remote-settings").is_none());
-        assert!(
-            cx.debug_bounds("hosting-settings").is_none(),
-            "the hosting controls stay in Settings"
-        );
+        for width in [1024., 393.] {
+            cx.simulate_resize(gpui::size(px(width), px(852.)));
+            state.update(cx, |state, cx| {
+                state.compact = width < 900.;
+                cx.notify();
+            });
+            draw(cx);
+            assert!(
+                cx.debug_bounds("remote-invitation").is_some(),
+                "hosting and accepting devices, the invitation is on the page"
+            );
+            assert!(cx.debug_bounds("hosts-remote-settings").is_none());
+            assert!(
+                cx.debug_bounds("hosting-settings").is_none(),
+                "the hosting controls stay in Settings"
+            );
+        }
 
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| {
                 controller.set_pairing_enabled(false)
             });
         });
-        draw(cx);
-        assert!(cx.debug_bounds("remote-invitation").is_none());
-        assert!(
-            cx.debug_bounds("hosts-remote-settings").is_some(),
-            "with pairing off, the page leads to the setting"
-        );
+        for width in [1024., 393.] {
+            cx.simulate_resize(gpui::size(px(width), px(852.)));
+            state.update(cx, |state, cx| {
+                state.compact = width < 900.;
+                cx.notify();
+            });
+            draw(cx);
+            assert!(cx.debug_bounds("remote-invitation").is_none());
+            assert!(
+                cx.debug_bounds("hosts-remote-settings").is_some(),
+                "with pairing off, the page leads to the setting"
+            );
+            assert!(cx.debug_bounds("hosting-settings").is_none());
+        }
 
         cx.update(|_, cx| {
             cx.update_global::<RemoteController, _>(|controller, _| controller.stop_hosting());
@@ -1217,6 +1241,7 @@ mod tests {
     #[cfg(feature = "remote-hosting")]
     #[gpui::test]
     fn superseded_pairing_does_not_overwrite_the_saved_machine(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let root = std::env::temp_dir().join(format!(
             "tcode-stale-pairing-{}",
             tcode_services::store::now_millis()
@@ -1238,6 +1263,28 @@ mod tests {
         probe.update_in(cx, |probe, window, cx| {
             probe.0.update(cx, |panel, cx| {
                 let old = panel.form.restart();
+                let current = panel.form.restart();
+                panel.finish_pair(
+                    old,
+                    Err("invalid or expired invitation".into()),
+                    "machine",
+                    window,
+                    cx,
+                );
+                assert!(panel.form.error.is_none());
+                assert!(client.load_hosts().is_empty());
+                panel.finish_pair(
+                    current,
+                    Err("invalid or expired invitation".into()),
+                    "machine",
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    panel.form.error.as_deref(),
+                    Some(crate::tr!("hosts.pair.rejected").as_ref())
+                );
+                assert!(client.load_hosts().is_empty());
                 let current = panel.form.restart();
                 panel.finish_pair(current, Ok(host("current pairing")), "machine", window, cx);
                 panel.finish_pair(old, Ok(host("superseded pairing")), "machine", window, cx);

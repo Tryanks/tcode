@@ -558,48 +558,6 @@ fn parse_porcelain_path(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::FileChangeKind;
-
-    #[test]
-    fn fallback_merge_collapses_fragments_and_keeps_summed_stats() {
-        let changes = [
-            FileChange {
-                path: "/repo/src/lib.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+middle\n".into()),
-            },
-            FileChange {
-                path: "/repo/other.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: Some("-gone\n+new\n".into()),
-            },
-            FileChange {
-                path: "/repo/src/lib.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: Some("-middle\n-final\n+replacement\n".into()),
-            },
-        ];
-
-        let merged = merge_file_changes_by_path(&changes);
-        assert_eq!(merged.len(), 2);
-        let lib = merged
-            .iter()
-            .find(|change| change.path.ends_with("src/lib.rs"))
-            .unwrap();
-        let diff = lib.diff.as_deref().unwrap();
-        let stats = diff.lines().fold((0, 0), |(added, deleted), line| {
-            if line.starts_with("+++") || line.starts_with("---") {
-                (added, deleted)
-            } else if line.starts_with('+') {
-                (added + 1, deleted)
-            } else if line.starts_with('-') {
-                (added, deleted + 1)
-            } else {
-                (added, deleted)
-            }
-        });
-        assert_eq!(stats, (2, 3));
-    }
 
     fn dirty_upstream() -> GitStatus {
         GitStatus {

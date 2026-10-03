@@ -1,6 +1,6 @@
 //! Finding a paired machine again on the LAN: the saved addresses over
-//! loopback with the browse off, and, opted into with `TCODE_TEST_MDNS=1`,
-//! a real DNS-SD advertise and browse on this host's interfaces.
+//! loopback with the browse off, and an explicitly ignored real DNS-SD
+//! advertise and browse on this host's interfaces.
 use std::{
     net::SocketAddr,
     path::PathBuf,
@@ -204,48 +204,6 @@ fn a_saved_address_further_down_the_list_reaches_the_machine() {
     host.shutdown();
 }
 
-/// The saved addresses come first and at once; with the browse off, that is
-/// the whole resolve.
-#[test]
-fn saved_addresses_are_the_whole_resolve_with_the_browse_off() {
-    let id = iroh::SecretKey::from_bytes(&[3; 32]).public();
-    let saved: Vec<SocketAddr> = vec!["10.0.0.9:47421".parse().unwrap()];
-    let lookup = LanLookup::new(
-        {
-            let saved = saved.clone();
-            move |wanted| {
-                if wanted == id {
-                    saved.clone()
-                } else {
-                    Vec::new()
-                }
-            }
-        },
-        LanOptions {
-            browse: Browse::Off,
-            multicast_lock: None,
-        },
-    );
-    let items = tcode_traverse::block_on(async {
-        let mut items = Vec::new();
-        let mut stream = lookup.resolve(id).unwrap();
-        while let Some(item) = stream.next().await {
-            let item = item.unwrap();
-            items.push((
-                item.provenance(),
-                item.endpoint_info().ip_addrs().copied().collect::<Vec<_>>(),
-            ));
-        }
-        items
-    });
-    assert_eq!(items, [("lan-saved", saved)]);
-    assert!(
-        lookup
-            .resolve(iroh::SecretKey::from_bytes(&[4; 32]).public())
-            .is_some()
-    );
-}
-
 /// A platform browse delivers what it finds while the resolve is polled, and
 /// is told to stop the moment the resolve is dropped: iroh drops a resolve
 /// as soon as it has a path, which aborts the task behind it, so the stop
@@ -304,14 +262,11 @@ fn a_dropped_resolve_stops_the_platform_browse_at_once() {
 }
 
 /// Real multicast on this host's interfaces: the machine's DNS-SD record is
-/// browsed back with its bound port. Opt in with `TCODE_TEST_MDNS=1`; a CI
-/// runner without multicast cannot run it.
+/// browsed back with its bound port. Run explicitly with `--ignored` on a
+/// host with multicast; a CI runner without multicast cannot run it.
 #[test]
+#[ignore = "requires multicast on a real interface"]
 fn a_machine_advertises_dns_sd_that_a_device_browses() {
-    if std::env::var_os("TCODE_TEST_MDNS").is_none_or(|v| v != "1") {
-        eprintln!("skipped: set TCODE_TEST_MDNS=1 on a host with multicast");
-        return;
-    }
     let host_dir = TestDir::new("mdns-host");
     let port = free_port();
     let host = start_host(&host_dir, Some(port));

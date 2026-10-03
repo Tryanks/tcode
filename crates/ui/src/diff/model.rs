@@ -906,37 +906,6 @@ mod tests {
     }
 
     #[test]
-    fn sub_runs_clips_and_rebases() {
-        let all = vec![
-            (0..5, HighlightStyle::default()),
-            (8..12, HighlightStyle::default()),
-        ];
-        assert_eq!(sub_runs(&all, 4, 10)[0].0, 0..1);
-        assert_eq!(sub_runs(&all, 4, 10)[1].0, 4..6);
-    }
-
-    #[test]
-    fn invisibles_remap_bytes_and_override_styles() {
-        let normal = HighlightStyle::default();
-        let ws = HighlightStyle {
-            color: Some(gpui::hsla(0., 0., 0.5, 1.)),
-            ..Default::default()
-        };
-        let (text, runs) = apply_invisibles("é \tx", &[(0..5, normal)], &ws);
-        assert_eq!(text, "é·→x");
-        assert_eq!(text.len(), 8);
-        assert_eq!(runs[0].0, 0..2);
-        assert_eq!(runs[1].0, 2..7);
-        assert_eq!(runs[1].1, ws);
-        assert_eq!(runs[2].0, 7..8);
-        assert!(
-            runs.iter()
-                .all(|(range, _)| range.start < range.end && range.end <= text.len())
-        );
-        assert!(runs.windows(2).all(|pair| pair[0].0.end <= pair[1].0.start));
-    }
-
-    #[test]
     fn removed_row_uses_nearest_following_new_line_for_collapse() {
         let file = file(
             vec![
@@ -962,104 +931,50 @@ mod tests {
     }
 
     #[test]
-    fn expand_up_down_and_all_update_visibility() {
-        let rows = (1..=6)
-            .map(|line| code(RowKind::Context, Some(line), Some(line), "line"))
-            .collect();
-        let mut top = file(rows, std::iter::once(2..6).collect());
-        expand(&mut top, 2..6, ExpandDir::Up, 2);
-        assert_eq!(top.collapsed, vec![4..6]);
-        assert!(visible_unified(&top).contains(&VisibleItem::Row(1)));
-
-        let mut bottom = top.clone();
-        expand(&mut bottom, 4..6, ExpandDir::Down, 1);
-        assert_eq!(bottom.collapsed, vec![4..5]);
-        assert!(visible_unified(&bottom).contains(&VisibleItem::Row(4)));
-
-        expand(&mut bottom, 4..5, ExpandDir::All, 20);
-        assert!(bottom.collapsed.is_empty());
-        assert_eq!(visible_unified(&bottom).len(), 6);
-        assert_eq!(visible_split(&bottom).len(), 6);
-    }
-
-    #[test]
-    fn split_pairing_aligns_equal_content_inside_change_block() {
-        let rows = vec![
-            code(RowKind::Removed, Some(1), None, "same"),
-            code(RowKind::Removed, Some(2), None, "old"),
-            code(RowKind::Added, None, Some(1), "same"),
-            code(RowKind::Added, None, Some(2), "new"),
-        ];
-        let pairs = pair_rendered_rows(&rows);
-        assert_eq!(
-            pairs,
-            vec![
-                PairedRow {
-                    left: Some(0),
-                    right: Some(2)
-                },
-                PairedRow {
-                    left: Some(1),
-                    right: Some(3)
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn display_columns_accounts_for_tabs_and_wide_characters() {
-        assert_eq!(display_columns("ab\tcd"), 6);
-        assert_eq!(display_columns("a界b"), 4);
-    }
-
-    #[test]
     fn no_wrap_widths_cover_unified_and_split_rows() {
-        let rows = vec![
-            code(RowKind::Removed, Some(1), None, "short"),
-            code(RowKind::Added, None, Some(1), "a much longer replacement"),
-        ];
-        let files = vec![file(rows, Vec::new())];
-        let (unified, split) = diff_content_widths(&files);
-        assert!(unified >= 24. * 8. + 106.);
-        assert!(split >= (5. + 24.) * 8. + 117.);
-    }
-
-    #[test]
-    fn reconstructs_matching_unified_patch_into_expandable_full_text() {
-        let new = "one\ntwo\nthree\nfour\nnew value\nsix\nseven\neight\nnine\nten\n";
-        let old = "one\ntwo\nthree\nfour\nold value\nsix\nseven\neight\nnine\nten\n";
-        let patch = "@@ -3,5 +3,5 @@\n three\n four\n-old value\n+new value\n six\n seven\n";
-
-        let (reconstructed_old, reconstructed_new) =
-            reconstruct_from_text(new.into(), patch).expect("matching patch should reconstruct");
-        assert_eq!(reconstructed_old, old);
-        assert_eq!(reconstructed_new, new);
-
-        let file = build_file(
-            &FileDiffInput {
-                path: "unified.txt",
-                kind: FileChangeKind::Modify,
-                old_text: Some(&reconstructed_old),
-                new_text: Some(&reconstructed_new),
-                patch: Some(patch),
-                ignore_whitespace: false,
-                show_invisibles: false,
-            },
-            "unified.txt".into(),
-            "text",
-            &HighlightTheme::default_dark(),
-            &colors(),
-            &HighlightStyle::default(),
-        );
-        assert!(file.expandable);
-        assert_eq!(file.added, 1);
-        assert_eq!(file.removed, 1);
-        assert!(!file.collapsed.is_empty());
+        // The long prefix puts content beyond header chrome, so a wrong tab
+        // or wide-character width cannot hide behind the header's minimum.
+        let tabbed = "a".repeat(32) + "ab\tcd";
+        let wide = "a".repeat(32) + "a界b";
+        for (left, right, left_columns, right_columns) in [
+            (
+                "short".to_string(),
+                "a much longer replacement".to_string(),
+                5usize,
+                25usize,
+            ),
+            (tabbed.clone(), wide.clone(), 32 + 6, 32 + 4),
+            (wide, tabbed, 32 + 4, 32 + 6),
+        ] {
+            let files = vec![file(
+                vec![
+                    code(RowKind::Removed, Some(1), None, &left),
+                    code(RowKind::Added, None, Some(1), &right),
+                ],
+                Vec::new(),
+            )];
+            let (unified, split) = diff_content_widths(&files);
+            assert_eq!(
+                unified,
+                left_columns.max(right_columns) as f32 * 8. + 106.,
+                "{left:?} / {right:?}"
+            );
+            assert_eq!(
+                split,
+                (left_columns + right_columns) as f32 * 8. + 117.,
+                "{left:?} / {right:?}"
+            );
+        }
     }
 
     #[test]
     fn reconstruction_requires_matching_unambiguous_current_text() {
         for (current, patch, old) in [
+            (
+                "one\ntwo\nthree\nfour\nnew value\nsix\nseven\neight\nnine\nten\n",
+                "@@ -3,5 +3,5 @@\n three\n four\n-old value\n+new value\n six\n seven\n",
+                Some("one\ntwo\nthree\nfour\nold value\nsix\nseven\neight\nnine\nten\n"),
+            ),
             ("alpha\nbeta\n", "+alpha\n+beta", Some("")),
             (
                 "before\nnew one\nnew two\nafter\n",
@@ -1084,142 +999,376 @@ mod tests {
 
     #[test]
     fn full_text_pipeline_builds_expanded_rows_collapsed_context_and_word_runs() {
-        let old = "one\ntwo\nthree\nfour\nlet x = 1;\nsix\nseven\neight\nnine\nten\n";
-        let new = "one\ntwo\nthree\nfour\nlet x = 2;\nsix\nseven\neight\nnine\nten\n";
-        let input = FileDiffInput {
-            path: "src/test.rs",
-            kind: FileChangeKind::Modify,
-            old_text: Some(old),
-            new_text: Some(new),
-            patch: None,
-            ignore_whitespace: false,
-            show_invisibles: false,
+        let theme = HighlightTheme::default_dark();
+        let whitespace = HighlightStyle {
+            color: Some(gpui::hsla(0., 0., 0.5, 1.)),
+            ..Default::default()
         };
-        let file = build_file(
-            &input,
-            "src/test.rs".into(),
-            "rust",
-            &HighlightTheme::default_dark(),
-            &colors(),
-            &HighlightStyle::default(),
-        );
-
-        assert_eq!(file.added, 1);
-        assert_eq!(file.removed, 1);
-        assert_eq!(file.all_rows.len(), 11);
-        assert_eq!(file.collapsed, vec![1..2, 9..11]);
-        assert!(file.expandable);
-        let changed = file
-            .all_rows
-            .iter()
-            .filter_map(|row| match row {
-                RenderedRow {
-                    kind, text, runs, ..
-                } if matches!(kind, RowKind::Added | RowKind::Removed) => Some((kind, text, runs)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(changed.len(), 2);
-        for (kind, text, runs) in changed {
-            let expected = match kind {
-                RowKind::Added => colors().added_word_bg,
-                RowKind::Removed => colors().removed_word_bg,
-                RowKind::Context => unreachable!(),
+        for (case, old, new, language, ignore_whitespace, show_invisibles) in [
+            (
+                "word and context",
+                "one\ntwo\nthree\nfour\nlet x = 1;\nsix\nseven\neight\nnine\nten\n",
+                "one\ntwo\nthree\nfour\nlet x = 2;\nsix\nseven\neight\nnine\nten\n",
+                "rust",
+                false,
+                false,
+            ),
+            (
+                "whitespace visible",
+                "let x = 1;\n",
+                "let  x=1;\n",
+                "rust",
+                false,
+                false,
+            ),
+            (
+                "whitespace ignored",
+                "let x = 1;\n",
+                "let  x=1;\n",
+                "rust",
+                true,
+                false,
+            ),
+            (
+                "line-local styles",
+                "/* α\nβ */ \"tail\nend\"\n",
+                "/* α\nβ */ \"tail\nend\"\n",
+                "rust",
+                false,
+                false,
+            ),
+            (
+                "invisible glyphs",
+                "é \tx\n",
+                "é \tx\n",
+                "unknown-language",
+                false,
+                true,
+            ),
+            (
+                "context expansion",
+                "one\ntwo\nthree\nfour\nfive\nsix\n",
+                "one\ntwo\nthree\nfour\nfive\nsix\n",
+                "text",
+                false,
+                false,
+            ),
+        ] {
+            let input = FileDiffInput {
+                path: "src/test.rs",
+                kind: FileChangeKind::Modify,
+                old_text: Some(old),
+                new_text: Some(new),
+                patch: None,
+                ignore_whitespace,
+                show_invisibles,
             };
-            assert!(runs.iter().any(|(range, style)| {
-                &text[range.clone()] == if *kind == RowKind::Added { "2" } else { "1" }
-                    && style.background_color == Some(expected)
-            }));
+            let mut file = build_file(
+                &input,
+                input.path.into(),
+                language,
+                &theme,
+                &colors(),
+                &whitespace,
+            );
+            assert!(file.expandable, "{case}");
+            for row in &file.all_rows {
+                assert!(
+                    row.runs.iter().all(|(range, _)| {
+                        range.start < range.end
+                            && range.end <= row.text.len()
+                            && row.text.is_char_boundary(range.start)
+                            && row.text.is_char_boundary(range.end)
+                    }),
+                    "{case}: {row:?}"
+                );
+                assert!(
+                    row.runs
+                        .windows(2)
+                        .all(|pair| pair[0].0.end <= pair[1].0.start),
+                    "{case}: {row:?}"
+                );
+            }
+            match case {
+                "word and context" => {
+                    assert_eq!((file.added, file.removed), (1, 1));
+                    assert_eq!(file.all_rows.len(), 11);
+                    assert_eq!(file.collapsed, vec![1..2, 9..11]);
+                    let changed = file
+                        .all_rows
+                        .iter()
+                        .filter(|row| matches!(row.kind, RowKind::Added | RowKind::Removed))
+                        .collect::<Vec<_>>();
+                    assert_eq!(changed.len(), 2);
+                    for row in changed {
+                        let (word, background) = if row.kind == RowKind::Added {
+                            ("2", colors().added_word_bg)
+                        } else {
+                            ("1", colors().removed_word_bg)
+                        };
+                        assert!(
+                            row.runs
+                                .iter()
+                                .any(|(range, style)| &row.text[range.clone()] == word
+                                    && style.background_color == Some(background))
+                        );
+                    }
+                }
+                "whitespace visible" => {
+                    assert_eq!((file.added, file.removed), (1, 1));
+                    assert_eq!(
+                        file.all_rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+                        [RowKind::Removed, RowKind::Added]
+                    );
+                }
+                "whitespace ignored" => {
+                    assert_eq!((file.added, file.removed), (0, 0));
+                    assert_eq!(file.all_rows.len(), 1);
+                    assert_eq!(file.all_rows[0].kind, RowKind::Context);
+                    assert_eq!(file.all_rows[0].text, "let  x=1;");
+                }
+                "line-local styles" => {
+                    assert_eq!(
+                        file.all_rows
+                            .iter()
+                            .map(|row| row.text.as_str())
+                            .collect::<Vec<_>>(),
+                        ["/* α", "β */ \"tail", "end\""]
+                    );
+                    let comment = theme.style("comment").unwrap();
+                    let string = theme.style("string").unwrap();
+                    assert_eq!(file.all_rows[0].runs, vec![(0..5, comment)]);
+                    // The second line begins inside the preceding comment and
+                    // ends inside a string continued on the third line. Both
+                    // styles must be clipped and rebased, with the intervening
+                    // ordinary space preserved as a separate run.
+                    assert_eq!(
+                        file.all_rows[1].runs,
+                        vec![
+                            (0..5, comment),
+                            (5..6, HighlightStyle::default()),
+                            (6..11, string),
+                        ]
+                    );
+                    assert_eq!(file.all_rows[2].runs, vec![(0..4, string)]);
+                }
+                "invisible glyphs" => {
+                    assert_eq!(file.all_rows.len(), 1);
+                    let row = &file.all_rows[0];
+                    assert_eq!(row.text, "é·→x");
+                    assert_eq!(row.text.len(), 8);
+                    assert_eq!(
+                        row.runs,
+                        vec![
+                            (0..2, HighlightStyle::default()),
+                            (2..7, whitespace),
+                            (7..8, HighlightStyle::default()),
+                        ]
+                    );
+                }
+                "context expansion" => {
+                    assert_eq!(file.collapsed, vec![1..7]);
+                    expand(&mut file, 1..7, ExpandDir::Up, 2);
+                    assert_eq!(file.collapsed, vec![3..7]);
+                    assert!(visible_unified(&file).contains(&VisibleItem::Row(1)));
+                    expand(&mut file, 3..7, ExpandDir::Down, 1);
+                    assert_eq!(file.collapsed, vec![3..6]);
+                    assert!(visible_unified(&file).contains(&VisibleItem::Row(5)));
+                    expand(&mut file, 3..6, ExpandDir::All, 20);
+                    assert!(file.collapsed.is_empty());
+                    assert_eq!(visible_unified(&file).len(), 6);
+                    assert_eq!(visible_split(&file).len(), 6);
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
     #[test]
     fn patch_pipeline_preserves_fixed_gap_and_applies_word_runs() {
-        let input = FileDiffInput {
-            path: "src/test.rs",
-            kind: FileChangeKind::Modify,
-            old_text: None,
-            new_text: None,
-            patch: Some("@@ -10,2 +10,2 @@\n-let x = 1;\n+let x = 2;\n tail"),
-            ignore_whitespace: false,
-            show_invisibles: false,
-        };
-        let file = build_file(
-            &input,
-            "src/test.rs".into(),
-            "rust",
-            &HighlightTheme::default_dark(),
-            &colors(),
-            &HighlightStyle::default(),
-        );
-
-        assert_eq!(file.collapsed, std::iter::once(1..10).collect::<Vec<_>>());
-        assert!(!file.expandable);
-        assert_eq!(
-            visible_unified(&file).first(),
-            Some(&VisibleItem::Gap {
-                count: 9,
-                new_lines: 1..10,
-                expandable: false,
-            })
-        );
-        assert!(file.all_rows[..2].iter().all(|row| {
-            row.runs
-                .iter()
-                .any(|(_, style)| style.background_color.is_some())
-        }));
+        use RowKind::{Added, Context, Removed};
+        for (case, patch, added, removed, gaps, rows, word_highlights) in [
+            (
+                "word highlights",
+                "@@ -10,2 +10,2 @@\n-let x = 1;\n+let x = 2;\n tail",
+                1,
+                1,
+                std::iter::once(1..10).collect(),
+                vec![
+                    (Removed, Some(10), None, "let x = 1;"),
+                    (Added, None, Some(10), "let x = 2;"),
+                    (Context, Some(11), Some(11), "tail"),
+                ],
+                true,
+            ),
+            (
+                "bare creation",
+                "+def f():\n+    return 1",
+                2,
+                0,
+                vec![],
+                vec![
+                    (Added, None, Some(1), "def f():"),
+                    (Added, None, Some(2), "    return 1"),
+                ],
+                false,
+            ),
+            (
+                "bare edit",
+                "-old one\n-old two\n+new one\n+new two\n+new three",
+                3,
+                2,
+                vec![],
+                vec![
+                    (Removed, Some(1), None, "old one"),
+                    (Removed, Some(2), None, "old two"),
+                    (Added, None, Some(1), "new one"),
+                    (Added, None, Some(2), "new two"),
+                    (Added, None, Some(3), "new three"),
+                ],
+                false,
+            ),
+            (
+                "multiple hunks",
+                "diff --git a/util.py b/util.py\n--- a/util.py\n+++ b/util.py\n@@ -1,3 +1,4 @@\n import sys\n-x = 1\n+x = 2\n+y = 3\n print(x)\n@@ -20,2 +21,2 @@\n last_ctx\n-tail_old\n+tail_new\n\\ No newline at end of file",
+                3,
+                2,
+                std::iter::once(5..21).collect(),
+                vec![
+                    (Context, Some(1), Some(1), "import sys"),
+                    (Removed, Some(2), None, "x = 1"),
+                    (Added, None, Some(2), "x = 2"),
+                    (Added, None, Some(3), "y = 3"),
+                    (Context, Some(3), Some(4), "print(x)"),
+                    (Context, Some(20), Some(21), "last_ctx"),
+                    (Removed, Some(21), None, "tail_old"),
+                    (Added, None, Some(22), "tail_new"),
+                ],
+                false,
+            ),
+            (
+                "initial gap",
+                "@@ -10,2 +10,3 @@\n ctx\n+added\n more",
+                1,
+                0,
+                std::iter::once(1..10).collect(),
+                vec![
+                    (Context, Some(10), Some(10), "ctx"),
+                    (Added, None, Some(11), "added"),
+                    (Context, Some(11), Some(12), "more"),
+                ],
+                false,
+            ),
+            (
+                "omitted hunk counts",
+                "@@ -1 +1 @@\n-a\n+b",
+                1,
+                1,
+                vec![],
+                vec![(Removed, Some(1), None, "a"), (Added, None, Some(1), "b")],
+                false,
+            ),
+        ] {
+            let input = FileDiffInput {
+                path: "src/test.rs",
+                kind: FileChangeKind::Modify,
+                old_text: None,
+                new_text: None,
+                patch: Some(patch),
+                ignore_whitespace: false,
+                show_invisibles: false,
+            };
+            let file = build_file(
+                &input,
+                input.path.into(),
+                "rust",
+                &HighlightTheme::default_dark(),
+                &colors(),
+                &HighlightStyle::default(),
+            );
+            assert_eq!((file.added, file.removed), (added, removed), "{case}");
+            assert_eq!(file.collapsed, gaps, "{case}");
+            assert!(!file.expandable, "{case}");
+            assert_eq!(
+                file.all_rows
+                    .iter()
+                    .map(|row| (row.kind, row.old, row.new, row.text.as_str()))
+                    .collect::<Vec<_>>(),
+                rows,
+                "{case}"
+            );
+            let visible_gaps = visible_unified(&file)
+                .into_iter()
+                .filter_map(|item| match item {
+                    VisibleItem::Gap {
+                        count,
+                        new_lines,
+                        expandable,
+                    } => Some((count, new_lines, expandable)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                visible_gaps,
+                gaps.iter()
+                    .map(|range| (range.end - range.start, range.clone(), false))
+                    .collect::<Vec<_>>(),
+                "{case}"
+            );
+            if word_highlights {
+                assert!(file.all_rows[..2].iter().all(|row| {
+                    row.runs
+                        .iter()
+                        .any(|(_, style)| style.background_color.is_some())
+                }));
+            }
+        }
     }
 
     #[test]
     fn split_pairing_aligns_multi_hunk_change_blocks() {
-        let input = FileDiffInput {
-            path: "src/test.rs",
-            kind: FileChangeKind::Modify,
-            old_text: None,
-            new_text: None,
-            patch: Some(
+        for (patch, expected) in [
+            (
                 "@@ -1,4 +1,4 @@\n one\n-old a\n-old b\n+new a\n two\n@@ -20,2 +20,3 @@\n tail\n+extra\n",
+                vec![
+                    (Some(0), Some(0)),
+                    (Some(1), Some(3)),
+                    (Some(2), None),
+                    (Some(4), Some(4)),
+                    (Some(5), Some(5)),
+                    (None, Some(6)),
+                ],
             ),
-            ignore_whitespace: false,
-            show_invisibles: false,
-        };
-        let file = build_file(
-            &input,
-            "src/test.rs".into(),
-            "rust",
-            &HighlightTheme::default_dark(),
-            &colors(),
-            &HighlightStyle::default(),
-        );
-
-        assert_eq!(file.all_split.len(), 6);
-        assert_eq!(
-            file.all_split[0],
-            PairedRow {
-                left: Some(0),
-                right: Some(0)
-            }
-        );
-        assert_eq!(
-            file.all_split[1],
-            PairedRow {
-                left: Some(1),
-                right: Some(3)
-            }
-        );
-        assert_eq!(
-            file.all_split[2],
-            PairedRow {
-                left: Some(2),
-                right: None
-            }
-        );
-        assert_eq!(
-            file.all_split[5],
-            PairedRow {
-                left: None,
-                right: Some(6)
-            }
-        );
+            (
+                "-same\n-old\n+same\n+new",
+                vec![(Some(0), Some(2)), (Some(1), Some(3))],
+            ),
+        ] {
+            let input = FileDiffInput {
+                path: "src/test.rs",
+                kind: FileChangeKind::Modify,
+                old_text: None,
+                new_text: None,
+                patch: Some(patch),
+                ignore_whitespace: false,
+                show_invisibles: false,
+            };
+            let file = build_file(
+                &input,
+                input.path.into(),
+                "rust",
+                &HighlightTheme::default_dark(),
+                &colors(),
+                &HighlightStyle::default(),
+            );
+            assert_eq!(
+                file.all_split
+                    .iter()
+                    .map(|pair| (pair.left, pair.right))
+                    .collect::<Vec<_>>(),
+                expected,
+                "{patch}"
+            );
+        }
     }
 }

@@ -1108,6 +1108,47 @@ fn timed_out(what: &str) -> io::Error {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_loopback_connections_report_lan_on_both_sides() {
+        block_on(async {
+            let server = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .clear_ip_transports()
+                .bind_addr("127.0.0.1:0")
+                .unwrap()
+                .alpns(vec![wire::ALPN_MAIN.to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let client = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .clear_ip_transports()
+                .bind_addr("127.0.0.1:0")
+                .unwrap()
+                .bind()
+                .await
+                .unwrap();
+            let (outgoing, incoming) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(client.connect(server.addr(), wire::ALPN_MAIN), async {
+                    server.accept().await.unwrap().await.unwrap()
+                })
+            })
+            .await
+            .expect("the loopback connection establishes");
+            let outgoing = outgoing.unwrap();
+            let expected = PathInfo {
+                direct: true,
+                relay: None,
+                lan: true,
+                probing_direct: false,
+            };
+            assert_eq!(path_info(&outgoing), expected);
+            assert_eq!(path_info(&incoming), expected);
+            client.close().await;
+            server.close().await;
+        });
+    }
+
     /// A self-hosted instance that does not answer at start: the machine
     /// runs with no relay and no lookup, and the manifest is applied to the
     /// running endpoint by the refresh that first reaches it. The loop

@@ -87,24 +87,6 @@ pub(super) fn attachment_paths(attachments: &[Attachment]) -> Vec<String> {
         .collect()
 }
 
-impl From<&str> for QueuedMessage {
-    fn from(text: &str) -> Self {
-        QueuedMessage {
-            delivery_key: None,
-            id: 0,
-            text: text.to_string(),
-            relay_transcript: None,
-            attachments: Vec::new(),
-            not_before: None,
-            options: TurnOptions::default(),
-            ultrathink: false,
-            context_len: None,
-            context_window_changed: None,
-            kind: QueuedMessageKind::User,
-        }
-    }
-}
-
 /// What a send gesture resolves to. Enter always means [`Self::Send`] or
 /// [`Self::Queue`]; ⌘/Ctrl+Enter additionally reaches [`Self::Steer`] — or
 /// [`Self::QueueUnsupported`] when the provider has no steering mechanism, in

@@ -1099,13 +1099,30 @@ mod tests {
                         command: "echo red".into(),
                         // Bold red, 25 characters: it fits one 40-column row and
                         // wraps onto a second at 20.
-                        output: "\u{1b}[1;31mabcdefghijklmnopqrstuvwxy\u{1b}[0m".into(),
+                        output: "\u{1b}[1;31mabcdefghijklmnopqrstuvwxy\u{1b}[0m\nplain\r\nend\n"
+                            .into(),
                         exit_code: Some(0),
                         status: agent::ItemStatus::Completed,
                     },
                 }),
             )
             .expect("append event");
+        store
+            .append_event(
+                &meta.id,
+                2,
+                &agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "empty-output".into(),
+                    parent_item_id: None,
+                    content: agent::ItemContent::CommandExecution {
+                        command: "true".into(),
+                        output: String::new(),
+                        exit_code: Some(0),
+                        status: agent::ItemStatus::Completed,
+                    },
+                }),
+            )
+            .expect("append empty command output");
         store.upsert_meta(&meta).expect("write meta");
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
@@ -1120,12 +1137,12 @@ mod tests {
         })
         .expect("subscribe to the session");
 
-        let frame = |cols: u16| {
+        let frame = |item_id: &str, cols: u16| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 match smol::block_on(link.query(Query::RenderStoredOutput {
                     session_id: meta.id.clone(),
-                    item_id: "cmd-1".into(),
+                    item_id: item_id.into(),
                     cols,
                 })) {
                     Ok(QueryResponse::TerminalFrame(frame)) => return *frame,
@@ -1139,21 +1156,47 @@ mod tests {
             }
         };
 
-        let narrow = frame(40);
-        assert_eq!((narrow.cols, narrow.rows), (40, 1));
-        assert_eq!(narrow.visible[0].cells[20].text, "u");
-        let style = narrow.style(&narrow.visible[0].cells[0]);
-        assert_eq!(style.fg, TerminalColor::Indexed(1));
-        assert!(style.flags().contains(CellFlags::BOLD));
-
-        let narrower = frame(20);
-        assert_eq!((narrower.cols, narrower.rows), (20, 2));
-        assert_eq!(narrower.visible[1].cells[0].text, "u");
-        assert!(narrower.history.is_empty() && narrower.cursor.is_none());
-
-        // A width no screen has is answered at the nearest one the host renders.
-        assert_eq!(frame(4).cols, 20);
-        assert_eq!(frame(4000).cols, 400);
+        for (requested, cols, first_line_rows) in [
+            (0, 20, 2),
+            (4, 20, 2),
+            (20, 20, 2),
+            (40, 40, 1),
+            (4000, 400, 1),
+        ] {
+            let rendered = frame("cmd-1", requested);
+            assert_eq!(rendered.cols, cols);
+            assert_eq!(usize::from(rendered.rows), first_line_rows + 2);
+            let text = |row: usize| {
+                rendered.visible[row]
+                    .cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+            };
+            if cols == 20 {
+                assert_eq!(text(0), "abcdefghijklmnopqrst");
+                assert_eq!(text(1), "uvwxy");
+            } else {
+                assert_eq!(text(0), "abcdefghijklmnopqrstuvwxy");
+            }
+            assert_eq!(text(first_line_rows), "plain");
+            assert_eq!(text(first_line_rows + 1), "end");
+            for row in &rendered.visible[..first_line_rows] {
+                for cell in &row.cells {
+                    let style = rendered.style(cell);
+                    assert_eq!(style.fg, TerminalColor::Indexed(1));
+                    assert!(style.flags().contains(CellFlags::BOLD));
+                }
+            }
+            assert!(
+                !rendered
+                    .style(&rendered.visible[first_line_rows].cells[0])
+                    .flags()
+                    .contains(CellFlags::BOLD)
+            );
+            assert!(rendered.history.is_empty() && rendered.cursor.is_none());
+        }
+        assert_eq!(frame("empty-output", 40).rows, 0);
 
         let missing = smol::block_on(link.query(Query::RenderStoredOutput {
             session_id: meta.id.clone(),

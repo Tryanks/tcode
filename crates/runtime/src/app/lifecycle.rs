@@ -61,13 +61,6 @@ impl AppState {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn native_rewind_pending(&self, target_id: &str) -> bool {
-        self.resident(target_id)
-            .map(|session| session.meta.id.as_str())
-            .is_some_and(|id| self.pending_native_rewinds.contains_key(id))
-    }
-
     /// Spawn the provider process for the active session if it isn't running.
     pub(super) fn ensure_started(&mut self, target_id: &str, cx: &mut HostCx) {
         let Some(session_id) = self
