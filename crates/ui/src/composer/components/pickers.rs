@@ -94,7 +94,7 @@ impl Composer {
         let query = self.model_search.read(cx).value().to_lowercase();
         let fav_profiles: Vec<(String, ProviderKind)> = {
             let profiles = store.enabled_profiles();
-            PICKER_PROVIDER_KINDS
+            ProviderKind::NATIVE
                 .into_iter()
                 .flat_map(|kind| {
                     profiles
@@ -723,7 +723,7 @@ fn render_model_pane(
     let profile_ids: Vec<String> = {
         let store = store_entity.read(cx);
         let profiles = store.enabled_profiles();
-        PICKER_PROVIDER_KINDS
+        ProviderKind::NATIVE
             .into_iter()
             .flat_map(|kind| {
                 profiles

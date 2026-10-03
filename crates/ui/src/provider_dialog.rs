@@ -105,7 +105,7 @@ impl ProviderDialog {
             window,
             cx,
         );
-        let &[
+        let [
             binary_name,
             home_placeholder,
             _,
@@ -538,7 +538,7 @@ impl ProviderDialog {
             ),
         ];
         if provider.caps().home_path {
-            let &[_, _, home_label, home_help, _, _] = provider_copy(provider);
+            let [_, _, home_label, home_help, _, _] = provider_copy(provider);
             blocks.push(
                 self.field_block(
                     crate::tr!(home_label).into_owned().into(),
@@ -974,19 +974,14 @@ pub fn render_footer(
 type ProviderCopy = [&'static str; 6];
 
 #[rustfmt::skip]
-const PROVIDER_COPY: [(ProviderKind, ProviderCopy); 5] = [
-    (ProviderKind::Codex,      ["codex",    "~/.codex",   "providers.codex_home",  "providers.codex_home_help",  "",                             "gpt-6.7-codex-ultra-preview"]),
-    (ProviderKind::ClaudeCode, ["claude",   "~",          "providers.claude_home", "providers.claude_home_help", "e.g. --chrome",                "claude-sonnet-5"]),
-    (ProviderKind::Pi,         ["pi",       "~/.pi/agent", "providers.pi_home",    "providers.pi_home_help",     "e.g. --provider openai-codex", "openai-codex/gpt-5.5"]),
-    (ProviderKind::OpenCode,   ["opencode", "",           "providers.home",       "providers.home_help",        "e.g. --print-logs",            "openai/gpt-5.1-codex"]),
-    (ProviderKind::Acp,        ["",         "",           "providers.home",       "providers.home_help",        "",                             ""]),
-];
-
-fn provider_copy(provider: ProviderKind) -> &'static ProviderCopy {
-    PROVIDER_COPY
-        .iter()
-        .find_map(|(kind, copy)| (*kind == provider).then_some(copy))
-        .expect("every provider has dialog copy")
+fn provider_copy(provider: ProviderKind) -> ProviderCopy {
+    match provider {
+        ProviderKind::Codex =>      ["codex",    "~/.codex",    "providers.codex_home",  "providers.codex_home_help",  "",                             "gpt-6.7-codex-ultra-preview"],
+        ProviderKind::ClaudeCode => ["claude",   "~",           "providers.claude_home", "providers.claude_home_help", "e.g. --chrome",                "claude-sonnet-5"],
+        ProviderKind::Pi =>         ["pi",       "~/.pi/agent", "providers.pi_home",     "providers.pi_home_help",     "e.g. --provider openai-codex", "openai-codex/gpt-5.5"],
+        ProviderKind::OpenCode =>   ["opencode", "",            "providers.home",        "providers.home_help",        "e.g. --print-logs",            "openai/gpt-5.1-codex"],
+        ProviderKind::Acp =>        ["",         "",            "providers.home",        "providers.home_help",        "",                             ""],
+    }
 }
 
 fn path_string(path: &Option<std::path::PathBuf>) -> String {
