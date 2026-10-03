@@ -47,10 +47,19 @@
 | 25 | `grok inspect --json` | 0 | `plugins: [{"name": "delta", "enabled": true, …}, …]` |
 | 26 | `grok plugin enable delta` | 0 | `Enabled plugin: delta` |
 | 27 | `grok plugin update delta` (after delta → 1.0.1 in `multi`) | 0 | `update-path-plugin.txt`; the list still reports 1.0.0 |
+| 29 | `grok plugin install file:///tmp/tcode-probe-grok/multi --trust` (second home) | 0 | `Installed 2 plugin(s) from file:///tmp/tcode-probe-grok/multi: epsilon, delta` |
+| 30 | `grok plugin list --json --available` (second home) | 0 | `plugin-list-git-install.json` |
+| 31 | `grok plugin details delta` (second home) | 0 | `details-git-install.txt` |
 
 Each mutation was followed by a `plugin list --json --available` or
 `plugin marketplace list --json` showing its effect (05, 10, 15, 18, 20, 21,
 28 in the run).
+
+29–31 ran in a second, empty home (`HOME=/tmp/tcode-probe-grok-git/home`,
+`GROK_HOME` under it), otherwise as above. In a third throwaway home,
+`grok plugin install ../multi --trust` from the cwd `outside` listed both
+plugins with `source` `/private/tmp/tcode-probe-grok/outside/../multi`; no
+fixture was kept.
 
 ## Findings the implementation relies on
 
@@ -58,6 +67,13 @@ Each mutation was followed by a `plugin list --json --available` or
   activates and the exact command that proceeds (06). That command and text
   are the challenge a person accepts; `--trust` is passed only on a re-run
   whose challenge text hashes to the accepted SHA-256.
+- A plugin installed from a path or a URL has no marketplace, and its listed
+  `source` is the path made absolute against the cwd, or the URL as given
+  (10, 30); the listing carries no kind for it. `plugin details`, which
+  prints one block per repository (the same for `delta` and `epsilon`),
+  says `kind: local: <path>` (13) or `kind: git: <url>` (31), and the kind
+  is taken from there rather than from the path's syntax, which is the
+  host's.
 - `plugin update` refreshes a git marketplace's checkout itself (verified
   1.1.0 → 1.2.0 without `marketplace update`). For a path install it reports
   `local symlink, already live` and changes nothing (27), so Update is offered
