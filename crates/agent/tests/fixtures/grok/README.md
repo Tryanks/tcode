@@ -1,10 +1,12 @@
-# Grok session fixture
+# Grok session fixtures
 
-`resumed_turn.jsonl` is one Grok Build session recorded on the wire in both
+Each fixture is one Grok Build session recorded on the wire in both
 directions, in wire order, untruncated: one JSON object per line,
 `{"from": "client" | "agent", "message": <JSON-RPC message>}`.
 
-## Provenance
+## `resumed_turn.jsonl`
+
+### Provenance
 
 - CLI: `grok 1.0.46 (2765805b9442)`, darwin-arm64, in a throwaway `HOME` and
   `GROK_HOME`.
@@ -24,7 +26,7 @@ directions, in wire order, untruncated: one JSON object per line,
   with a pass-through recorder as `grok` on `PATH`. Grok was launched as
   `grok --permission-mode default agent --reasoning-effort low stdio`.
 
-## Scenario
+### Scenario
 
 An earlier process created the session with one turn; it is not recorded.
 This process resumes it (`session/resume`, then `session/set_mode default`)
@@ -44,10 +46,30 @@ and runs one turn whose scripted model calls are:
 
 The probe then shuts the session down (`session/close`).
 
-## Sanitization
+### Sanitization
 
 The `initialize` result's `hostname` is `fixture-host` and its `agentId` and
 `agentInstanceId` are zero UUIDs; the scratch directory is renamed to
 `/tmp/grok-fixture` in all its forms (`/private/tmp/…`, URL-encoded). Nothing
 else was changed. The `/Users/admin/actions-runner/…` paths are Grok's own
 built-in workflow metadata.
+
+## `agent_started_turn.jsonl`
+
+Same CLI, backend and recorder as above, through the probe:
+
+```sh
+cargo run -p agent --example probe -- grok "Background then foreground" <cwd> full_access \
+    --linger 3 --follow-up 4 "And now?"
+```
+
+Grok was launched as `grok --permission-mode bypassPermissions agent stdio`.
+A new session runs one sent turn whose scripted model calls start
+`sleep 1; echo bgdone` in the background (`block_until_ms: 0`), run
+`sleep 3; echo fg` in the foreground, and answer. The background task
+finishes during that turn, so as soon as the turn ends Grok runs a prompt of
+its own, `task-completed-<task id>` (`_x.ai/queue/changed` reports it running
+before the sent turn's `session/prompt` result arrives), and the scripted
+model answers it. Four seconds after the first turn completed, the probe sends
+a second turn, which the scripted model answers; the probe then closes the
+session. Sanitized as above.
