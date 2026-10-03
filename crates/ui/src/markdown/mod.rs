@@ -8,6 +8,7 @@ mod image_link;
 mod inline;
 mod inline_flow;
 mod link_target;
+mod mermaid;
 pub(crate) mod nodes;
 pub(crate) mod parse;
 mod render;
