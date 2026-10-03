@@ -819,7 +819,8 @@ pub async fn list_models(
 /// - Grok: `--permission-mode` default / bypassPermissions at launch; under
 ///   AutoAcceptEdits tcode approves Grok's edit permission requests once.
 /// - Cursor: `--force` at launch for FullAccess; otherwise its own permission
-///   requests.
+///   requests, of which tcode approves reads and searches once under
+///   ReadOnly, and file changes once under AutoAcceptEdits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {

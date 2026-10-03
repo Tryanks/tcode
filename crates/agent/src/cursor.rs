@@ -140,6 +140,7 @@ fn signed_out() -> AgentError {
 }
 
 struct Cursor {
+    approval_mode: ApprovalMode,
     updates: Mutex<Updates>,
     /// Cursor's todo list as `cursor/update_todos` last left it.
     todos: Mutex<Vec<Todo>>,
@@ -150,6 +151,7 @@ struct Cursor {
 impl Cursor {
     fn new(opts: &SessionOptions) -> Self {
         Self {
+            approval_mode: opts.approval_mode,
             updates: Mutex::new(Updates::new(opts.cwd.clone())),
             todos: Mutex::new(Vec::new()),
             run_failed: AtomicBool::new(false),
@@ -280,9 +282,13 @@ impl Dialect for Cursor {
             }
         };
         setup.adopt(modes.as_ref(), config_options.as_deref());
-        if let Some(model) = &opts.model {
-            select_model(setup, &session_id, model, config_options.as_deref()).await?;
+        let mut config_options = config_options.unwrap_or_default();
+        if let Some(model) = &opts.model
+            && let Some(selected) = select_model(setup, &session_id, model, &config_options).await?
+        {
+            config_options = selected;
         }
+        restore_parameters(setup, &session_id, &config_options).await;
         if opts.interaction_mode == InteractionMode::Plan || setup.in_plan_mode() {
             setup
                 .apply_interaction_mode(&session_id, opts.interaction_mode)
@@ -429,6 +435,32 @@ impl Dialect for Cursor {
         }
         self.updates().subagent_update(&params)
     }
+
+    /// Cursor's file and shell tools are its own: it calls none of these
+    /// services, and not offering them keeps it that way.
+    fn client_services(&self) -> bool {
+        false
+    }
+
+    fn owned_config_options(&self) -> &'static [&'static str] {
+        &[MODEL_CONFIG_ID]
+    }
+
+    fn auto_approves(&self, tool_call: &acp::ToolCallUpdate) -> bool {
+        let Some(kind) = tool_call.fields.kind else {
+            return false;
+        };
+        match self.approval_mode {
+            // A web fetch changes nothing locally but can carry data out, so
+            // it is asked about like any other action.
+            ApprovalMode::ReadOnly => matches!(kind, acp::ToolKind::Read | acp::ToolKind::Search),
+            ApprovalMode::AutoAcceptEdits => matches!(
+                kind,
+                acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move
+            ),
+            ApprovalMode::Supervised | ApprovalMode::FullAccess => false,
+        }
+    }
 }
 
 fn start_failure(err: &acp::Error, context: &str) -> AgentError {
@@ -439,34 +471,23 @@ fn start_failure(err: &acp::Error, context: &str) -> AgentError {
     }
 }
 
-/// Put the session on the composer's model. Cursor resumes a loaded
-/// conversation on the model it last used, so this follows `session/load`
-/// as well as `session/new`.
+/// Put the session on the composer's model, returning Cursor's options for
+/// it. Cursor resumes a loaded conversation on the model it last used, so
+/// this follows `session/load` as well as `session/new`.
 async fn select_model(
     setup: &Setup<'_>,
     session_id: &acp::SessionId,
     model: &str,
-    config_options: Option<&[acp::SessionConfigOption]>,
-) -> Result<(), AgentError> {
+    config_options: &[acp::SessionConfigOption],
+) -> Result<Option<Vec<acp::SessionConfigOption>>, AgentError> {
     let current = config_options
-        .into_iter()
-        .flatten()
+        .iter()
         .find(|option| option.id.0.as_ref() == MODEL_CONFIG_ID)
-        .and_then(|option| match &option.kind {
-            acp::SessionConfigKind::Select(select) => Some(select.current_value.0.to_string()),
-            _ => None,
-        });
-    if current.as_deref() == Some(model) {
-        return Ok(());
+        .and_then(select_value);
+    if current == Some(model) {
+        return Ok(None);
     }
-    let selected = setup
-        .connection
-        .send_request(acp::SetSessionConfigOptionRequest::new(
-            session_id.clone(),
-            acp::SessionConfigId::new(MODEL_CONFIG_ID),
-            acp::SessionConfigOptionValue::value_id(acp::SessionConfigValueId::new(model)),
-        ))
-        .block_task()
+    let selected = set_config_option(setup, session_id, MODEL_CONFIG_ID, model)
         .await
         .map_err(|err| {
             AgentError::Provider(format!(
@@ -474,8 +495,76 @@ async fn select_model(
                 describe(&err)
             ))
         })?;
-    setup.adopt(None, Some(&selected.config_options));
-    Ok(())
+    Ok(Some(selected))
+}
+
+/// Re-select the model parameters this session chose before: a new process
+/// starts on the parameters Cursor last saved for the model, which another
+/// session may have changed. A choice the model no longer offers is dropped.
+async fn restore_parameters(
+    setup: &Setup<'_>,
+    session_id: &acp::SessionId,
+    config_options: &[acp::SessionConfigOption],
+) {
+    for option in config_options {
+        let id = option.id.0.as_ref();
+        let acp::SessionConfigKind::Select(select) = &option.kind else {
+            continue;
+        };
+        let Some(chosen) = acp_session::config_selection(&setup.opts.option_selections, id) else {
+            continue;
+        };
+        let offered = match &select.options {
+            acp::SessionConfigSelectOptions::Ungrouped(options) => options
+                .iter()
+                .any(|option| option.value.0.as_ref() == chosen),
+            acp::SessionConfigSelectOptions::Grouped(groups) => groups
+                .iter()
+                .flat_map(|group| &group.options)
+                .any(|option| option.value.0.as_ref() == chosen),
+            _ => false,
+        };
+        if id == MODEL_CONFIG_ID || select_value(option) == Some(chosen) || !offered {
+            continue;
+        }
+        if let Err(err) = set_config_option(setup, session_id, id, chosen).await {
+            setup
+                .warn(format!(
+                    "Cursor did not restore {} `{chosen}`: {}",
+                    option.name,
+                    describe(&err)
+                ))
+                .await;
+        }
+    }
+}
+
+fn select_value(option: &acp::SessionConfigOption) -> Option<&str> {
+    match &option.kind {
+        acp::SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
+        _ => None,
+    }
+}
+
+/// `session/set_config_option`, adopting the refreshed options it answers
+/// with.
+async fn set_config_option(
+    setup: &Setup<'_>,
+    session_id: &acp::SessionId,
+    config_id: &str,
+    value: &str,
+) -> Result<Vec<acp::SessionConfigOption>, acp::Error> {
+    let response = setup
+        .connection
+        .send_request(acp::SetSessionConfigOptionRequest::new(
+            session_id.clone(),
+            acp::SessionConfigId::new(config_id),
+            acp::SessionConfigOptionValue::value_id(acp::SessionConfigValueId::new(value)),
+        ))
+        .block_task()
+        .await?;
+    setup.adopt(None, Some(&response.config_options));
+    Ok(response.config_options)
 }
 
 /// The questions of a `cursor/ask_question` request. Canonical answers are
