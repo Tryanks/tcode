@@ -5,8 +5,8 @@
 //! lists the native plugin catalog after running the optional operation:
 //! `install|update <id> <scope> [--accept <sha256>]`, `uninstall|enable|disable <id> <scope>`,
 //! `add-marketplace <source>` or `remove-marketplace <name>`. `--home` isolates
-//! the provider's native state (`CODEX_HOME` for Codex; for Claude Code `HOME`
-//! and `CLAUDE_CONFIG_DIR`).
+//! the provider's native state (`CODEX_HOME` for Codex, `GROK_HOME` for Grok;
+//! for Claude Code `HOME` and `CLAUDE_CONFIG_DIR`).
 //! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
 //! Flags are `--mode plan`, `--effort <value>`, `--resume <cursor-json>`, `--fork`,
 //! `--leave-questions` (user-input requests stay unanswered), `--mcp <name> <url>
