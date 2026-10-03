@@ -46,6 +46,23 @@ const MODE_OPTION_ID: &str = "acp:mode";
 const MODEL_OPTION_ID: &str = "acp:model";
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
+/// The persisted selection for the session config option `config_id`, as
+/// [`SessionOptions::option_selections`] carries it into a new process.
+pub(crate) fn config_selection<'a>(
+    selections: &'a [OptionSelection],
+    config_id: &str,
+) -> Option<&'a str> {
+    selections
+        .iter()
+        .find(|selection| {
+            selection
+                .id
+                .strip_prefix(CONFIG_OPTION_PREFIX)
+                .is_some_and(|id| id == config_id)
+        })
+        .and_then(|selection| selection.value.as_str())
+}
+
 /// Cap on captured terminal output when the agent sets none (1 MiB).
 const DEFAULT_TERMINAL_OUTPUT_LIMIT: u64 = 1 << 20;
 

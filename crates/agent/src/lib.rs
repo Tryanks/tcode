@@ -816,7 +816,8 @@ pub async fn list_models(
 ///   (mid-session switch may require a resume-restart).
 /// - pi: a bundled fail-closed tool-call extension in front of RPC extension UI.
 /// - OpenCode: `OPENCODE_PERMISSION` rules plus permission reply endpoints.
-/// - Grok: its `--permission-mode` at launch.
+/// - Grok: `--permission-mode` default / bypassPermissions at launch; under
+///   AutoAcceptEdits tcode approves Grok's edit permission requests once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
