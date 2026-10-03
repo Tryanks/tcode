@@ -93,7 +93,8 @@ macro_rules! request_handler {
 /// Each required method is a policy the dialect states for itself (launch,
 /// authentication, session establishment, replay suppression, turn completion,
 /// steering, approval-mode changes); only the extension routing defaults to
-/// "no vendor methods".
+/// "no vendor methods", the client services to "offered", and option
+/// ownership and automatic approval to "none".
 pub(crate) trait Dialect: Send + Sync + 'static {
     /// The agent's name in messages and logs.
     fn name(&self) -> &str;
@@ -155,6 +156,28 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     /// session updates.
     fn notification(&self, _state: &mut State, _method: &str, _params: Value) -> Vec<AgentEvent> {
         Vec::new()
+    }
+
+    /// Whether `initialize` offers the client's `fs/*` and `terminal/*`
+    /// services. An agent offered them runs its file and shell tools through
+    /// tcode instead of its own implementation.
+    fn client_services(&self) -> bool {
+        true
+    }
+
+    /// Session config options, by `configId`, that tcode already controls
+    /// elsewhere (the composer's model picker), so they are not surfaced again
+    /// in [`AgentEvent::ProviderOptions`].
+    fn owned_config_options(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Whether a permission request for this tool call is approved without
+    /// asking the user: an approval mode the agent does not apply itself.
+    /// Only the request's allow-once option is chosen automatically; without
+    /// one the user is asked.
+    fn auto_approves(&self, _tool_call: &acp::ToolCallUpdate) -> bool {
+        false
     }
 }
 
@@ -369,6 +392,7 @@ where
             let outcome = smol::block_on(async move {
                 let launch = dialect.launch(&opts)?;
                 let name = dialect.name().to_string();
+                let client_services = dialect.client_services();
                 let mut child = spawn_agent(&name, provider, &launch, &opts)?;
                 let (Some(stdin), Some(stdout), Some(stderr)) =
                     (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -388,10 +412,12 @@ where
                     .builder()
                     .name(format!("tcode-acp-query-{name}"))
                     .connect_with(sdk::ByteStreams::new(stdin, stdout), async |connection| {
-                        Ok(match initialize(&connection, &name, &launch).await {
-                            Ok(init) => query(&connection, &init).await,
-                            Err(err) => Err(err),
-                        })
+                        Ok(
+                            match initialize(&connection, &name, &launch, client_services).await {
+                                Ok(init) => query(&connection, &init).await,
+                                Err(err) => Err(err),
+                            },
+                        )
                     })
                     .await;
                 let _ = child.kill();
@@ -511,7 +537,9 @@ async fn run_actor<D: Dialect>(
         })
         .detach();
 
-    let state = Arc::new(Mutex::new(State::new(opts.cwd.clone())));
+    let mut state = State::new(opts.cwd.clone());
+    state.owned_options = dialect.owned_config_options();
+    let state = Arc::new(Mutex::new(state));
     let client = Client {
         events: events.clone(),
         state: state.clone(),
@@ -539,7 +567,28 @@ async fn run_actor<D: Dialect>(
             sdk::on_receive_notification!(),
         )
         .on_receive_request(
-            request_handler!(client, acp::RequestPermissionRequest, request_permission),
+            {
+                let client = client.clone();
+                let dialect = dialect.clone();
+                async move |args: acp::RequestPermissionRequest, responder, connection| {
+                    let client = client.clone();
+                    let automatic = dialect
+                        .auto_approves(&args.tool_call)
+                        .then(|| allow_once(&args.options))
+                        .flatten();
+                    connection.spawn(async move {
+                        responder.respond_with_result(match automatic {
+                            Some(option) => Ok(acp::RequestPermissionResponse::new(
+                                acp::RequestPermissionOutcome::Selected(
+                                    acp::SelectedPermissionOutcome::new(option),
+                                ),
+                            )),
+                            None => client.request_permission(args).await,
+                        })
+                    })?;
+                    Ok(())
+                }
+            },
             sdk::on_receive_request!(),
         )
         .on_receive_request(
@@ -844,7 +893,7 @@ async fn handshake<D: Dialect>(
     events: &Sender<AgentEvent>,
 ) -> Result<(Established, bool), AgentError> {
     let name = dialect.name();
-    let init = initialize(connection, name, launch).await?;
+    let init = initialize(connection, name, launch, dialect.client_services()).await?;
     let setup = Setup {
         connection,
         opts,
@@ -862,12 +911,13 @@ async fn initialize(
     connection: &Connection,
     name: &str,
     launch: &Launch,
+    client_services: bool,
 ) -> Result<acp::InitializeResponse, AgentError> {
     let mut client_capabilities = acp::ClientCapabilities::new()
         .fs(acp::FileSystemCapabilities::new()
-            .read_text_file(true)
-            .write_text_file(true))
-        .terminal(true);
+            .read_text_file(client_services)
+            .write_text_file(client_services))
+        .terminal(client_services);
     client_capabilities.meta = launch.client_meta.clone();
     // On a leash: an agent that starts but never answers `initialize` (cline
     // 3.0.39 does exactly this) would otherwise hang session startup forever,
@@ -1452,6 +1502,15 @@ fn approval_outcome(
     ))
 }
 
+/// The option an automatic approval selects. Persistent options would record a
+/// rule beyond this session that no one chose.
+fn allow_once(options: &[acp::PermissionOption]) -> Option<acp::PermissionOptionId> {
+    options
+        .iter()
+        .find(|option| option.kind == acp::PermissionOptionKind::AllowOnce)
+        .map(|option| option.option_id.clone())
+}
+
 /// `stopReason` → canonical turn status, plus the message to surface (if any).
 pub(crate) fn stop_reason_status(reason: acp::StopReason) -> (TurnStatus, Option<String>) {
     match reason {
@@ -1702,6 +1761,8 @@ pub(crate) struct State {
     terminals: HashMap<String, Arc<Terminal>>,
     usage: Option<TokenUsage>,
     options: OptionRegistry,
+    /// [`Dialect::owned_config_options`].
+    owned_options: &'static [&'static str],
     modes: Option<acp::SessionModeState>,
     previous_non_plan_mode: Option<acp::SessionModeId>,
 }
@@ -1724,6 +1785,7 @@ impl State {
             terminals: HashMap::new(),
             usage: None,
             options: OptionRegistry::default(),
+            owned_options: &[],
             modes: None,
             previous_non_plan_mode: None,
         }
@@ -1780,19 +1842,15 @@ impl State {
     }
 
     fn provider_options(&self) -> AgentEvent {
+        let surfaced = || {
+            self.options.records.iter().filter(|record| {
+                !matches!(&record.origin, OptionOrigin::Config(id)
+                    if self.owned_options.contains(&id.0.as_ref()))
+            })
+        };
         AgentEvent::ProviderOptions {
-            descriptors: self
-                .options
-                .records
-                .iter()
-                .map(|record| record.descriptor.clone())
-                .collect(),
-            selections: self
-                .options
-                .records
-                .iter()
-                .map(|record| record.selection.clone())
-                .collect(),
+            descriptors: surfaced().map(|record| record.descriptor.clone()).collect(),
+            selections: surfaced().map(|record| record.selection.clone()).collect(),
         }
     }
 
