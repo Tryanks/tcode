@@ -7,9 +7,11 @@ use std::{
     rc::Rc,
 };
 
+use crate::widgets::copy::CopiedMark;
 use gpui::{
-    Bounds, Context, FocusHandle, ImageSource, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Pixels, Point, Render, SharedString, SharedUri, Styled as _, Window, px,
+    Bounds, ClipboardItem, Context, FocusHandle, ImageSource, IntoElement, ListAlignment,
+    ListState, ParentElement as _, Pixels, Point, Render, SharedString, SharedUri, Styled as _,
+    Window, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
@@ -45,6 +47,8 @@ pub struct MarkdownState {
     pub(super) base_dir: Option<PathBuf>,
     link_targets: LinkTargetCache,
     pub(super) pending_context: Option<PendingContextTarget>,
+    /// Keyed by the copied code block's root path.
+    pub(super) copied: CopiedMark,
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
     pub(super) link_press_origin: Option<Point<Pixels>>,
@@ -86,6 +90,7 @@ impl MarkdownState {
             base_dir: None,
             link_targets: LinkTargetCache::default(),
             pending_context: None,
+            copied: CopiedMark::default(),
             link_press_origin: None,
             is_selecting: false,
             text: text.to_string(),
@@ -212,6 +217,11 @@ impl MarkdownState {
             None => path,
         };
         crate::store::host_image(path)
+    }
+
+    pub(super) fn copy_code(&mut self, path: String, code: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(code));
+        self.copied.mark(path, |state| &mut state.copied, cx);
     }
 
     pub(super) fn set_pending_context(

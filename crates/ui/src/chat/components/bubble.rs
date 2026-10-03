@@ -21,6 +21,7 @@ use tcode_core::session::SteeringStatus;
 use super::super::RewindTurn;
 use super::assistant;
 use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
+use crate::widgets::copy::{action_button, copy_button};
 
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub(crate) type SharedClickHandler = Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -116,7 +117,7 @@ pub(crate) fn native_rewind_button(
         return None;
     }
 
-    let trigger = assistant::action_button(
+    let trigger = action_button(
         SharedString::from(format!("rewind-{turn}")),
         IconName::Undo,
         if disabled {
@@ -234,7 +235,7 @@ pub(crate) fn user_bubble(
     let group_key = SharedString::from(format!("user-{entry_id}"));
     let mut actions = h_flex().gap(px(2.)).items_center().justify_end();
     if !visible.trim().is_empty() {
-        actions = actions.child(assistant::copy_button(
+        actions = actions.child(copy_button(
             &format!("user:{entry_id}"),
             copied,
             compact,
