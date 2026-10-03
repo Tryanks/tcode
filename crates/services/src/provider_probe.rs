@@ -124,17 +124,55 @@ pub async fn probe_provider(
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_aggregator_auth)
         }
+        ProviderKind::Cursor => run_capture_env(&program, &["status", "--format", "json"], &env)
+            .await
+            .as_deref()
+            .and_then(|json| parse_cursor_auth(json, cursor_key_configured(&env))),
         ProviderKind::Grok => run_capture_env(&program, &["models"], &env)
             .await
             .as_deref()
             .and_then(parse_grok_models_auth),
         // Authentication over ACP is surfaced by the session protocol.
-        // `cursor-agent status` ignores CURSOR_API_KEY, so it cannot tell a
-        // signed-out Cursor from one using an API key.
-        ProviderKind::Cursor | ProviderKind::Acp => None,
+        ProviderKind::Acp => None,
     };
 
     finalize_probe(checked_at, version, auth)
+}
+
+/// `cursor-agent status --format json` reports only the stored login: it says
+/// `unauthenticated` while CURSOR_API_KEY or CURSOR_AUTH_TOKEN signs the CLI
+/// in, so it counts as signed out only when neither is set.
+fn parse_cursor_auth(json: &str, key_configured: bool) -> Option<ProviderAuth> {
+    let status: serde_json::Value = serde_json::from_str(json).ok()?;
+    if status.get("isAuthenticated") == Some(&serde_json::Value::Bool(true)) {
+        return Some(ProviderAuth {
+            status: AuthStatus::Authenticated,
+            label: None,
+            email: status
+                .pointer("/userInfo/email")
+                .and_then(serde_json::Value::as_str)
+                .filter(|email| !email.is_empty())
+                .map(str::to_string),
+        });
+    }
+    (status.get("status").and_then(serde_json::Value::as_str) == Some("unauthenticated")
+        && !key_configured)
+        .then_some(ProviderAuth {
+            status: AuthStatus::Unauthenticated,
+            label: None,
+            email: None,
+        })
+}
+
+/// Whether Cursor's child sees an API key or auth token, from the profile's
+/// environment or the one it inherits.
+fn cursor_key_configured(env: &[(String, String)]) -> bool {
+    ["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"].iter().any(|key| {
+        match env.iter().rev().find(|(name, _)| name == key) {
+            Some((_, value)) => !value.is_empty(),
+            None => std::env::var_os(key).is_some_and(|value| !value.is_empty()),
+        }
+    })
 }
 
 /// The first line of `grok models`. Only the states observed from Grok 1.0.46
@@ -202,6 +240,49 @@ mod tests {
         assert_eq!(result.status, Some(ProviderStatusKind::Error));
         assert_eq!(result.message, None);
         assert_eq!(result.diagnostic, Some(ProviderProbeDiagnostic::MissingCli));
+    }
+
+    /// `cursor-agent status --format json` from the agent crate's stand-in,
+    /// which prints the fixture it is pointed at.
+    #[cfg(unix)]
+    #[test]
+    fn cursor_is_signed_out_only_without_an_api_key_or_auth_token() {
+        let fixtures =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent/tests/fixtures/cursor");
+        let probe = |status: &str, api_key: &str, auth_token: &str| {
+            let env = vec![
+                (
+                    "TCODE_STAND_IN_STATUS".to_string(),
+                    fixtures.join(status).display().to_string(),
+                ),
+                ("CURSOR_API_KEY".to_string(), api_key.to_string()),
+                ("CURSOR_AUTH_TOKEN".to_string(), auth_token.to_string()),
+            ];
+            smol::block_on(probe_provider(
+                ProviderKind::Cursor,
+                Some(fixtures.join("cursor-agent")),
+                LaunchEnv { env, home: None },
+            ))
+        };
+
+        let signed_out = probe("status_signed_out.json", "", "");
+        assert_eq!(
+            signed_out.diagnostic,
+            Some(ProviderProbeDiagnostic::Unauthenticated)
+        );
+        for (api_key, auth_token) in [("key", ""), ("", "token")] {
+            assert_eq!(
+                probe("status_signed_out.json", api_key, auth_token).diagnostic,
+                Some(ProviderProbeDiagnostic::IndeterminateAuth),
+                "a key or token signs Cursor in without a stored login"
+            );
+        }
+
+        let signed_in = probe("status_signed_in.json", "", "");
+        assert_eq!(signed_in.status, Some(ProviderStatusKind::Ready));
+        let auth = signed_in.auth.unwrap();
+        assert_eq!(auth.status, AuthStatus::Authenticated);
+        assert_eq!(auth.email.as_deref(), Some("dev@example.com"));
     }
 
     #[test]
