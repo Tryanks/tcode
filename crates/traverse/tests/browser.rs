@@ -470,12 +470,19 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
             broadcast["content"]["event"]["type"], "project_created",
             "a subscribed browser sees the other's broadcast"
         );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), two.0.next())
-                .await
-                .is_err(),
-            "the ack reaches only its sender"
-        );
+        // A reply to this later command is an ordered barrier: any leaked
+        // ack for the first browser would precede it on the host stream.
+        two.send(
+            json!({"id":9,"payload":{"type":"command","content":{"type":"open_latest_session"}}}),
+        )
+        .await;
+        loop {
+            let reply = two.recv().await;
+            if reply["type"] == "ack" {
+                assert_eq!(reply["content"]["id"], 9, "the ack reaches only its sender");
+                break;
+            }
+        }
     });
     server.shutdown();
 }

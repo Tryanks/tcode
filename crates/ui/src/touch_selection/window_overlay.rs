@@ -224,21 +224,17 @@ mod tests {
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        let text = (0..40)
+        let paragraphs = (0..40)
             .map(|ix| format!("Paragraph {ix} of the message."))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let markdown = std::rc::Rc::new(std::cell::OnceCell::new());
-        let (_, cx) = cx.add_window_view({
-            let markdown = markdown.clone();
-            move |window, cx| {
-                let state = cx.new(|cx| MarkdownState::new(&text, cx));
-                markdown.set(state.clone()).ok().unwrap();
-                let body = cx.new(|_| Body { markdown: state });
-                gpui_base::Root::new(body, window, cx)
-            }
+            .collect::<Vec<_>>();
+        let text = paragraphs.join("\n\n")
+            + "\n\n```text\nfirst line\nsecond line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |";
+        let expected = paragraphs.join("\n") + "\nfirst line\nsecond line\nname value\nalpha beta";
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let markdown = cx.new(|cx| MarkdownState::new(&text, cx));
+            let body = cx.new(|_| Body { markdown });
+            gpui_base::Root::new(body, window, cx)
         });
-        let markdown = markdown.get().unwrap().clone();
         // A window far shorter than the message: most of its blocks are
         // outside the viewport, and the virtualized list never paints them.
         cx.simulate_resize(size(px(320.), px(120.)));
@@ -270,18 +266,14 @@ mod tests {
         // Select All takes the whole message, including the blocks that were
         // never laid out, and keeps the menu.
         tap(cx, "edit-menu-select-all");
-        let rendered = markdown.read_with(cx, |markdown, _| {
-            markdown.rendered_text().trim().to_string()
-        });
-        assert!(rendered.ends_with("Paragraph 39 of the message."));
-        assert_eq!(cx.update(TextSelection::selected_text).trim(), rendered);
+        assert_eq!(cx.update(TextSelection::selected_text).trim(), expected);
         assert!(cx.debug_bounds("edit-menu-copy").is_some());
 
         // Copy closes the menu; the selection stays.
         tap(cx, "edit-menu-copy");
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
-            Some(rendered)
+            Some(expected)
         );
         assert!(cx.debug_bounds("edit-menu").is_none());
         assert!(

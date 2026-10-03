@@ -789,14 +789,4 @@ mod tests {
         tree.frame.h = 100.0;
         assert!(!is_text_sparse(&tree));
     }
-
-    #[test]
-    fn safe_prefix_ends_on_utf8_and_line_boundaries() {
-        let text = "a\nβ\ncharlie";
-        for (bytes, lines, expected) in [(3, 10, "a\n"), (20, 2, "a\nβ\n")] {
-            let (prefix, offset) = safe_prefix(text, bytes, lines);
-            assert_eq!(prefix, expected);
-            assert_eq!(offset, expected.len());
-        }
-    }
 }

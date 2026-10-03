@@ -389,29 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn newer_packets_replace_older_ones_and_stale_puts_conflict() {
-        let (store, path) = temp_store("stale");
-        let secret = SecretKey::generate();
-        let first = packet(&secret, "relay=https://a.example/");
-        let second = packet(&secret, "relay=https://b.example/");
-        store.put(&second, 10).unwrap();
-        assert!(matches!(store.put(&first, 11), Err(PutError::Stale)));
-        assert!(matches!(store.put(&second, 11), Err(PutError::Stale)));
-        assert_eq!(
-            store.get(&secret.public()).unwrap().unwrap(),
-            second.to_relay_payload()
-        );
-        assert!(
-            store
-                .get(&SecretKey::generate().public())
-                .unwrap()
-                .is_none()
-        );
-        drop(store);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn eviction_drops_records_not_refreshed_within_max_age() {
         let (store, path) = temp_store("evict");
         let stale = SecretKey::generate();

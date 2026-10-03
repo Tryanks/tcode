@@ -1857,29 +1857,54 @@ mod tests {
             ("in progress", None, ItemStatus::InProgress, false),
             ("child", Some("spawn-1"), ItemStatus::Completed, false),
         ] {
-            let timeline = Timeline::fold_events([
-                user_msg("user-1", "edit it"),
-                turn_started(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id: "edit".into(),
-                    parent_item_id: parent.map(str::to_string),
-                    content: ItemContent::FileChange {
-                        changes: vec![FileChange {
-                            path: "src/lib.rs".into(),
-                            kind: FileChangeKind::Modify,
-                            diff: Some("-old\n+new\n".into()),
-                        }],
-                        status,
-                    },
-                }),
-            ]);
+            let mut timeline =
+                Timeline::fold_events([user_msg("user-1", "edit it"), turn_started()]);
+            for (id, path, diff) in [
+                (
+                    "edit-1",
+                    "src/lib.rs",
+                    "--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+middle\n",
+                ),
+                ("edit-2", "other.rs", "-gone\n+new\n"),
+                ("edit-3", "src/lib.rs", "-middle\n-final\n+replacement\n"),
+            ] {
+                timeline.apply_at(
+                    None,
+                    &AgentEvent::ItemCompleted(ThreadItem {
+                        id: id.into(),
+                        parent_item_id: parent.map(str::to_string),
+                        content: ItemContent::FileChange {
+                            changes: vec![FileChange {
+                                path: path.into(),
+                                kind: FileChangeKind::Modify,
+                                diff: Some(diff.into()),
+                            }],
+                            status,
+                        },
+                    }),
+                );
+            }
             let changes = &timeline.turns[0].changes;
             assert_eq!(changes.is_some(), included, "{label}");
             if let Some(changes) = changes {
                 assert_eq!(changes.completeness, ChangeCompleteness::Partial);
-                assert_eq!(changes.changes.len(), 1);
-                assert_eq!(changes.changes[0].path, "src/lib.rs");
-                assert_eq!(changes.changes[0].diff.as_deref(), Some("-old\n+new\n"));
+                assert_eq!(
+                    changes
+                        .changes
+                        .iter()
+                        .map(|change| (change.path.as_str(), change.diff.as_deref()))
+                        .collect::<Vec<_>>(),
+                    [
+                        (
+                            "src/lib.rs",
+                            Some(
+                                "--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+middle\n-middle\n-final\n+replacement\n"
+                            )
+                        ),
+                        ("other.rs", Some("-gone\n+new\n")),
+                    ],
+                    "{label}"
+                );
             }
         }
     }
@@ -2018,66 +2043,6 @@ mod tests {
             "first.txt"
         );
         assert!(timeline.turns[1].changes.is_none());
-    }
-
-    /// Models a Claude-style trace: session init → streamed text deltas → full
-    /// assistant message → result.
-    #[test]
-    fn fold_simple_claude_style_trace() {
-        let events = vec![
-            AgentEvent::SessionStarted {
-                provider_session_id: "78b7774c".into(),
-                resume: ResumeCursor(json!({ "session_id": "78b7774c" })),
-                model: Some("claude-opus-4-8".into()),
-            },
-            user_msg("user-1", "hi"),
-            AgentEvent::TurnStarted {
-                turn_id: "t1".into(),
-            },
-            AgentEvent::Delta {
-                item_id: "msg_011".into(),
-                kind: DeltaKind::AssistantText,
-                text: "Hi! ".into(),
-            },
-            AgentEvent::Delta {
-                item_id: "msg_011".into(),
-                kind: DeltaKind::AssistantText,
-                text: "How can I help you today?".into(),
-            },
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "msg_011".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "Hi! How can I help you today?".into(),
-                },
-            }),
-            AgentEvent::TurnCompleted {
-                turn_id: "t1".into(),
-                status: TurnStatus::Completed,
-                usage: Some(TokenUsage {
-                    input_tokens: Some(3355),
-                    output_tokens: Some(17),
-                    ..Default::default()
-                }),
-            },
-        ];
-        let timeline = Timeline::fold_events(events);
-
-        assert_eq!(timeline.entries.len(), 2);
-        assert!(matches!(
-            &timeline.entries[0].content,
-            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "hi"
-        ));
-        assert!(matches!(
-            &timeline.entries[1].content,
-            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Hi! How can I help you today?"
-        ));
-        assert!(!timeline.turn_running);
-        assert_eq!(timeline.last_turn_status, Some(TurnStatus::Completed));
-        assert_eq!(timeline.usage.unwrap().output_tokens, Some(17));
-        assert_eq!(timeline.model.as_deref(), Some("claude-opus-4-8"));
-        assert!(timeline.resume.is_some());
-        assert_eq!(timeline.first_user_message(), Some("hi"));
     }
 
     #[test]
@@ -2464,64 +2429,75 @@ mod tests {
 
     #[test]
     fn timestamps_and_turn_grouping_fold_across_two_exchanges() {
-        // Two user→assistant exchanges; timestamps thread through as envelopes.
-        let stored = vec![
-            StoredEvent {
-                ts: Some(1_000_000),
-                event: user_msg("u1", "first"),
-                elided: None,
-            },
-            StoredEvent {
-                ts: Some(1_000_500),
-                event: AgentEvent::TurnStarted {
+        let mut timeline = Timeline::fold_events([
+            at(
+                999_900,
+                AgentEvent::SessionStarted {
+                    provider_session_id: "78b7774c".into(),
+                    resume: ResumeCursor(json!({ "session_id": "78b7774c" })),
+                    model: Some("claude-opus-4-8".into()),
+                },
+            ),
+            at(1_000_000, user_msg("u1", "first")),
+            at(
+                1_000_500,
+                AgentEvent::TurnStarted {
                     turn_id: "t1".into(),
                 },
-                elided: None,
-            },
-            StoredEvent {
-                ts: Some(1_002_000),
-                event: AgentEvent::ItemCompleted(ThreadItem {
-                    id: "a1".into(),
-                    parent_item_id: None,
-                    content: ItemContent::AssistantMessage { text: "hi".into() },
-                }),
-                elided: None,
-            },
-            StoredEvent {
-                ts: Some(1_005_500),
-                event: AgentEvent::TurnCompleted {
+            ),
+            at(1_001_000, assistant_delta("a1", "Hi! ")),
+            at(
+                1_001_500,
+                assistant_delta("a1", "How can I help you today?"),
+            ),
+            at(1_002_000, assistant("a1", "Hi! How can I help you today?")),
+            at(
+                1_005_500,
+                AgentEvent::TurnCompleted {
                     turn_id: "t1".into(),
                     status: TurnStatus::Completed,
-                    usage: None,
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(3355),
+                        output_tokens: Some(17),
+                        ..Default::default()
+                    }),
                 },
-                elided: None,
-            },
-            StoredEvent {
-                ts: Some(2_000_000),
-                event: user_msg("u2", "second"),
-                elided: None,
-            },
-            StoredEvent {
-                ts: Some(2_000_400),
-                event: AgentEvent::TurnStarted {
-                    turn_id: "t2".into(),
-                },
-                elided: None,
-            },
-        ];
-        let timeline = Timeline::fold_events(stored);
+            ),
+        ]);
+        assert_eq!(timeline.entries.len(), 2);
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "first"
+        ));
+        assert!(matches!(
+            &timeline.entries[1].content,
+            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Hi! How can I help you today?"
+        ));
+        assert!(!timeline.turn_running);
+        assert_eq!(timeline.last_turn_status, Some(TurnStatus::Completed));
+        assert_eq!(timeline.usage.as_ref().unwrap().output_tokens, Some(17));
+        assert_eq!(timeline.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(
+            timeline.resume,
+            Some(ResumeCursor(json!({ "session_id": "78b7774c" })))
+        );
+        assert_eq!(timeline.first_user_message(), Some("first"));
 
-        // Two turns; the first is finished with a 5s wall-clock duration.
+        timeline.apply_stored(&at(2_000_000, user_msg("u2", "second")));
+        timeline.apply_stored(&at(
+            2_000_400,
+            AgentEvent::TurnStarted {
+                turn_id: "t2".into(),
+            },
+        ));
         assert_eq!(timeline.turns.len(), 2);
         assert_eq!(timeline.turns[0].start_ts, Some(1_000_500));
         assert_eq!(timeline.turns[0].end_ts, Some(1_005_500));
         assert_eq!(timeline.turns[0].status, Some(TurnStatus::Completed));
         assert!(!timeline.turns[0].running);
-        // Second turn is still running (no TurnCompleted yet).
         assert!(timeline.turns[1].running);
         assert!(timeline.turn_running);
 
-        // Entries carry their timestamp and map to the right turn.
         let u1 = &timeline.entries[0];
         assert_eq!(u1.ts, Some(1_000_000));
         assert_eq!(u1.turn, 0);
@@ -2534,7 +2510,6 @@ mod tests {
             .unwrap();
         assert_eq!(u2.turn, 1);
 
-        // mark_idle clears running state after a replayed session goes cold.
         let mut cold = timeline.clone();
         cold.mark_idle();
         assert!(!cold.turn_running);
@@ -2743,9 +2718,41 @@ mod tests {
                 ],
             },
         );
-        assert_eq!(timeline.plan_steps.len(), 2);
+        assert_eq!(
+            timeline.plan_steps,
+            [
+                PlanStep {
+                    step: "a".into(),
+                    status: PlanStepStatus::Completed
+                },
+                PlanStep {
+                    step: "b".into(),
+                    status: PlanStepStatus::InProgress
+                },
+            ]
+        );
         assert_eq!(timeline.plan_explanation.as_deref(), Some("Working"));
-        assert_eq!(timeline.plan_steps[1].status, PlanStepStatus::InProgress);
+        for explanation in [Some("Revised"), None] {
+            timeline.apply_at(
+                None,
+                &AgentEvent::PlanUpdated {
+                    turn_id: Some("t".into()),
+                    explanation: explanation.map(str::to_string),
+                    steps: vec![PlanStep {
+                        step: "replacement".into(),
+                        status: PlanStepStatus::Pending,
+                    }],
+                },
+            );
+            assert_eq!(
+                timeline.plan_steps,
+                [PlanStep {
+                    step: "replacement".into(),
+                    status: PlanStepStatus::Pending
+                }]
+            );
+            assert_eq!(timeline.plan_explanation.as_deref(), explanation);
+        }
     }
 
     #[test]
@@ -2904,26 +2911,6 @@ mod tests {
                 ..
             }) if summary == "pong" && model == "opus" && effort == "high"
         ));
-    }
-
-    #[test]
-    fn review_comment_serialization_matches_prompt_format() {
-        let comment = ReviewComment::new(
-            "src/lib.rs".into(),
-            7,
-            8,
-            ReviewSide::New,
-            "  Please avoid the unwrap.  ".into(),
-            "@@ -7,1 +7,2 @@\n old\n+new".into(),
-            "turn:3".into(),
-            "Turn 4".into(),
-            12,
-            13,
-        );
-        assert_eq!(
-            append_review_comments_to_prompt("Fix this", &[comment]),
-            "Fix this\n\n<review_comment sectionId=\"turn:3\" sectionTitle=\"Turn 4\" filePath=\"src/lib.rs\" startIndex=\"12\" endIndex=\"13\" rangeLabel=\"+7 to +8\">\nPlease avoid the unwrap.\n```diff\n@@ -7,1 +7,2 @@\n old\n+new\n```\n</review_comment>"
-        );
     }
 
     #[test]
@@ -3133,6 +3120,16 @@ mod tests {
                 1_500,
             ),
             (
+                "backward completion followed by clock recovery",
+                vec![
+                    started(2_000, running("a")),
+                    completed(1_000, ran("a")),
+                    started(3_000, running("b")),
+                    completed(5_000, ran("b")),
+                ],
+                2_000,
+            ),
+            (
                 "failed",
                 vec![
                     started(1_000, running("a")),
@@ -3224,6 +3221,10 @@ mod tests {
                 vec![at(1_000, turn_started()), turn_completed().into()],
             ),
             (
+                "end before start",
+                vec![at(9_000, turn_started()), at(1_000, turn_completed())],
+            ),
+            (
                 "tool beyond end",
                 vec![
                     at(0, turn_started()),
@@ -3264,31 +3265,6 @@ mod tests {
             Timeline::fold_events([at(1_000, user_msg("u", "go")), at(9_000, turn_completed())]);
         assert_eq!(timeline.turns[0].start_ts, Some(1_000));
         assert_eq!(timeline.turns[0].timing, None);
-    }
-
-    #[test]
-    fn a_backward_timestamp_neither_underflows_nor_inflates_a_bucket() {
-        let timing = timing_of(vec![
-            at(10_000, turn_started()),
-            started(12_000, running("a")),
-            // The clock steps backwards: the interval is clamped to zero rather
-            // than wrapping around or crediting negative time.
-            completed(11_000, ran("a")),
-            started(13_000, running("b")),
-            completed(15_000, ran("b")),
-            // The clock recovered, and the turn end is still at or past every
-            // timestamp seen inside the turn, so clamping the one backward step
-            // is enough — this turn keeps its breakdown.
-            at(20_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.total_ms, 10_000);
-        assert_eq!(timing.tool_ms, 2_000);
-
-        // A turn that ends before it started yields no breakdown at all.
-        let inverted = timing_of(vec![at(9_000, turn_started()), at(1_000, turn_completed())]);
-        assert_eq!(inverted, None);
     }
 
     #[test]
@@ -3340,133 +3316,101 @@ mod tests {
 
     #[test]
     fn a_turn_finalized_without_a_timestamp_rejects_later_tool_transitions() {
-        // A terminal status closes the turn even without an end timestamp.
-        // A stray transition between turns must not enter the next turn's clock.
-        let timeline = Timeline::fold_events(vec![
-            at(1_000, turn_started()),
-            turn_completed().into(),
-            started(3_000, running("ghost")),
-            at(4_000, turn_started()),
-            at(10_000, turn_completed()),
-        ]);
-
-        assert_eq!(timeline.turns.len(), 2);
-        assert_eq!(timeline.turns[0].timing, None);
-        let timing = timeline.turns[1]
-            .timing
-            .expect("the new turn is fully timestamped");
-        assert_eq!(timing.total_ms, 6_000);
-        assert_eq!(timing.tool_ms, 0);
-    }
-
-    #[test]
-    fn replaying_a_stored_turn_reproduces_the_live_breakdown() {
-        let events = vec![
-            at(1_000, user_msg("u1", "run it")),
-            at(1_100, turn_started()),
-            started(2_000, running("a")),
-            started(2_500, subagent("b", ItemStatus::InProgress)),
-            completed(4_000, ran("a")),
-            completed(4_800, subagent("b", ItemStatus::Completed)),
-            at(7_100, turn_completed()),
-        ];
-
-        let mut live = Timeline::default();
-        for stored in &events {
-            live.apply_at(stored.ts, &stored.event);
+        for (label, first_end, first_timing) in [
+            (
+                "timed",
+                Some(4_000),
+                Some(TurnTiming {
+                    total_ms: 4_000,
+                    tool_ms: 1_000,
+                }),
+            ),
+            ("untimed", None, None),
+        ] {
+            let mut timeline = Timeline::fold_events([
+                at(0, turn_started()),
+                started(1_000, running("a")),
+                completed(2_000, ran("a")),
+                StoredEvent {
+                    ts: first_end,
+                    event: turn_completed(),
+                    elided: None,
+                },
+            ]);
+            assert_eq!(timeline.turns[0].timing, first_timing, "{label}");
+            for event in [
+                started(4_500, running("ghost")),
+                at(5_000, user_msg("u2", "again")),
+                at(5_000, turn_started()),
+                at(9_000, turn_completed()),
+            ] {
+                timeline.apply_stored(&event);
+            }
+            assert_eq!(timeline.turns.len(), 2, "{label}");
+            assert_eq!(timeline.turns[0].timing, first_timing, "{label}");
+            assert_eq!(
+                timeline.turns[1].timing,
+                Some(TurnTiming {
+                    total_ms: 4_000,
+                    tool_ms: 0,
+                }),
+                "{label}"
+            );
         }
-        let replayed = Timeline::fold_events(events);
-
-        assert_eq!(live.turns[0].timing, replayed.turns[0].timing);
-        let timing = replayed.turns[0].timing.expect("breakdown");
-        assert_eq!(timing.total_ms, 6_000);
-        assert_eq!(timing.tool_ms, 2_800);
-    }
-
-    #[test]
-    fn each_turn_gets_its_own_breakdown() {
-        let timeline = Timeline::fold_events(vec![
-            at(0, turn_started()),
-            started(1_000, running("a")),
-            completed(2_000, ran("a")),
-            at(4_000, turn_completed()),
-            at(5_000, user_msg("u2", "again")),
-            at(5_000, turn_started()),
-            at(9_000, turn_completed()),
-        ]);
-
-        assert_eq!(timeline.turns.len(), 2);
-        assert_eq!(timeline.turns[0].timing.unwrap().tool_ms, 1_000);
-        // The second turn starts from a clean clock — no leakage across turns.
-        assert_eq!(timeline.turns[1].timing.unwrap().tool_ms, 0);
-        assert_eq!(timeline.turns[1].timing.unwrap().total_ms, 4_000);
-    }
-
-    #[test]
-    fn served_model_without_1m_suffix_is_not_a_model_change() {
-        let timeline = Timeline::fold_events([
-            AgentEvent::SessionStarted {
-                provider_session_id: "session".into(),
-                resume: ResumeCursor(json!({})),
-                model: Some("claude-opus-5[1m]".into()),
-            },
-            user_msg("user", "hello"),
-            AgentEvent::ServedModel {
-                model: "claude-opus-5".into(),
-                reason: None,
-            },
-            // Only the listed context suffixes are ignored, not any bracket.
-            AgentEvent::ServedModel {
-                model: "claude-opus-5[3m]".into(),
-                reason: None,
-            },
-        ]);
-        let changes = timeline
-            .entries
-            .iter()
-            .filter_map(|entry| match &entry.content {
-                EntryContent::ModelChanged { from, to, .. } => Some((from.clone(), to.clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            changes,
-            vec![(Some("claude-opus-5".into()), "claude-opus-5[3m]".into())]
-        );
     }
 
     #[test]
     fn served_model_change_sets_turn_meta_and_adds_one_divider() {
-        let timeline = Timeline::fold_events([
-            AgentEvent::SessionStarted {
-                provider_session_id: "session".into(),
-                resume: ResumeCursor(json!({})),
-                model: Some("requested".into()),
-            },
-            user_msg("user", "hello"),
-            AgentEvent::ServedModel {
-                model: "served".into(),
-                reason: Some("capacity".into()),
-            },
-            AgentEvent::ServedModel {
-                model: "served".into(),
-                reason: Some("capacity".into()),
-            },
-        ]);
-        assert_eq!(timeline.turns[0].served_model.as_deref(), Some("served"));
-        let changes = timeline
-            .entries
-            .iter()
-            .filter(|entry| matches!(entry.content, EntryContent::ModelChanged { .. }))
-            .collect::<Vec<_>>();
-        assert_eq!(changes.len(), 1);
-        assert!(matches!(
-            &changes[0].content,
-            EntryContent::ModelChanged { from, to, reason }
-                if from.as_deref() == Some("requested")
-                    && to == "served"
-                    && reason.as_deref() == Some("capacity")
-        ));
+        for (requested, transitions, served, expected) in [
+            (
+                "requested",
+                vec![("served", Some("capacity")), ("served", Some("capacity"))],
+                "served",
+                vec![(Some("requested"), "served", Some("capacity"))],
+            ),
+            (
+                "claude-opus-5[1m]",
+                vec![("claude-opus-5", None)],
+                "claude-opus-5",
+                vec![],
+            ),
+            (
+                "claude-opus-5[1m]",
+                vec![("claude-opus-5", None), ("claude-opus-5[3m]", None)],
+                "claude-opus-5[3m]",
+                vec![(Some("claude-opus-5"), "claude-opus-5[3m]", None)],
+            ),
+        ] {
+            let mut timeline = Timeline::fold_events([
+                AgentEvent::SessionStarted {
+                    provider_session_id: "session".into(),
+                    resume: ResumeCursor(json!({})),
+                    model: Some(requested.into()),
+                },
+                user_msg("user", "hello"),
+            ]);
+            for (model, reason) in transitions {
+                timeline.apply_at(
+                    None,
+                    &AgentEvent::ServedModel {
+                        model: model.into(),
+                        reason: reason.map(str::to_string),
+                    },
+                );
+            }
+            assert_eq!(timeline.turns[0].served_model.as_deref(), Some(served));
+            let changes = timeline
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.content {
+                    EntryContent::ModelChanged { from, to, reason } => {
+                        Some((from.as_deref(), to.as_str(), reason.as_deref()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(changes, expected, "{requested} -> {served}");
+        }
     }
 
     /// Logs recorded before pi named its streamed messages carry every

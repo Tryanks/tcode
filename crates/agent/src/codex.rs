@@ -2778,30 +2778,49 @@ mod tests {
 
     #[test]
     fn mcp_builder_handles_both_one_and_none() {
-        let preview = crate::McpRegistration {
-            name: "tcode_preview".into(),
-            url: "http://p".into(),
-            bearer_token: "p".into(),
-        };
-        let orchestrate = crate::McpRegistration {
-            name: "tcode_orchestrate".into(),
-            url: "http://o".into(),
-            bearer_token: "o".into(),
-        };
-        let computer_use = crate::McpRegistration {
-            name: "tcode_computer_use".into(),
-            url: "http://c".into(),
-            bearer_token: "c".into(),
-        };
-        assert!(mcp_args(&[]).is_empty());
-        let one = mcp_args(std::slice::from_ref(&preview));
-        assert_eq!(one.len(), 2);
-        assert!(one[1].starts_with("mcp_servers.tcode_preview="));
-        let all = mcp_args(&[preview, orchestrate, computer_use]);
-        assert_eq!(all.len(), 6);
-        assert!(all[1].starts_with("mcp_servers.tcode_preview="));
-        assert!(all[3].starts_with("mcp_servers.tcode_orchestrate="));
-        assert!(all[5].starts_with("mcp_servers.tcode_computer_use="));
+        let registrations = [
+            crate::McpRegistration {
+                name: "tcode_preview".into(),
+                url: "http://p".into(),
+                bearer_token: "p".into(),
+            },
+            crate::McpRegistration {
+                name: "tcode_orchestrate".into(),
+                url: "http://o".into(),
+                bearer_token: "o".into(),
+            },
+            crate::McpRegistration {
+                name: "tcode_computer_use".into(),
+                url: "http://c".into(),
+                bearer_token: "c".into(),
+            },
+        ];
+        for count in [0, 1, 3] {
+            let args = mcp_args(&registrations[..count]);
+            assert_eq!(args.len(), count * 2);
+            for (arg, (key, url, authorization)) in args.as_chunks::<2>().0.iter().zip([
+                ("mcp_servers.tcode_preview", "http://p", "Bearer p"),
+                ("mcp_servers.tcode_orchestrate", "http://o", "Bearer o"),
+                ("mcp_servers.tcode_computer_use", "http://c", "Bearer c"),
+            ]) {
+                assert_eq!(arg[0], "-c");
+                let (actual_key, value) = arg[1].split_once('=').unwrap();
+                assert_eq!(actual_key, key);
+                let doc: toml::Value = toml::from_str(&format!("v = {value}")).unwrap();
+                let table = &doc["v"];
+                assert_eq!(table["url"].as_str(), Some(url));
+                assert_eq!(
+                    table["http_headers"]["Authorization"].as_str(),
+                    Some(authorization)
+                );
+                assert!(table.get("bearer_token").is_none());
+                // Trusted tcode servers must not require another native MCP approval.
+                assert_eq!(
+                    table["default_tools_approval_mode"].as_str(),
+                    Some("approve")
+                );
+            }
+        }
     }
 
     fn test_actor() -> (Actor, Receiver<AgentEvent>) {
@@ -4204,21 +4223,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_token_usage_from_last_and_total() {
-        let usage = map_usage(&json!({
-            "total":{"totalTokens":123,"inputTokens":100,"cachedInputTokens":20,"outputTokens":23,"reasoningOutputTokens":3},
-            "last":{"totalTokens":12,"inputTokens":8,"cachedInputTokens":2,"outputTokens":4,"reasoningOutputTokens":1},
-            "modelContextWindow":200000
-        })).unwrap();
-        assert_eq!(usage.input_tokens, Some(8));
-        assert_eq!(usage.cached_input_tokens, Some(2));
-        assert_eq!(usage.output_tokens, Some(4));
-        assert_eq!(usage.used_tokens, Some(12));
-        assert_eq!(usage.total_processed_tokens, Some(123));
-        assert_eq!(usage.context_window, Some(200000));
-    }
-
-    #[test]
     fn maps_reasoning_and_user_text() {
         let reasoning = map_item(
             &json!({"type":"reasoning","id":"r1","summary":["summary"],"content":["detail"]}),
@@ -4752,39 +4756,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_decision_maps_to_cancel_wire_string() {
-        smol::block_on(async {
-            let (mut actor, events) = test_actor();
-            actor.approvals.insert("41".into(), json!(41));
-            actor
-                .handle_command(SessionCommand::RespondApproval {
-                    request_id: "41".into(),
-                    decision: ApprovalDecision::Cancel,
-                })
-                .await
-                .unwrap();
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ApprovalResolved {
-                    decision: ApprovalDecision::Cancel,
-                    ..
-                }
-            ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(
-                response,
-                json!({"id": 41, "result": {"decision": "cancel"}})
-            );
-
-            let _ = actor.child.kill();
-            let _ = actor.child.wait();
-        });
-    }
-
-    #[test]
     fn shutdown_settles_pending_user_input_empty() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
@@ -4838,6 +4809,11 @@ mod tests {
                 events.recv().await.unwrap(),
                 AgentEvent::TokenUsage(TokenUsage {
                     input_tokens: Some(8),
+                    cached_input_tokens: Some(2),
+                    output_tokens: Some(4),
+                    used_tokens: Some(12),
+                    total_processed_tokens: Some(123),
+                    context_window: Some(200000),
                     ..
                 })
             ));
@@ -4856,35 +4832,55 @@ mod tests {
                 AgentEvent::TurnCompleted {
                     status: TurnStatus::Completed,
                     usage: Some(TokenUsage {
+                        input_tokens: Some(8),
+                        cached_input_tokens: Some(2),
                         output_tokens: Some(4),
+                        used_tokens: Some(12),
+                        total_processed_tokens: Some(123),
+                        context_window: Some(200000),
                         ..
                     }),
                     ..
                 }
             ));
 
-            actor
-                .handle_command(SessionCommand::RespondApproval {
-                    request_id: "41".into(),
-                    decision: ApprovalDecision::ApproveForSession,
+            let approval_line = include_str!("../tests/fixtures/codex/v2_messages.jsonl")
+                .lines()
+                .find(|line| {
+                    let message: Value = serde_json::from_str(line).unwrap();
+                    message["method"] == "item/fileChange/requestApproval"
                 })
-                .await
-                .unwrap();
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ApprovalResolved {
-                    decision: ApprovalDecision::ApproveForSession,
-                    ..
+                .expect("recorded native approval request");
+            for (decision, wire) in [
+                (ApprovalDecision::ApproveForSession, "acceptForSession"),
+                (ApprovalDecision::Cancel, "cancel"),
+            ] {
+                if decision == ApprovalDecision::Cancel {
+                    // Re-enter through the native request, never a seeded pending map.
+                    actor.handle_line(approval_line).await;
+                    assert!(matches!(
+                        events.recv().await.unwrap(),
+                        AgentEvent::ApprovalRequested(ApprovalRequest { ref id, .. }) if id == "41"
+                    ));
                 }
-            ));
-            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
-                panic!("expected echoed response")
-            };
-            let response: Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(
-                response,
-                json!({"id": 41, "result": {"decision": "acceptForSession"}})
-            );
+                actor
+                    .handle_command(SessionCommand::RespondApproval {
+                        request_id: "41".into(),
+                        decision: decision.clone(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    events.recv().await.unwrap(),
+                    AgentEvent::ApprovalResolved { ref request_id, decision: resolved }
+                        if request_id == "41" && resolved == decision
+                ));
+                let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed response")
+                };
+                let response: Value = serde_json::from_str(&response).unwrap();
+                assert_eq!(response, json!({"id":41, "result":{"decision":wire}}));
+            }
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();

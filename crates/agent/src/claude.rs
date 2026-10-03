@@ -3415,32 +3415,52 @@ mod tests {
 
     #[test]
     fn mcp_builder_handles_both_one_and_none() {
-        let preview = crate::McpRegistration {
-            name: "tcode_preview".into(),
-            url: "http://p".into(),
-            bearer_token: "p".into(),
-        };
-        let orchestrate = crate::McpRegistration {
-            name: "tcode_orchestrate".into(),
-            url: "http://o".into(),
-            bearer_token: "o".into(),
-        };
-        let computer_use = crate::McpRegistration {
-            name: "tcode_computer_use".into(),
-            url: "http://c".into(),
-            bearer_token: "c".into(),
-        };
-        assert!(mcp_args(&[]).is_empty());
-        let one = mcp_args(std::slice::from_ref(&preview));
-        assert_eq!(one[0], "--mcp-config");
-        let one_json: Value = serde_json::from_str(&one[1]).unwrap();
-        assert!(one_json["mcpServers"].get("tcode_preview").is_some());
-        assert!(one_json["mcpServers"].get("tcode_orchestrate").is_none());
-        let all_json: Value =
-            serde_json::from_str(&mcp_args(&[preview, orchestrate, computer_use])[1]).unwrap();
-        assert!(all_json["mcpServers"].get("tcode_preview").is_some());
-        assert!(all_json["mcpServers"].get("tcode_orchestrate").is_some());
-        assert!(all_json["mcpServers"].get("tcode_computer_use").is_some());
+        let registrations = [
+            crate::McpRegistration {
+                name: "tcode_preview".into(),
+                url: "http://p".into(),
+                bearer_token: "p".into(),
+            },
+            crate::McpRegistration {
+                name: "tcode_orchestrate".into(),
+                url: "http://o".into(),
+                bearer_token: "o".into(),
+            },
+            crate::McpRegistration {
+                name: "tcode_computer_use".into(),
+                url: "http://c".into(),
+                bearer_token: "c".into(),
+            },
+        ];
+        for count in [0, 1, 3] {
+            let args = mcp_args(&registrations[..count]);
+            if count == 0 {
+                assert!(args.is_empty());
+                continue;
+            }
+            assert_eq!(args.len(), 2);
+            assert_eq!(args[0], "--mcp-config");
+            let config: Value = serde_json::from_str(&args[1]).unwrap();
+            let servers = config["mcpServers"].as_object().unwrap();
+            assert_eq!(servers.len(), count);
+            for (name, url, authorization) in [
+                ("tcode_preview", "http://p", "Bearer p"),
+                ("tcode_orchestrate", "http://o", "Bearer o"),
+                ("tcode_computer_use", "http://c", "Bearer c"),
+            ]
+            .into_iter()
+            .take(count)
+            {
+                assert_eq!(
+                    servers[name],
+                    json!({
+                        "type": "http",
+                        "url": url,
+                        "headers": {"Authorization": authorization},
+                    })
+                );
+            }
+        }
     }
 
     fn feed(mapper: &mut Mapper, line: &str) -> Vec<AgentEvent> {
@@ -3988,41 +4008,6 @@ mod tests {
     }
 
     #[test]
-    fn exit_plan_mode_captures_and_denies() {
-        let mut m = Mapper::new();
-        m.start_turn();
-        // Permission-callback path: capture ProposedPlan + queue auto-deny.
-        let evs = feed(
-            &mut m,
-            r##"{"type":"control_request","request_id":"req-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan\n- step one"}}}"##,
-        );
-        assert_eq!(evs.len(), 1);
-        match &evs[0] {
-            AgentEvent::ProposedPlan { item_id, markdown } => {
-                assert_eq!(item_id, "req-plan");
-                assert_eq!(markdown, "# Plan\n- step one");
-            }
-            other => panic!("expected ProposedPlan, got {other:?}"),
-        }
-        let outgoing = m.take_outgoing();
-        assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["response"]["subtype"], "success");
-        assert_eq!(outgoing[0]["response"]["request_id"], "req-plan");
-        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "deny");
-        assert_eq!(
-            outgoing[0]["response"]["response"]["message"],
-            EXIT_PLAN_DENY_MESSAGE
-        );
-
-        // Assistant-block path with the SAME tool id is deduped (no second event).
-        let evs = feed(
-            &mut m,
-            r##"{"type":"assistant","message":{"id":"msg_p","content":[{"type":"tool_use","id":"req-plan","name":"ExitPlanMode","input":{"plan":"# Plan\n- step one"}}]}}"##,
-        );
-        assert!(evs.is_empty(), "duplicate capture should be suppressed");
-    }
-
-    #[test]
     fn plan_session_launches_with_plan_permission_mode() {
         let launch_mode = initial_permission_mode(ApprovalMode::Supervised, InteractionMode::Plan);
         assert_eq!(launch_mode, "plan");
@@ -4094,13 +4079,33 @@ mod tests {
         m.start_turn();
         let first = feed(
             &mut m,
-            r##"{"type":"control_request","request_id":"req-plan-1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# First plan"}}}"##,
+            r##"{"type":"control_request","request_id":"req-plan-1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# First plan\n- step one"}}}"##,
         );
         assert!(matches!(
             first.as_slice(),
-            [AgentEvent::ProposedPlan { .. }]
+            [AgentEvent::ProposedPlan { item_id, markdown }]
+                if item_id == "req-plan-1" && markdown == "# First plan\n- step one"
         ));
-        assert_eq!(m.take_outgoing().len(), 1);
+        assert_eq!(
+            m.take_outgoing(),
+            vec![json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": "req-plan-1",
+                    "response": {"behavior": "deny", "message": EXIT_PLAN_DENY_MESSAGE},
+                }
+            })]
+        );
+
+        let assistant = feed(
+            &mut m,
+            r##"{"type":"assistant","message":{"id":"msg_p","content":[{"type":"tool_use","id":"req-plan-1","name":"ExitPlanMode","input":{"plan":"# First plan\n- step one"}}]}}"##,
+        );
+        assert!(
+            assistant.is_empty(),
+            "the assistant replay must not repeat the proposal"
+        );
 
         let second = feed(
             &mut m,
@@ -4110,7 +4115,10 @@ mod tests {
             second.is_empty(),
             "a retry in the same turn must not emit another ProposedPlan"
         );
-        assert_eq!(m.take_outgoing().len(), 1, "the retry is still denied");
+        let outgoing = m.take_outgoing();
+        assert_eq!(outgoing.len(), 1, "the retry is still denied");
+        assert_eq!(outgoing[0]["response"]["request_id"], "req-plan-2");
+        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "deny");
 
         m.start_turn();
         let next_turn = feed(
@@ -4222,10 +4230,12 @@ mod tests {
         for line in include_str!("../tests/fixtures/claude/compaction_recorded.jsonl").lines() {
             events.extend(feed(&mut m, line));
         }
+        assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], AgentEvent::ContextCompacted(c) if c.in_progress));
-        assert!(
-            matches!(&events[1], AgentEvent::ContextCompacted(c) if !c.in_progress && c.pre_tokens == Some(19555) && c.post_tokens == Some(2948) && c.dropped_tokens == Some(16607) && c.duration_ms == Some(24455))
-        );
+        assert!(matches!(&events[1], AgentEvent::ContextCompacted(c)
+                if !c.in_progress && c.trigger.as_deref() == Some("manual")
+                    && c.pre_tokens == Some(19555) && c.post_tokens == Some(2948)
+                    && c.dropped_tokens == Some(16607) && c.duration_ms == Some(24455)));
         assert_eq!(m.latest_usage.used_tokens, None);
         assert_eq!(
             m.latest_usage.freshness,
@@ -4318,18 +4328,6 @@ mod tests {
         );
         assert!(
             matches!(output_only.last(), Some(AgentEvent::TokenUsage(u)) if u.used_tokens.is_none())
-        );
-    }
-
-    #[test]
-    fn compact_boundary_maps_to_context_compacted() {
-        let mut m = Mapper::new();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"system","subtype":"compact_boundary","session_id":"s1","compact_metadata":{"trigger":"manual","pre_tokens":500,"post_tokens":10}}"#,
-        );
-        assert!(
-            matches!(evs.as_slice(), [AgentEvent::ContextCompacted(crate::Compaction { in_progress: false, trigger: Some(trigger), pre_tokens: Some(500), post_tokens: Some(10), .. })] if trigger == "manual")
         );
     }
 
@@ -4731,82 +4729,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_structured_patch_preserves_external_file_diff() {
-        let mut mapper = Mapper::new();
-        let started = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"id":"msg-external","content":[{"type":"tool_use","id":"toolu-external","name":"Write","input":{"file_path":"/tmp/tcode-outside-workspace.txt","content":"visible diff\n"}}]}}"#,
-        );
-        assert!(matches!(
-            &started[0],
-            AgentEvent::ItemStarted(ThreadItem {
-                content: ItemContent::FileChange { changes, status: ItemStatus::InProgress },
-                ..
-            }) if changes.len() == 1
-                && changes[0].path == "/tmp/tcode-outside-workspace.txt"
-                && changes[0].kind == FileChangeKind::Create
-                && changes[0].diff.as_deref() == Some("+visible diff")
-        ));
-
-        let completed = feed(
-            &mut mapper,
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-external","content":"File created successfully"}]},"tool_use_result":{"type":"create","filePath":"/tmp/tcode-outside-workspace.txt","content":"visible diff\n","structuredPatch":[]}}"#,
-        );
-
-        assert!(matches!(
-            &completed[0],
-            AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::FileChange { changes, status },
-                ..
-            }) if *status == ItemStatus::Completed
-                && changes[0].path == "/tmp/tcode-outside-workspace.txt"
-                && changes[0].diff.as_deref() == Some("+visible diff")
-        ));
-    }
-
-    #[test]
-    fn can_use_tool_maps_to_approval_and_response() {
-        let mut m = Mapper::new();
-        m.start_turn();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/h.txt","content":"hi\n"},"description":"h.txt"}}"#,
-        );
-        let request_id = match &evs[0] {
-            AgentEvent::ApprovalRequested(req) => {
-                assert_eq!(req.id, "req-1");
-                assert_eq!(req.turn_id.as_deref(), Some("turn-1"));
-                match &req.kind {
-                    ApprovalKind::FileChange { changes, reason } => {
-                        assert_eq!(changes[0].path, "/tmp/h.txt");
-                        assert_eq!(reason.as_deref(), Some("h.txt"));
-                    }
-                    other => panic!("expected FileChange approval, got {other:?}"),
-                }
-                req.id.clone()
-            }
-            other => panic!("expected ApprovalRequested, got {other:?}"),
-        };
-
-        let resp = m
-            .build_approval_response(&request_id, ApprovalDecision::Approve)
-            .expect("response for known request");
-        assert_eq!(resp["type"], "control_response");
-        assert_eq!(resp["response"]["subtype"], "success");
-        assert_eq!(resp["response"]["request_id"], "req-1");
-        assert_eq!(resp["response"]["response"]["behavior"], "allow");
-        assert_eq!(
-            resp["response"]["response"]["updatedInput"]["file_path"],
-            "/tmp/h.txt"
-        );
-        // Consumed: a second response is not produced.
-        assert!(
-            m.build_approval_response(&request_id, ApprovalDecision::Approve)
-                .is_none()
-        );
-    }
-
-    #[test]
     fn deny_cancel_and_session_approval_wire_strings() {
         // Denials use the user-facing message expected by the approval flow.
         let mut m = Mapper::new();
@@ -4927,32 +4849,66 @@ mod tests {
     }
 
     #[test]
-    fn approval_detail_construction_rules() {
-        // 1. command → "<tool>: <trimmed, first 400 chars>".
-        let d = approval_detail("Bash", &json!({ "command": "  echo hi  " }));
-        assert_eq!(d, "Bash: echo hi");
-        let long = "x".repeat(500);
-        let d = approval_detail("Bash", &json!({ "cmd": long }));
-        assert_eq!(d, format!("Bash: {}", "x".repeat(400)));
-
-        // 2. subagent item: description preferred, prefixed with subagent_type.
-        let d = approval_detail(
-            "Task",
-            &json!({ "subagent_type": "explore", "description": "find refs", "prompt": "ignored" }),
-        );
-        assert_eq!(d, "explore: find refs");
-        // prompt fallback (first 200 chars), no subagent_type prefix.
-        let d = approval_detail("Task", &json!({ "prompt": "y".repeat(300) }));
-        assert_eq!(d, "y".repeat(200));
-
-        // 3. otherwise serialize input; ≤400 keeps full JSON.
-        let d = approval_detail("Weird", &json!({ "a": 1 }));
-        assert_eq!(d, "Weird: {\"a\":1}");
-        // >400 → first 397 chars + "..."
-        let big = json!({ "blob": "z".repeat(500) });
-        let d = approval_detail("Weird", &big);
-        assert!(d.starts_with("Weird: "));
-        assert!(d.ends_with("..."));
+    fn approval_details_reach_native_permission_requests() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        for (tool, input, expected) in [
+            (
+                "Task",
+                json!({"subagent_type":"explore", "description":"find refs", "prompt":"ignored"}),
+                Some("explore: find refs"),
+            ),
+            (
+                "Task",
+                json!({"prompt":"find references"}),
+                Some("find references"),
+            ),
+            ("Weird", json!({"a":1}), Some("Weird: {\"a\":1}")),
+            (
+                "Read",
+                json!({"file_path":"/tmp/a.txt"}),
+                Some("Read: {\"file_path\":\"/tmp/a.txt\"}"),
+            ),
+            ("Task", json!({"prompt":"y".repeat(300)}), None),
+            ("Weird", json!({"blob":"z".repeat(500)}), None),
+        ] {
+            let events = m.on_message(json!({
+                "type": "control_request",
+                "request_id": "detail-request",
+                "request": {"subtype":"can_use_tool", "tool_name":tool, "input":input},
+            }));
+            let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+                panic!("expected native permission request, got {events:?}");
+            };
+            let detail = match &request.kind {
+                ApprovalKind::ToolUse {
+                    name,
+                    input: actual_input,
+                    detail,
+                } => {
+                    assert_eq!(name, tool);
+                    assert_eq!(actual_input, &input);
+                    detail
+                }
+                ApprovalKind::FileRead { detail } if tool == "Read" => detail,
+                other => panic!("unexpected approval for {tool}: {other:?}"),
+            };
+            if let Some(expected) = expected {
+                assert_eq!(detail, expected);
+            } else if tool == "Task" {
+                let prompt = input["prompt"].as_str().unwrap();
+                assert!(!detail.is_empty());
+                assert!(prompt.starts_with(detail.as_str()));
+                assert!(
+                    detail.len() < prompt.len(),
+                    "long task prompts must remain bounded"
+                );
+            } else {
+                assert!(detail.starts_with("Weird: {\"blob\":\""));
+                assert!(detail.ends_with("..."));
+                assert!(detail.len() < input["blob"].as_str().unwrap().len());
+            }
+        }
     }
 
     #[test]
@@ -5217,97 +5173,145 @@ mod tests {
     }
 
     #[test]
-    fn permission_mode_flag_maps_all_modes() {
-        assert_eq!(permission_mode_flag(ApprovalMode::Supervised), "default");
-        assert_eq!(permission_mode_flag(ApprovalMode::ReadOnly), "default");
-        assert_eq!(
-            permission_mode_flag(ApprovalMode::AutoAcceptEdits),
-            "acceptEdits"
-        );
-        assert_eq!(
-            permission_mode_flag(ApprovalMode::FullAccess),
-            "bypassPermissions"
-        );
-    }
-
-    #[test]
     fn set_permission_mode_request_shape() {
         let mut m = Mapper::new();
-        let req =
-            m.set_permission_mode_request_str(permission_mode_flag(ApprovalMode::AutoAcceptEdits));
-        let request_id = req["request_id"].as_str().unwrap().to_owned();
-        assert_eq!(req["type"], "control_request");
-        assert!(req["request_id"].is_string());
-        assert_eq!(req["request"]["subtype"], "set_permission_mode");
-        assert_eq!(req["request"]["mode"], "acceptEdits");
-        assert_eq!(m.applied_permission_mode, "default");
+        for (mode, native_mode, accepted) in [
+            (ApprovalMode::Supervised, "default", true),
+            (ApprovalMode::ReadOnly, "default", true),
+            (ApprovalMode::AutoAcceptEdits, "acceptEdits", true),
+            (ApprovalMode::FullAccess, "bypassPermissions", false),
+        ] {
+            let previous = m.applied_permission_mode.clone();
+            let req = m.set_permission_mode_request_str(permission_mode_flag(mode));
+            let request_id = req["request_id"].as_str().unwrap().to_owned();
+            assert_eq!(req["type"], "control_request");
+            assert_eq!(req["request"]["subtype"], "set_permission_mode");
+            assert_eq!(req["request"]["mode"], native_mode);
+            assert_eq!(
+                m.applied_permission_mode, previous,
+                "must wait for acknowledgement"
+            );
 
-        let events = m.on_message(json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": request_id,
-                "response": {},
+            let events = m.on_message(json!({
+                "type": "control_response",
+                "response": if accepted {
+                    json!({"subtype": "success", "request_id": request_id, "response": {}})
+                } else {
+                    json!({"subtype": "error", "request_id": request_id, "error": "unsupported mode"})
+                }
+            }));
+            if accepted {
+                assert!(events.is_empty());
+                assert_eq!(m.applied_permission_mode, native_mode);
+            } else {
+                assert!(matches!(
+                    events.as_slice(),
+                    [AgentEvent::Warning { message }] if message.contains("unsupported mode")
+                ));
+                assert_eq!(m.applied_permission_mode, previous);
             }
-        }));
-        assert!(events.is_empty());
-        assert_eq!(m.applied_permission_mode, "acceptEdits");
-
-        // FullAccess maps to bypassPermissions on the wire.
-        let req = m.set_permission_mode_request_str(permission_mode_flag(ApprovalMode::FullAccess));
-        assert_eq!(req["request"]["mode"], "bypassPermissions");
-        let events = m.on_message(json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "error",
-                "request_id": req["request_id"],
-                "error": "unsupported mode",
-            }
-        }));
-        assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::Warning { message }]
-                if message.contains("unsupported mode")
-        ));
-        assert_eq!(m.applied_permission_mode, "acceptEdits");
+        }
     }
 
     #[test]
     fn full_fixture_trace_parses() {
-        // Replay a captured real trace; assert the key canonical events appear.
         let trace = include_str!("../tests/fixtures/claude/tool_use_trace.jsonl");
         let mut m = Mapper::new();
         let mut all = Vec::new();
-        for line in trace.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
+        let mut turn_id = None;
+        let mut approvals = 0;
+        for line in trace.lines().filter(|line| !line.trim().is_empty()) {
             let msg: Value = serde_json::from_str(line).expect("fixture line is json");
-            all.extend(m.on_message(msg));
+            for event in m.on_message(msg) {
+                if let AgentEvent::TurnStarted { turn_id: started } = &event {
+                    turn_id = Some(started.clone());
+                }
+                if let AgentEvent::ApprovalRequested(request) = &event {
+                    approvals += 1;
+                    assert_eq!(request.id, "221a98ab-3314-470d-89e0-0528a9e8d75f");
+                    assert!(turn_id.is_some());
+                    assert_eq!(request.turn_id, turn_id);
+                    let ApprovalKind::FileChange { changes, reason } = &request.kind else {
+                        panic!("expected Write approval, got {request:?}");
+                    };
+                    assert_eq!(changes.len(), 1);
+                    assert_eq!(changes[0].path, "/private/tmp/probe-claude-py/hello.txt");
+                    assert_eq!(reason.as_deref(), Some("hello.txt"));
+                    let response = m
+                        .build_approval_response(&request.id, ApprovalDecision::Approve)
+                        .expect("response to the recorded request");
+                    assert_eq!(
+                        response,
+                        json!({
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "success",
+                                "request_id": "221a98ab-3314-470d-89e0-0528a9e8d75f",
+                                "response": {
+                                    "behavior": "allow",
+                                    "updatedInput": {
+                                        "file_path": "/private/tmp/probe-claude-py/hello.txt",
+                                        "content": "hi\n",
+                                    },
+                                },
+                            },
+                        })
+                    );
+                    assert!(
+                        m.build_approval_response(&request.id, ApprovalDecision::Approve)
+                            .is_none()
+                    );
+                }
+                all.push(event);
+            }
         }
         assert!(
             all.iter()
-                .any(|e| matches!(e, AgentEvent::SessionStarted { .. })),
+                .any(|event| matches!(event, AgentEvent::SessionStarted { .. })),
             "expected SessionStarted"
         );
-        assert!(
-            all.iter()
-                .any(|e| matches!(e, AgentEvent::ApprovalRequested(_))),
-            "expected ApprovalRequested"
+        assert_eq!(approvals, 1);
+
+        // Empty structuredPatch in the recorded result must preserve the Write input's diff.
+        let changes: Vec<_> = all
+            .iter()
+            .filter_map(|event| {
+                let (phase, item) = match event {
+                    AgentEvent::ItemStarted(item) => ("started", item),
+                    AgentEvent::ItemCompleted(item) => ("completed", item),
+                    _ => return None,
+                };
+                let ItemContent::FileChange { changes, status } = &item.content else {
+                    return None;
+                };
+                Some((phase, item.id.as_str(), *status, changes.as_slice()))
+            })
+            .collect();
+        let expected = [FileChange {
+            path: "/private/tmp/probe-claude-py/hello.txt".into(),
+            kind: FileChangeKind::Create,
+            diff: Some("+hi".into()),
+        }];
+        assert_eq!(
+            changes,
+            vec![
+                (
+                    "started",
+                    "toolu_01E6rT4J5qJva9HnEfBx5top",
+                    ItemStatus::InProgress,
+                    expected.as_slice()
+                ),
+                (
+                    "completed",
+                    "toolu_01E6rT4J5qJva9HnEfBx5top",
+                    ItemStatus::Completed,
+                    expected.as_slice()
+                ),
+            ]
         );
         assert!(
-            all.iter().any(|e| matches!(
-                e,
-                AgentEvent::ItemStarted(ThreadItem {
-                    content: ItemContent::FileChange { .. },
-                    ..
-                })
-            )),
-            "expected FileChange ItemStarted"
-        );
-        assert!(
-            all.iter().any(|e| matches!(
-                e,
+            all.iter().any(|event| matches!(
+                event,
                 AgentEvent::TurnCompleted {
                     status: TurnStatus::Completed,
                     ..

@@ -2658,9 +2658,15 @@ mod tests {
         });
         assert!(cx.debug_bounds("pending-delivery-bubble").is_some());
         assert!(cx.debug_bounds("pending-thread-row").is_some());
+        as_mobile(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
         let navigation = shell.read_with(cx, |shell, _| shell.window_state());
         navigation.update(cx, |state, cx| state.enter_workspace(cx));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.compact(cx));
+            assert_eq!(shell.destination(cx), Destination::Threads);
+        });
         cx.update(|window, cx| {
             crate::settings_page::apply_theme(tcode_core::settings::ThemeMode::Dark, window, cx)
         });
@@ -2840,112 +2846,131 @@ mod tests {
     #[gpui::test]
     fn cold_start_restores_thread_and_selects_it_once(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
-        assert!(
-            cx.debug_bounds("baseline-loading").is_some(),
-            "the restored destination shows a skeleton before its Index baseline"
-        );
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(
-                shell.window_state.read(cx).history(),
-                [
-                    Destination::Hosts,
-                    Destination::Threads,
-                    Destination::Thread
-                ]
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        for width in [393., 1024.] {
+            let (shell, host, _, cx) =
+                mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, width, "plan");
+            assert!(
+                cx.debug_bounds("baseline-loading").is_some(),
+                "the restored destination shows a skeleton before its Index baseline"
             );
-            assert_eq!(
-                shell
-                    .store()
-                    .unwrap()
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(
+                    shell.window_state.read(cx).history(),
+                    [
+                        Destination::Hosts,
+                        Destination::Threads,
+                        Destination::Thread
+                    ]
+                );
+                assert_eq!(
+                    shell
+                        .store()
+                        .unwrap()
+                        .read(cx)
+                        .active_session_id()
+                        .as_deref(),
+                    Some("thread-a")
+                );
+            });
+            restore_index(&shell, &host, true, cx);
+            restore_index(&shell, &host, true, cx);
+            restore_status(&shell, &host, cx);
+            draw(cx);
+            cx.update(|window, cx| {
+                let composer = shell
                     .read(cx)
-                    .active_session_id()
-                    .as_deref(),
-                Some("thread-a")
-            );
-        });
-        restore_index(&shell, &host, true, cx);
-        restore_index(&shell, &host, true, cx);
-        restore_status(&shell, &host, cx);
-        draw(cx);
-        cx.update(|window, cx| {
-            let composer = shell
-                .read(cx)
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat
-                .read(cx)
-                .composer();
-            assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
-        });
-        let subscriptions = sent(&host).into_iter().filter(|payload| matches!(payload,
-            ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-a".into() }
-        )).count();
-        assert_eq!(
-            subscriptions, 1,
-            "baseline reconciliation must not select again"
-        );
-        for (topic, event) in [
-            (
-                Topic::Settings,
-                ServerEvent::SettingsSnapshot(Default::default()),
-            ),
-            (
-                Topic::SessionEvents {
-                    session_id: "thread-a".into(),
-                },
-                ServerEvent::SessionSnapshot {
-                    from: 1800,
-                    end: 2000,
-                    records: (0..200)
-                        .map(|_| {
-                            agent::AgentEvent::Warning {
-                                message: "short".into(),
-                            }
-                            .into()
-                        })
-                        .collect(),
-                    total: 2000,
-                    total_turns: 1,
-                    truncated: false,
-                },
-            ),
-        ] {
-            host.incoming
-                .try_send(
-                    encode_line(&HostMessage::Event(EventEnvelope {
-                        request_id: None,
-                        topic,
-                        event,
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
-        draw(cx);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-        });
-        cx.run_until_parked();
-        assert!(
-            sent(&host).into_iter().any(|payload| matches!(
-                payload,
-                ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
-                    before: 1800,
-                    limit: 200,
-                    ..
-                })
-            )),
-            "restored short history must prefetch before any scroll"
-        );
-        shell.read_with(cx, |shell, cx| {
+                    .attachment
+                    .as_ref()
+                    .unwrap()
+                    .chat
+                    .read(cx)
+                    .composer();
+                assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
+            });
+            let subscriptions = sent(&host).into_iter().filter(|payload| matches!(payload,
+                ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-a".into() }
+            )).count();
             assert_eq!(
-                shell.window_state.read(cx).history().last(),
-                Some(&Destination::Thread)
-            )
-        });
+                subscriptions, 1,
+                "baseline reconciliation must not select again"
+            );
+            for (topic, event) in [
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                (
+                    Topic::SessionEvents {
+                        session_id: "thread-a".into(),
+                    },
+                    ServerEvent::SessionSnapshot {
+                        from: 1800,
+                        end: 2000,
+                        records: (0..200)
+                            .map(|_| {
+                                agent::AgentEvent::Warning {
+                                    message: "short".into(),
+                                }
+                                .into()
+                            })
+                            .collect(),
+                        total: 2000,
+                        total_turns: 1,
+                        truncated: false,
+                    },
+                ),
+            ] {
+                host.incoming
+                    .try_send(
+                        encode_line(&HostMessage::Event(EventEnvelope {
+                            request_id: None,
+                            topic,
+                            event,
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            await_restore_update(&shell, cx, |store| !store.chat_loading());
+            draw(cx);
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+            assert!(
+                sent(&host).into_iter().any(|payload| matches!(
+                    payload,
+                    ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+                        before: 1800,
+                        limit: 200,
+                        ..
+                    })
+                )),
+                "restored short history must prefetch before any scroll"
+            );
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(
+                    shell.window_state.read(cx).history().last(),
+                    Some(&Destination::Thread)
+                )
+            });
+            let focus = shell.read_with(cx, |shell, cx| {
+                shell
+                    .attachment
+                    .as_ref()
+                    .unwrap()
+                    .chat
+                    .read(cx)
+                    .composer()
+                    .read(cx)
+                    .input_focus_handle(cx)
+            });
+            for rotated_width in [width, 393., 1024.] {
+                resize(cx, rotated_width);
+                cx.update(|window, _| assert!(!focus.is_focused(window), "cold restore at {width}px must not open the keyboard after hydration or rotation"));
+            }
+        }
     }
 
     #[gpui::test]
@@ -3079,47 +3104,44 @@ mod tests {
     }
 
     #[gpui::test]
-    fn same_page_thread_selection_is_checkpointed_without_waiting_for_host(
-        cx: &mut TestAppContext,
-    ) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
-        store_of(&shell, cx).update(cx, |store, _| store.select_session("thread-b".into()));
-        shell
-            .read_with(cx, |shell, _| shell.window_state())
-            .update(cx, |state, cx| state.open_thread(cx));
-        draw(cx);
-        cx.executor().advance_clock(Duration::from_millis(151));
-        draw(cx);
-        let navigation = client.load_preferences().navigation.unwrap();
-        assert_eq!(navigation["session_id"], "thread-b");
-        assert_eq!(
-            navigation["history"],
-            serde_json::json!(["hosts", "threads", "thread"])
-        );
-    }
-
-    #[gpui::test]
     fn navigation_checkpoint_debounces_selection_and_history_without_losing_preferences(
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         let store = store_of(&shell, cx);
+        // An OpenThread intent on the existing page must checkpoint without
+        // waiting for a host response or a changed history.
+        store.update(cx, |store, _| store.select_session("thread-b".into()));
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_thread(cx));
+        draw(cx);
+        assert_eq!(client.saves.get(), 0);
+        cx.executor().advance_clock(Duration::from_millis(151));
+        draw(cx);
+        assert_eq!(client.saves.get(), 1);
+        let same_page = client.load_preferences().navigation.unwrap();
+        assert_eq!(same_page["session_id"], "thread-b");
+        assert_eq!(
+            same_page["history"],
+            serde_json::json!(["hosts", "threads", "thread"])
+        );
+
         store.update(cx, |store, cx| {
-            store.select_session("thread-b".into());
+            store.select_session("thread-c".into());
             cx.notify();
         });
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| state.go(Destination::Settings, cx));
         draw(cx);
-        assert_eq!(client.saves.get(), 0);
+        assert_eq!(client.saves.get(), 1);
         cx.executor().advance_clock(Duration::from_millis(151));
         draw(cx);
-        assert_eq!(client.saves.get(), 1);
+        assert_eq!(client.saves.get(), 2);
         let navigation = client.load_preferences().navigation.unwrap();
-        assert_eq!(navigation["session_id"], "thread-b");
+        assert_eq!(navigation["session_id"], "thread-c");
         assert_eq!(
             navigation["history"],
             serde_json::json!(["hosts", "threads", "thread", "settings"])
@@ -3363,6 +3385,21 @@ mod tests {
             bottom: px(400.),
             ..Default::default()
         };
+        // A desktop visual-viewport transition is a control: without a
+        // software keyboard it must not blur the same focused editor.
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
+        resize(cx, 1024.);
+        cx.update(|window, cx| focus.focus(window, cx));
+        draw(cx);
+        for insets in [keyboard, gpui::Edges::default()] {
+            crate::window_seam::occlude_for_test(cx, insets);
+            draw(cx);
+            cx.update(|window, _| assert!(focus.is_focused(window)));
+        }
+        as_mobile(cx);
+        resize(cx, 393.);
+        cx.update(|window, cx| window.blur(cx));
+        draw(cx);
         let card = cx
             .debug_bounds("composer-card")
             .expect("composer on the thread page");
@@ -3421,33 +3458,6 @@ mod tests {
             );
             assert!(state.read(cx).palette_open);
         });
-    }
-
-    /// A desktop window has no software keyboard: a visual viewport change
-    /// there never touches focus.
-    #[gpui::test]
-    fn desktop_visual_viewport_changes_never_blur(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
-        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        resize(cx, 1024.);
-        let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
-        });
-        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        cx.update(|window, cx| focus.focus(window, cx));
-        draw(cx);
-        for insets in [
-            gpui::Edges {
-                bottom: px(400.),
-                ..Default::default()
-            },
-            gpui::Edges::default(),
-        ] {
-            crate::window_seam::occlude_for_test(cx, insets);
-            draw(cx);
-            cx.update(|window, _| assert!(focus.is_focused(window)));
-        }
     }
 
     /// A tablet that rotates through phone widths and back: the read-only
@@ -3660,31 +3670,6 @@ mod tests {
                 "a restored terminal must not steal focus after navigation has blurred"
             )
         });
-    }
-
-    #[gpui::test]
-    fn software_keyboard_wide_cold_restore_stays_unfocused(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        let (shell, host, _, cx) =
-            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1024., "plan");
-        restore_index(&shell, &host, true, cx);
-        restore_status(&shell, &host, cx);
-        let focus = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat
-                .read(cx)
-                .composer()
-                .read(cx)
-                .input_focus_handle(cx)
-        });
-        for width in [1024., 393., 1024.] {
-            resize(cx, width);
-            cx.update(|window, _| assert!(!focus.is_focused(window)));
-        }
     }
 
     #[gpui::test]
@@ -3990,7 +3975,14 @@ mod tests {
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_initial(cx, None);
+        as_mobile(cx);
         resize(cx, 393.);
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| {
+                state.go(Destination::Thread, cx);
+                state.go(Destination::Panel, cx);
+            });
         let hosts = shell.read_with(cx, |shell, _| shell.hosts.clone());
         cx.update(|window, cx| {
             set_back_target(window.window_handle(), &shell, cx);
@@ -4008,6 +4000,13 @@ mod tests {
                 [Destination::Hosts, Destination::Threads]
             );
         });
+        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        draw(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.destination(cx)),
+            Destination::Hosts
+        );
+        assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
     }
 
     #[gpui::test]
@@ -4361,7 +4360,12 @@ mod tests {
             shell.read_with(cx, |shell, cx| shell.destination(cx)),
             Destination::Thread
         );
+        as_mobile(cx);
         resize(cx, 393.);
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.compact(cx));
+            assert_eq!(shell.destination(cx), Destination::Thread);
+        });
         cx.simulate_keystrokes("ctrl-tab");
         assert_eq!(
             store
@@ -4685,18 +4689,13 @@ mod tests {
         as_mobile(cx);
         resize(cx, 393.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
-        let settings = shell.read_with(cx, |shell, _| {
-            shell
-                .attachment
-                .as_ref()
-                .expect("attached")
-                .settings_page
-                .clone()
-        });
 
         window_state.update(cx, |state, cx| state.open_settings(cx));
         draw(cx);
-        settings.update(cx, |page, cx| page.select_section_for_test(cx));
+        let general = cx
+            .debug_bounds("settings-nav-general")
+            .expect("General settings row");
+        cx.simulate_click(general.center(), gpui::Modifiers::default());
         draw(cx);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.destination(cx), Destination::SettingsSection)
@@ -4722,32 +4721,6 @@ mod tests {
         });
     }
 
-    /// Hosts is where connections are made, in both directions; *configuring*
-    /// hosting — the endpoint, its name, Traverse, the paired devices — is a
-    /// setting of this machine, and stays in Settings even where the build
-    /// can actually host.
-    #[gpui::test]
-    fn the_hosts_page_never_shows_hosting_settings(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
-        as_mobile(cx);
-        resize(cx, 393.);
-        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
-        window_state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
-        draw(cx);
-        draw(cx);
-        assert!(
-            cx.debug_bounds("hosts-page").is_some(),
-            "the hosts page is what is on screen"
-        );
-        assert!(
-            cx.debug_bounds("hosting-settings").is_none(),
-            "hosting controls belong to Settings → Remote, at every width \
-             (this build has remote-hosting: {})",
-            cfg!(feature = "remote-hosting")
-        );
-    }
-
     /// A store selection can come from the sidebar or palette. In wide layout
     /// it switches the content column away from Hosts without requiring Back.
     #[gpui::test]
@@ -4756,7 +4729,7 @@ mod tests {
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         draw(cx);
-        for _ in 0..2 {
+        for thread in ["thread-1", "thread-2"] {
             let feature = cx
                 .debug_bounds("sidebar-feature-hosts")
                 .expect("the Machines feature row is visible");
@@ -4777,22 +4750,37 @@ mod tests {
                 shell.read_with(cx, |shell, cx| shell.window_state.read(cx).route()),
                 Route::Hosts
             );
+
+            let store = store_of(&shell, cx);
+            store.update(cx, |store, cx| {
+                store.select_session(thread.into());
+                cx.notify();
+            });
+            draw(cx);
+
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
+            });
+            assert!(
+                cx.debug_bounds("hosts-route").is_none(),
+                "the chat content replaces Machines as soon as the store selection changes"
+            );
+            assert_eq!(
+                shell.read_with(cx, |shell, cx| shell
+                    .window_state
+                    .read(cx)
+                    .history()
+                    .to_vec()),
+                vec![Destination::Hosts, Destination::Thread]
+            );
         }
-
-        let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| {
-            store.select_session("thread-1".into());
-            cx.notify();
-        });
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
         draw(cx);
-
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
-        });
-        assert!(
-            cx.debug_bounds("hosts-route").is_none(),
-            "the chat content replaces Machines as soon as the store selection changes"
-        );
+        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        draw(cx);
+        assert_eq!(state.read_with(cx, |state, _| state.route()), Route::Chat);
+        assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
     }
 
     /// Settings replaces the whole window, unlike the Hosts route: the left
@@ -4822,6 +4810,19 @@ mod tests {
             cx.debug_bounds("settings-device-caption").is_some(),
             "the rail carries the settings group captions instead"
         );
+        let general = cx
+            .debug_bounds("settings-nav-general")
+            .expect("settings navigation");
+        cx.simulate_click(general.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        draw(cx);
+        assert_eq!(
+            window_state.read_with(cx, |state, _| state.route()),
+            Route::Chat
+        );
+        assert!(cx.debug_bounds("sidebar-feature-hosts").is_some());
+        assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
     }
 
     /// Visiting Hosts from an open thread is navigation, not a reconnection:

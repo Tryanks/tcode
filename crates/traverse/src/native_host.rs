@@ -745,7 +745,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let host = NativeClientHost::new(dir.0.clone(), "fallback");
+        let host = NativeClientHost::new(dir.0.clone(), "fallback").with_platform("Android 15");
 
         assert_eq!(
             host.load_preferences(),
@@ -763,7 +763,11 @@ mod tests {
         let device_id = host.device_id();
         assert!(tcode_client::host::valid_device_id(&device_id));
         assert_eq!(host.device_id(), device_id);
-        assert!(dir.0.join("device.json").exists());
+        let identity: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join("device.json")).unwrap()).unwrap();
+        assert_eq!(identity["v"], 1);
+        assert_eq!(identity["name"], "My phone");
+        assert_eq!(identity["platform"], "Android 15");
         host.save_preferences(&ClientPreferences {
             appearance: Some("light".into()),
             language: None,
@@ -788,7 +792,18 @@ mod tests {
         host.set_last_host_id(Some("next-host"));
         assert_eq!(host.last_host_id().as_deref(), Some("next-host"));
         assert_eq!(host.device_name(), "Renamed");
-        let reopened = NativeClientHost::new(dir.0.clone(), "fallback");
+        assert_eq!(host.device_id(), device_id);
+        // Check the write before reopening can refresh the identity's details.
+        let identity: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join("device.json")).unwrap()).unwrap();
+        assert_eq!(identity["v"], 1);
+        assert_eq!(identity["name"], "Renamed");
+        assert_eq!(identity["platform"], "Android 15");
+        let loaded = DeviceIdentity::load_or_create(&dir.0).unwrap();
+        assert_eq!(loaded.endpoint_id().to_string(), device_id);
+        assert_eq!(loaded.claim().name, "Renamed");
+        assert_eq!(loaded.claim().platform.as_deref(), Some("Android 15"));
+        let reopened = NativeClientHost::new(dir.0.clone(), "fallback").with_platform("Android 15");
         assert_eq!(reopened.device_id(), device_id);
         assert_eq!(reopened.last_host_id().as_deref(), Some("next-host"));
         assert_eq!(reopened.device_name(), "Renamed");

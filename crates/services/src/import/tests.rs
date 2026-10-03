@@ -291,23 +291,39 @@ fn import_is_idempotent_and_replays_into_timeline() {
         |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "Imported question")
     ));
     assert!(timeline.entries.iter().any(|entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Imported answer")));
-}
 
-#[test]
-fn existing_ids_include_import_and_native_resume_cursors() {
-    let mut imported = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/one"), None);
-    imported.imported_from = Some("claude:imported".into());
-    let mut claude = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/two"), None);
-    claude.resume_cursor = Some(ResumeCursor(json!({"session_id":"native-claude"})));
-    let mut codex = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/three"), None);
-    codex.resume_cursor = Some(ResumeCursor(json!({"thread_id":"native-codex"})));
-    let ids = existing_external_ids(&[imported, claude, codex]);
+    let mut imported = meta.clone();
+    imported.resume_cursor = None;
+    store.upsert_meta(&imported).unwrap();
+    let mut existing = existing_external_ids(&store.load_index());
     assert_eq!(
-        ids,
-        HashSet::from([
-            "claude:imported".to_string(),
-            "claude:native-claude".to_string(),
-            "codex:native-codex".to_string(),
-        ])
+        import_thread(&store, &project, &thread, &mut existing),
+        ImportOutcome::SkippedDuplicate
     );
+    assert_eq!(store.load_index().len(), 1);
+
+    for (index, (provider, source, external_id, cursor, lines)) in [
+        (ProviderKind::ClaudeCode, SourceTool::ClaudeCode, "claude:native-claude",
+            json!({"session_id":"native-claude"}), vec![
+                json!({"type":"user","message":{"role":"user","content":"Native Claude question"},"timestamp":"2026-01-02T03:04:05.006Z","cwd":project.root,"sessionId":"native-claude"}),
+            ]),
+        (ProviderKind::Codex, SourceTool::CodexCli, "codex:native-codex",
+            json!({"thread_id":"native-codex"}), vec![
+                json!({"timestamp":"2026-01-02T03:04:05.006Z","type":"session_meta","payload":{"id":"native-codex","cwd":project.root,"originator":"codex_exec"}}),
+                json!({"timestamp":"2026-01-02T03:04:06.006Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Native Codex question"}]}}),
+            ]),
+    ].into_iter().enumerate() {
+        let mut native = SessionMeta::new(provider, project.root.clone(), None);
+        native.resume_cursor = Some(ResumeCursor(cursor));
+        store.upsert_meta(&native).unwrap();
+        let file = temp.path().join(format!("native-{index}.jsonl"));
+        write_lines(&file, &lines);
+        let thread = ExternalThread {
+            source, file, external_id: external_id.into(), title_hint: None, last_active_ms: 0,
+        };
+        let mut existing = existing_external_ids(&store.load_index());
+        assert_eq!(import_thread(&store, &project, &thread, &mut existing),
+            ImportOutcome::SkippedDuplicate, "{external_id}");
+        assert_eq!(store.load_index().len(), index + 2);
+    }
 }

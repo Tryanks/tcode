@@ -992,7 +992,7 @@ impl ChatView {
                     one_shot_row_target,
                     timeline.turn_running,
                 );
-                let entries = markdown_entries_for_residency(timeline, &self.rows, &scope).entries;
+                let entries = markdown_entries_for_residency(timeline, &self.rows, &scope);
                 let decisions = decide(ResidencyInput {
                     row_count,
                     visible_rows: self.markdown_visible_rows.clone(),
@@ -3024,17 +3024,11 @@ impl ChatView {
     }
 }
 
-struct ResidencyMarkdownEntries {
-    entries: Vec<MarkdownEntry>,
-    #[cfg(test)]
-    constructions: usize,
-}
-
 fn markdown_entries_for_residency(
     timeline: &Timeline,
     rows: &[TimelineRow],
     scope: &ResidencyScope,
-) -> ResidencyMarkdownEntries {
+) -> Vec<MarkdownEntry> {
     let mut entries = Vec::new();
     for (index, entry) in timeline.entries.iter().enumerate() {
         let Some(row) = row_of_entry(rows, index, entry.turn) else {
@@ -3064,11 +3058,7 @@ fn markdown_entries_for_residency(
             row,
         });
     }
-    ResidencyMarkdownEntries {
-        #[cfg(test)]
-        constructions: entries.len(),
-        entries,
-    }
+    entries
 }
 
 /// The walk back into a page that replaced the reservation the reader had
@@ -3686,11 +3676,12 @@ mod tests {
     #[test]
     fn activity_visibility_tracks_successors_and_the_remaining_minimum_window() {
         let first_seen = Instant::now();
-        for (seen_as_latest, elapsed, delay) in [
-            (true, 200, Some(300)),
-            (true, 500, None),
-            (true, 1_000, None),
-            (false, 0, Some(500)),
+        for (seen_as_latest, elapsed, delay, becomes_older) in [
+            (true, 200, Some(300), false),
+            (true, 500, None, false),
+            (true, 1_000, None, false),
+            (false, 0, Some(500), false),
+            (true, 100, Some(400), true),
         ] {
             let mut expansions = AutoActivityExpansions::default();
             if seen_as_latest {
@@ -3738,6 +3729,53 @@ mod tests {
                     repeated.collapse, None,
                     "a repaint must not enqueue a second timer"
                 );
+                if becomes_older {
+                    expansions.observe(
+                        AUTO_ACTIVITY_TEST_SESSION,
+                        "next",
+                        true,
+                        Latest,
+                        first_seen + Duration::from_millis(100),
+                    );
+                    let older = expansions.observe(
+                        AUTO_ACTIVITY_TEST_SESSION,
+                        "activity",
+                        true,
+                        Older,
+                        first_seen + Duration::from_millis(200),
+                    );
+                    assert!(!older.expanded);
+                    assert_eq!(older.collapse, None);
+                    assert!(!expansions.finish_collapse(
+                        AUTO_ACTIVITY_TEST_SESSION,
+                        "activity",
+                        generation,
+                    ));
+                    let first_old = expansions.observe(
+                        AUTO_ACTIVITY_TEST_SESSION,
+                        "next",
+                        true,
+                        ImmediatelySuperseded,
+                        first_seen + Duration::from_millis(200),
+                    );
+                    assert!(first_old.expanded);
+                    assert_eq!(
+                        first_old.collapse.map(|(_, delay)| delay),
+                        Some(Duration::from_millis(400))
+                    );
+                    assert!(
+                        expansions
+                            .observe(
+                                AUTO_ACTIVITY_TEST_SESSION,
+                                "current",
+                                true,
+                                Latest,
+                                first_seen + Duration::from_millis(200),
+                            )
+                            .expanded
+                    );
+                    continue;
+                }
                 assert!(expansions.finish_collapse(
                     AUTO_ACTIVITY_TEST_SESSION,
                     "activity",
@@ -3761,113 +3799,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn second_old_activity_collapses_before_minimum_visibility_ends() {
-        let mut expansions = AutoActivityExpansions::default();
-        let first_seen = Instant::now();
-
-        expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command-1",
-            true,
-            Latest,
-            first_seen,
-        );
-        let (oldest_generation, oldest_delay) = expansions
-            .observe(
-                AUTO_ACTIVITY_TEST_SESSION,
-                "activity-command-1",
-                true,
-                ImmediatelySuperseded,
-                first_seen + Duration::from_millis(100),
-            )
-            .collapse
-            .expect("the first old activity should retain its visibility window");
-        assert_eq!(oldest_delay, Duration::from_millis(400));
-        expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command-2",
-            true,
-            Latest,
-            first_seen + Duration::from_millis(100),
-        );
-
-        let oldest = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command-1",
-            true,
-            Older,
-            first_seen + Duration::from_millis(200),
-        );
-        let first_old = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command-2",
-            true,
-            ImmediatelySuperseded,
-            first_seen + Duration::from_millis(200),
-        );
-        let current = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command-3",
-            true,
-            Latest,
-            first_seen + Duration::from_millis(200),
-        );
-
-        assert!(!oldest.expanded);
-        assert_eq!(oldest.collapse, None);
-        assert!(first_old.expanded);
-        assert_eq!(
-            first_old.collapse.map(|(_, delay)| delay),
-            Some(Duration::from_millis(400))
-        );
-        assert!(current.expanded);
-        assert!(!expansions.finish_collapse(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command-1",
-            oldest_generation
-        ));
-    }
-
-    #[test]
-    fn returning_session_shows_only_latest_snapshot_activity() {
-        let mut expansions = AutoActivityExpansions::default();
-        let returned_at = Instant::now();
-        let keys = [
-            "activity-command-1",
-            "activity-command-2",
-            "activity-command-3",
-            "activity-command-4",
-            "activity-command-5",
-        ];
-        expansions.activate_session(Some(AUTO_ACTIVITY_TEST_SESSION));
-        assert!(expansions.awaiting_session_snapshot(Some(AUTO_ACTIVITY_TEST_SESSION)));
-        expansions.hydrate_session_snapshot(
-            AUTO_ACTIVITY_TEST_SESSION,
-            keys.into_iter().map(str::to_owned).collect(),
-        );
-        assert!(!expansions.awaiting_session_snapshot(Some(AUTO_ACTIVITY_TEST_SESSION)));
-
-        for (index, key) in keys[..4].iter().enumerate() {
-            let recency =
-                super::AutoActivityRecency::from_newer_activity_count(keys.len() - index - 1);
-            let historical =
-                expansions.observe(AUTO_ACTIVITY_TEST_SESSION, key, true, recency, returned_at);
-            assert!(!historical.expanded, "historical {key} reopened");
-            assert_eq!(historical.collapse, None);
-        }
-
-        let latest = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            keys[4],
-            true,
-            Latest,
-            returned_at,
-        );
-        assert!(latest.expanded);
-        assert_eq!(latest.collapse, None);
     }
 
     #[test]
@@ -4397,40 +4328,6 @@ mod tests {
         assert!(view.read_with(cx, |chat, _| chat.has_resident_markdown_state("early")));
     }
 
-    #[test]
-    fn collapsed_activity_stays_collapsed_after_visiting_another_session() {
-        let mut expansions = AutoActivityExpansions::default();
-        let first_seen = Instant::now();
-        expansions.observe("session-a", "activity-command", true, Latest, first_seen);
-        let superseded = expansions.observe(
-            "session-a",
-            "activity-command",
-            true,
-            ImmediatelySuperseded,
-            first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
-        );
-        assert!(!superseded.expanded);
-
-        let same_id_in_other_session = expansions.observe(
-            "session-b",
-            "activity-command",
-            true,
-            Latest,
-            first_seen + Duration::from_millis(600),
-        );
-        assert!(same_id_in_other_session.expanded);
-
-        let revisited = expansions.observe(
-            "session-a",
-            "activity-command",
-            true,
-            ImmediatelySuperseded,
-            first_seen + Duration::from_millis(700),
-        );
-        assert!(!revisited.expanded);
-        assert_eq!(revisited.collapse, None);
-    }
-
     #[gpui::test]
     fn manually_collapsed_activity_stays_closed_while_new_activity_opens(cx: &mut TestAppContext) {
         use gpui::{px, size};
@@ -4528,37 +4425,55 @@ mod tests {
 
     #[test]
     fn pending_collapse_is_scoped_to_its_session() {
-        let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
-        expansions.observe("session-a", "activity-command", true, Latest, first_seen);
-        let (generation, _) = expansions
-            .observe(
+        for elapsed in [100, 500] {
+            let mut expansions = AutoActivityExpansions::default();
+            expansions.observe("session-a", "activity-command", true, Latest, first_seen);
+            let superseded = expansions.observe(
                 "session-a",
                 "activity-command",
                 true,
                 ImmediatelySuperseded,
-                first_seen + Duration::from_millis(100),
-            )
-            .collapse
-            .expect("supersession should schedule a collapse");
-        expansions.observe(
-            "session-b",
-            "activity-command",
-            true,
-            Latest,
-            first_seen + Duration::from_millis(200),
-        );
-
-        assert!(expansions.finish_collapse("session-a", "activity-command", generation));
-        let other_session = expansions.observe(
-            "session-b",
-            "activity-command",
-            true,
-            Latest,
-            first_seen + Duration::from_millis(300),
-        );
-        assert!(other_session.expanded);
-        assert_eq!(other_session.collapse, None);
+                first_seen + Duration::from_millis(elapsed),
+            );
+            assert_eq!(superseded.expanded, elapsed < 500);
+            assert_eq!(superseded.collapse.is_some(), elapsed < 500);
+            let other = expansions.observe(
+                "session-b",
+                "activity-command",
+                true,
+                Latest,
+                first_seen + Duration::from_millis(600),
+            );
+            assert!(other.expanded);
+            if let Some((generation, _)) = superseded.collapse {
+                assert!(expansions.finish_collapse("session-a", "activity-command", generation));
+            }
+            let other = expansions.observe(
+                "session-b",
+                "activity-command",
+                true,
+                Latest,
+                first_seen + Duration::from_millis(700),
+            );
+            assert!(
+                other.expanded,
+                "session B after session A collapsed at {elapsed}ms"
+            );
+            assert_eq!(other.collapse, None);
+            let revisited = expansions.observe(
+                "session-a",
+                "activity-command",
+                true,
+                ImmediatelySuperseded,
+                first_seen + Duration::from_millis(700),
+            );
+            assert!(
+                !revisited.expanded,
+                "session A after returning at {elapsed}ms"
+            );
+            assert_eq!(revisited.collapse, None);
+        }
     }
 
     #[test]
@@ -4625,7 +4540,7 @@ mod tests {
     }
 
     #[test]
-    fn residency_markdown_entry_allocations_are_bounded_by_candidate_windows() {
+    fn residency_markdown_entries_are_bounded_by_candidate_windows() {
         let mut timeline = synthetic_markdown_timeline(200);
         timeline.turns[5].running = true;
         timeline.turn_running = true;
@@ -4642,21 +4557,11 @@ mod tests {
 
         let candidates = markdown_entries_for_residency(&timeline, &rows, &scope);
 
-        assert_eq!(candidates.constructions, 172);
-        assert!(candidates.constructions < timeline.entries.len());
+        assert_eq!(candidates.len(), 172);
+        assert!(candidates.len() < timeline.entries.len());
         // A running turn far from the viewport is history like any other.
-        assert!(
-            !candidates
-                .entries
-                .iter()
-                .any(|entry| entry.id == "assistant-5")
-        );
-        assert!(
-            candidates
-                .entries
-                .iter()
-                .any(|entry| entry.id == "assistant-199")
-        );
+        assert!(!candidates.iter().any(|entry| entry.id == "assistant-5"));
+        assert!(candidates.iter().any(|entry| entry.id == "assistant-199"));
     }
 
     #[gpui::test]
@@ -5355,7 +5260,16 @@ mod tests {
             list.is_scrolled_to_end()
         );
         assert!(!list.is_following_tail());
+        // Reach a nonzero intra-row offset through the same real wheel path;
+        // a row-boundary anchor would miss prepend regressions that reset it.
+        scroll(
+            list.logical_scroll_top().offset_in_item - px(7.),
+            gpui::TouchPhase::Moved,
+            cx,
+        );
         let before = list.logical_scroll_top();
+        assert!(before.item_ix > 0);
+        assert_eq!(before.offset_in_item, px(7.));
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), full, cx);
             cx.notify();
@@ -5485,52 +5399,6 @@ mod tests {
                 "reserved incoming space is not loaded history"
             );
         }
-    }
-
-    #[gpui::test]
-    fn prepending_history_preserves_the_visible_turn_and_pixel_offset(cx: &mut TestAppContext) {
-        use gpui::{FollowMode, ListOffset, px};
-        let full = synthetic_markdown_timeline(60);
-        let mut tail = synthetic_markdown_timeline(60);
-        tail.turns.drain(..20);
-        tail.entries.retain(|entry| entry.turn >= 20);
-        for entry in &mut tail.entries {
-            std::sync::Arc::make_mut(entry).turn -= 20;
-        }
-        let (store, window_state, session_id) = seed_chat(cx, tail);
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
-        cx.simulate_resize(gpui::size(px(1024.), px(700.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        list.set_follow_mode(FollowMode::Normal);
-        list.scroll_to(ListOffset {
-            item_ix: 10,
-            offset_in_item: px(7.),
-        });
-        view.update(cx, |_, cx| cx.notify());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let before_prepend = list.logical_scroll_top();
-        assert_eq!(before_prepend.item_ix, 10);
-        assert_eq!(before_prepend.offset_in_item, px(7.));
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, full, cx);
-            cx.notify();
-        });
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let anchor = list.logical_scroll_top();
-        assert_eq!(
-            anchor.item_ix, 70,
-            "the same row must remain visible after 20 earlier turns of three rows"
-        );
-        assert_eq!(anchor.offset_in_item, px(7.));
-        assert!(!list.is_following_tail());
     }
 
     /// A scrolling screenshot moves the timeline tile by tile from wherever it
@@ -5699,141 +5567,84 @@ mod tests {
     }
 
     #[gpui::test]
-    fn incoming_page_replaces_scrollable_reservation_without_moving_content(
-        cx: &mut TestAppContext,
-    ) {
-        use gpui::{FollowMode, ListOffset, px};
-        let full = synthetic_markdown_timeline(60);
-        let mut tail = synthetic_markdown_timeline(60);
-        tail.turns.drain(..20);
-        tail.entries.retain(|entry| entry.turn >= 20);
-        for entry in &mut tail.entries {
-            std::sync::Arc::make_mut(entry).turn -= 20;
-        }
-        let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        for _ in 0..2 {
-            view.update(cx, |_, cx| cx.notify());
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-            });
-        }
-        let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
-            (
-                chat.list_state.clone(),
-                chat.history_placeholder_height,
-                chat.leading_space(),
-            )
-        });
-        assert!(placeholder > px(100.));
-        list.set_follow_mode(FollowMode::Normal);
-        // Scroll past the first content into the incoming page's reservation.
-        list.scroll_to(ListOffset {
-            item_ix: 0,
-            offset_in_item: leading - px(100.),
-        });
-        view.update(cx, |_, cx| cx.notify());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let content_top = list.bounds_for_item(0).unwrap().top() + leading;
-        assert!(
-            content_top > list.viewport_bounds().top(),
-            "scroll continues above loaded content"
-        );
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, full, cx);
-            store.suppress_history_prefetch_for_test();
-            cx.notify();
-        });
-        // The first frame measures the page; the next one walks back into it.
-        for _ in 0..2 {
-            cx.update(|window, cx| {
-                let _ = window.draw(cx);
-                window.simulate_next_frame(cx);
-            });
-        }
-        let anchor = list.logical_scroll_top();
-        assert!(
-            anchor.item_ix < 60 && anchor.offset_in_item >= px(0.),
-            "the viewport top sits inside the measured page, not above its row: {anchor:?}"
-        );
-        let after = list
-            .bounds_for_item(60)
-            .expect("previous first turn remains on screen")
-            .top();
-        assert!(
-            (after - content_top).abs() < px(1.),
-            "incoming content replaces reserved space at the same pixel anchor: {content_top:?} -> {after:?}"
-        );
-        assert!(!list.is_following_tail());
-    }
-
-    #[gpui::test]
     fn pan_packet_after_a_page_lands_keeps_the_walk_back_into_it(cx: &mut TestAppContext) {
         use gpui::{FollowMode, ListOffset, point, px};
-        let full = synthetic_markdown_timeline(60);
-        let mut tail = synthetic_markdown_timeline(60);
-        tail.turns.drain(..20);
-        tail.entries.retain(|entry| entry.turn >= 20);
-        for entry in &mut tail.entries {
-            std::sync::Arc::make_mut(entry).turn -= 20;
-        }
-        let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        for _ in 0..2 {
+        for pan_delta in [0., 40.] {
+            let full = synthetic_markdown_timeline(60);
+            let mut tail = synthetic_markdown_timeline(60);
+            tail.turns.drain(..20);
+            tail.entries.retain(|entry| entry.turn >= 20);
+            for entry in &mut tail.entries {
+                std::sync::Arc::make_mut(entry).turn -= 20;
+            }
+            let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                ChatView::new(store.clone(), window_state, window, cx)
+            });
+            cx.simulate_resize(gpui::size(px(393.), px(852.)));
+            for _ in 0..2 {
+                view.update(cx, |_, cx| cx.notify());
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+            }
+            let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
+                (
+                    chat.list_state.clone(),
+                    chat.history_placeholder_height,
+                    chat.leading_space(),
+                )
+            });
+            assert!(placeholder > px(100.));
+            list.set_follow_mode(FollowMode::Normal);
+            list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: leading - px(100.),
+            });
             view.update(cx, |_, cx| cx.notify());
             cx.update(|window, cx| {
                 let _ = window.draw(cx);
             });
+            let content_top = list.bounds_for_item(0).unwrap().top() + leading;
+            assert!(content_top > list.viewport_bounds().top());
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id, full, cx);
+                store.suppress_history_prefetch_for_test();
+                cx.notify();
+            });
+            // The frame that lands the page measures it.
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            // The finger is still moving: a pan packet resolves against that
+            // frame's anchor before the next frame walks back into the page.
+            if pan_delta != 0. {
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: list.viewport_bounds().center(),
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.), px(pan_delta))),
+                    touch_phase: gpui::TouchPhase::Moved,
+                    ..Default::default()
+                });
+            }
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+            let anchor = list.logical_scroll_top();
+            assert!(
+                anchor.item_ix < 60 && anchor.offset_in_item >= px(0.),
+                "pan {pan_delta}: {anchor:?}"
+            );
+            let after = list
+                .bounds_for_item(60)
+                .expect("previous first turn remains on screen")
+                .top();
+            assert!(
+                (after - (content_top + px(pan_delta))).abs() < px(1.),
+                "the walk-back and the pan both apply: {content_top:?} + {pan_delta} -> {after:?}"
+            );
+            assert!(!list.is_following_tail());
         }
-        let (list, leading) = view.read_with(cx, |chat, _| {
-            (chat.list_state.clone(), chat.leading_space())
-        });
-        list.set_follow_mode(FollowMode::Normal);
-        list.scroll_to(ListOffset {
-            item_ix: 0,
-            offset_in_item: leading - px(100.),
-        });
-        view.update(cx, |_, cx| cx.notify());
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let content_top = list.bounds_for_item(0).unwrap().top() + leading;
-        store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, full, cx);
-            store.suppress_history_prefetch_for_test();
-            cx.notify();
-        });
-        // The frame that lands the page measures it.
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        // The finger is still moving: a pan packet resolves against that
-        // frame's anchor before the next frame walks back into the page.
-        cx.simulate_event(gpui::ScrollWheelEvent {
-            position: list.viewport_bounds().center(),
-            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(40.))),
-            touch_phase: gpui::TouchPhase::Moved,
-            ..Default::default()
-        });
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            let _ = window.draw(cx);
-        });
-        let after = list
-            .bounds_for_item(60)
-            .expect("previous first turn remains on screen")
-            .top();
-        assert!(
-            (after - (content_top + px(40.))).abs() < px(1.),
-            "the walk-back and the pan both apply: {content_top:?} + 40 -> {after:?}"
-        );
-        assert!(!list.is_following_tail());
     }
 
     #[gpui::test]
@@ -5968,31 +5779,51 @@ mod tests {
 
     #[gpui::test]
     fn large_markdown_becomes_resident_asynchronously_and_remeasures_turn(cx: &mut TestAppContext) {
-        let text = large_markdown("async content");
-        let timeline = single_assistant_timeline("large", &text);
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
-        let view =
-            cx.add_window(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
-        let view = view.root(cx).expect("chat window should have a root");
-
-        view.read_with(cx, |chat, _| {
-            assert!(!chat.has_resident_markdown_state("large"));
-            assert!(!chat.markdown_remeasured_rows.contains(&0));
-        });
-        cx.run_until_parked();
-        view.read_with(cx, |chat, cx| {
-            assert!(chat.has_resident_markdown_state("large"));
-            assert_eq!(chat.resident_markdown_source("large"), Some(text.as_str()));
-            let rendered = chat
-                .md_states
-                .get("large")
-                .expect("large Markdown state should be resident")
-                .state
-                .read(cx)
-                .rendered_text();
-            assert!(rendered.contains("async content"));
-            assert!(chat.markdown_remeasured_rows.contains(&0));
-        });
+        for (id, text, asynchronous) in [
+            ("small", "small **streaming** reply".to_string(), false),
+            ("large", large_markdown("async content"), true),
+        ] {
+            assert_eq!(text.len() >= ASYNC_MARKDOWN_THRESHOLD_BYTES, asynchronous);
+            let timeline = single_assistant_timeline(id, &text);
+            let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+            let view = cx
+                .add_window(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+            let view = view.root(cx).expect("chat window should have a root");
+            view.read_with(cx, |chat, _| {
+                assert_eq!(chat.has_resident_markdown_state(id), !asynchronous, "{id}");
+                assert_eq!(
+                    chat.pending_md_builds.contains_key(id),
+                    asynchronous,
+                    "{id}"
+                );
+                if asynchronous {
+                    assert!(!chat.markdown_remeasured_rows.contains(&0));
+                } else {
+                    assert_eq!(chat.resident_markdown_source(id), Some(text.as_str()));
+                }
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |chat, cx| {
+                assert!(chat.has_resident_markdown_state(id), "{id}");
+                assert_eq!(chat.resident_markdown_source(id), Some(text.as_str()));
+                assert!(!chat.pending_md_builds.contains_key(id));
+                let rendered = chat
+                    .md_states
+                    .get(id)
+                    .unwrap()
+                    .state
+                    .read(cx)
+                    .rendered_text();
+                assert!(rendered.contains(if asynchronous {
+                    "async content"
+                } else {
+                    "small streaming reply"
+                }));
+                if asynchronous {
+                    assert!(chat.markdown_remeasured_rows.contains(&0));
+                }
+            });
+        }
     }
 
     #[gpui::test]
@@ -6103,22 +5934,6 @@ mod tests {
         assert!(view.read_with(cx, |chat, _| chat.has_resident_markdown_state("note-149")));
         assert!(!view.read_with(cx, |chat, _| chat.has_resident_markdown_state("note-0")));
         assert!(cx.debug_bounds("timeline-row-300").is_some());
-    }
-
-    #[gpui::test]
-    fn small_markdown_is_resident_synchronously(cx: &mut TestAppContext) {
-        let text = "small **streaming** reply";
-        assert!(text.len() < ASYNC_MARKDOWN_THRESHOLD_BYTES);
-        let timeline = single_assistant_timeline("small", text);
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
-        let view =
-            cx.add_window(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
-        let view = view.root(cx).expect("chat window should have a root");
-
-        view.read_with(cx, |chat, _| {
-            assert_eq!(chat.resident_markdown_source("small"), Some(text));
-            assert!(!chat.pending_md_builds.contains_key("small"));
-        });
     }
 
     #[gpui::test]

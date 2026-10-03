@@ -3627,6 +3627,49 @@ mod tests {
             "scrolling while loading must not queue another page"
         );
 
+        incoming
+            .try_send(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                    id: request.id,
+                    result: Err(tcode_protocol::ProtocolError::decode("offline")),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        cx.run_until_parked();
+        workspace.update(cx, |store, cx| {
+            assert!(!store.history_loading(), "failed pages hide activity");
+            store.load_earlier_messages(cx);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(4));
+        workspace.update(cx, |store, cx| store.load_earlier_messages(cx));
+        cx.run_until_parked();
+        assert!(
+            outgoing.try_recv().is_err(),
+            "retry is throttled for five seconds"
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        workspace.update(cx, |store, cx| store.load_earlier_messages(cx));
+        cx.run_until_parked();
+        let retry = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            retry.payload, request.payload,
+            "retry requests the same bounded page"
+        );
+        request = retry;
+        workspace.update(cx, |store, cx| {
+            assert!(store.history_loading());
+            store.load_earlier_messages(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            outgoing.try_recv().is_err(),
+            "retry also permits one page in flight"
+        );
+
         for page in 0..4 {
             let before = 1800 - page * 200;
             assert!(matches!(

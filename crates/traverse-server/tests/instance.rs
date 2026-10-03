@@ -52,7 +52,7 @@ async fn manifest_and_pkarr_store_over_http() {
     let server = spawn("http", |config| {
         config.region = Some("test".into());
         config.pkarr.put_per_second = 1;
-        config.pkarr.put_burst = 3;
+        config.pkarr.put_burst = 4;
         config.pkarr.get_per_second = 1;
         config.pkarr.get_burst = 3;
     })
@@ -104,6 +104,21 @@ async fn manifest_and_pkarr_store_over_http() {
         .await
         .unwrap();
     assert_eq!(put.status(), 204);
+    let stale = http
+        .put(pkarr.clone())
+        .body(older.to_relay_payload())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 409);
+    let equal = http
+        .put(pkarr.clone())
+        .body(newer.to_relay_payload())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(equal.status(), 409);
+    // Neither rejected write changes the accepted record.
     let got = http.get(pkarr.clone()).send().await.unwrap();
     assert_eq!(got.status(), 200);
     assert_eq!(got.headers()["cache-control"], "public, max-age=300");
@@ -116,13 +131,13 @@ async fn manifest_and_pkarr_store_over_http() {
     assert_eq!(limited.status(), 429);
     assert_eq!(limited.headers()["retry-after"], "1");
 
-    let stale = http
+    let oversize = http
         .put(pkarr.clone())
-        .body(older.to_relay_payload())
+        .body(vec![0u8; MAX_PAYLOAD_BYTES + 1])
         .send()
         .await
         .unwrap();
-    assert_eq!(stale.status(), 409);
+    assert_eq!(oversize.status(), 413);
 
     let mut corrupted = packet(&secret, "https://c.example/").to_relay_payload();
     corrupted[0] ^= 0x01;
@@ -134,15 +149,7 @@ async fn manifest_and_pkarr_store_over_http() {
         .unwrap();
     assert_eq!(invalid.status(), 400);
 
-    let oversize = http
-        .put(pkarr.clone())
-        .body(vec![0u8; MAX_PAYLOAD_BYTES + 1])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(oversize.status(), 413);
-
-    // Three PUTs used the burst (the oversize one never reached the
+    // Four PUTs used the burst (the oversize one never reached the
     // limiter); the next is refused whatever it carries.
     let limited = http
         .put(pkarr.clone())

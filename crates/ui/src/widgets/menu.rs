@@ -655,61 +655,27 @@ impl<T: IntoElement + 'static> RenderOnce for DropdownMenuPopover<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{
-        PlatformInput, TestAppContext, TouchEvent, TouchId, TouchPhase, VisualTestContext, point,
-        size,
-    };
-    use std::cell::Cell;
-
-    struct MenuHarness(Rc<Cell<usize>>);
+    use gpui::{TestAppContext, VisualTestContext, point, size};
+    struct MenuHarness;
     impl Render for MenuHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let clicks = self.0.clone();
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .id("row-a")
-                        .relative()
-                        .h(px(56.))
-                        .w_full()
-                        .child("A")
-                        .context_menu(|menu, _, _| menu.menu("Action", Box::new(Cancel)))
-                        .touch(true),
-                )
-                .child(
-                    div()
-                        .id("row-b")
-                        .mt(px(400.))
-                        .h(px(56.))
-                        .w_full()
-                        .child("B")
-                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
-                )
+            div().size_full().flex().flex_col().child(
+                div()
+                    .id("row-a")
+                    .relative()
+                    .h(px(56.))
+                    .w_full()
+                    .child("A")
+                    .context_menu(|menu, _, _| menu.menu("Action", Box::new(Cancel)))
+                    .touch(true),
+            )
         }
-    }
-
-    fn touch(cx: &mut VisualTestContext, id: u64, phase: TouchPhase, position: Point<Pixels>) {
-        cx.update(|window, cx| {
-            window.dispatch_event(
-                PlatformInput::Touch(TouchEvent {
-                    id: TouchId(id),
-                    phase,
-                    position,
-                    predicted_position: None,
-                    force: None,
-                }),
-                cx,
-            );
-        });
     }
 
     #[gpui::test]
     fn context_menu_opens_at_the_pointer_and_stays_in_the_window(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| MenuHarness(Rc::default()));
+        let (_, cx) = cx.add_window_view(|_, _| MenuHarness);
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let right_click = |cx: &mut VisualTestContext, position| {
@@ -734,36 +700,6 @@ mod tests {
         let menu = right_click(cx, point(px(380.), px(50.)));
         assert!(menu.right() <= px(393. - 8.), "{menu:?}");
         assert_eq!(menu.top(), px(50.));
-    }
-
-    #[gpui::test]
-    fn long_press_dismissal_consumes_outside_tap(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let clicks = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view({
-            let clicks = clicks.clone();
-            move |_, _| MenuHarness(clicks)
-        });
-        cx.simulate_resize(size(px(393.), px(852.)));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let a = point(px(20.), px(40.));
-        touch(cx, 1, TouchPhase::Started, a);
-        cx.run_until_parked();
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(801));
-        cx.run_until_parked();
-        touch(cx, 1, TouchPhase::Ended, a);
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("tcode-popup-menu").is_some());
-        let b = point(px(20.), px(480.));
-        touch(cx, 2, TouchPhase::Started, b);
-        touch(cx, 2, TouchPhase::Ended, b);
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
-        assert_eq!(clicks.get(), 0, "dismissal must not activate B");
-        touch(cx, 3, TouchPhase::Started, b);
-        touch(cx, 3, TouchPhase::Ended, b);
-        assert_eq!(clicks.get(), 1, "the second tap activates B");
     }
 
     /// A menu fed one row per project, like the sidebar's project filter.

@@ -167,20 +167,34 @@ fn attachments_mux_uses_host_session_directory_and_returns_identical_bytes() {
     };
     let dir = status.attachments_dir;
     let bytes = vec![0x89, b'P', b'N', b'G', 0, 0xff, 0x80];
-    let QueryResponse::SavedAttachment(path) = smol::block_on(link.query(Query::SaveAttachment {
-        dir: dir.clone(),
-        bytes: bytes.clone(),
-        ext: "png".into(),
-    }))
-    .unwrap() else {
-        panic!("missing saved path");
-    };
-    assert_eq!(path.parent(), Some(dir.as_path()));
-    assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    assert_eq!(
-        smol::block_on(link.query(Query::ReadFileBytes { path })).unwrap(),
-        QueryResponse::FileBytes(bytes.clone())
-    );
+    for ext in ["png", "JPG"] {
+        let QueryResponse::SavedAttachment(path) =
+            smol::block_on(link.query(Query::SaveAttachment {
+                dir: dir.clone(),
+                bytes: bytes.clone(),
+                ext: ext.into(),
+            }))
+            .unwrap()
+        else {
+            panic!("missing saved path");
+        };
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some(ext));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            smol::block_on(link.query(Query::ReadFileBytes { path })).unwrap(),
+            QueryResponse::FileBytes(bytes.clone())
+        );
+    }
+    for ext in ["", "../x", "png/", "png.exe", "a-b", "toolongext"] {
+        let error = smol::block_on(link.query(Query::SaveAttachment {
+            dir: dir.clone(),
+            bytes: bytes.clone(),
+            ext: ext.into(),
+        }))
+        .expect_err("extension rejected in an otherwise valid request");
+        assert_eq!(error.code, "invalid_attachment", "extension {ext:?}");
+    }
     // A client cannot write outside the attachments root, escape it, name
     // the file into another directory, or exceed the per-image limit.
     let outside = dir.parent().unwrap().parent().unwrap().to_path_buf();

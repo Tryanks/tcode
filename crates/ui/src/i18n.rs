@@ -135,28 +135,25 @@ mod tests {
 
     #[test]
     fn explicit_overrides_win() {
-        assert_eq!(
-            resolve_locale(Some(LANGUAGE_ENGLISH), Some("zh-TW")),
-            LANGUAGE_ENGLISH
-        );
-        assert_eq!(
-            resolve_locale(Some(LANGUAGE_SIMPLIFIED_CHINESE), Some("en-US")),
-            LANGUAGE_SIMPLIFIED_CHINESE
-        );
-        assert_eq!(
-            resolve_locale(None, Some("zh-Hans-CN")),
-            LANGUAGE_SIMPLIFIED_CHINESE
-        );
-        assert_eq!(
-            resolve_locale(Some("unsupported"), Some("en-US")),
-            LANGUAGE_ENGLISH
-        );
-    }
-
-    #[test]
-    fn platform_system_locale_precedes_the_desktop_fallback() {
-        set_platform_system_locale(Some("zh-Hans-CN"));
-        assert_eq!(system_locale().as_deref(), Some("zh-Hans-CN"));
-        set_platform_system_locale(None);
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for (platform, requested, expected) in [
+            ("zh-TW", Some(LANGUAGE_ENGLISH), LANGUAGE_ENGLISH),
+            (
+                "en-US",
+                Some(LANGUAGE_SIMPLIFIED_CHINESE),
+                LANGUAGE_SIMPLIFIED_CHINESE,
+            ),
+            ("zh-Hans-CN", None, LANGUAGE_SIMPLIFIED_CHINESE),
+            ("en-US", Some("unsupported"), LANGUAGE_ENGLISH),
+        ] {
+            set_platform_system_locale(Some(platform));
+            assert_eq!(
+                apply_locale(requested),
+                expected,
+                "{platform} / {requested:?}"
+            );
+            set_platform_system_locale(None);
+        }
+        set_locale(LANGUAGE_ENGLISH);
     }
 }

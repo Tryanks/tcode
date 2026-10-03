@@ -799,39 +799,13 @@ mod tests {
     }
 
     #[test]
-    fn read_git_branch_reads_head() {
-        let root = std::env::temp_dir().join(format!("tcode-branch-test-{}", uuid::Uuid::new_v4()));
-        let git = root.join(".git");
-        std::fs::create_dir_all(&git).unwrap();
-
-        // A .git dir with no HEAD file yet is treated as no branch.
-        assert_eq!(read_git_branch(&root), None);
-
-        // Symbolic ref -> short branch name.
-        std::fs::write(git.join("HEAD"), "ref: refs/heads/feature/x\n").unwrap();
-        assert_eq!(read_git_branch(&root), Some("feature/x".into()));
-
-        // Detached HEAD -> short sha.
-        std::fs::write(git.join("HEAD"), "0123456789abcdef\n").unwrap();
-        assert_eq!(read_git_branch(&root), Some("0123456".into()));
-
-        // Non-repo directory.
-        let plain = std::env::temp_dir().join(format!("tcode-plain-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&plain).unwrap();
-        assert_eq!(read_git_branch(&plain), None);
-
-        let _ = std::fs::remove_dir_all(root);
-        let _ = std::fs::remove_dir_all(plain);
-    }
-
-    #[test]
     fn checkout_preserves_dirty_worktree_then_switches_once_clean() {
         let (temp, root) = scratch_repo("tcode-checkout-dirty-test");
-        run(&root, &["branch", "feature"]);
+        run(&root, &["branch", "feature/x"]);
         std::fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
 
         assert_eq!(
-            checkout_if_clean(&root, "feature"),
+            checkout_if_clean(&root, "feature/x"),
             Err(CheckoutError::Dirty)
         );
         assert_eq!(read_git_branch(&root), Some("main".into()));
@@ -839,10 +813,25 @@ mod tests {
             std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
             "dirty\n"
         );
-        assert_eq!(list_git_branches(&root), ["feature", "main"]);
+        assert_eq!(list_git_branches(&root), ["feature/x", "main"]);
         run(&root, &["checkout", "--", "tracked.txt"]);
-        assert_eq!(checkout_if_clean(&root, "feature"), Ok(()));
-        assert_eq!(read_git_branch(&root), Some("feature".into()));
+        assert_eq!(checkout_if_clean(&root, "feature/x"), Ok(()));
+        assert_eq!(read_git_branch(&root), Some("feature/x".into()));
+
+        let commit = crate::process::command("git")
+            .args(["rev-parse", "--short=7", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(commit.status.success());
+        let expected = String::from_utf8(commit.stdout).unwrap().trim().to_string();
+        run(&root, &["checkout", "--detach"]);
+        assert_eq!(read_git_branch(&root), Some(expected));
+        let uninitialized = temp.join("uninitialized");
+        std::fs::create_dir_all(&uninitialized).unwrap();
+        assert_eq!(read_git_branch(&uninitialized), None);
+        std::fs::create_dir(uninitialized.join(".git")).unwrap();
+        assert_eq!(read_git_branch(&uninitialized), None);
 
         let _ = std::fs::remove_dir_all(temp);
     }

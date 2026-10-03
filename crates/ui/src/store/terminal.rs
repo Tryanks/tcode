@@ -314,43 +314,68 @@ mod tests {
     }
 
     #[test]
-    fn simple_selection_covers_the_dragged_span_and_yields_its_text() {
-        let mut model = model(&["alpha beta", "gamma"], 10);
-        model.start_selection(SelectionKind::Simple, (0, 0), SelectionSide::Left);
-        model.update_selection((1, 4), SelectionSide::Right);
-        assert!(model.is_selected(0, 0));
-        assert!(model.is_selected(1, 4));
-        assert!(!model.is_selected(1, 5));
-        assert_eq!(
-            model.selected_text(),
-            Some((1, 2, "alpha beta\ngamma".to_string()))
-        );
-    }
-
-    #[test]
-    fn word_selection_stops_at_delimiters_and_line_selection_takes_the_row() {
-        let mut model = model(&["alpha beta"], 10);
-        model.start_selection(SelectionKind::Semantic, (0, 7), SelectionSide::Left);
-        assert_eq!(model.selected_text(), Some((1, 1, "beta".to_string())));
-
-        model.start_selection(SelectionKind::Lines, (0, 3), SelectionSide::Left);
-        assert_eq!(
-            model.selected_text(),
-            Some((1, 1, "alpha beta".to_string()))
-        );
-    }
-
-    #[test]
-    fn wrapped_rows_join_without_a_newline() {
+    fn selection_modes_preserve_text_boundaries_and_wide_cells() {
         let mut wrapped = frame(&["abcde", "fghij"], 5);
         wrapped.visible[0].wrapped = true;
-        let mut model = TerminalModel::new("tab".into());
-        model.apply_frame(wrapped);
-        model.select_all();
-        assert_eq!(
-            model.selected_text().map(|(_, _, text)| text),
-            Some("abcdefghij".to_string())
-        );
+        let mut wide = frame(&["ab"], 4);
+        wide.visible[0].cells[0].text = "中".into();
+        wide.visible[0].cells[0].width = CellWidth::Wide;
+        wide.visible[0].cells[1].text = String::new();
+        wide.visible[0].cells[1].width = CellWidth::Spacer;
+        for (frame, selection, expected, membership) in [
+            (
+                frame(&["alpha beta", "gamma"], 10),
+                Some((SelectionKind::Simple, (0, 0), Some((1, 4)))),
+                (1, 2, "alpha beta\ngamma"),
+                vec![(0, 0, true), (1, 4, true), (1, 5, false)],
+            ),
+            (
+                frame(&["alpha beta"], 10),
+                Some((SelectionKind::Semantic, (0, 7), None)),
+                (1, 1, "beta"),
+                vec![(0, 4, false), (0, 6, true), (0, 9, true)],
+            ),
+            (
+                frame(&["alpha beta"], 10),
+                Some((SelectionKind::Lines, (0, 3), None)),
+                (1, 1, "alpha beta"),
+                vec![(0, 0, true), (0, 9, true)],
+            ),
+            (
+                wrapped,
+                None,
+                (1, 2, "abcdefghij"),
+                vec![(0, 0, true), (1, 4, true)],
+            ),
+            (
+                wide,
+                Some((SelectionKind::Simple, (0, 0), Some((0, 0)))),
+                (1, 1, "中"),
+                vec![(0, 0, true), (0, 1, true)],
+            ),
+        ] {
+            let mut model = TerminalModel::new("tab".into());
+            model.apply_frame(frame);
+            if let Some((kind, start, end)) = selection {
+                model.start_selection(kind, start, SelectionSide::Left);
+                if let Some(end) = end {
+                    model.update_selection(end, SelectionSide::Right);
+                }
+            } else {
+                model.select_all();
+            }
+            assert_eq!(
+                model.selected_text(),
+                Some((expected.0, expected.1, expected.2.to_string()))
+            );
+            for (row, col, selected) in membership {
+                assert_eq!(
+                    model.is_selected(row, col),
+                    selected,
+                    "{expected:?} at {row},{col}"
+                );
+            }
+        }
     }
 
     /// Scroll offset and selection never cross the wire, so two viewers of the
@@ -400,24 +425,5 @@ mod tests {
         let link = model.hyperlink_at(0, 3).expect("osc 8 link");
         assert_eq!(link.url, "https://example.com/target");
         assert_eq!((link.start, link.end), ((0, 0), (0, 7)));
-    }
-
-    #[test]
-    fn wide_spacers_follow_their_partner_into_the_selection() {
-        let mut frame = frame(&["ab"], 4);
-        frame.visible[0].cells[0].text = "中".into();
-        frame.visible[0].cells[0].width = CellWidth::Wide;
-        frame.visible[0].cells[1].text = String::new();
-        frame.visible[0].cells[1].width = CellWidth::Spacer;
-        let mut model = TerminalModel::new("tab".into());
-        model.apply_frame(frame);
-        model.start_selection(SelectionKind::Simple, (0, 0), SelectionSide::Left);
-        model.update_selection((0, 0), SelectionSide::Right);
-        assert!(model.is_selected(0, 0));
-        assert!(model.is_selected(0, 1));
-        assert_eq!(
-            model.selected_text().map(|(_, _, text)| text),
-            Some("中".into())
-        );
     }
 }
