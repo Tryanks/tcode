@@ -225,7 +225,25 @@ impl Setup<'_> {
         request: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         self.state.lock_recover().loading = true;
-        let loaded = self.connection.send_request(request).block_task().await;
+        let (loaded_tx, loaded) = smol::channel::bounded(1);
+        let state = self.state.clone();
+        // Cleared while the response holds the dispatch loop: an update the
+        // agent sends right after answering is live, and with `block_task`
+        // it could be read before the flag clears and dropped as replay.
+        let registered =
+            self.connection
+                .send_request(request)
+                .on_receiving_result(move |result| async move {
+                    state.lock_recover().loading = false;
+                    let _ = loaded_tx.send(result).await;
+                    Ok(())
+                });
+        let loaded = match registered {
+            Ok(()) => loaded.recv().await.unwrap_or_else(|_| {
+                Err(acp::Error::internal_error().data("the agent closed before answering"))
+            }),
+            Err(err) => Err(err),
+        };
         self.state.lock_recover().loading = false;
         loaded
     }
