@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use super::compaction::{Compacted, CompactionRequest};
 use super::*;
-use tcode_services::store::{CompactOutcome, CompactRejection};
+use tcode_services::store::{CompactOutcome, CompactRejection, IndexWrite};
 
 pub(super) enum StoreWrite {
     AppendEvent {
@@ -51,9 +51,45 @@ pub(super) enum StoreWrite {
     Flush(smol::channel::Sender<()>),
 }
 
-/// Runs every queued write, one at a time in queue order.
+impl StoreWrite {
+    fn changes_index(&self) -> bool {
+        matches!(
+            self,
+            StoreWrite::UpsertMetas { .. }
+                | StoreWrite::UpsertProject(_)
+                | StoreWrite::RemoveSessions(_)
+                | StoreWrite::RemoveProject(_)
+        )
+    }
+}
+
+/// The error a failed index write reports, by what it was for.
+#[derive(Clone, Copy, PartialEq)]
+enum IndexFailure {
+    CreateSession,
+    UpdateSession,
+    PersistProject,
+    DeleteSession,
+    DeleteProject,
+}
+
+impl IndexFailure {
+    fn error(self, error: String) -> RuntimeError {
+        match self {
+            Self::CreateSession => RuntimeError::PersistSession { error },
+            Self::UpdateSession => RuntimeError::PersistSessionIndex { error },
+            Self::PersistProject => RuntimeError::PersistProject { error },
+            Self::DeleteSession => RuntimeError::DeleteSession { error },
+            Self::DeleteProject => RuntimeError::DeleteProject { error },
+        }
+    }
+}
+
+/// Runs every queued write in queue order. Index writes queued back to back
+/// are committed together, since every index commit is synced to disk.
 pub(super) struct StoreWriter {
     store: SessionStore,
+    index: SessionIndex,
     settings_store: SettingsStore,
     terminal_preferences_path: PathBuf,
     /// Logs compacted in this run with nothing written to them since, which
@@ -64,21 +100,125 @@ pub(super) struct StoreWriter {
 impl StoreWriter {
     pub(super) fn new(
         store: SessionStore,
+        index: SessionIndex,
         settings_store: SettingsStore,
         terminal_preferences_path: PathBuf,
     ) -> Self {
         Self {
             store,
+            index,
             settings_store,
             terminal_preferences_path,
             compacted: HashSet::new(),
         }
     }
 
+    /// Run queued writes until every sender is gone and the queue is empty.
+    pub(super) async fn serve(
+        mut self,
+        writes: smol::channel::Receiver<StoreWrite>,
+        failures: smol::channel::Sender<Result<RuntimeError, String>>,
+        host_cx: HostCx,
+    ) {
+        let mut next = None;
+        loop {
+            let write = match next.take() {
+                Some(write) => write,
+                None => match writes.recv().await {
+                    Ok(write) => write,
+                    Err(_) => break,
+                },
+            };
+            let reported = if write.changes_index() {
+                let mut batch = vec![write];
+                while let Ok(write) = writes.try_recv() {
+                    if write.changes_index() {
+                        batch.push(write);
+                    } else {
+                        next = Some(write);
+                        break;
+                    }
+                }
+                self.commit_index(batch, &host_cx).await
+            } else {
+                self.run(write, &host_cx).await.into_iter().collect()
+            };
+            for failure in reported {
+                let _ = failures.send(failure).await;
+            }
+        }
+    }
+
+    /// Commit index writes in one transaction on the blocking pool, then
+    /// delete the logs of the sessions they removed.
+    async fn commit_index(
+        &mut self,
+        batch: Vec<StoreWrite>,
+        host_cx: &HostCx,
+    ) -> Vec<Result<RuntimeError, String>> {
+        let mut writes = Vec::with_capacity(batch.len());
+        let mut failures = Vec::with_capacity(batch.len());
+        let mut removed = Vec::new();
+        for write in batch {
+            let (write, failure) = match write {
+                StoreWrite::UpsertMetas { metas, initial } => (
+                    IndexWrite::UpsertSessions(metas),
+                    if initial {
+                        IndexFailure::CreateSession
+                    } else {
+                        IndexFailure::UpdateSession
+                    },
+                ),
+                StoreWrite::UpsertProject(project) => (
+                    IndexWrite::UpsertProject(project),
+                    IndexFailure::PersistProject,
+                ),
+                StoreWrite::RemoveSessions(ids) => {
+                    for id in &ids {
+                        self.compacted.remove(id);
+                    }
+                    removed.push(ids.clone());
+                    (IndexWrite::RemoveSessions(ids), IndexFailure::DeleteSession)
+                }
+                StoreWrite::RemoveProject(id) => {
+                    (IndexWrite::RemoveProject(id), IndexFailure::DeleteProject)
+                }
+                _ => unreachable!("only index writes are batched"),
+            };
+            writes.push(write);
+            if !failures.contains(&failure) {
+                failures.push(failure);
+            }
+        }
+        let index = self.index.clone();
+        let store = self.store.clone();
+        let committed = host_cx
+            .unblock(move || {
+                index.commit(&writes)?;
+                Ok::<_, std::io::Error>(
+                    removed
+                        .iter()
+                        .filter_map(|ids| store.remove_session_logs(ids).err())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await;
+        match committed {
+            Ok(log_errors) => log_errors
+                .into_iter()
+                .map(|error| Ok(IndexFailure::DeleteSession.error(error.to_string())))
+                .collect(),
+            Err(error) => failures
+                .into_iter()
+                .map(|failure| Ok(failure.error(error.to_string())))
+                .collect(),
+        }
+    }
+
     /// Run one write. Compaction's reading, folding and syncing happen on the
     /// blocking pool and are awaited here, so the writes queued behind it
     /// still wait for it while the executor thread stays free.
-    pub(super) async fn run(
+    async fn run(
         &mut self,
         write: StoreWrite,
         host_cx: &HostCx,
@@ -103,11 +243,6 @@ impl StoreWriter {
                     }
                     StoreWrite::CloneEvents { dst, .. } => {
                         self.compacted.remove(dst);
-                    }
-                    StoreWrite::RemoveSessions(ids) => {
-                        for id in ids {
-                            self.compacted.remove(id);
-                        }
                     }
                     _ => {}
                 }
@@ -175,32 +310,6 @@ fn run_store_write(
                 })
             })
         }
-        StoreWrite::UpsertMetas { metas, initial } => store.upsert_metas(&metas).err().map(|err| {
-            if initial {
-                Ok(RuntimeError::PersistSession {
-                    error: err.to_string(),
-                })
-            } else {
-                Ok(RuntimeError::PersistSessionIndex {
-                    error: err.to_string(),
-                })
-            }
-        }),
-        StoreWrite::UpsertProject(project) => store.upsert_project(&project).err().map(|err| {
-            Ok(RuntimeError::PersistProject {
-                error: err.to_string(),
-            })
-        }),
-        StoreWrite::RemoveSessions(ids) => store.remove_sessions(&ids).err().map(|err| {
-            Ok(RuntimeError::DeleteSession {
-                error: err.to_string(),
-            })
-        }),
-        StoreWrite::RemoveProject(id) => store.remove_project(&id).err().map(|err| {
-            Ok(RuntimeError::DeleteProject {
-                error: err.to_string(),
-            })
-        }),
         StoreWrite::CloneEvents {
             src,
             dst,
@@ -274,5 +383,9 @@ fn run_store_write(
         StoreWrite::CompactLog { .. } | StoreWrite::DiscardCompactionLeftovers => {
             unreachable!("run by StoreWriter::run")
         }
+        StoreWrite::UpsertMetas { .. }
+        | StoreWrite::UpsertProject(_)
+        | StoreWrite::RemoveSessions(_)
+        | StoreWrite::RemoveProject(_) => unreachable!("run by StoreWriter::commit_index"),
     }
 }

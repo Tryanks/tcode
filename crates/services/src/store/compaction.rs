@@ -459,12 +459,8 @@ mod tests {
         assert_eq!(fs::read(store.events_path("s")).unwrap(), compacted);
         assert_eq!(fs::read(store.original_events_path("s")).unwrap(), original);
 
-        store.remove_sessions(&["s".to_string()]).unwrap();
-        assert_eq!(
-            fs::read_dir(store.root()).unwrap().count(),
-            1,
-            "only the index"
-        );
+        store.remove_session_logs(&["s".to_string()]).unwrap();
+        assert_eq!(fs::read_dir(store.root()).unwrap().count(), 0);
         fs::remove_dir_all(store.root()).unwrap();
     }
 }

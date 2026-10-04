@@ -333,9 +333,8 @@ impl AppState {
             },
             cx,
         );
-        // Reflect the upsert in memory instead of reloading the whole index
-        // from disk: `persist_metas` runs on every turn,
-        // where re-reading and re-parsing a large sessions.json stalls the UI.
+        // The host's lists are the index while it runs; the file is read
+        // only at startup.
         self.upsert_sessions_in_memory(metas);
     }
 

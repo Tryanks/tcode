@@ -3199,9 +3199,8 @@ mod tests {
     fn deleted_thread_keeps_its_pending_and_rejected_send_visible(cx: &mut TestAppContext) {
         let root = scratch_root("tcode-deleted-pending");
         let disk = SessionStore::open_at(root.clone()).unwrap();
-        disk.upsert_project(&project_at("p", &root)).unwrap();
-        disk.upsert_metas([&thread(&root, "deleted", "p", None)])
-            .unwrap();
+        seed_index(&disk, &[project_at("p", &root)], &[]);
+        seed_index(&disk, &[], &[thread(&root, "deleted", "p", None)]);
         let host = test_host(disk);
         let link = host.link();
         let workspace = cx.new(|cx| WorkspaceStore::new(link.clone(), cx));
@@ -4262,6 +4261,23 @@ mod tests {
         spawn_host(store, HostServices::default()).expect("spawn test host")
     }
 
+    /// Write the index a host started on `store` will load.
+    fn seed_index(store: &SessionStore, projects: &[Project], sessions: &[SessionMeta]) {
+        let mut writes: Vec<tcode_services::store::IndexWrite> = projects
+            .iter()
+            .cloned()
+            .map(tcode_services::store::IndexWrite::UpsertProject)
+            .collect();
+        writes.push(tcode_services::store::IndexWrite::UpsertSessions(
+            sessions.to_vec(),
+        ));
+        store
+            .open_index(std::time::Duration::ZERO)
+            .expect("open the index")
+            .commit(&writes)
+            .expect("seed the index");
+    }
+
     macro_rules! update_host {
         ($host:expr, $update:expr) => {
             smol::block_on($host.update_state_for_test($update)).expect("update test host")
@@ -4302,9 +4318,8 @@ mod tests {
         use tcode_client::ConnectionState;
         let root = scratch_root("baseline-replay");
         let disk = SessionStore::open_at(root.clone()).unwrap();
-        disk.upsert_project(&project_at("p", &root)).unwrap();
-        disk.upsert_metas([&thread(&root, "one", "p", None)])
-            .unwrap();
+        seed_index(&disk, &[project_at("p", &root)], &[]);
+        seed_index(&disk, &[], &[thread(&root, "one", "p", None)]);
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session("one".into()));
@@ -4484,14 +4499,13 @@ mod tests {
     fn archiving_the_viewed_child_returns_to_its_parent(cx: &mut TestAppContext) {
         let root = scratch_root("archive-to-parent");
         let disk = SessionStore::open_at(root.clone()).expect("open test store");
-        disk.upsert_project(&project_at("p", &root))
-            .expect("persist project");
+        seed_index(&disk, &[project_at("p", &root)], &[]);
         for meta in [
             thread(&root, "parent", "p", None),
             thread(&root, "child", "p", Some("parent")),
             thread(&root, "sibling", "p", None),
         ] {
-            disk.upsert_metas([&meta]).expect("persist session");
+            seed_index(&disk, &[], std::slice::from_ref(&meta));
         }
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4555,15 +4569,13 @@ mod tests {
         let disk = SessionStore::open_at(root.clone()).expect("open test store");
         // "other" is listed first, so a draft for it proves nothing about the
         // remembered project; "p" is the one the user last worked in.
-        disk.upsert_project(&project_at("other", &root.join("other")))
-            .expect("persist project");
-        disk.upsert_project(&project_at("p", &root))
-            .expect("persist project");
+        seed_index(&disk, &[project_at("other", &root.join("other"))], &[]);
+        seed_index(&disk, &[project_at("p", &root)], &[]);
         for meta in [
             thread(&root, "parent", "p", None),
             thread(&root, "child", "p", Some("parent")),
         ] {
-            disk.upsert_metas([&meta]).expect("persist session");
+            seed_index(&disk, &[], std::slice::from_ref(&meta));
         }
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4636,10 +4648,8 @@ mod tests {
     ) {
         let root = scratch_root("remembered-project");
         let disk = SessionStore::open_at(root.clone()).expect("open test store");
-        disk.upsert_project(&project_at("first", &root.join("first")))
-            .expect("persist project");
-        disk.upsert_project(&project_at("remembered", &root))
-            .expect("persist project");
+        seed_index(&disk, &[project_at("first", &root.join("first"))], &[]);
+        seed_index(&disk, &[project_at("remembered", &root)], &[]);
         let host = test_host(disk);
         command(
             &host,
@@ -4691,7 +4701,7 @@ mod tests {
         let disk = SessionStore::open_at(root.clone()).unwrap();
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         meta.id = "stale".into();
-        disk.upsert_metas([&meta]).unwrap();
+        seed_index(&disk, &[], &[meta.clone()]);
         let delta = |item: &str, text: &str| AgentEvent::Delta {
             item_id: item.into(),
             kind: agent::DeltaKind::AssistantText,
@@ -4951,9 +4961,7 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         let session_id = meta.id.clone();
-        session_store
-            .upsert_metas([&meta])
-            .expect("persist session");
+        seed_index(&session_store, &[], std::slice::from_ref(&meta));
         let events = [
             AgentEvent::ItemCompleted(ThreadItem {
                 id: "user-1".into(),
@@ -5116,12 +5124,8 @@ mod tests {
             SessionMeta::new(ProviderKind::Codex, seed_project.root.clone(), None);
         seed_session.project_id = Some(seed_project.id.clone());
         let seed_session_id = seed_session.id.clone();
-        session_store
-            .upsert_project(&seed_project)
-            .expect("persist seed project");
-        session_store
-            .upsert_metas([&seed_session])
-            .expect("persist seed session");
+        seed_index(&session_store, std::slice::from_ref(&seed_project), &[]);
+        seed_index(&session_store, &[], &[seed_session.clone()]);
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         wait_until(cx, &workspace, "initial session index", |cx| {
@@ -5254,9 +5258,7 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         let session_id = meta.id.clone();
-        session_store
-            .upsert_metas([&meta])
-            .expect("persist session");
+        seed_index(&session_store, &[], std::slice::from_ref(&meta));
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -5340,12 +5342,8 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let first = SessionMeta::new(ProviderKind::Codex, root.join("first"), None);
         let second = SessionMeta::new(ProviderKind::Codex, root.join("second"), None);
-        session_store
-            .upsert_metas([&first])
-            .expect("persist first session");
-        session_store
-            .upsert_metas([&second])
-            .expect("persist second session");
+        seed_index(&session_store, &[], std::slice::from_ref(&first));
+        seed_index(&session_store, &[], std::slice::from_ref(&second));
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -5464,12 +5462,8 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let first = SessionMeta::new(ProviderKind::ClaudeCode, root.join("first"), None);
         let second = SessionMeta::new(ProviderKind::ClaudeCode, root.join("second"), None);
-        session_store
-            .upsert_metas([&first])
-            .expect("persist first session");
-        session_store
-            .upsert_metas([&second])
-            .expect("persist second session");
+        seed_index(&session_store, &[], std::slice::from_ref(&first));
+        seed_index(&session_store, &[], std::slice::from_ref(&second));
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -5541,9 +5535,7 @@ mod tests {
         let root = scratch_root("tcode-fallback-lifecycle-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, root.join("worktree"), None);
-        session_store
-            .upsert_metas([&meta])
-            .expect("persist session");
+        seed_index(&session_store, &[], std::slice::from_ref(&meta));
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -5639,7 +5631,7 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         meta.id = "git-replica".into();
-        session_store.upsert_metas([&meta]).unwrap();
+        seed_index(&session_store, &[], &[meta.clone()]);
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
@@ -5739,11 +5731,9 @@ mod tests {
             let root = scratch_root("remove-project-draft-ui");
             let disk = SessionStore::open_at(root.clone()).expect("open test store");
             for project in ["doomed", "kept"] {
-                disk.upsert_project(&project_at(project, &root))
-                    .expect("persist project");
+                seed_index(&disk, &[project_at(project, &root)], &[]);
             }
-            disk.upsert_metas([&thread(&root, "kept-thread", "kept", None)])
-                .expect("persist session");
+            seed_index(&disk, &[], &[thread(&root, "kept-thread", "kept", None)]);
             let host = test_host(disk);
             let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
@@ -5803,8 +5793,7 @@ mod tests {
     fn committing_a_draft_carries_its_conversation_state_to_the_thread(cx: &mut TestAppContext) {
         let root = scratch_root("commit-draft-ui");
         let disk = SessionStore::open_at(root.clone()).expect("open test store");
-        disk.upsert_project(&project_at("p", &root))
-            .expect("persist project");
+        seed_index(&disk, &[project_at("p", &root)], &[]);
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 

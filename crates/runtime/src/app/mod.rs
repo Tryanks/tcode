@@ -72,7 +72,7 @@ use tcode_services::import::{
 use tcode_services::provider_probe::{default_program, probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
-use tcode_services::store::{SessionStore, now_millis, now_secs};
+use tcode_services::store::{LoadedIndex, SessionIndex, SessionStore, now_millis, now_secs};
 use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
     self, CheckInput as ProviderCheckInput, Installation,
@@ -245,7 +245,7 @@ mod subagents;
 mod terminals;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -309,9 +309,14 @@ impl Default for TcodeUpdateState {
 
 pub struct AppState {
     store: SessionStore,
+    /// The project and session index this host owns while it runs; written
+    /// only by the store writer once startup is over.
+    index: SessionIndex,
     settings_store: SettingsStore,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
+    /// The running store writer, which ends once every queued write is done.
+    store_writer: Option<HostTask<()>>,
     store_write_failures: smol::channel::Sender<Result<RuntimeError, String>>,
     store_write_failure_receiver: Option<smol::channel::Receiver<Result<RuntimeError, String>>>,
     pub sessions: Vec<SessionMeta>,
@@ -438,20 +443,34 @@ pub(crate) fn startup_collapsed_threads(sessions: &[SessionMeta]) -> Vec<String>
         .collect()
 }
 
+/// How long a host started by a relaunch waits for the instance it replaces
+/// to quit and release the index. That instance may first ask whether to stop
+/// its working threads.
+const RELAUNCH_INDEX_WAIT: Duration = Duration::from_secs(15);
+
 impl AppState {
-    pub fn new(store: SessionStore) -> Self {
-        Self::with_ai_titles(store, false)
+    #[cfg(test)]
+    pub(crate) fn new(store: SessionStore) -> Self {
+        Self::start(store, false).expect("open the session index")
     }
 
-    pub(crate) fn with_ai_titles(store: SessionStore, ai_title_generation_enabled: bool) -> Self {
-        // Load + migrate once and persist so derived project ids stay stable.
-        let file = store.read_file();
-        if let Err(err) = store.persist_index(&file) {
-            log::warn!("failed to persist migrated session index: {err}");
-        }
-        let mut sessions = file.sessions;
+    /// Open the data dir's index and load the host's state from it. Fails
+    /// when another host has the index open.
+    pub(crate) fn start(
+        store: SessionStore,
+        ai_title_generation_enabled: bool,
+    ) -> std::io::Result<Self> {
+        let index_wait = if tcode_services::relaunch::pending(store.root()) {
+            RELAUNCH_INDEX_WAIT
+        } else {
+            Duration::ZERO
+        };
+        let index = store.open_index(index_wait)?;
+        let LoadedIndex {
+            projects,
+            mut sessions,
+        } = index.load()?;
         sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
-        let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let mut settings = settings_store.load();
         settings.collapsed_threads = startup_collapsed_threads(&sessions);
@@ -491,11 +510,13 @@ impl AppState {
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
         let session_search = Arc::new(std::sync::Mutex::new(SessionSearch::new(store.clone())));
-        Self {
+        Ok(Self {
             store,
+            index,
             settings_store,
             store_writes,
             store_write_receiver: Some(store_write_receiver),
+            store_writer: None,
             store_write_failures,
             store_write_failure_receiver: Some(store_write_failure_receiver),
             sessions,
@@ -544,7 +565,7 @@ impl AppState {
             external_imports: HashMap::new(),
             next_import_run_id: 1,
             session_search,
-        }
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -554,20 +575,15 @@ impl AppState {
 
     fn start_store_writer(&mut self, cx: &mut HostCx) {
         if let Some(writes) = self.store_write_receiver.take() {
-            let mut writer = StoreWriter::new(
+            let writer = StoreWriter::new(
                 self.store.clone(),
+                self.index.clone(),
                 self.settings_store.clone(),
                 self.terminal_preferences_path.clone(),
             );
             let failures = self.store_write_failures.clone();
             let host_cx = cx.clone();
-            HostCx::spawn_detached(cx, async move {
-                while let Ok(write) = writes.recv().await {
-                    if let Some(failure) = writer.run(write, &host_cx).await {
-                        let _ = failures.send(failure).await;
-                    }
-                }
-            });
+            self.store_writer = Some(cx.spawn_background(writer.serve(writes, failures, host_cx)));
         }
         if let Some(failures) = self.store_write_failure_receiver.take() {
             let host_cx = cx.clone();
@@ -580,6 +596,13 @@ impl AppState {
                 }
             });
         }
+    }
+
+    /// Stop accepting writes and hand back the writer, which finishes the
+    /// queued ones and then closes the index.
+    pub(crate) fn close_store(self) -> Option<HostTask<()>> {
+        let Self { store_writer, .. } = self;
+        store_writer
     }
 
     fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut HostCx) {

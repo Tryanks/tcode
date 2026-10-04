@@ -1,7 +1,9 @@
 //! On-disk persistence for tcode sessions.
 //!
 //! Layout (under the platform data dir, e.g. `~/Library/Application Support/tcode/`):
-//!   * `sessions.json` — an [`IndexFile`] containing projects and sessions.
+//!   * `tcode.redb` — the [`SessionIndex`] of projects and sessions, opened by
+//!     the host alone. It replaced `sessions.json`, which its first open
+//!     imports and renames to `sessions.json.migrated`.
 //!   * `<id>.jsonl` — append-only `{ ts, event }` records. A log that
 //!     [`SessionStore::compact_log`] rewrote begins with a layout header line;
 //!     a log without one is layout epoch 0.
@@ -10,7 +12,7 @@
 //! Replay accepts timestamped records and legacy bare [`AgentEvent`] lines,
 //! then folds [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -18,12 +20,13 @@ use std::path::PathBuf;
 use agent::{AgentEvent, ModelSpec, ProviderCommand, ProviderKind};
 use serde::{Deserialize, Serialize};
 
-use tcode_core::project::{IndexFile, Project, SessionMeta, migrate_index};
 use tcode_core::session::StoredEvent;
 
 mod compaction;
+mod index;
 
 pub use compaction::{CompactOutcome, CompactRejection, MalformedLine};
+pub use index::{IndexWrite, LoadedIndex, SessionIndex};
 
 /// The first line of a rewritten log. It lives in the log itself so the
 /// records and the epoch they belong to are replaced in one rename and can
@@ -138,10 +141,6 @@ impl SessionStore {
 
     pub fn root(&self) -> &PathBuf {
         &self.root
-    }
-
-    fn index_path(&self) -> PathBuf {
-        self.root.join("sessions.json")
     }
 
     fn events_path(&self, id: &str) -> PathBuf {
@@ -271,121 +270,15 @@ impl SessionStore {
         fs::rename(&tmp, path)
     }
 
-    /// Load the whole index file (projects + sessions), tolerating the old
-    /// bare-array schema and deriving implicit projects for orphan sessions.
-    pub fn read_file(&self) -> IndexFile {
-        let path = self.index_path();
-        let Ok(bytes) = fs::read(&path) else {
-            return IndexFile::default();
-        };
-        // Current schema is an object; the legacy schema was a bare array.
-        let parsed = serde_json::from_slice::<IndexFile>(&bytes).or_else(|_| {
-            serde_json::from_slice::<Vec<SessionMeta>>(&bytes).map(|sessions| IndexFile {
-                projects: Vec::new(),
-                sessions,
-            })
-        });
-        match parsed {
-            Ok(file) => migrate_index(file),
-            Err(err) => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_nanos())
-                    .unwrap_or(0);
-                let corrupt_path = self.root.join(format!("sessions.json.corrupt-{timestamp}"));
-                match fs::rename(&path, &corrupt_path) {
-                    Ok(()) => log::warn!(
-                        "failed to parse sessions.json: {err}; preserved it as {}",
-                        corrupt_path.display()
-                    ),
-                    Err(rename_err) => log::warn!(
-                        "failed to parse sessions.json: {err}; failed to preserve corrupt index: {rename_err}"
-                    ),
-                }
-                IndexFile::default()
-            }
-        }
-    }
-
-    /// Load the session index (newest first). Empty if missing / unreadable.
-    pub fn load_index(&self) -> Vec<SessionMeta> {
-        let mut metas = self.read_file().sessions;
-        metas.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
-        metas
-    }
-
-    /// Insert or replace metas in the index (by id) with one index write.
-    pub fn upsert_metas<'a>(
-        &self,
-        metas: impl IntoIterator<Item = &'a SessionMeta>,
-    ) -> std::io::Result<()> {
-        let mut file = self.read_file();
-        let mut positions: HashMap<String, usize> = file
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(position, meta)| (meta.id.clone(), position))
-            .collect();
-        for meta in metas {
-            match positions.get(&meta.id) {
-                Some(&position) => file.sessions[position] = meta.clone(),
-                None => {
-                    positions.insert(meta.id.clone(), file.sessions.len());
-                    file.sessions.push(meta.clone());
-                }
-            }
-        }
-        self.persist_index(&file)
-    }
-
-    /// Insert or replace a project, then remove its previous managed icon.
-    pub fn upsert_project(&self, project: &Project) -> std::io::Result<()> {
-        let mut file = self.read_file();
-        let mut previous = None;
-        if let Some(existing) = file.projects.iter_mut().find(|p| p.id == project.id) {
-            if existing.icon_path != project.icon_path {
-                previous = existing.icon_path.clone();
-            }
-            *existing = project.clone();
-        } else {
-            file.projects.push(project.clone());
-        }
-        self.persist_index(&file)?;
-        self.remove_project_icon(previous);
-        Ok(())
-    }
-
-    /// Remove a project and its managed icon. Sessions are removed separately.
-    pub fn remove_project(&self, id: &str) -> std::io::Result<()> {
-        let mut file = self.read_file();
-        let icon = file
-            .projects
-            .iter()
-            .find(|p| p.id == id)
-            .and_then(|p| p.icon_path.clone());
-        file.projects.retain(|project| project.id != id);
-        self.persist_index(&file)?;
-        self.remove_project_icon(icon);
-        Ok(())
-    }
-
-    fn remove_project_icon(&self, path: Option<PathBuf>) {
-        if let Some(path) = path
-            && path.parent() == Some(self.root.join("project-icons").as_path())
+    /// Delete a project icon the host copied into the data dir; an icon
+    /// elsewhere is the user's own file.
+    fn remove_project_icon(&self, path: PathBuf) {
+        if path.parent() == Some(self.root.join("project-icons").as_path())
             && let Err(error) = fs::remove_file(&path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             log::warn!("could not remove project icon {}: {error}", path.display());
         }
-    }
-
-    /// Persist a whole index file atomically (also flushes migration on startup).
-    pub fn persist_index(&self, file: &IndexFile) -> std::io::Result<()> {
-        let tmp = self.index_path().with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        fs::write(&tmp, data)?;
-        fs::rename(&tmp, self.index_path())
     }
 
     /// Append one event to the session's JSONL log, wrapped in a timestamped
@@ -467,15 +360,10 @@ impl SessionStore {
         fs::rename(tmp, dst)
     }
 
-    /// Remove sessions from the index with one index write, then delete their
-    /// event logs and the originals kept from before a rewrite. Every file is
-    /// attempted; the first failure is returned.
-    pub fn remove_sessions(&self, ids: &[String]) -> std::io::Result<()> {
+    /// Delete removed sessions' event logs and the originals kept from before
+    /// a rewrite. Every file is attempted; the first failure is returned.
+    pub fn remove_session_logs(&self, ids: &[String]) -> std::io::Result<()> {
         let removed: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        let mut file = self.read_file();
-        file.sessions
-            .retain(|meta| !removed.contains(meta.id.as_str()));
-        self.persist_index(&file)?;
         let mut result = Ok(());
         for id in removed {
             for path in [self.events_path(id), self.original_events_path(id)] {
@@ -535,89 +423,6 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("tcode-store-test-{}", uuid::Uuid::new_v4()));
         p
-    }
-
-    #[test]
-    fn removing_project_cleans_only_managed_icons_after_persisting() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-icon-cleanup-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        fs::create_dir(root.join("project-icons")).unwrap();
-        let mut project = Project::from_root(root.join("project"));
-        for (path, managed) in [
-            (root.join("project-icons/icon.png"), true),
-            (root.join("original.png"), false),
-        ] {
-            fs::write(&path, b"stored image").unwrap();
-            project.icon_path = Some(path.clone());
-            store.upsert_project(&project).unwrap();
-            // A failed index replacement must retain the image still referenced on disk.
-            fs::create_dir(root.join("sessions.json.tmp")).unwrap();
-            assert!(store.remove_project(&project.id).is_err());
-            assert!(path.exists());
-            assert_eq!(
-                store.read_file().projects[0].icon_path.as_ref(),
-                Some(&path)
-            );
-            fs::remove_dir(root.join("sessions.json.tmp")).unwrap();
-            store.remove_project(&project.id).unwrap();
-            assert!(store.read_file().projects.is_empty());
-            assert_eq!(path.exists(), !managed);
-        }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn session_index_upserts_orders_and_removes_only_the_selected_session() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let mut a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/a"), None);
-        a.updated_at = 100;
-        let mut b = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/b"), None);
-        b.updated_at = 200;
-        store.upsert_metas([&a, &b]).unwrap();
-
-        let index = store.load_index();
-        assert_eq!(index.len(), 2);
-        // newest first
-        assert_eq!(index[0].id, b.id);
-        assert_eq!(index[1].id, a.id);
-
-        // upsert replaces
-        let mut a2 = a.clone();
-        a2.title = "renamed".into();
-        store.upsert_metas([&a2]).unwrap();
-        let index = store.load_index();
-        assert_eq!(index.len(), 2);
-        assert_eq!(
-            index.iter().find(|m| m.id == a.id).unwrap().title,
-            "renamed"
-        );
-        store
-            .append_event(
-                &a.id,
-                1,
-                &AgentEvent::TurnStarted {
-                    turn_id: "turn-a".into(),
-                },
-            )
-            .unwrap();
-        store
-            .append_event(
-                &b.id,
-                2,
-                &AgentEvent::TurnStarted {
-                    turn_id: "turn-b".into(),
-                },
-            )
-            .unwrap();
-        store.remove_sessions(std::slice::from_ref(&a.id)).unwrap();
-        store.remove_sessions(std::slice::from_ref(&a.id)).unwrap();
-        let remaining = store.load_index();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, b.id);
-        assert!(!store.events_path(&a.id).exists());
-        assert!(store.events_path(&b.id).exists());
-        let _ = fs::remove_dir_all(store.root());
     }
 
     #[test]
@@ -704,70 +509,5 @@ mod tests {
             r#"{"ts":3000,"event":{"type":"turn_started","turn_id":"next"}}"#
         );
         fs::remove_dir_all(store.root()).unwrap();
-    }
-
-    #[test]
-    fn corrupt_index_is_preserved_before_returning_empty() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let corrupt_bytes = b"not valid session json";
-        fs::write(store.index_path(), corrupt_bytes).unwrap();
-
-        assert!(store.load_index().is_empty());
-        assert!(!store.index_path().exists());
-        let backups: Vec<_> = fs::read_dir(store.root())
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("sessions.json.corrupt-")
-            })
-            .collect();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(fs::read(backups[0].path()).unwrap(), corrupt_bytes);
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn legacy_bare_array_index_loads_and_derives_projects() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        // Old-format file: a bare JSON array with no project_id fields.
-        let legacy = serde_json::json!([
-            {
-                "id": "s1", "title": "One", "provider": "claude_code",
-                "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
-            },
-            {
-                "id": "s2", "title": "Two", "provider": "codex",
-                "cwd": "/work/alpha", "created_at": 2, "updated_at": 20
-            },
-            {
-                "id": "s3", "title": "Three", "provider": "codex",
-                "cwd": "/work/beta", "created_at": 3, "updated_at": 30
-            }
-        ]);
-        fs::write(store.index_path(), legacy.to_string()).unwrap();
-
-        let file = store.read_file();
-        // Two distinct roots -> two derived projects, deduped by root.
-        assert_eq!(file.projects.len(), 2);
-        let alpha = file
-            .projects
-            .iter()
-            .find(|p| p.root == std::path::Path::new("/work/alpha"))
-            .unwrap();
-        assert_eq!(alpha.name, "alpha");
-        // Both alpha sessions share the same derived project.
-        let s1 = file.sessions.iter().find(|s| s.id == "s1").unwrap();
-        let s2 = file.sessions.iter().find(|s| s.id == "s2").unwrap();
-        assert_eq!(s1.project_id, Some(alpha.id.clone()));
-        assert_eq!(s2.project_id, s1.project_id);
-        let s3 = file.sessions.iter().find(|s| s.id == "s3").unwrap();
-        assert_ne!(s3.project_id, s1.project_id);
-        let migrated_again = migrate_index(file.clone());
-        assert_eq!(migrated_again.projects, file.projects);
-        assert_eq!(migrated_again.sessions, file.sessions);
-        let _ = fs::remove_dir_all(store.root());
     }
 }

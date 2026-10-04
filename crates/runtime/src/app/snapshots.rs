@@ -445,7 +445,7 @@ impl AppState {
         statuses
     }
 
-    /// `sessions` stays newest-first, matching `load_index`'s order.
+    /// `sessions` stays newest-first, the order the host loads it in.
     pub(super) fn upsert_sessions_in_memory(
         &mut self,
         metas: impl IntoIterator<Item = SessionMeta>,

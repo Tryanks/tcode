@@ -10331,6 +10331,7 @@ dependencies = [
  "flate2",
  "image",
  "log",
+ "redb",
  "serde",
  "serde_json",
  "smol",

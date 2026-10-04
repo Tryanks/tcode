@@ -4,6 +4,7 @@ use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
 use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{Command, CommandResponse, HostMessage, Subscription};
+use tcode_services::store::IndexWrite;
 #[test]
 fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
     for screen_recording in [false, true] {
@@ -172,8 +173,10 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         // A completion without model/effort must not erase the last observation,
         // and reopening the persisted mirror must retain it.
         let persisted = state
-            .store
-            .load_index()
+            .index
+            .load()
+            .unwrap()
+            .sessions
             .into_iter()
             .find(|meta| meta.id == mirror.id)
             .unwrap();
@@ -710,8 +713,8 @@ fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
     mirror.title = "subagent".into();
     mirror.parent_session_id = Some("parent".into());
     mirror.native_subagent = Some("toolu_zombie".into());
-    test_store.upsert_metas([&parent]).unwrap();
-    test_store.upsert_metas([&mirror]).unwrap();
+    seed_index(&test_store, &[], &[parent.clone()]);
+    seed_index(&test_store, &[], &[mirror.clone()]);
     let stored = [
         AgentEvent::TurnStarted {
             turn_id: "toolu_zombie".into(),
@@ -764,6 +767,7 @@ fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
     });
 
     // Reloading the repaired mirror leaves the closed turn alone.
+    state.stop();
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
     state.update(cx, |state, cx| state.select_session("mirror", cx));
     cx.run_until(|state| {
@@ -1033,7 +1037,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let cwd = test_store.root().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let project = Project::from_root(cwd.clone());
-    test_store.upsert_project(&project).unwrap();
+    seed_index(&test_store, std::slice::from_ref(&project), &[]);
     let scripted = scripted_provider(ProviderKind::ClaudeCode);
     let commands = scripted.commands.clone();
     let events = scripted.events.clone();
@@ -1073,8 +1077,10 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
         assert!(!state.sessions.iter().any(|meta| meta.id == session_id));
         assert!(
             !state
-                .store
-                .load_index()
+                .index
+                .load()
+                .unwrap()
+                .sessions
                 .iter()
                 .any(|meta| meta.id == session_id)
         );
@@ -1144,8 +1150,10 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
                 .unwrap()
                 .clone(),
             state
-                .store
-                .load_index()
+                .index
+                .load()
+                .unwrap()
+                .sessions
                 .into_iter()
                 .find(|meta| meta.id == session_id)
                 .unwrap(),
@@ -1179,7 +1187,7 @@ fn thread_fold_is_host_state_shared_over_the_pipe_and_pruned_with_the_thread() {
         if id == "archived-child" {
             meta.archived_at = Some(1);
         }
-        store.upsert_metas([&meta]).unwrap();
+        seed_index(&store, &[], &[meta.clone()]);
     }
     let state = cx.new_entity(TestClientState::new(store.clone()));
     state.update(cx, |state, _| {
@@ -1265,8 +1273,8 @@ fn lifecycle_batches_apply_exact_timestamp_cascades_and_persist() {
     let store = (*test_store).clone();
     let kept = Project::from_root(root.join("kept"));
     let doomed = Project::from_root(root.join("doomed"));
-    store.upsert_project(&kept).unwrap();
-    store.upsert_project(&doomed).unwrap();
+    seed_index(&store, std::slice::from_ref(&kept), &[]);
+    seed_index(&store, std::slice::from_ref(&doomed), &[]);
     let mut metas = Vec::new();
     for (id, parent, project) in [
         ("parent", None, &kept),
@@ -1284,7 +1292,7 @@ fn lifecycle_batches_apply_exact_timestamp_cascades_and_persist() {
         meta.project_id = Some(project.id.clone());
         metas.push(meta);
     }
-    store.upsert_metas(&metas).unwrap();
+    seed_index(&store, &[], &metas);
     let state = cx.new_entity(TestClientState::new(store.clone()));
     let archived_at = |state: &TestClientState, id: &str| {
         state
@@ -1359,7 +1367,7 @@ fn lifecycle_batches_apply_exact_timestamp_cascades_and_persist() {
         "every batch is accepted"
     );
 
-    let reopened = SessionStore::open_at(root).unwrap().read_file();
+    let reopened = state.read(|state| state.index.load().unwrap());
     assert_eq!(reopened.projects, [kept]);
     let mut persisted: Vec<_> = reopened
         .sessions
@@ -1538,7 +1546,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         meta.title = "Old title".into();
         meta.updated_at = 123;
         let id = meta.id.clone();
-        store.upsert_metas([&meta]).unwrap();
+        seed_index(&store, &[], &[meta.clone()]);
         let image = store.root().join("qr.png");
         fs::write(&image, [1, 2, 3]).unwrap();
         for (item_id, content) in [
@@ -1703,7 +1711,13 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 .find(|meta| meta.id == id)
                 .map(|meta| meta.title.as_str());
             assert_eq!(title, expected, "{outcome}");
-            let persisted = store.load_index().into_iter().find(|meta| meta.id == id);
+            let persisted = state
+                .index
+                .load()
+                .unwrap()
+                .sessions
+                .into_iter()
+                .find(|meta| meta.id == id);
             assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
             if !matches!(outcome, "renamed" | "deleted") {
                 assert_eq!(state.sessions[0].updated_at, 123, "{outcome}");
@@ -1730,7 +1744,7 @@ fn title_regeneration_rejects_empty_history_without_calling_the_provider() {
     let store = TestStore::new("tcode-empty-title");
     let meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
     let id = meta.id.clone();
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(&store, &[], std::slice::from_ref(&meta));
     let scripted = scripted_provider(ProviderKind::Codex);
     let state = cx.new_entity({
         let mut state = TestClientState::new((*store).clone());
@@ -2788,8 +2802,8 @@ fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
     let mut first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
     first.updated_at = 100;
     let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
-    store.upsert_metas([&first]).unwrap();
-    store.upsert_metas([&second]).unwrap();
+    seed_index(&store, &[], &[first.clone()]);
+    seed_index(&store, &[], std::slice::from_ref(&second));
     let first_id = first.id.clone();
     let second_id = second.id.clone();
     let state = cx.new_entity(TestClientState::new(store));
@@ -2944,7 +2958,7 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
                 vec![]
             };
             assert_eq!(draft.meta.option_selections, expected, "{name}");
-            assert!(state.store.load_index().is_empty(), "{name}");
+            assert!(state.index.load().unwrap().sessions.is_empty(), "{name}");
         });
     }
 }
@@ -2989,7 +3003,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
         assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5-1"));
         assert!(draft.meta.acp_agent_id.is_none());
         assert!(draft.meta.option_selections.is_empty());
-        assert!(state.store.load_index().is_empty());
+        assert!(state.index.load().unwrap().sessions.is_empty());
     });
 }
 
@@ -5149,7 +5163,7 @@ fn startup_generation_rejects_stale_same_session_attempt() {
         let store = TestStore::new("tcode-startup-generation");
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = "same-session".into();
-        store.upsert_metas([&meta]).unwrap();
+        seed_index(&store, &[], &[meta.clone()]);
         let (starts, started) = smol::channel::unbounded();
         let launcher = ProviderLauncher(Arc::new(move |_, _| {
             let (complete, completed) = smol::channel::bounded(1);
@@ -5428,9 +5442,12 @@ fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() 
     let updated_at = now_secs() - 3600;
     session.meta.updated_at = updated_at;
     let meta = session.meta.clone();
-    test_store.upsert_metas([&meta]).unwrap();
 
     state.update(cx, |state, cx| {
+        state
+            .index
+            .commit(&[IndexWrite::UpsertSessions(vec![meta.clone()])])
+            .unwrap();
         state.sessions.push(meta);
         state.install_selected(session);
         state.park_active(cx);
@@ -5446,7 +5463,8 @@ fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() 
         assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
     });
     cx.run_until_parked();
-    assert_eq!(test_store.load_index()[0].updated_at, updated_at);
+    let persisted = state.read(|state| state.index.load().unwrap().sessions);
+    assert_eq!(persisted[0].updated_at, updated_at);
 }
 
 #[test]
@@ -5644,7 +5662,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         base: "main".into(),
         branch: "tcode/source".into(),
     });
-    store.upsert_metas([&source]).unwrap();
+    seed_index(&store, &[], &[source.clone()]);
     store
         .append_event(
             &source.id,
@@ -5663,7 +5681,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
     empty_source.resume_cursor = Some(agent::ResumeCursor(
         serde_json::json!({"thread_id": "native-empty-source"}),
     ));
-    store.upsert_metas([&empty_source]).unwrap();
+    seed_index(&store, &[], &[empty_source.clone()]);
     assert!(!root.join(format!("{}.jsonl", empty_source.id)).exists());
     let state = cx.new_entity(TestClientState::new(store));
 
@@ -5714,8 +5732,10 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         assert!(active.timeline.turns.is_empty());
         assert!(
             state
-                .store
-                .load_index()
+                .index
+                .load()
+                .unwrap()
+                .sessions
                 .iter()
                 .any(|meta| meta.id == fork.id)
         );
@@ -5742,8 +5762,8 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
 
     let fresh = SessionStore::open_at(test_store.root().clone()).unwrap();
     assert_eq!(
-        fresh
-            .load_index()
+        state
+            .read(|state| state.index.load().unwrap().sessions)
             .iter()
             .find(|meta| meta.id == id)
             .unwrap()
@@ -5906,7 +5926,7 @@ fn cold_select_installs_immediately_then_loads_persisted_timeline() {
     let test_store = TestStore::new("tcode-cold-select-async-test");
     let store = (*test_store).clone();
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/cold"), None);
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(&store, &[], std::slice::from_ref(&meta));
     store
         .append_event(
             &meta.id,
@@ -5947,7 +5967,7 @@ fn parked_readopt_refolds_events_appended_while_parked() {
     let test_store = TestStore::new("tcode-parked-readopt-async-test");
     let store = (*test_store).clone();
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/parked"), None);
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(&store, &[], std::slice::from_ref(&meta));
     store
         .append_event(&meta.id, 1, &persisted_assistant_event("before parking"))
         .unwrap();
@@ -5997,8 +6017,8 @@ fn stale_timeline_completion_cannot_land_on_another_session() {
     let store = (*test_store).clone();
     let a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
     let b = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
-    store.upsert_metas([&a]).unwrap();
-    store.upsert_metas([&b]).unwrap();
+    seed_index(&store, &[], std::slice::from_ref(&a));
+    seed_index(&store, &[], std::slice::from_ref(&b));
     store
         .append_event(&a.id, 1, &persisted_assistant_event("only session A"))
         .unwrap();
@@ -6042,7 +6062,7 @@ fn timeline_load_keeps_records_appended_during_the_fold() {
     let test_store = TestStore::new("tcode-timeline-watermark-test");
     let store = (*test_store).clone();
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/watermark"), None);
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(&store, &[], std::slice::from_ref(&meta));
     store
         .append_event(&meta.id, 1, &persisted_assistant_event("before load"))
         .unwrap();
@@ -6229,8 +6249,11 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
     let id = session.meta.id.clone();
 
     state.update(cx, |state, cx| {
-        state.store.upsert_metas([&session.meta]).unwrap();
-        state.sessions = state.store.load_index();
+        state
+            .index
+            .commit(&[IndexWrite::UpsertSessions(vec![session.meta.clone()])])
+            .unwrap();
+        state.sessions = state.index.load().unwrap().sessions;
         state.install_selected(session);
         state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -6290,7 +6313,10 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
                 if !live {
                     session.runtime = Runtime::Idle;
                 }
-                state.store.upsert_metas([&session.meta]).unwrap();
+                state
+                    .index
+                    .commit(&[IndexWrite::UpsertSessions(vec![session.meta.clone()])])
+                    .unwrap();
                 state.sessions.push(session.meta.clone());
                 if parked {
                     state.residents.parked.insert("session".into(), session);
@@ -6428,8 +6454,11 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
             .binary_path = Some("/nonexistent/tcode-test-claude".into());
 
         // A live session with a running turn (the overnight workflow).
-        state.store.upsert_metas([&session.meta]).unwrap();
-        state.sessions = state.store.load_index();
+        state
+            .index
+            .commit(&[IndexWrite::UpsertSessions(vec![session.meta.clone()])])
+            .unwrap();
+        state.sessions = state.index.load().unwrap().sessions;
         state.install_selected(session);
         state.send_turn(&id_a, "run the long migration".into(), Vec::new(), cx);
         state.send_turn(&id_a, "queued follow-up".into(), Vec::new(), cx);
@@ -6556,8 +6585,11 @@ fn drained_parked_session_stays_resident() {
     let id = session.meta.id.clone();
 
     state.update(cx, |state, cx| {
-        state.store.upsert_metas([&session.meta]).unwrap();
-        state.sessions = state.store.load_index();
+        state
+            .index
+            .commit(&[IndexWrite::UpsertSessions(vec![session.meta.clone()])])
+            .unwrap();
+        state.sessions = state.index.load().unwrap().sessions;
         state.install_selected(session);
         state.send_turn(&id, "one last thing".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -7432,7 +7464,7 @@ fn history_pages_of_an_opened_session_parse_the_log_once() {
     let store = TestStore::new("history-single-parse");
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
     meta.id = "paged".into();
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(&store, &[], &[meta.clone()]);
     let records = persist_streamed_turns(&store, "paged", 5);
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let reads_before_open = store.event_reads();
@@ -7509,7 +7541,7 @@ fn session_log_follows_residency_and_flushes_before_release() {
     let store = TestStore::new("history-log-residency");
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
     meta.id = "resident".into();
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(&store, &[], &[meta.clone()]);
     let persisted = persist_streamed_turns(&store, "resident", 2).len() as u64;
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let reads_before_open = store.event_reads();
@@ -7688,7 +7720,7 @@ fn live_records(messages: &[HostMessage]) -> Vec<(u64, u64, SessionEventRecord)>
 fn open_stored_session(store: &SessionStore, id: &str) -> SessionMeta {
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
     meta.id = id.into();
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(store, &[], &[meta.clone()]);
     meta
 }
 
@@ -8315,7 +8347,7 @@ fn settled_commands_persist_without_closing_the_selected_conversation() {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
         meta.parent_session_id = parent.map(str::to_string);
-        store.upsert_metas([&meta]).unwrap();
+        seed_index(&store, &[], &[meta.clone()]);
     }
     let state = cx.new_entity(TestClientState::new(store.clone()));
     state.update(cx, |state, cx| state.select_session("parent", cx));
@@ -8338,10 +8370,9 @@ fn settled_commands_persist_without_closing_the_selected_conversation() {
                 .all(|meta| meta.settled_at.is_some() && meta.archived_at.is_none())
         );
     });
-    let restarted = AppState::new(store.clone());
     assert!(
-        restarted
-            .sessions
+        state
+            .read(|state| state.index.load().unwrap().sessions)
             .iter()
             .all(|meta| meta.settled_at.is_some())
     );
@@ -8380,8 +8411,8 @@ fn settled_commands_persist_without_closing_the_selected_conversation() {
     );
     cx.run_until_parked();
     assert!(
-        store
-            .load_index()
+        state
+            .read(|state| state.index.load().unwrap().sessions)
             .iter()
             .all(|meta| meta.settled_at.is_none())
     );
@@ -8607,7 +8638,7 @@ fn history_paging_bench() {
     let store = TestStore::new("tcode-history-paging-bench");
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
     meta.id = "bench".into();
-    store.upsert_metas([&meta]).unwrap();
+    seed_index(&store, &[], &[meta.clone()]);
     fs::copy(&source, store.root().join("bench.jsonl")).unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let started = Instant::now();
@@ -8672,12 +8703,12 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("index-deltas");
     let project = Project::from_root(store.root().join("project"));
-    store.upsert_project(&project).unwrap();
+    seed_index(&store, std::slice::from_ref(&project), &[]);
     for id in ["kept", "archived"] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, project.root.clone(), None);
         meta.id = id.into();
         meta.project_id = Some(project.id.clone());
-        store.upsert_metas([&meta]).unwrap();
+        seed_index(&store, &[], &[meta.clone()]);
     }
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     cx.run_until_parked();

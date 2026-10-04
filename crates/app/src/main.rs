@@ -183,7 +183,7 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
 
 /// Start the in-process host and put the mux in front of it. This window is
 /// then one ordinary client among every link attached to that mux.
-fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
+fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -204,9 +204,71 @@ fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
         }
         Err(error) => log::warn!("MCP host failed to bind: {error}"),
     }
-    let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
+    let host = spawn_host(store, host_services)?;
     let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
-    (host, mux)
+    Ok((host, mux))
+}
+
+/// The window-less stand-in for a host that could not start: an alert that
+/// says why, after which the app quits.
+struct StartupFailure;
+
+impl gpui::Render for StartupFailure {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::Empty
+    }
+}
+
+fn report_startup_failure(error: &std::io::Error, data_dir: &std::path::Path) {
+    eprintln!("tcode: {error}");
+    let (title, detail) = if error.kind() == std::io::ErrorKind::ResourceBusy {
+        (
+            tcode_ui::tr!("startup.index_in_use_title").into_owned(),
+            tcode_ui::tr!("startup.index_in_use", dir = data_dir.display()).into_owned(),
+        )
+    } else {
+        (
+            tcode_ui::tr!("startup.failed_title").into_owned(),
+            error.to_string(),
+        )
+    };
+    let quit = tcode_ui::tr!("quit.confirm").into_owned();
+    gpui_platform::application().run(move |cx| {
+        // On macOS `cx.quit()` ends in `-[NSApplication terminate:]`, which
+        // calls `exit(0)` right after gpui's shutdown has run its quit
+        // handlers, so the failure status has to be set from one of them.
+        cx.on_app_quit(|_| async { std::process::exit(1) }).detach();
+        cx.activate(true);
+        let window = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::centered(size(px(420.), px(160.)), cx)),
+                ..Default::default()
+            },
+            |_, cx| gpui::AppContext::new(cx, |_| StartupFailure),
+        );
+        let Ok(window) = window else {
+            cx.quit();
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            let answer = window.prompt(
+                gpui::PromptLevel::Critical,
+                &title,
+                Some(&detail),
+                &[quit.as_str()],
+                cx,
+            );
+            cx.spawn(async move |_, cx| {
+                let _ = answer.await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    });
 }
 
 struct LocalKernel {
@@ -217,18 +279,18 @@ struct LocalKernel {
 }
 
 impl LocalKernel {
-    fn start(store: SessionStore) -> Self {
-        let (host, mux) = start_local(store);
+    fn start(store: SessionStore) -> std::io::Result<Self> {
+        let (host, mux) = start_local(store)?;
         let connection = mux.attach();
         let control_link = HostLink::new(connection.to_host, connection.from_host);
         let pump_link = control_link.clone();
         let control_pump = smol::spawn(async move { pump_link.pump().await });
-        Self {
+        Ok(Self {
             host,
             mux,
             control_link,
             _control_pump: control_pump,
-        }
+        })
     }
 
     /// A window's link to the local kernel. The mux keeps the kernel alive
@@ -360,7 +422,13 @@ fn main() {
     };
     // Kernel ownership is process composition, not a property of whichever
     // host the window currently views.
-    let kernel = Rc::new(LocalKernel::start(store));
+    let kernel = match LocalKernel::start(store) {
+        Ok(kernel) => Rc::new(kernel),
+        Err(error) => {
+            report_startup_failure(&error, &data_dir);
+            std::process::exit(1);
+        }
+    };
     let local_settings = kernel.settings();
 
     gpui_platform::application()

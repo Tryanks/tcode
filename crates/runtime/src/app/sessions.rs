@@ -1139,10 +1139,14 @@ impl AppState {
             .terminal_preferences
             .remove(&draft_destination.preference_key())
             .is_some();
-        if self.forget_sessions(&session_ids, false, cx) || draft_preferences_changed {
+        // Queued right behind its sessions' removal, so both leave the index
+        // in one commit.
+        let preferences_changed =
+            self.forget_sessions(&session_ids, false, cx) || draft_preferences_changed;
+        self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
+        if preferences_changed {
             self.write_terminal_preferences(cx);
         }
-        self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
             .collapsed_projects
             .retain(|id| id != project_id);

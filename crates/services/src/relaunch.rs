@@ -72,6 +72,12 @@ pub fn clear(data_dir: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether a marker is waiting for this launch: the instance that wrote it
+/// may still be quitting.
+pub fn pending(data_dir: &Path) -> bool {
+    marker_path(data_dir).exists()
+}
+
 /// Read the marker and delete it (consume-once). Returns `None` when absent or
 /// unparsable; the file is removed either way so a corrupt marker can't wedge
 /// every future launch into a relaunch loop.

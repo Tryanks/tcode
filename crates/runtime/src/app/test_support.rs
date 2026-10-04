@@ -5,6 +5,7 @@ use std::rc::{Rc, Weak};
 
 use crate::host::HostFn;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
+use tcode_services::store::IndexWrite;
 
 pub(super) struct TestStore(SessionStore);
 
@@ -27,6 +28,31 @@ impl Drop for TestStore {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(self.0.root());
     }
+}
+
+/// Write the index a host started on `store` will load, the way an earlier
+/// host would have left it.
+pub(crate) fn seed_index(store: &SessionStore, projects: &[Project], sessions: &[SessionMeta]) {
+    let mut writes: Vec<IndexWrite> = projects
+        .iter()
+        .cloned()
+        .map(IndexWrite::UpsertProject)
+        .collect();
+    writes.push(IndexWrite::UpsertSessions(sessions.to_vec()));
+    store
+        .open_index(Duration::ZERO)
+        .expect("open the index")
+        .commit(&writes)
+        .expect("seed the index");
+}
+
+/// What a host that stopped left in `store`'s index.
+pub(crate) fn stored_index(store: &SessionStore) -> LoadedIndex {
+    store
+        .open_index(Duration::ZERO)
+        .expect("open the index")
+        .load()
+        .expect("load the index")
 }
 
 /// Plain smol/mailbox replacement for the former gpui test context.
@@ -230,6 +256,18 @@ impl TestEntity {
 
     pub(super) fn read<R>(&self, read: impl FnOnce(&TestClientState) -> R) -> R {
         read(&self.0.borrow())
+    }
+
+    /// Stop this host as `spawn_host` does: once its queued writes are done
+    /// and the index is closed, another host may start on the data dir.
+    pub(super) fn stop(self) {
+        let state = Rc::try_unwrap(self.0)
+            .ok()
+            .expect("nothing else holds the test host")
+            .into_inner();
+        if let Some(writer) = state.host.close_store() {
+            smol::block_on(writer);
+        }
     }
 }
 

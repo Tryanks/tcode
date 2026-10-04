@@ -470,8 +470,8 @@ pub fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMe
     output
 }
 
-/// On-disk shape of `sessions.json` (current schema). Old files were a bare
-/// `Vec<SessionMeta>`; the store loader tolerates both.
+/// Shape of the legacy `sessions.json` index (its last schema; older files
+/// were a bare `Vec<SessionMeta>`), and of an index being migrated.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexFile {
     #[serde(default)]
@@ -481,9 +481,11 @@ pub struct IndexFile {
 }
 
 /// Ensure every session belongs to a project, deriving implicit projects from
-/// each orphan session's cwd (deduped by root). Idempotent.
+/// each orphan session's cwd (deduped by root). A session whose project is in
+/// `unreadable_projects` (stored, but not readable by this build) is not an
+/// orphan. Idempotent.
 #[cfg(feature = "process")]
-pub fn migrate_index(mut file: IndexFile) -> IndexFile {
+pub fn migrate_index(mut file: IndexFile, unreadable_projects: &HashSet<String>) -> IndexFile {
     // Map existing project roots to their ids so derived projects dedupe.
     let mut root_to_id: std::collections::HashMap<PathBuf, String> = file
         .projects
@@ -492,11 +494,9 @@ pub fn migrate_index(mut file: IndexFile) -> IndexFile {
         .collect();
 
     for session in &mut file.sessions {
-        if session
-            .project_id
-            .as_ref()
-            .is_some_and(|id| file.projects.iter().any(|p| &p.id == id))
-        {
+        if session.project_id.as_ref().is_some_and(|id| {
+            unreadable_projects.contains(id) || file.projects.iter().any(|p| &p.id == id)
+        }) {
             continue;
         }
         let root = session.cwd.clone();

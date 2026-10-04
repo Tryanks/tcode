@@ -218,6 +218,10 @@ quit:
   title: "退出 Tcode？"
   description: "仍有 %{count} 个会话正在工作。退出将停止这些会话。"
   confirm: "退出"
+startup:
+  index_in_use_title: "Tcode 已在运行"
+  index_in_use: "另一个 Tcode 正在使用 %{dir}。请先退出它，再重新打开 Tcode。"
+  failed_title: "Tcode 无法启动"
 settings:
   title: "设置"
   sections: "全部设置"

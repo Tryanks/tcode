@@ -218,6 +218,10 @@ quit:
   title: "Quit Tcode?"
   description: "%{count} session(s) are still working. Quitting will stop them."
   confirm: "Quit"
+startup:
+  index_in_use_title: "Tcode is already running"
+  index_in_use: "Another Tcode is using %{dir}. Quit it, then open Tcode again."
+  failed_title: "Tcode could not start"
 settings:
   title: "Settings"
   sections: "All settings"

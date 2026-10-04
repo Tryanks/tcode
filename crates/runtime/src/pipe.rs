@@ -123,7 +123,13 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
-            let mut state = AppState::with_ai_titles(store, services.ai_title_generation);
+            let mut state = match AppState::start(store, services.ai_title_generation) {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
@@ -149,8 +155,13 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.start_log_compaction(&mut cx);
             }
             state.sync_terminal_handles();
-            let _ = ready_tx.send(());
-            smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
+            let _ = ready_tx.send(Ok(()));
+            let state = smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
+            // Stopped means the queued writes are on disk and the index is
+            // closed for the next host.
+            if let Some(writer) = state.close_store() {
+                smol::block_on(writer);
+            }
             let _ = stopped_tx.send_blocking(());
         })?;
     ready_rx.recv().map_err(|error| {
@@ -158,7 +169,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             std::io::ErrorKind::BrokenPipe,
             format!("host failed during startup: {error}"),
         )
-    })?;
+    })??;
 
     Ok(SpawnedHost {
         to_host: client_tx,
@@ -175,7 +186,7 @@ async fn host_loop(
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostFn>,
-) {
+) -> AppState {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
         enum Input {
@@ -206,6 +217,7 @@ async fn host_loop(
         state.reap_terminal_projections();
         domain_diff.emit_changes(&state, &mut cx);
     }
+    state
 }
 
 fn malformed_message_id(line: &str) -> Option<u64> {
@@ -766,6 +778,7 @@ fn io_protocol_error(error: std::io::Error) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::{seed_index, stored_index};
 
     pub(super) fn next_event(
         events: &async_channel::Receiver<EventEnvelope>,
@@ -1021,7 +1034,7 @@ mod tests {
                 },
             )
             .expect("append event");
-        store.upsert_metas([&meta]).expect("write meta");
+        seed_index(&store, &[], std::slice::from_ref(&meta));
         let event_log = store.read_event_log(&meta.id).expect("read event log");
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
@@ -1130,7 +1143,7 @@ mod tests {
                 }),
             )
             .expect("append empty command output");
-        store.upsert_metas([&meta]).expect("write meta");
+        seed_index(&store, &[], std::slice::from_ref(&meta));
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let link = host.link();
@@ -1257,16 +1270,18 @@ mod tests {
         )
         .unwrap();
         let store = SessionStore::open_at(root.clone()).unwrap();
-        // An older project record must still load with automatic artwork.
-        std::fs::write(
-            root.join("sessions.json"),
-            serde_json::json!({
-                "projects": [{"id":"p", "name":"Project", "root": project_root, "created_at":1}],
-                "sessions": []
-            })
-            .to_string(),
-        )
-        .unwrap();
+        // A project without a chosen image loads with automatic artwork.
+        seed_index(
+            &store,
+            &[tcode_core::project::Project {
+                id: "p".into(),
+                name: "Project".into(),
+                root: project_root.clone(),
+                icon_path: None,
+                created_at: 1,
+            }],
+            &[],
+        );
         let host = spawn_host(store.clone(), HostServices::default()).unwrap();
         let link = host.link();
         link.subscribe(Subscription {
@@ -1326,7 +1341,7 @@ mod tests {
         assert!(first.starts_with(root.join("project-icons")));
         host.shutdown_blocking().unwrap();
         assert_eq!(
-            store.read_file().projects[0].icon_path.as_ref(),
+            stored_index(&store).projects[0].icon_path.as_ref(),
             Some(&first)
         );
         // Removing the source must not break the saved custom copy.
@@ -1347,7 +1362,7 @@ mod tests {
         })
         .unwrap();
         host.shutdown_blocking().unwrap();
-        let second = store.read_file().projects[0].icon_path.clone().unwrap();
+        let second = stored_index(&store).projects[0].icon_path.clone().unwrap();
         assert_ne!(first, second);
         assert!(!first.exists());
         std::fs::write(&logo, include_bytes!("../../../assets/icons/app/tcode.png")).unwrap();
@@ -1367,7 +1382,7 @@ mod tests {
             QueryResponse::FileBytes(_)
         ));
         host.shutdown_blocking().unwrap();
-        assert!(store.read_file().projects[0].icon_path.is_none());
+        assert!(stored_index(&store).projects[0].icon_path.is_none());
         assert!(!second.exists());
         assert!(logo.exists());
         std::fs::remove_dir_all(root).unwrap();
