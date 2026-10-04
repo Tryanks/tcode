@@ -27,7 +27,7 @@ use tcode_protocol::{
     Command, CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
     GitDiffScope, GitStatusStatus, IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus,
     ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
-    Subscription, TerminalFrame, Topic,
+    SessionWindow, Subscription, TerminalFrame, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -173,6 +173,8 @@ pub struct WorkspaceStore {
     /// records, so the range can be longer than the records.
     session_from: HashMap<String, u64>,
     session_end: HashMap<String, u64>,
+    /// The layout `session_from` and `session_end` are positions in.
+    session_epoch: HashMap<String, u64>,
     selection_generation: u64,
     session_turn_offset: usize,
     history_task: Option<Task<()>>,
@@ -351,6 +353,7 @@ impl WorkspaceStore {
             session_records: HashMap::new(),
             session_from: HashMap::new(),
             session_end: HashMap::new(),
+            session_epoch: HashMap::new(),
             selection_generation: 0,
             session_turn_offset: 0,
             history_task: None,
@@ -383,6 +386,7 @@ impl WorkspaceStore {
         for topic in &seed_topics {
             if let Err(error) = host.subscribe(Subscription {
                 after: None,
+                epoch: None,
                 topic: topic.clone(),
             }) {
                 log::error!("failed to subscribe to {topic:?}: {}", error.message);
@@ -391,6 +395,7 @@ impl WorkspaceStore {
         let _ = host.subscribe(Subscription {
             topic: Topic::RuntimeEvents,
             after: None,
+            epoch: None,
         });
         let events = host.events();
         #[cfg(not(target_family = "wasm"))]
@@ -991,76 +996,55 @@ impl WorkspaceStore {
             {
                 self.history_error = Some(history::history_error_message(error.clone()));
             }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionSnapshot(window)) => {
+                if self.selected_session_id.as_ref() == Some(session_id) {
+                    self.apply_session_window(&envelope.topic, window);
+                }
+            }
             (
                 Topic::SessionEvents { session_id },
-                ServerEvent::SessionSnapshot {
-                    from,
-                    end,
-                    records,
-                    total,
-                    total_turns,
-                    ..
+                ServerEvent::SessionEvent {
+                    epoch,
+                    position,
+                    record,
                 },
             ) => {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
-                let held = self.session_records.entry(session_id.clone()).or_default();
-                let start = self.session_from.entry(session_id.clone()).or_insert(*from);
-                let held_end = self.session_end.entry(session_id.clone()).or_insert(*from);
-                if *from == 0 {
-                    held.clear();
-                    *start = 0;
-                    *held_end = 0;
-                } else if *from != *held_end {
-                    held.clear();
-                    self.session_from.remove(session_id);
-                    self.session_end.remove(session_id);
-                    self.session_replica = None;
-                    self.hydrated_sessions.remove(session_id);
-                    self.baseline_topics.remove(&envelope.topic);
-                    self.session_catching_up = false;
-                    let _ = self.host.subscribe(Subscription {
-                        topic: envelope.topic.clone(),
-                        after: None,
-                    });
+                let (Some(&held_epoch), Some(&held_end)) = (
+                    self.session_epoch.get(session_id),
+                    self.session_end.get(session_id),
+                ) else {
                     return;
-                }
-                if records.is_empty() && *from != 0 && self.session_replica.is_some() {
-                    self.baseline_topics.insert(envelope.topic.clone());
-                    self.hydrated_sessions.insert(session_id.clone());
-                    return;
-                }
-                held.extend(records.iter().cloned());
-                *held_end = *end;
-                let after = *end;
-                self.session_catching_up = after < *total;
-                let _ = self.host.update_after(&envelope.topic, after);
+                };
                 if self.session_catching_up {
                     return;
                 }
-                let mut timeline = self.fold_held_records(session_id);
-                self.baseline_topics.insert(envelope.topic.clone());
-                self.hydrated_sessions.insert(session_id.clone());
-                self.session_turn_offset =
-                    (*total_turns as usize).saturating_sub(timeline.turns.len());
-                self.settle_running_turn(&mut timeline);
-                self.session_replica = Some((session_id.clone(), timeline));
-            }
-            (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
-                if self.selected_session_id.as_ref() != Some(session_id) {
+                if *epoch < held_epoch || (*epoch == held_epoch && *position < held_end) {
+                    // From a layout the client already left, or already held.
                     return;
                 }
-                if self.session_catching_up || !self.session_from.contains_key(session_id) {
+                if (*epoch, *position) != (held_epoch, held_end) {
+                    // Past a gap, or in a layout the client has not seen: the
+                    // host answers the held cursor with what continues it, or
+                    // with a baseline.
+                    self.session_catching_up = true;
+                    let _ = self.host.subscribe(Subscription {
+                        topic: envelope.topic.clone(),
+                        after: Some(held_end),
+                        epoch: Some(held_epoch),
+                    });
                     return;
                 }
                 self.session_records
                     .entry(session_id.clone())
                     .or_default()
                     .push(record.clone());
-                let after = self.session_end.get(session_id).map_or(0, |end| end + 1);
-                self.session_end.insert(session_id.clone(), after);
-                let _ = self.host.update_after(&envelope.topic, after);
+                self.session_end.insert(session_id.clone(), held_end + 1);
+                let _ = self
+                    .host
+                    .update_after(&envelope.topic, held_epoch, held_end + 1);
                 // A new turn means the user moved on; the recovery card for the
                 // stopped one is stale.
                 if matches!(record.event, agent::AgentEvent::TurnStarted { .. }) {
@@ -1329,6 +1313,49 @@ impl WorkspaceStore {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.turn_running)
+    }
+
+    /// Apply a window of the selected session's log. Records continuing the
+    /// held cursor extend the held records; any other window is a baseline
+    /// that replaces them, older pages included. The replica changes once the
+    /// records reach the log's end, and in one step, so the conversation never
+    /// renders empty between the old records and the new.
+    fn apply_session_window(&mut self, topic: &Topic, window: &SessionWindow) {
+        let Topic::SessionEvents { session_id } = topic else {
+            return;
+        };
+        let continues = self.session_epoch.get(session_id) == Some(&window.epoch)
+            && self.session_end.get(session_id) == Some(&window.from);
+        if continues
+            && window.records.is_empty()
+            && window.from != 0
+            && self.session_replica.is_some()
+        {
+            self.session_catching_up = false;
+            self.baseline_topics.insert(topic.clone());
+            self.hydrated_sessions.insert(session_id.clone());
+            return;
+        }
+        let held = self.session_records.entry(session_id.clone()).or_default();
+        if !continues {
+            held.clear();
+            self.session_from.insert(session_id.clone(), window.from);
+            self.session_epoch.insert(session_id.clone(), window.epoch);
+        }
+        held.extend(window.records.iter().cloned());
+        self.session_end.insert(session_id.clone(), window.end);
+        self.session_catching_up = window.end < window.total;
+        let _ = self.host.update_after(topic, window.epoch, window.end);
+        if self.session_catching_up {
+            return;
+        }
+        let mut timeline = self.fold_held_records(session_id);
+        self.baseline_topics.insert(topic.clone());
+        self.hydrated_sessions.insert(session_id.clone());
+        self.session_turn_offset =
+            (window.total_turns as usize).saturating_sub(timeline.turns.len());
+        self.settle_running_turn(&mut timeline);
+        self.session_replica = Some((session_id.clone(), timeline));
     }
 
     fn fold_held_records(&self, session_id: &str) -> Timeline {
@@ -2196,6 +2223,7 @@ impl WorkspaceStore {
     pub fn watch_external_import(&self, project_id: &str) {
         if let Err(error) = self.host.subscribe(Subscription {
             after: None,
+            epoch: None,
             topic: Topic::ExternalImport {
                 project_id: project_id.to_string(),
             },
@@ -2207,6 +2235,7 @@ impl WorkspaceStore {
     pub fn unwatch_external_import(&mut self, project_id: &str) {
         let _ = self.host.unsubscribe(Subscription {
             after: None,
+            epoch: None,
             topic: Topic::ExternalImport {
                 project_id: project_id.to_string(),
             },
@@ -2914,7 +2943,9 @@ mod tests {
         session::{ReviewComment, ReviewSide},
         settings::{Settings, ThemeMode},
     };
-    use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
+    use tcode_protocol::{
+        Command, EventEnvelope, QueryResponse, ServerEvent, SessionEventRecord, Topic,
+    };
     use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
@@ -3312,14 +3343,15 @@ mod tests {
                     topic: Topic::SessionEvents {
                         session_id: "one".into(),
                     },
-                    event: ServerEvent::SessionSnapshot {
+                    event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         total: 0,
                         total_turns: 0,
                         truncated: false,
                         from: 0,
                         end: 0,
                         records: vec![],
-                    },
+                    }),
                 },
                 cx,
             );
@@ -3388,14 +3420,15 @@ mod tests {
                     topic: Topic::SessionEvents {
                         session_id: "large".into(),
                     },
-                    event: ServerEvent::SessionSnapshot {
+                    event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         from: 1800,
                         end: 2000,
                         records,
                         total: 2000,
                         total_turns: 500,
                         truncated: false,
-                    },
+                    }),
                 },
                 cx,
             );
@@ -3425,14 +3458,15 @@ mod tests {
                 &EventEnvelope {
                     request_id: None,
                     topic: topic.clone(),
-                    event: ServerEvent::SessionSnapshot {
+                    event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         from: 2000,
                         end: 2000,
                         records: vec![],
                         total: 2000,
                         total_turns: 500,
                         truncated: false,
-                    },
+                    }),
                 },
                 cx,
             );
@@ -3486,18 +3520,21 @@ mod tests {
                 event,
             };
             store.apply_domain_event(
-                &event(ServerEvent::SessionSnapshot {
-                    from: 10,
-                    end: 20,
-                    records: vec![StoredEvent {
-                        ts: Some(1),
-                        event: tool.clone(),
-                        elided: Some(700_000),
-                    }],
-                    total: 20,
-                    total_turns: 1,
-                    truncated: false,
-                }),
+                &event(ServerEvent::SessionSnapshot(
+                    tcode_protocol::SessionWindow {
+                        epoch: 0,
+                        from: 10,
+                        end: 20,
+                        records: vec![StoredEvent {
+                            ts: Some(1),
+                            event: tool.clone(),
+                            elided: Some(700_000),
+                        }],
+                        total: 20,
+                        total_turns: 1,
+                        truncated: false,
+                    },
+                )),
                 cx,
             );
             assert_eq!(
@@ -3509,12 +3546,14 @@ mod tests {
                 Some(Some(700_000))
             );
             store.apply_domain_event(
-                &event(ServerEvent::SessionEvent(
-                    agent::AgentEvent::TurnStarted {
+                &event(ServerEvent::SessionEvent {
+                    epoch: 0,
+                    position: 20,
+                    record: agent::AgentEvent::TurnStarted {
                         turn_id: "next".into(),
                     }
                     .into(),
-                )),
+                }),
                 cx,
             );
             assert_eq!(store.session_end["merged"], 21);
@@ -3579,7 +3618,8 @@ mod tests {
                     topic: Topic::SessionEvents {
                         session_id: "large".into(),
                     },
-                    event: ServerEvent::SessionSnapshot {
+                    event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         from: 1800,
                         end: 2000,
                         records: (0..200)
@@ -3593,7 +3633,7 @@ mod tests {
                         total: 2000,
                         total_turns: 1,
                         truncated: false,
-                    },
+                    }),
                 },
                 cx,
             );
@@ -3696,6 +3736,7 @@ mod tests {
                     tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
                         id: request.id,
                         result: Ok(tcode_protocol::QueryResponse::SessionHistoryPage {
+                            epoch: 0,
                             records,
                             from: before - 200,
                             end: before,
@@ -3735,6 +3776,259 @@ mod tests {
             assert_eq!(store.session_from["large"], 1000);
             assert_eq!(store.session_records["large"].len(), 1000);
             assert!(!store.history_loading());
+        });
+    }
+
+    /// A baseline in a new layout replaces the held records, older pages
+    /// included, in one step: the conversation never renders empty and nothing
+    /// is requested again. A page or a live record from the layout it left,
+    /// arriving after it, is discarded; a live record past a gap asks the host
+    /// to continue the held cursor; a page answered with a baseline installs it.
+    #[gpui::test]
+    fn records_from_a_left_layout_are_discarded_after_a_baseline(cx: &mut TestAppContext) {
+        use tcode_core::session::StoredEvent;
+        use tcode_protocol::{ClientPayload, HostMessage, Query, SessionWindow, Subscription};
+        let status = draft_status();
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        let topic = Topic::SessionEvents {
+            session_id: "thread".into(),
+        };
+        let turns = |range: std::ops::Range<usize>| -> Vec<StoredEvent> {
+            range
+                .flat_map(|turn| {
+                    [
+                        AgentEvent::TurnStarted {
+                            turn_id: turn.to_string(),
+                        },
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            id: format!("answer-{turn}"),
+                            parent_item_id: None,
+                            content: ItemContent::AssistantMessage {
+                                text: format!("answer {turn}"),
+                            },
+                        }),
+                        AgentEvent::TurnCompleted {
+                            turn_id: turn.to_string(),
+                            status: TurnStatus::Completed,
+                            usage: None,
+                        },
+                    ]
+                    .map(StoredEvent::from)
+                })
+                .collect()
+        };
+        let envelope = |event| EventEnvelope {
+            request_id: None,
+            topic: topic.clone(),
+            event,
+        };
+        let live = |epoch, position, turn: usize| {
+            envelope(ServerEvent::SessionEvent {
+                epoch,
+                position,
+                record: AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                }
+                .into(),
+            })
+        };
+        let sent = |outgoing: &async_channel::Receiver<String>| -> Vec<ClientPayload> {
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .map(|line| tcode_protocol::decode_client_line(&line).unwrap().payload)
+                .collect()
+        };
+        let answer = |request: u64, result| {
+            incoming
+                .try_send(
+                    tcode_protocol::encode_line(&HostMessage::QueryResult {
+                        id: request,
+                        result: Ok(result),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+
+        workspace.update(cx, |store, cx| {
+            store.select_session("thread".into());
+            store.session_status_replica = Some(status);
+            store.apply_domain_event(
+                &envelope(ServerEvent::SessionSnapshot(SessionWindow {
+                    epoch: 0,
+                    from: 300,
+                    end: 600,
+                    records: turns(100..200),
+                    total: 600,
+                    total_turns: 200,
+                    truncated: false,
+                })),
+                cx,
+            );
+        });
+        sent(&outgoing);
+        workspace.update(cx, |store, cx| store.update_history_window(1., cx));
+        cx.run_until_parked();
+        let page = outgoing
+            .try_recv()
+            .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+            .unwrap();
+        assert!(matches!(
+            page.payload,
+            ClientPayload::Query(Query::SessionHistoryPage {
+                epoch: 0,
+                before: 300,
+                ..
+            })
+        ));
+
+        let baseline = turns(150..200);
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &envelope(ServerEvent::SessionSnapshot(SessionWindow {
+                    epoch: 1,
+                    from: 150,
+                    end: 300,
+                    records: baseline.clone(),
+                    total: 300,
+                    total_turns: 200,
+                    truncated: false,
+                })),
+                cx,
+            );
+            assert!(!store.session_loading(), "the conversation stays on screen");
+            assert_eq!(
+                store.with_active_timeline(|timeline| timeline.turns.len()),
+                Some(50)
+            );
+            assert_eq!(store.session_turn_offset, 150);
+            assert_eq!(store.session_records["thread"], baseline);
+            assert_eq!(
+                (store.session_epoch["thread"], store.session_from["thread"]),
+                (1, 150)
+            );
+        });
+        assert_eq!(
+            sent(&outgoing),
+            [ClientPayload::Subscribe(Subscription {
+                topic: topic.clone(),
+                after: Some(300),
+                epoch: Some(1),
+            })],
+            "the baseline is the reply; the cursor moves to its end"
+        );
+
+        answer(
+            page.id,
+            tcode_protocol::QueryResponse::SessionHistoryPage {
+                epoch: 0,
+                records: turns(0..100),
+                from: 0,
+                end: 300,
+                truncated: false,
+            },
+        );
+        cx.run_until_parked();
+        workspace.update(cx, |store, cx| {
+            assert_eq!(
+                store.session_records["thread"], baseline,
+                "the old page is dropped"
+            );
+            assert_eq!(store.session_from["thread"], 150);
+            assert_eq!(store.history_error(), None);
+            store.apply_domain_event(&live(0, 600, 600), cx);
+            assert_eq!(
+                store.session_end["thread"], 300,
+                "a record of the old layout"
+            );
+            store.apply_domain_event(&live(1, 300, 300), cx);
+            assert_eq!(store.session_end["thread"], 301);
+            store.apply_domain_event(&live(1, 300, 300), cx);
+            assert_eq!(store.session_end["thread"], 301, "a record already held");
+        });
+        sent(&outgoing);
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(&live(1, 305, 305), cx);
+            assert_eq!(store.session_end["thread"], 301);
+        });
+        assert_eq!(
+            sent(&outgoing),
+            [ClientPayload::Subscribe(Subscription {
+                topic: topic.clone(),
+                after: Some(301),
+                epoch: Some(1),
+            })],
+            "a record past a gap asks for what continues the held cursor"
+        );
+
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &envelope(ServerEvent::SessionSnapshot(SessionWindow {
+                    epoch: 1,
+                    from: 301,
+                    end: 306,
+                    records: turns(301..306)[..5].to_vec(),
+                    total: 306,
+                    total_turns: 202,
+                    truncated: false,
+                })),
+                cx,
+            );
+            assert_eq!(store.session_end["thread"], 306);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        cx.run_until_parked();
+        sent(&outgoing);
+        workspace.update(cx, |store, cx| store.update_history_window(1., cx));
+        cx.run_until_parked();
+        let page = outgoing
+            .try_recv()
+            .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+            .unwrap();
+        assert!(matches!(
+            page.payload,
+            ClientPayload::Query(Query::SessionHistoryPage {
+                epoch: 1,
+                before: 150,
+                ..
+            })
+        ));
+        let reset = turns(20..50);
+        answer(
+            page.id,
+            tcode_protocol::QueryResponse::SessionHistoryReset(SessionWindow {
+                epoch: 2,
+                from: 60,
+                end: 150,
+                records: reset.clone(),
+                total: 150,
+                total_turns: 50,
+                truncated: false,
+            }),
+        );
+        cx.run_until_parked();
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(store.session_records["thread"], reset);
+            assert_eq!(
+                (
+                    store.session_epoch["thread"],
+                    store.session_from["thread"],
+                    store.session_end["thread"]
+                ),
+                (2, 60, 150)
+            );
         });
     }
 
@@ -3810,14 +4104,15 @@ mod tests {
             topic: Topic::SessionEvents {
                 session_id: session_id.into(),
             },
-            event: ServerEvent::SessionSnapshot {
+            event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                epoch: 0,
                 from,
                 end,
                 records,
                 total: end,
                 total_turns: 1,
                 truncated: from > 0,
-            },
+            }),
         }
     }
 
@@ -4041,14 +4336,15 @@ mod tests {
                     Topic::SessionEvents {
                         session_id: "one".into(),
                     },
-                    ServerEvent::SessionSnapshot {
+                    ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         from: 0,
                         end: 0,
                         records: vec![],
                         total: 0,
                         total_turns: 0,
                         truncated: false,
-                    },
+                    }),
                 ),
             ];
             store.apply_connection_state(ConnectionState::Reconnecting {
@@ -4379,82 +4675,257 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty_root);
     }
 
+    /// A phone holds a cursor while its connection is down; meanwhile the
+    /// host releases the thread and compaction rewrites its log with fewer
+    /// records, yet more than the phone's position. Reconnecting replays the
+    /// stale cursor, and the phone must get a baseline in the new layout, not
+    /// the new layout's records spliced onto its old ones; live records and
+    /// earlier pages then continue in the new layout, each record once.
     #[gpui::test]
-    fn reconnect_and_mismatched_tail_preserve_exactly_one_copy_of_each_record(
+    fn reconnecting_with_a_cursor_into_a_rewritten_log_replaces_the_held_records(
         cx: &mut TestAppContext,
     ) {
-        let root = scratch_root("p4a-reconnect");
+        use tcode_client::ConnectionState;
+        use tcode_core::session::{StoredEvent, Timeline};
+        let root = scratch_root("stale-cursor");
         let disk = SessionStore::open_at(root.clone()).unwrap();
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-        meta.id = "reconnect".into();
+        meta.id = "stale".into();
         disk.upsert_metas([&meta]).unwrap();
-        let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        workspace.update(cx, |store, _| store.select_session("reconnect".into()));
-        wait_until(cx, &workspace, "selected status", |cx| {
-            workspace.read_with(cx, |store, _| store.session_status_replica.is_some())
-        });
-        update_host!(&host, |state, cx| {
-            for (ts, text) in [(1, "one"), (2, "two"), (3, "three")] {
-                state.record_event_for_replica_test(
-                    "reconnect",
-                    ts,
-                    &AgentEvent::Warning {
-                        message: text.into(),
+        let delta = |item: &str, text: &str| AgentEvent::Delta {
+            item_id: item.into(),
+            kind: agent::DeltaKind::AssistantText,
+            text: text.into(),
+        };
+        let turn = |index: usize, deltas: &[&str]| {
+            let answer = format!("answer-{index}");
+            let mut events = vec![
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id: format!("user-{index}"),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: format!("question {index}"),
+                        context_len: None,
+                        attachments: vec![],
                     },
-                    cx,
-                );
+                }),
+                AgentEvent::TurnStarted {
+                    turn_id: format!("turn-{index}"),
+                },
+            ];
+            events.extend(deltas.iter().map(|text| delta(&answer, text)));
+            events.push(AgentEvent::ItemCompleted(ThreadItem {
+                id: answer,
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: deltas.concat(),
+                },
+            }));
+            events.push(AgentEvent::TurnCompleted {
+                turn_id: format!("turn-{index}"),
+                status: TurnStatus::Completed,
+                usage: None,
+            });
+            events
+        };
+        let mut log: Vec<StoredEvent> = Vec::new();
+        let mut record = |event: AgentEvent| {
+            let stored = StoredEvent {
+                ts: Some(log.len() as u64 + 1),
+                event,
+                elided: None,
+            };
+            log.push(stored.clone());
+            stored
+        };
+        // The phone sees the first turn while its answer streams.
+        let first_turn = turn(0, &["a", "b", "c"]);
+        for event in &first_turn[..4] {
+            let stored = record(event.clone());
+            disk.append_event("stale", stored.ts.unwrap(), &stored.event)
+                .unwrap();
+        }
+
+        let host = test_host(disk.clone());
+        let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
+        let (to_host, outgoing) = async_channel::unbounded::<String>();
+        let (incoming, from_host) = async_channel::unbounded::<String>();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        smol::spawn({
+            let link = link.clone();
+            async move { link.pump().await }
+        })
+        .detach();
+        let dial = || {
+            let connection = mux.attach();
+            let (outgoing, incoming) = (outgoing.clone(), incoming.clone());
+            [
+                smol::spawn(async move {
+                    while let Ok(line) = outgoing.recv().await {
+                        if connection.to_host.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                }),
+                smol::spawn(async move {
+                    while let Ok(line) = connection.from_host.recv().await {
+                        if incoming.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                }),
+            ]
+        };
+        let connection = dial();
+        let workspace = cx.new(|cx| WorkspaceStore::new(link.clone(), cx));
+        workspace.update(cx, |store, _| store.select_session("stale".into()));
+        wait_until(cx, &workspace, "the streaming turn", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.session_end.get("stale") == Some(&4) && store.session_replica.is_some()
+            })
+        });
+
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
+        drop(connection);
+        // The turn finishes and many more follow while the phone is away.
+        let mut appended: Vec<StoredEvent> =
+            first_turn[4..].iter().cloned().map(&mut record).collect();
+        for index in 1..=150 {
+            appended.extend(turn(index, &["x", "y", "z"]).into_iter().map(&mut record));
+        }
+        let held_position = 4;
+        update_host!(&host, move |state, cx| {
+            for stored in &appended {
+                state.record_event_for_replica_test("stale", stored.ts.unwrap(), &stored.event, cx);
             }
         });
-        wait_until(cx, &workspace, "three records", |cx| {
-            workspace.read_with(cx, |store, _| store.session_records["reconnect"].len() == 3)
-        });
-        host.link()
-            .set_connection_state(tcode_client::ConnectionState::Reconnecting {
-                attempt: 1,
-                reason: None,
-            });
-        host.link()
-            .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
-        command(&host, Command::ClearRelaunchMarker);
-        workspace.update(cx, |store, cx| {
-            store.drain_host_events_for_test(cx);
-            assert_eq!(store.session_records["reconnect"].len(), 3);
-            store.apply_domain_event(
-                &EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionEvents {
-                        session_id: "reconnect".into(),
-                    },
-                    event: ServerEvent::SessionSnapshot {
-                        total: 0,
-                        total_turns: 0,
-                        truncated: false,
-                        from: 2,
-                        end: 2,
-                        records: vec![],
-                    },
-                },
-                cx,
-            );
+        // Another device's page request in the phone's layout tells when the
+        // host has released the log it pinned and serves the rewritten one.
+        let probe = {
+            let connection = mux.attach();
+            let probe = tcode_client::HostLink::new(connection.to_host, connection.from_host);
+            smol::spawn({
+                let probe = probe.clone();
+                async move { probe.pump().await }
+            })
+            .detach();
+            probe
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let page = smol::block_on(probe.query(tcode_protocol::Query::SessionHistoryPage {
+                session_id: "stale".into(),
+                epoch: 0,
+                before: held_position,
+                limit: 1,
+            }));
+            if matches!(page, Ok(QueryResponse::SessionHistoryReset(_))) {
+                break;
+            }
             assert!(
-                store.session_replica.is_none(),
-                "invalid tail must request a full replacement"
+                std::time::Instant::now() < deadline,
+                "the released log is served in its rewritten layout"
             );
-        });
-        wait_until(
-            cx,
-            &workspace,
-            "full replacement after invalid tail",
-            |cx| workspace.read_with(cx, |store, _| store.session_records["reconnect"].len() == 3),
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let rewritten = disk.read_log("stale");
+        assert!(
+            (held_position as usize) < rewritten.records.len()
+                && rewritten.records.len() < log.len(),
+            "the rewritten layout is shorter but still holds the phone's position"
         );
+        let conversation = Timeline::fold_stored(&log);
+
+        let _connection = dial();
+        link.set_connection_state(ConnectionState::Connected { path: None });
+        wait_until(cx, &workspace, "a baseline in the rewritten layout", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.session_epoch.get("stale") == Some(&rewritten.epoch)
+                    && !store.session_catching_up
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            assert!(
+                store.session_from["stale"] > 0,
+                "the baseline is a recent window"
+            );
+            assert_eq!(store.session_end["stale"], rewritten.records.len() as u64);
+        });
+        // Earlier pages continue from the baseline in its layout. (The store's
+        // own page task awaits a reply the host thread delivers, which the
+        // test scheduler forbids; the store's handling of pages is covered
+        // against a scripted host.)
+        let (mut held, mut before) = workspace.read_with(cx, |store, _| {
+            (
+                store.session_records["stale"].clone(),
+                store.session_from["stale"],
+            )
+        });
+        while before > 0 {
+            let Ok(QueryResponse::SessionHistoryPage {
+                epoch,
+                records,
+                from,
+                end,
+                ..
+            }) = smol::block_on(link.query(tcode_protocol::Query::SessionHistoryPage {
+                session_id: "stale".into(),
+                epoch: rewritten.epoch,
+                before,
+                limit: 200,
+            }))
+            else {
+                panic!("a page in the served layout")
+            };
+            assert_eq!((epoch, end), (rewritten.epoch, before));
+            held.splice(0..0, records);
+            before = from;
+        }
+        assert_eq!(
+            Timeline::fold_stored(&held),
+            conversation,
+            "the baseline and every page continue the rewritten layout"
+        );
+
+        update_host!(&host, |state, cx| {
+            state.record_event_for_replica_test(
+                "stale",
+                1_000_000,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "live".into(),
+                    parent_item_id: None,
+                    content: ItemContent::AssistantMessage {
+                        text: "after the reconnect".into(),
+                    },
+                }),
+                cx,
+            )
+        });
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 2,
+            reason: None,
+        });
+        link.set_connection_state(ConnectionState::Connected { path: None });
+        // An ack is a FIFO fence through the mux and the host: the replayed
+        // subscription was answered before it.
+        link.command_blocking(Command::ClearRelaunchMarker).unwrap();
+        let end = rewritten.records.len() as u64 + 1;
+        wait_until(cx, &workspace, "the live record", |cx| {
+            workspace.read_with(cx, |store, _| store.session_end["stale"] == end)
+        });
         workspace.read_with(cx, |store, _| {
             assert_eq!(
-                store.session_records["reconnect"]
+                store.session_records["stale"]
                     .iter()
-                    .map(|record| record.ts)
-                    .collect::<Vec<_>>(),
-                vec![Some(1), Some(2), Some(3)]
+                    .filter(|record| matches!(
+                        &record.event,
+                        AgentEvent::ItemCompleted(item) if item.id == "live"
+                    ))
+                    .count(),
+                1
             );
             let subscription = store
                 .host
@@ -4462,9 +4933,15 @@ mod tests {
                 .into_iter()
                 .find(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
                 .unwrap();
-            assert_eq!(subscription.after, Some(3));
+            assert_eq!(
+                (subscription.epoch, subscription.after),
+                (Some(rewritten.epoch), Some(end)),
+                "the transport replays the cursor in the new layout"
+            );
         });
-        shutdown_test_host(&host);
+        link.shutdown_blocking().unwrap();
+        host.to_host.close();
+        host.stopped.recv_blocking().unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5014,6 +5491,7 @@ mod tests {
                     session_id: second.id.clone(),
                 },
                 after: None,
+                epoch: None,
             })
             .unwrap();
         for (session_id, text) in [
@@ -5127,20 +5605,15 @@ mod tests {
         });
 
         let session_id = meta.id.clone();
-        update_host!(&host, move |_state, cx| {
-            cx.emit(HostEvent::Domain(EventEnvelope {
-                request_id: None,
-                topic: Topic::SessionEvents {
-                    session_id: session_id.clone(),
+        update_host!(&host, move |state, cx| {
+            state.record_event_for_replica_test(
+                &session_id,
+                1,
+                &AgentEvent::TurnStarted {
+                    turn_id: "turn-next".into(),
                 },
-                event: ServerEvent::SessionEvent(SessionEventRecord {
-                    ts: None,
-                    event: AgentEvent::TurnStarted {
-                        turn_id: "turn-next".into(),
-                    },
-                    elided: None,
-                }),
-            }));
+                cx,
+            );
         });
         wait_until(
             cx,

@@ -35,6 +35,28 @@ pub enum Topic {
     ExternalImport { project_id: String },
 }
 
+/// Records standing for the log cursors `from..end` of the log's layout
+/// `epoch`. The host may merge or drop records whose effect a later record in
+/// the log repeats, so `records` can be shorter than the range.
+///
+/// A cursor is a position in one layout: rewriting a log renumbers its
+/// records under a new epoch, and a position is meaningless in any other.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionWindow {
+    pub epoch: u64,
+    pub from: u64,
+    pub end: u64,
+    pub records: Vec<StoredEvent>,
+    #[serde(default)]
+    pub total: u64,
+    /// Absolute turn count keeps turn-addressed actions correct in a window.
+    #[serde(default)]
+    pub total_turns: u64,
+    /// The byte budget reduced this reply below the requested record count.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     /// Present only on subscription replies; mux routes these to their requester.
@@ -62,7 +84,12 @@ pub enum ServerEvent {
         session_id: String,
         request: crate::PreviewRequest,
     },
-    SessionEvent(StoredEvent),
+    /// The record appended at `position` of the log's layout `epoch`.
+    SessionEvent {
+        epoch: u64,
+        position: u64,
+        record: StoredEvent,
+    },
     SessionStatusReplaced(SessionStatus),
     ProvidersReplaced(ProvidersStatus),
     GitStatusReplaced(GitStatusStatus),
@@ -112,22 +139,10 @@ pub enum ServerEvent {
         /// the reviewer judged the flag not a false positive.
         draft: String,
     },
-    /// Records standing for the log cursors `from..end`. The host may merge
-    /// or drop records whose effect a later record in the log repeats, so
-    /// `records` can be shorter than the range.
-    SessionSnapshot {
-        from: u64,
-        end: u64,
-        records: Vec<StoredEvent>,
-        #[serde(default)]
-        total: u64,
-        /// Absolute turn count keeps turn-addressed actions correct in a window.
-        #[serde(default)]
-        total_turns: u64,
-        /// The byte budget reduced this reply below the requested record count.
-        #[serde(default)]
-        truncated: bool,
-    },
+    /// The reply to a subscription: records continuing the cursor it named,
+    /// or a baseline that replaces every record the client holds when the
+    /// cursor is not in the layout the host serves.
+    SessionSnapshot(SessionWindow),
     SessionHistoryError(crate::ProtocolError),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),

@@ -18,7 +18,7 @@ pub use event::{
     GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure, NoticeSeverity,
     ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
     RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionEventRecord, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
+    SessionEventRecord, SessionStatus, SessionWindow, TcodeUpdateStatus, TerminalContextStatus,
     TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
@@ -41,8 +41,10 @@ pub use wire::{
 // the requests it waits on in the session status; version 8 adds the Cursor
 // and Grok provider kinds, which an older peer cannot decode because
 // `ProviderKind` has no unknown fallback; version 9 replaces the single-thread
-// archive, unarchive and delete commands with batched ones.
-pub const PROTOCOL_VERSION: u32 = 9;
+// archive, unarchive and delete commands with batched ones; version 10 places
+// every session log cursor in a layout epoch, since a compacted log renumbers
+// its records.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]
 mod tests;

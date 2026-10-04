@@ -703,18 +703,20 @@ impl HostLink {
         self.send_payload(self.next_id(), ClientPayload::Unsubscribe(subscription))
     }
 
-    /// Advance replay memory only after the store has applied these records. Sending
-    /// the latest subscription also updates native/browser transport replay caches.
-    /// The host returns an empty tail when the store is already up to date.
-    pub fn update_after(&self, topic: &Topic, after: u64) -> Result<(), ProtocolError> {
+    /// Advance replay memory to position `after` of layout `epoch` only after
+    /// the store has applied these records. Sending the latest subscription also
+    /// updates native/browser transport replay caches. The host returns an empty
+    /// tail when the store is already up to date.
+    pub fn update_after(&self, topic: &Topic, epoch: u64, after: u64) -> Result<(), ProtocolError> {
         let subscription = {
             let mut topics = self.inner.subscribed_topics.lock().unwrap();
             let Some(subscription) = topics.get_mut(topic) else {
                 return Ok(());
             };
-            if subscription.after == Some(after) {
+            if (subscription.epoch, subscription.after) == (Some(epoch), Some(after)) {
                 return Ok(());
             }
+            subscription.epoch = Some(epoch);
             subscription.after = Some(after);
             subscription.clone()
         };
@@ -804,6 +806,7 @@ impl HostLink {
                     ClientPayload::Unsubscribe(Subscription {
                         topic: topic.clone(),
                         after: None,
+                        epoch: None,
                     }),
                 );
             }
@@ -1305,6 +1308,7 @@ mod tests {
                 session_id: "one".into(),
             },
             after: None,
+            epoch: None,
         };
         link.subscribe(subscription.clone()).unwrap();
         outgoing.try_recv().unwrap();
@@ -1328,14 +1332,15 @@ mod tests {
         let reply = EventEnvelope {
             request_id: Some(request.id),
             topic: subscription.topic,
-            event: ServerEvent::SessionSnapshot {
+            event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                epoch: 0,
                 total: 0,
                 total_turns: 0,
                 truncated: false,
                 from: 0,
                 end: 0,
                 records: vec![],
-            },
+            }),
         };
         assert!(link.subscription_reply_is_current(&reply));
     }
@@ -1385,14 +1390,19 @@ mod tests {
         link.subscribe(Subscription {
             topic: topic.clone(),
             after: None,
+            epoch: None,
         })
         .unwrap();
         outgoing.try_recv().unwrap();
-        link.update_after(&topic, 7).unwrap();
+        link.update_after(&topic, 2, 7).unwrap();
         let updated = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
         assert!(matches!(
             updated.payload,
-            ClientPayload::Subscribe(Subscription { after: Some(7), .. })
+            ClientPayload::Subscribe(Subscription {
+                after: Some(7),
+                epoch: Some(2),
+                ..
+            })
         ));
         link.set_connection_state(ConnectionState::Reconnecting {
             attempt: 1,
@@ -1404,18 +1414,23 @@ mod tests {
         let queued_reply = EventEnvelope {
             request_id: Some(replay.id),
             topic: topic.clone(),
-            event: ServerEvent::SessionSnapshot {
+            event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                epoch: 0,
                 total: 0,
                 total_turns: 0,
                 truncated: false,
                 from: 0,
                 end: 0,
                 records: vec![],
-            },
+            }),
         };
         assert!(link.subscription_reply_is_current(&queued_reply));
-        link.unsubscribe(Subscription { topic, after: None })
-            .unwrap();
+        link.unsubscribe(Subscription {
+            topic,
+            after: None,
+            epoch: None,
+        })
+        .unwrap();
         assert!(!link.subscription_reply_is_current(&queued_reply));
         assert!(link.inner.subscription_requests.lock().unwrap().is_empty());
         outgoing.try_recv().unwrap();
@@ -1487,11 +1502,13 @@ mod tests {
 
         link.subscribe(Subscription {
             after: None,
+            epoch: None,
             topic: Topic::Index,
         })
         .unwrap();
         link.subscribe(Subscription {
             after: None,
+            epoch: None,
             topic: Topic::Index,
         })
         .unwrap();

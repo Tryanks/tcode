@@ -2,7 +2,10 @@
 //!
 //! Layout (under the platform data dir, e.g. `~/Library/Application Support/tcode/`):
 //!   * `sessions.json` — an [`IndexFile`] containing projects and sessions.
-//!   * `<id>.jsonl` — append-only `{ ts, event }` records.
+//!   * `<id>.jsonl` — append-only `{ ts, event }` records. A log that
+//!     [`SessionStore::compact_log`] rewrote begins with a layout header line;
+//!     a log without one is layout epoch 0.
+//!   * `<id>.jsonl.orig` — the log as it was before its first rewrite.
 //!
 //! Replay accepts timestamped records and legacy bare [`AgentEvent`] lines,
 //! then folds [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
@@ -17,6 +20,39 @@ use serde::{Deserialize, Serialize};
 
 use tcode_core::project::{IndexFile, Project, SessionMeta, migrate_index};
 use tcode_core::session::StoredEvent;
+
+mod compaction;
+
+pub use compaction::{CompactOutcome, CompactRejection, MalformedLine};
+
+/// The first line of a rewritten log. It lives in the log itself so the
+/// records and the epoch they belong to are replaced in one rename and can
+/// never disagree after a crash. It is neither an envelope nor a bare event,
+/// so it parses as no record.
+#[derive(Serialize, Deserialize)]
+struct LayoutHeader {
+    /// How many times the log's records were rewritten in place.
+    layout_epoch: u64,
+}
+
+/// The layout epoch a log's first line declares, if it is a header.
+fn layout_epoch(first_line: &str) -> Option<u64> {
+    serde_json::from_str::<LayoutHeader>(first_line)
+        .ok()
+        .map(|header| header.layout_epoch)
+}
+
+/// How many of the log's bytes its layout header line takes; 0 without one.
+fn header_len(bytes: &[u8]) -> usize {
+    let first = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    match std::str::from_utf8(first).ok().and_then(layout_epoch) {
+        Some(_) => (first.len() + 1).min(bytes.len()),
+        None => 0,
+    }
+}
 
 /// On-disk envelope wrapping each event with its record time. Kept private:
 /// callers deal in [`StoredEvent`] (which tolerates the legacy bare form).
@@ -49,6 +85,15 @@ pub fn encode_event_log<'a>(
         log.push(b'\n');
     }
     Ok(log)
+}
+
+/// A session's event log as one read of its file saw it.
+#[derive(Debug, Default)]
+pub struct EventLog {
+    /// The layout `records` are positioned in: the epoch the log's header
+    /// declares, or 0 for a log without one.
+    pub epoch: u64,
+    pub records: Vec<StoredEvent>,
 }
 
 /// Cheap, cloneable handle to the on-disk data directory.
@@ -103,10 +148,19 @@ impl SessionStore {
         self.root.join(format!("{id}.jsonl"))
     }
 
-    /// Read the native event-log bytes without parsing or normalizing them.
+    fn original_events_path(&self, id: &str) -> PathBuf {
+        self.root.join(format!("{id}.jsonl.orig"))
+    }
+
+    /// Read the native event-log records' bytes without parsing or
+    /// normalizing them. The layout header is the store's, not a record, so
+    /// it is left out.
     pub fn read_event_log(&self, id: &str) -> std::io::Result<Vec<u8>> {
         match fs::read(self.events_path(id)) {
-            Ok(bytes) => Ok(bytes),
+            Ok(mut bytes) => {
+                bytes.drain(..header_len(&bytes));
+                Ok(bytes)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(error) => Err(error),
         }
@@ -362,30 +416,44 @@ impl SessionStore {
     /// (`{"ts":…,"event":…}`) or a legacy bare event (`{"type":…}`), so logs
     /// written before the envelope format still replay (with `ts == None`).
     pub fn read_events(&self, id: &str) -> Vec<StoredEvent> {
+        self.read_log(id).records
+    }
+
+    /// [`SessionStore::read_events`] with the layout the records are in. Both
+    /// come from one open file, so a rewrite renamed over the log meanwhile
+    /// cannot pair one layout's epoch with the other's records.
+    pub fn read_log(&self, id: &str) -> EventLog {
         #[cfg(any(test, feature = "test-support"))]
         self.event_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = self.events_path(id);
-        let Ok(file) = File::open(&path) else {
-            return Vec::new();
+        let mut log = EventLog::default();
+        let Ok(file) = File::open(self.events_path(id)) else {
+            return log;
         };
-        let mut events = Vec::new();
-        for line in BufReader::new(file).lines() {
+        for (number, line) in BufReader::new(file).lines().enumerate() {
             let Ok(line) = line else { break };
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
+            if number == 0
+                && let Some(epoch) = layout_epoch(trimmed)
+            {
+                log.epoch = epoch;
+                continue;
+            }
             match parse_stored_line(trimmed) {
-                Ok(stored) => events.push(stored),
+                Ok(stored) => log.records.push(stored),
                 Err(err) => log::warn!("skipping unparseable event in {id}.jsonl: {err}"),
             }
         }
-        events
+        log
     }
 
     /// Atomically clone one session's append-only event log. A missing source
     /// is an empty transcript and therefore succeeds without creating a file.
+    /// The copy is byte for byte, layout header included: it starts in the
+    /// layout its records are already in.
     pub fn clone_events(&self, src_id: &str, dst_id: &str) -> std::io::Result<()> {
         let src = self.events_path(src_id);
         let data = match fs::read(src) {
@@ -400,7 +468,8 @@ impl SessionStore {
     }
 
     /// Remove sessions from the index with one index write, then delete their
-    /// event logs. Every log is attempted; the first failure is returned.
+    /// event logs and the originals kept from before a rewrite. Every file is
+    /// attempted; the first failure is returned.
     pub fn remove_sessions(&self, ids: &[String]) -> std::io::Result<()> {
         let removed: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let mut file = self.read_file();
@@ -409,11 +478,13 @@ impl SessionStore {
         self.persist_index(&file)?;
         let mut result = Ok(());
         for id in removed {
-            match fs::remove_file(self.events_path(id)) {
-                Err(err) if err.kind() != std::io::ErrorKind::NotFound && result.is_ok() => {
-                    result = Err(err);
+            for path in [self.events_path(id), self.original_events_path(id)] {
+                match fs::remove_file(path) {
+                    Err(err) if err.kind() != std::io::ErrorKind::NotFound && result.is_ok() => {
+                        result = Err(err);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         result

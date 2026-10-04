@@ -71,6 +71,7 @@ impl WorkspaceStore {
         }
         let session_id = self.selected_session_id.clone().expect("selected history");
         let before = self.session_from[&session_id];
+        let epoch = self.session_epoch[&session_id];
         let generation = self.selection_generation;
         let host = self.host.clone();
         self.history_error = None;
@@ -78,6 +79,7 @@ impl WorkspaceStore {
             let result = host
                 .query(Query::SessionHistoryPage {
                     session_id: session_id.clone(),
+                    epoch,
                     before,
                     limit: tcode_protocol::SESSION_HISTORY_RECORDS as u32,
                 })
@@ -86,7 +88,19 @@ impl WorkspaceStore {
                 if store.selection_generation != generation {
                     return false;
                 }
+                let held_epoch = store.session_epoch.get(&session_id).copied();
                 match result {
+                    // The held records moved to another layout while the
+                    // request was out; its positions mean nothing there.
+                    Ok(QueryResponse::SessionHistoryPage { epoch, .. }) if Some(epoch) != held_epoch => {}
+                    Ok(QueryResponse::SessionHistoryReset(window)) => {
+                        if Some(window.epoch) != held_epoch {
+                            let topic = tcode_protocol::Topic::SessionEvents {
+                                session_id: session_id.clone(),
+                            };
+                            store.apply_session_window(&topic, &window);
+                        }
+                    }
                     Ok(QueryResponse::SessionHistoryPage {
                         records, from, end, ..
                     }) if from < before

@@ -22,6 +22,9 @@ pub struct HostServices {
     pub background_startup_probes: bool,
     /// Generate AI-authored titles for new threads and explicit regeneration.
     pub ai_title_generation: bool,
+    /// Delete what earlier runs' log compactions left behind, then compact
+    /// the logs that existed at startup, one at a time in the background.
+    pub compact_existing_logs: bool,
     /// URL/tokens and the broker receiver stay host-side. Requests reach
     /// subscribed WebViews through the preview reverse-RPC topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
@@ -141,6 +144,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 }
                 state.refresh_provider_usage(&mut cx);
                 state.refresh_provider_status(&mut cx);
+            }
+            if services.compact_existing_logs {
+                state.start_log_compaction(&mut cx);
             }
             state.sync_terminal_handles();
             let _ = ready_tx.send(());
@@ -586,10 +592,11 @@ fn dispatch_query(
     match query {
         Query::SessionHistoryPage {
             session_id,
+            epoch,
             before,
             limit,
         } => {
-            let result = app.session_history_page(&session_id, before, limit);
+            let result = app.session_history_page(&session_id, epoch, before, limit);
             cx.spawn_background(async move { result })
         }
         Query::Hosting { .. } => cx.spawn_background(async {
@@ -1134,6 +1141,7 @@ mod tests {
                 session_id: meta.id.clone(),
             },
             after: None,
+            epoch: None,
         })
         .expect("subscribe to the session");
 
@@ -1263,6 +1271,7 @@ mod tests {
         let link = host.link();
         link.subscribe(Subscription {
             after: None,
+            epoch: None,
             topic: Topic::Index,
         })
         .unwrap();
@@ -1397,6 +1406,7 @@ mod tests {
 
         link.subscribe(Subscription {
             after: None,
+            epoch: None,
             topic: Topic::Index,
         })
         .expect("send subscription");

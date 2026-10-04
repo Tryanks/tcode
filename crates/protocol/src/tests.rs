@@ -100,19 +100,27 @@ fn event_envelopes_keep_stored_record_shape_and_optional_request_id() {
         topic: Topic::SessionEvents {
             session_id: "session-1".into(),
         },
-        event: ServerEvent::SessionEvent(SessionEventRecord {
-            ts: Some(123),
-            event: AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
+        event: ServerEvent::SessionEvent {
+            epoch: 2,
+            position: 40,
+            record: SessionEventRecord {
+                ts: Some(123),
+                event: AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+                elided: None,
             },
-            elided: None,
-        }),
+        },
     };
     let expected = json!({
         "topic": {"type": "session_events", "content": {"session_id": "session-1"}},
         "event": {
             "type": "session_event",
-            "content": {"ts": 123, "event": {"type": "turn_started", "turn_id": "turn-1"}},
+            "content": {
+                "epoch": 2,
+                "position": 40,
+                "record": {"ts": 123, "event": {"type": "turn_started", "turn_id": "turn-1"}},
+            },
         },
     });
     assert_eq!(serde_json::to_value(&envelope).unwrap(), expected);
@@ -171,7 +179,8 @@ fn older_messages_default_new_optional_fields() {
         subscription,
         Subscription {
             topic: Topic::Index,
-            after: None
+            after: None,
+            epoch: None,
         }
     );
     let index: IndexSnapshot =
@@ -812,16 +821,18 @@ fn thread_export_and_project_creation_use_their_documented_wire_shapes() {
 
 #[test]
 fn history_paging_literal_json_contract() {
-    let query = r#"{"type":"session_history_page","content":{"session_id":"thread","before":1800,"limit":200}}"#;
+    let query = r#"{"type":"session_history_page","content":{"session_id":"thread","epoch":3,"before":1800,"limit":200}}"#;
     assert_eq!(
         serde_json::from_str::<Query>(query).unwrap(),
         Query::SessionHistoryPage {
             session_id: "thread".into(),
+            epoch: 3,
             before: 1800,
             limit: 200
         }
     );
     let response = QueryResponse::SessionHistoryPage {
+        epoch: 3,
         records: vec![],
         from: 1600,
         end: 1800,
@@ -829,32 +840,64 @@ fn history_paging_literal_json_contract() {
     };
     assert_eq!(
         serde_json::to_string(&response).unwrap(),
-        r#"{"type":"session_history_page","content":{"records":[],"from":1600,"end":1800,"truncated":true}}"#
+        r#"{"type":"session_history_page","content":{"epoch":3,"records":[],"from":1600,"end":1800,"truncated":true}}"#
     );
-    let snapshot = ServerEvent::SessionSnapshot {
-        from: 1800,
-        end: 2000,
+    let window = SessionWindow {
+        epoch: 4,
+        from: 1200,
+        end: 1400,
         records: vec![],
-        total: 2000,
+        total: 1400,
         total_turns: 0,
         truncated: false,
     };
     assert_eq!(
-        serde_json::to_string(&snapshot).unwrap(),
-        r#"{"type":"session_snapshot","content":{"from":1800,"end":2000,"records":[],"total":2000,"total_turns":0,"truncated":false}}"#
+        serde_json::to_string(&QueryResponse::SessionHistoryReset(window.clone())).unwrap(),
+        r#"{"type":"session_history_reset","content":{"epoch":4,"from":1200,"end":1400,"records":[],"total":1400,"total_turns":0,"truncated":false}}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&ServerEvent::SessionSnapshot(window)).unwrap(),
+        r#"{"type":"session_snapshot","content":{"epoch":4,"from":1200,"end":1400,"records":[],"total":1400,"total_turns":0,"truncated":false}}"#
     );
     assert!(matches!(
         serde_json::from_str::<ServerEvent>(
-            r#"{"type":"session_snapshot","content":{"from":0,"end":0,"records":[]}}"#
+            r#"{"type":"session_snapshot","content":{"epoch":0,"from":0,"end":0,"records":[]}}"#
         )
         .unwrap(),
-        ServerEvent::SessionSnapshot {
+        ServerEvent::SessionSnapshot(SessionWindow {
             total: 0,
             total_turns: 0,
             truncated: false,
             ..
-        }
+        })
     ));
+    assert!(
+        serde_json::from_str::<ServerEvent>(
+            r#"{"type":"session_snapshot","content":{"from":0,"end":0,"records":[]}}"#
+        )
+        .is_err(),
+        "a window names the layout its cursors are in"
+    );
+    let resume = r#"{"topic":{"type":"session_events","content":{"session_id":"thread"}},"after":1400,"epoch":4}"#;
+    let subscription = Subscription {
+        topic: Topic::SessionEvents {
+            session_id: "thread".into(),
+        },
+        after: Some(1400),
+        epoch: Some(4),
+    };
+    assert_eq!(serde_json::to_string(&subscription).unwrap(), resume);
+    assert_eq!(
+        serde_json::from_str::<Subscription>(
+            r#"{"topic":{"type":"session_events","content":{"session_id":"thread"}},"after":1400}"#
+        )
+        .unwrap(),
+        Subscription {
+            epoch: None,
+            ..subscription
+        },
+        "a position without its layout decodes as no resumable cursor"
+    );
 }
 
 #[test]

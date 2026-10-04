@@ -48,6 +48,7 @@ pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
             session_id: session_id.clone(),
         },
         after: None,
+        epoch: None,
     })
     .unwrap();
     (host, mux, link, session_id)
@@ -71,6 +72,7 @@ fn preview_mux_request_reply_first_responder_and_no_subscriber_timeout() {
                     session_id: session_id.clone(),
                 },
                 after: None,
+                epoch: None,
             })
             .unwrap();
         client.command_blocking(Command::OpenLatestSession).unwrap(); // subscription barrier
@@ -289,6 +291,7 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
     let events = link.events();
     link.subscribe(Subscription {
         after: None,
+        epoch: None,
         topic: Topic::ExternalImport {
             project_id: project_id.clone(),
         },
@@ -363,6 +366,7 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
     let late_events = late.events();
     late.subscribe(Subscription {
         after: None,
+        epoch: None,
         topic: Topic::ExternalImport {
             project_id: project_id.clone(),
         },
@@ -417,7 +421,11 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
         },
     ] {
         watcher
-            .subscribe(Subscription { after: None, topic })
+            .subscribe(Subscription {
+                after: None,
+                epoch: None,
+                topic,
+            })
             .unwrap();
     }
     next(&events, |event| {
@@ -504,6 +512,7 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
     )];
     link.subscribe(Subscription {
         after: None,
+        epoch: None,
         topic: Topic::ExternalImport {
             project_id: project_id.clone(),
         },

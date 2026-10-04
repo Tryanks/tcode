@@ -231,6 +231,7 @@ impl WorkspaceStore {
             let _ = self.host.unsubscribe(Subscription {
                 topic: Topic::Terminal { terminal_id: *id },
                 after: None,
+                epoch: None,
             });
         }
         self.terminals.clear();
@@ -249,6 +250,7 @@ impl WorkspaceStore {
             let _ = self.host.unsubscribe(Subscription {
                 topic: Topic::Terminal { terminal_id: *id },
                 after: None,
+                epoch: None,
             });
             false
         });
@@ -265,6 +267,7 @@ impl WorkspaceStore {
                 let _ = self.host.subscribe(Subscription {
                     topic: Topic::Terminal { terminal_id: id },
                     after: None,
+                    epoch: None,
                 });
             }
         }

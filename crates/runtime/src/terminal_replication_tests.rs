@@ -31,6 +31,7 @@ impl Replica {
         link.subscribe(Subscription {
             topic: Topic::Terminal { terminal_id },
             after: None,
+            epoch: None,
         })
         .unwrap();
         let ServerEvent::TerminalFrame { frame, .. } = next(&events, |event| {
@@ -428,6 +429,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
                 terminal_id: session.terminal_id,
             },
             after: None,
+            epoch: None,
         })
         .unwrap();
     let mut rejoined = Replica::attach(&second_link, second.events.clone(), session.terminal_id);
@@ -455,6 +457,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
                 session_id: session.session_id.clone(),
             },
             after: None,
+            epoch: None,
         })
         .unwrap();
     session

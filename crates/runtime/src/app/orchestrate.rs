@@ -867,20 +867,19 @@ impl AppState {
             let _ = reply.try_send(Ok(result));
             return;
         }
-        let store = self.store.clone();
+        let folds: Vec<_> = unloaded
+            .into_iter()
+            .map(|id| {
+                let fold = self.folded_log(&id, cx);
+                (id, fold)
+            })
+            .collect();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let timelines = host_cx
-                .unblock(move || {
-                    unloaded
-                        .into_iter()
-                        .map(|id| {
-                            let timeline = Timeline::fold_events(store.read_events(&id));
-                            (id, timeline)
-                        })
-                        .collect::<HashMap<_, _>>()
-                })
-                .await;
+            let mut timelines = HashMap::new();
+            for (id, fold) in folds {
+                timelines.insert(id, fold.await);
+            }
             let result = host_cx
                 .enqueue_and_wait(move |state, _| {
                     state.orchestrate_status_json(&children, &timelines)
@@ -910,13 +909,10 @@ impl AppState {
             let _ = reply.try_send(result);
             return;
         }
-        let store = self.store.clone();
+        let fold = self.folded_log(&thread_id, cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let read_id = thread_id.clone();
-            let timeline = host_cx
-                .unblock(move || Timeline::fold_events(store.read_events(&read_id)))
-                .await;
+            let timeline = fold.await;
             let result = host_cx
                 .enqueue_and_wait(move |state, _| {
                     let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
@@ -926,6 +922,28 @@ impl AppState {
                 .unwrap_or_else(|_| Err("tcode orchestrator is not available".to_string()));
             let _ = reply.send(result).await;
         });
+    }
+
+    /// The pure fold of a session's whole log. A cached log already holds
+    /// every record accepted for it, appends still queued for disk included;
+    /// otherwise the JSONL is read once everything queued before now is
+    /// written.
+    pub(super) fn folded_log(&mut self, session_id: &str, cx: &mut HostCx) -> HostTask<Timeline> {
+        if let Some(log) = self.event_records.get(session_id) {
+            let fold = log.fold().clone();
+            return cx.spawn_background(async move { fold });
+        }
+        let (completion, written) = smol::channel::bounded(1);
+        self.enqueue_store_write(StoreWrite::Flush(completion), cx);
+        let store = self.store.clone();
+        let read_id = session_id.to_string();
+        let host_cx = cx.clone();
+        cx.spawn_background(async move {
+            let _ = written.recv().await;
+            host_cx
+                .unblock(move || Timeline::fold_events(store.read_events(&read_id)))
+                .await
+        })
     }
 
     pub(super) fn loaded_child_timeline(&self, session_id: &str) -> Option<&Timeline> {
@@ -1047,13 +1065,10 @@ impl AppState {
         // attention.
         let auto_archive = child.archive_on_complete && matches!(status, TurnStatus::Completed);
         let result_max_chars = child.result_max_chars;
-        let store = self.store.clone();
+        let fold = self.folded_log(&child_id, cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let read_id = child_id.clone();
-            let timeline = host_cx
-                .unblock(move || Timeline::fold_events(store.read_events(&read_id)))
-                .await;
+            let timeline = fold.await;
             host_cx.enqueue(move |state, cx| {
                 let child_still_exists = state.sessions.iter().any(|meta| {
                     meta.id == child_id

@@ -187,6 +187,7 @@ fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
+        compact_existing_logs: true,
         ..HostServices::default()
     };
     match mcp_host::Host::bind() {
@@ -250,6 +251,7 @@ impl LocalKernel {
         if let Err(error) = self.control_link.subscribe(tcode_protocol::Subscription {
             topic: topic.clone(),
             after: None,
+            epoch: None,
         }) {
             log::error!("could not request local settings: {}", error.message);
             return settings::Settings::default();
@@ -271,9 +273,11 @@ impl LocalKernel {
                 Err(_) => break settings::Settings::default(),
             }
         };
-        let _ = self
-            .control_link
-            .unsubscribe(tcode_protocol::Subscription { topic, after: None });
+        let _ = self.control_link.unsubscribe(tcode_protocol::Subscription {
+            topic,
+            after: None,
+            epoch: None,
+        });
         result
     }
 }

@@ -3,7 +3,7 @@ use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
 use tcode_core::settings::{SettingsPatch, ThemeMode};
-use tcode_protocol::{Command, CommandResponse, HostMessage};
+use tcode_protocol::{Command, CommandResponse, HostMessage, Subscription};
 #[test]
 fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
     for screen_recording in [false, true] {
@@ -1122,10 +1122,13 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
         message,
         HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::SessionEvents { .. },
-            event: ServerEvent::SessionEvent(SessionEventRecord {
-                event: AgentEvent::TurnStarted { turn_id },
+            event: ServerEvent::SessionEvent {
+                record: SessionEventRecord {
+                    event: AgentEvent::TurnStarted { turn_id },
+                    ..
+                },
                 ..
-            }),
+            },
             ..
         }) if turn_id == "scripted-turn"
     )));
@@ -4943,10 +4946,13 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
         message,
         HostMessage::Event(EventEnvelope {
             topic: Topic::SessionEvents { .. },
-            event: ServerEvent::SessionEvent(SessionEventRecord {
-                event: AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. },
+            event: ServerEvent::SessionEvent {
+                record: SessionEventRecord {
+                    event: AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. },
+                    ..
+                },
                 ..
-            }),
+            },
             ..
         }) if turn_id == "turn-fallback"
     )));
@@ -5455,6 +5461,7 @@ fn subscribing_readopts_an_uncommitted_draft_before_its_idle_reaper() {
                 session_id: id.clone(),
             },
             after: None,
+            epoch: None,
         };
         state.subscribe(&subscription, cx);
         state.unsubscribe(&subscription, cx);
@@ -7076,6 +7083,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
                 session_id: id.clone(),
             },
             after: None,
+            epoch: None,
         })
         .unwrap();
         id
@@ -7136,7 +7144,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
                     session_id: id.clone()
                 }
             );
-            records += usize::from(matches!(event.event, ServerEvent::SessionEvent(_)));
+            records += usize::from(matches!(event.event, ServerEvent::SessionEvent { .. }));
         }
         assert_eq!(records, 3);
         link.subscribe(Subscription {
@@ -7144,11 +7152,14 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
                 session_id: id.clone(),
             },
             after: Some(1),
+            epoch: Some(0),
         })
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         let snapshot = events.try_recv().unwrap();
-        let ServerEvent::SessionSnapshot { from, records, .. } = snapshot.event else {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow { from, records, .. }) =
+            snapshot.event
+        else {
             panic!("expected tail")
         };
         assert_eq!(from, 1);
@@ -7162,11 +7173,12 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
                 session_id: id.clone(),
             },
             after: Some(99),
+            epoch: Some(0),
         })
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         assert!(
-            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records, .. } if records.len() == 3)
+            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow { from: 0, records, .. }) if records.len() == 3)
         );
     }
     assert!(
@@ -7195,12 +7207,13 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             .collect();
         state
             .event_records
-            .insert("large".into(), SessionLog::from_records(records.clone()));
+            .insert("large".into(), SessionLog::new(0, records.clone()));
         let subscription = tcode_protocol::Subscription {
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
             },
             after: None,
+            epoch: None,
         };
         let snapshot = state.subscription_snapshot(&subscription).unwrap();
         assert!(
@@ -7209,13 +7222,13 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 .len()
                 <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
         );
-        let ServerEvent::SessionSnapshot {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
             from,
             records: tail,
             total,
             truncated,
             ..
-        } = snapshot.event
+        }) = snapshot.event
         else {
             panic!("snapshot")
         };
@@ -7229,7 +7242,8 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 from,
                 end,
                 truncated,
-            } = state.session_history_page("large", before, 200).unwrap()
+                ..
+            } = state.session_history_page("large", 0, before, 200).unwrap()
             else {
                 panic!("page")
             };
@@ -7244,14 +7258,15 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             let snapshot = state
                 .subscription_snapshot(&tcode_protocol::Subscription {
                     after: Some(after),
+                    epoch: Some(0),
                     ..subscription.clone()
                 })
                 .unwrap();
-            let ServerEvent::SessionSnapshot {
+            let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
                 from,
                 records: tail,
                 ..
-            } = snapshot.event
+            }) = snapshot.event
             else {
                 panic!("tail")
             };
@@ -7320,7 +7335,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         assert_eq!(turn_starts, [0, 303, 606, 909, 1212]);
         state
             .event_records
-            .insert("streamed".into(), SessionLog::from_records(records.clone()));
+            .insert("streamed".into(), SessionLog::new(0, records.clone()));
 
         let snapshot = state
             .subscription_snapshot(&tcode_protocol::Subscription {
@@ -7328,9 +7343,12 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                     session_id: "streamed".into(),
                 },
                 after: None,
+                epoch: None,
             })
             .unwrap();
-        let ServerEvent::SessionSnapshot { from, .. } = snapshot.event else {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow { from, .. }) =
+            snapshot.event
+        else {
             panic!("snapshot")
         };
         assert_eq!(
@@ -7343,7 +7361,10 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             end,
             records: page,
             truncated,
-        } = state.session_history_page("streamed", from, 200).unwrap()
+            ..
+        } = state
+            .session_history_page("streamed", 0, from, 200)
+            .unwrap()
         else {
             panic!("page")
         };
@@ -7424,14 +7445,15 @@ fn history_pages_of_an_opened_session_parse_the_log_once() {
                     session_id: "paged".into(),
                 },
                 after: None,
+                epoch: None,
             })
             .unwrap();
-        let ServerEvent::SessionSnapshot {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
             from,
             records,
             total_turns,
             ..
-        } = snapshot.event
+        }) = snapshot.event
         else {
             panic!("snapshot")
         };
@@ -7456,7 +7478,7 @@ fn history_pages_of_an_opened_session_parse_the_log_once() {
                 from,
                 end,
                 ..
-            } = state.session_history_page("paged", before, 200).unwrap()
+            } = state.session_history_page("paged", 0, before, 200).unwrap()
             else {
                 panic!("page")
             };
@@ -7465,8 +7487,8 @@ fn history_pages_of_an_opened_session_parse_the_log_once() {
             before = from;
         }
         assert_eq!(
-            format!("{:?}", Timeline::fold_events(loaded).entries),
-            format!("{:?}", Timeline::fold_events(records).entries),
+            Timeline::fold_events(loaded),
+            Timeline::fold_events(records),
             "merged deltas fold as the log does"
         );
     });
@@ -7493,7 +7515,7 @@ fn session_log_follows_residency_and_flushes_before_release() {
     let reads_before_open = store.event_reads();
     let (commands, _actor) = smol::channel::unbounded();
 
-    state.update(cx, |state, cx| {
+    let released = state.update(cx, |state, cx| {
         state.select_session("resident", cx);
         state.record_event(
             "resident",
@@ -7514,14 +7536,15 @@ fn session_log_follows_residency_and_flushes_before_release() {
                     session_id: "resident".into(),
                 },
                 after: Some(persisted),
+                epoch: Some(0),
             })
             .unwrap();
-        let ServerEvent::SessionSnapshot {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
             records,
             total,
             total_turns,
             ..
-        } = snapshot.event
+        }) = snapshot.event
         else {
             panic!("snapshot")
         };
@@ -7530,7 +7553,7 @@ fn session_log_follows_residency_and_flushes_before_release() {
             matches!(&records[..], [record] if matches!(&record.event, AgentEvent::ItemCompleted(item) if item.id == "user-late"))
         );
         let QueryResponse::SessionHistoryPage { from, records, .. } = state
-            .session_history_page("resident", persisted + 1, 1)
+            .session_history_page("resident", 0, persisted + 1, 1)
             .unwrap()
         else {
             panic!("page")
@@ -7554,16 +7577,572 @@ fn session_log_follows_residency_and_flushes_before_release() {
             state.event_records.contains_key("resident"),
             "the log outlives residency until the store writer flushed its appends"
         );
+        state.event_records["resident"].fold().clone()
     });
     cx.run_until(|state| !state.event_records.contains_key("resident"));
     state.update(cx, |state, _| {
         assert!(!state.event_records.contains_key("resident"));
+        // Release compacts the log, so the conversation, not its record
+        // count, is what the next cold open must find.
         assert_eq!(
-            state.store.read_events("resident").len() as u64,
-            persisted + 1
+            Timeline::fold_events(state.store.read_events("resident")),
+            released
         );
     });
     assert_eq!(store.event_reads() - reads_before_open, 2);
+}
+
+/// Send `payload` through the host pipe as client message `id`, and return
+/// every message the host serialized since the last drain, once it parked.
+fn through_pipe(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    id: u64,
+    payload: tcode_protocol::ClientPayload,
+) -> Vec<HostMessage> {
+    state.update(cx, |state, host_cx| {
+        crate::pipe::handle_client_message(
+            &mut state.host,
+            host_cx,
+            tcode_protocol::ClientMessage {
+                id,
+                key: None,
+                payload,
+            },
+        )
+    });
+    cx.run_until_parked();
+    cx.drain_outgoing()
+}
+
+fn subscribe_events(
+    session_id: &str,
+    after: Option<u64>,
+    epoch: Option<u64>,
+) -> tcode_protocol::ClientPayload {
+    tcode_protocol::ClientPayload::Subscribe(Subscription {
+        topic: Topic::SessionEvents {
+            session_id: session_id.into(),
+        },
+        after,
+        epoch,
+    })
+}
+
+fn history_page(session_id: &str, epoch: u64, before: u64) -> tcode_protocol::ClientPayload {
+    tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+        session_id: session_id.into(),
+        epoch,
+        before,
+        limit: 200,
+    })
+}
+
+/// The window answering subscription request `id`.
+fn window_reply(messages: &[HostMessage], id: u64) -> tcode_protocol::SessionWindow {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                request_id: Some(request),
+                event: ServerEvent::SessionSnapshot(window),
+                ..
+            }) if *request == id => Some(window.clone()),
+            _ => None,
+        })
+        .expect("a window answers the subscription")
+}
+
+fn query_reply(messages: &[HostMessage], id: u64) -> QueryResponse {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            HostMessage::QueryResult { id: reply, result } if *reply == id => {
+                Some(result.clone().expect("query succeeds"))
+            }
+            _ => None,
+        })
+        .expect("the query is answered")
+}
+
+/// The live records among `messages`, with the cursor each was sent at.
+fn live_records(messages: &[HostMessage]) -> Vec<(u64, u64, SessionEventRecord)> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                request_id: None,
+                event:
+                    ServerEvent::SessionEvent {
+                        epoch,
+                        position,
+                        record,
+                    },
+                ..
+            }) => Some((*epoch, *position, record.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn open_stored_session(store: &SessionStore, id: &str) -> SessionMeta {
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
+    meta.id = id.into();
+    store.upsert_metas([&meta]).unwrap();
+    meta
+}
+
+/// A cursor is a position in one layout. Against a log rewritten under a new
+/// epoch, a position from the old layout, even one the new layout still has,
+/// or a position without its layout gets a baseline that replaces what the
+/// client holds, never records continuing from that position.
+#[test]
+fn a_cursor_from_another_layout_gets_a_baseline() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("layout-cursors");
+    open_stored_session(&store, "rewritten");
+    let conversation = Timeline::fold_events(persist_streamed_turns(&store, "rewritten", 3));
+    assert!(matches!(
+        store.compact_log("rewritten"),
+        tcode_services::store::CompactOutcome::Rewritten { .. }
+    ));
+    assert_eq!(store.log_epoch("rewritten"), 1);
+    let total = store.read_events("rewritten").len() as u64;
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    for (id, (label, after, epoch, continues)) in [
+        (
+            "a position the new layout still has",
+            Some(4),
+            Some(0),
+            false,
+        ),
+        ("the new layout's end", Some(total), Some(0), false),
+        ("a position without its layout", Some(4), None, false),
+        ("a position in the served layout", Some(4), Some(1), true),
+        (
+            "a position past the served end",
+            Some(total + 1),
+            Some(1),
+            false,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = id as u64 + 1;
+        let replies = through_pipe(&state, cx, id, subscribe_events("rewritten", after, epoch));
+        let window = window_reply(&replies, id);
+        assert_eq!(
+            (window.epoch, window.end, window.total),
+            (1, total, total),
+            "{label}"
+        );
+        if continues {
+            assert_eq!(window.from, 4, "{label}");
+        } else {
+            assert_eq!(window.from, 0, "{label}: a baseline");
+            assert_eq!(
+                Timeline::fold_stored(&window.records),
+                conversation,
+                "{label}"
+            );
+        }
+    }
+
+    let replies = through_pipe(&state, cx, 10, history_page("rewritten", 0, 4));
+    let QueryResponse::SessionHistoryReset(window) = query_reply(&replies, 10) else {
+        panic!("a page in the old layout gets a baseline")
+    };
+    assert_eq!((window.epoch, window.from, window.end), (1, 0, total));
+    let replies = through_pipe(&state, cx, 11, history_page("rewritten", 1, total));
+    assert!(matches!(
+        query_reply(&replies, 11),
+        QueryResponse::SessionHistoryPage { epoch: 1, from: 0, end, .. } if end == total
+    ));
+}
+
+/// A resident log keeps the layout it was loaded in while compaction rewrites
+/// its JSONL: subscribers keep receiving, resuming and paging in that layout
+/// and see every record once, appends after the rewrite land in the rewritten
+/// JSONL in order, and the next load serves the rewritten layout, folding
+/// exactly as the resident log did.
+#[test]
+fn a_resident_log_keeps_its_layout_while_its_jsonl_is_rewritten() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("resident-layout");
+    open_stored_session(&store, "pinned");
+    let persisted = persist_streamed_turns(&store, "pinned", 2).len() as u64;
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let first = window_reply(
+        &through_pipe(&state, cx, 1, subscribe_events("pinned", None, None)),
+        1,
+    );
+    let second = window_reply(
+        &through_pipe(&state, cx, 2, subscribe_events("pinned", None, None)),
+        2,
+    );
+    for window in [&first, &second] {
+        assert_eq!((window.epoch, window.from, window.end), (0, 0, persisted));
+    }
+
+    let message = |id: &str, text: &str| {
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage { text: text.into() },
+        })
+    };
+    let delta = |item: &str| AgentEvent::Delta {
+        item_id: item.into(),
+        kind: agent::DeltaKind::AssistantText,
+        text: "word ".into(),
+    };
+    let mut turn = vec![AgentEvent::TurnStarted {
+        turn_id: "turn-2".into(),
+    }];
+    turn.extend((0..20).map(|_| delta("answer-2")));
+    turn.push(message("answer-2", &"word ".repeat(20)));
+    turn.push(AgentEvent::TurnCompleted {
+        turn_id: "turn-2".into(),
+        status: TurnStatus::Completed,
+        usage: None,
+    });
+    state.update(cx, |state, cx| {
+        for event in &turn {
+            state.record_event("pinned", event, cx);
+        }
+    });
+    cx.run_until(|state| state.store.log_epoch("pinned") == 1);
+    let late = [
+        AgentEvent::TurnChangesUpdated {
+            turn_id: "turn-2".into(),
+            changes: agent::file_changes_from_unified_diff(
+                "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+            )
+            .unwrap(),
+            completeness: agent::ChangeCompleteness::Exact,
+        },
+        AgentEvent::TurnStarted {
+            turn_id: "turn-3".into(),
+        },
+        delta("answer-3"),
+    ];
+    state.update(cx, |state, cx| {
+        for event in &late {
+            state.record_event("pinned", event, cx);
+        }
+    });
+    cx.run_until_parked();
+    let live = live_records(&cx.drain_outgoing());
+    let end = persisted + (turn.len() + late.len()) as u64;
+    assert_eq!(
+        live.iter()
+            .map(|(epoch, position, _)| (*epoch, *position))
+            .collect::<Vec<_>>(),
+        (persisted..end)
+            .map(|position| (0, position))
+            .collect::<Vec<_>>(),
+        "live records keep the resident layout's positions across the rewrite"
+    );
+    let resident = state.read(|state| state.event_records["pinned"].fold().clone());
+    let mut held = first.records.clone();
+    held.extend(live.into_iter().map(|(_, _, record)| record));
+    assert_eq!(Timeline::fold_stored(&held), resident);
+    assert_eq!(
+        Timeline::fold_events(store.read_events("pinned")),
+        resident,
+        "the appends after the rewrite landed in it, in order"
+    );
+
+    let resumed = window_reply(
+        &through_pipe(
+            &state,
+            cx,
+            3,
+            subscribe_events("pinned", Some(end), Some(0)),
+        ),
+        3,
+    );
+    assert_eq!(
+        (
+            resumed.epoch,
+            resumed.from,
+            resumed.end,
+            resumed.records.len()
+        ),
+        (0, end, end, 0)
+    );
+    let resumed = window_reply(
+        &through_pipe(
+            &state,
+            cx,
+            4,
+            subscribe_events("pinned", Some(persisted), Some(0)),
+        ),
+        4,
+    );
+    assert_eq!(
+        (resumed.epoch, resumed.from, resumed.end),
+        (0, persisted, end)
+    );
+    let mut held = second.records.clone();
+    held.extend(resumed.records);
+    assert_eq!(Timeline::fold_stored(&held), resident);
+    assert!(matches!(
+        query_reply(&through_pipe(&state, cx, 5, history_page("pinned", 0, persisted)), 5),
+        QueryResponse::SessionHistoryPage { epoch: 0, end, .. } if end == persisted
+    ));
+
+    through_pipe(
+        &state,
+        cx,
+        6,
+        tcode_protocol::ClientPayload::Unsubscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "pinned".into(),
+            },
+            after: None,
+            epoch: None,
+        }),
+    );
+    cx.run_until(|state| !state.event_records.contains_key("pinned"));
+    let reopened = window_reply(
+        &through_pipe(
+            &state,
+            cx,
+            7,
+            subscribe_events("pinned", Some(end), Some(0)),
+        ),
+        7,
+    );
+    assert_ne!(
+        reopened.epoch, 0,
+        "a cursor into the released layout resets"
+    );
+    assert_eq!(reopened.epoch, store.log_epoch("pinned"));
+    assert!(reopened.total < end);
+    assert_eq!(
+        state.read(|state| state.event_records["pinned"].fold().clone()),
+        resident
+    );
+}
+
+/// A background timeline load that read the JSONL before a rewrite, and
+/// finishes after the rewritten layout was cached, must not skip records by
+/// its own count: those are positions in another layout.
+#[test]
+fn a_timeline_load_from_before_a_rewrite_does_not_skip_by_its_count() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("timeline-load-rewrite");
+    let meta = open_stored_session(&store, "background");
+    persist_streamed_turns(&store, "background", 2);
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| state.load_background_session(meta, cx));
+    cx.wait_for_mailbox();
+    assert!(matches!(
+        store.compact_log("background"),
+        tcode_services::store::CompactOutcome::Rewritten { .. }
+    ));
+    state.update(cx, |state, cx| {
+        state.record_event(
+            "background",
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: "after-the-rewrite".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "late".into(),
+                },
+            }),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    state.read(|state| {
+        let timeline = &state.resident("background").unwrap().timeline;
+        assert!(
+            timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == "after-the-rewrite")
+        );
+        assert_eq!(timeline.turns.len(), 2);
+    });
+}
+
+/// A crash can stop a rewrite at any step. Production startup leaves every log
+/// complete in the layout its header names, deletes the originals and
+/// temporary files earlier runs left, and keeps the originals its own
+/// rewrites make until the next start, which rewrites nothing again.
+#[test]
+fn startup_recovers_logs_from_every_step_a_rewrite_can_stop_at() {
+    use crate::pipe::{HostServices, spawn_host};
+    let root = TestStore::new("compaction-crash");
+    let path = |name: String| root.root().join(name);
+    let mut conversations = HashMap::new();
+    let mut originals = HashMap::new();
+    for id in ["temporary-left", "original-linked", "renamed"] {
+        open_stored_session(&root, id);
+        conversations.insert(
+            id,
+            Timeline::fold_events(persist_streamed_turns(&root, id, 2)),
+        );
+        originals.insert(id, std::fs::read(path(format!("{id}.jsonl"))).unwrap());
+    }
+    let partial = b"{\"layout_epoch\":1}\n{\"ts\":1,\"event\"";
+    // Stopped after writing its temporary file.
+    std::fs::write(path("temporary-left.jsonl.compacting".into()), partial).unwrap();
+    // Stopped after also keeping the original, before the rename.
+    std::fs::write(path("original-linked.jsonl.compacting".into()), partial).unwrap();
+    std::fs::hard_link(
+        path("original-linked.jsonl".into()),
+        path("original-linked.jsonl.orig".into()),
+    )
+    .unwrap();
+    // Renamed; the original beside it is an earlier run's.
+    assert!(matches!(
+        root.compact_log("renamed"),
+        tcode_services::store::CompactOutcome::Rewritten { .. }
+    ));
+    std::fs::write(path("renamed.jsonl.orig.tmp".into()), partial).unwrap();
+    let renamed = std::fs::read(path("renamed.jsonl".into())).unwrap();
+
+    let start = || {
+        spawn_host(
+            (*root).clone(),
+            HostServices {
+                compact_existing_logs: true,
+                ..HostServices::default()
+            },
+        )
+        .unwrap()
+    };
+    let host = start();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ["temporary-left", "original-linked"]
+        .iter()
+        .any(|id| root.log_epoch(id) != 1)
+    {
+        assert!(Instant::now() < deadline, "the pass compacts the cold logs");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    host.shutdown_blocking().unwrap();
+    let mut leftovers: Vec<String> = std::fs::read_dir(root.root())
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| !name.ends_with(".jsonl") && name.contains(".jsonl"))
+        .collect();
+    leftovers.sort();
+    assert_eq!(
+        leftovers,
+        ["original-linked.jsonl.orig", "temporary-left.jsonl.orig"],
+        "this run's originals stay; earlier runs' and every temporary file are gone"
+    );
+    for id in ["temporary-left", "original-linked"] {
+        assert_eq!(
+            std::fs::read(path(format!("{id}.jsonl.orig"))).unwrap(),
+            originals[id]
+        );
+    }
+    assert_eq!(
+        std::fs::read(path("renamed.jsonl".into())).unwrap(),
+        renamed
+    );
+
+    let host = start();
+    let link = host.link();
+    for id in ["temporary-left", "original-linked", "renamed"] {
+        let log = root.read_log(id);
+        assert_eq!(log.epoch, 1, "{id}");
+        assert_eq!(
+            Timeline::fold_events(log.records),
+            conversations[id],
+            "{id}"
+        );
+        link.subscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: id.into(),
+            },
+            after: None,
+            epoch: None,
+        })
+        .unwrap();
+    }
+    link.command_blocking(Command::ClearRelaunchMarker).unwrap();
+    let mut served = HashMap::new();
+    while let Ok(envelope) = link.events().try_recv() {
+        if let (Topic::SessionEvents { session_id }, ServerEvent::SessionSnapshot(window)) =
+            (envelope.topic, envelope.event)
+        {
+            served.insert(session_id, window.epoch);
+        }
+    }
+    assert_eq!(
+        served,
+        HashMap::from([
+            ("temporary-left".to_string(), 1),
+            ("original-linked".to_string(), 1),
+            ("renamed".to_string(), 1),
+        ])
+    );
+    smol::block_on(host.update_state_for_test(|state, cx| {
+        state.record_event(
+            "renamed",
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: "after-restart".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "appended".into(),
+                },
+            }),
+            cx,
+        )
+    }))
+    .unwrap();
+    host.shutdown_blocking().unwrap();
+    assert!(
+        std::fs::read_dir(root.root())
+            .unwrap()
+            .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+            .all(|name| name.ends_with(".jsonl") || !name.contains(".jsonl")),
+        "the second start deleted the first start's originals"
+    );
+    for id in ["temporary-left", "original-linked"] {
+        assert_eq!(root.log_epoch(id), 1, "{id} is not rewritten again");
+    }
+    let renamed = root.read_events("renamed");
+    assert!(matches!(
+        &renamed.last().unwrap().event,
+        AgentEvent::ItemCompleted(item) if item.id == "after-restart"
+    ));
+    assert_eq!(
+        Timeline::fold_events(renamed[..renamed.len() - 1].to_vec()),
+        conversations["renamed"]
+    );
+}
+
+/// The background pass compacts the logs nobody has open without caching
+/// them, and leaves an open log to the live triggers: it is compacted once it
+/// is released.
+#[test]
+fn the_background_pass_leaves_open_logs_to_their_release() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("compaction-pass");
+    for id in ["cold", "open"] {
+        open_stored_session(&store, id);
+        persist_streamed_turns(&store, id, 2);
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        state.select_session("open", cx);
+        state.start_log_compaction(cx);
+    });
+    cx.run_until(|state| state.store.log_epoch("cold") == 1);
+    state.read(|state| {
+        assert_eq!(state.store.log_epoch("open"), 0);
+        assert!(!state.event_records.contains_key("cold"));
+    });
+    state.update(cx, |state, cx| state.park_active(cx));
+    cx.run_until(|state| state.store.log_epoch("open") == 1);
 }
 
 #[test]
@@ -7583,12 +8162,13 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
             .collect();
         state
             .event_records
-            .insert("large".into(), SessionLog::from_records(records.clone()));
+            .insert("large".into(), SessionLog::new(0, records.clone()));
         let subscription = tcode_protocol::Subscription {
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
             },
             after: None,
+            epoch: None,
         };
         let mut snapshot = state.subscription_snapshot(&subscription).unwrap();
         snapshot.request_id = Some(u64::MAX);
@@ -7598,18 +8178,20 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
                 .len()
                 <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
         );
-        let ServerEvent::SessionSnapshot {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
             from,
             records: tail,
             truncated,
             ..
-        } = snapshot.event
+        }) = snapshot.event
         else {
             panic!("snapshot")
         };
         assert!(truncated);
         assert_eq!(tail, records[from as usize..]);
-        let response = state.session_history_page("large", 10, u32::MAX).unwrap();
+        let response = state
+            .session_history_page("large", 0, 10, u32::MAX)
+            .unwrap();
         let line = tcode_protocol::encode_line(&HostMessage::QueryResult {
             id: u64::MAX,
             result: Ok(response.clone()),
@@ -7630,15 +8212,16 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         let snapshot = state
             .subscription_snapshot(&tcode_protocol::Subscription {
                 after: Some(0),
+                epoch: Some(0),
                 ..subscription
             })
             .unwrap();
-        let ServerEvent::SessionSnapshot {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
             from,
             records: tail,
             truncated,
             ..
-        } = snapshot.event
+        }) = snapshot.event
         else {
             panic!("tail")
         };
@@ -7651,9 +8234,12 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         };
         state
             .event_records
-            .insert("large".into(), SessionLog::from_records(records));
+            .insert("large".into(), SessionLog::new(0, records));
         assert_eq!(
-            state.session_history_page("large", 10, 1).unwrap_err().code,
+            state
+                .session_history_page("large", 0, 10, 1)
+                .unwrap_err()
+                .code,
             "history_record_too_large"
         );
     });
@@ -8035,10 +8621,14 @@ fn history_paging_bench() {
                     session_id: "bench".into(),
                 },
                 after: None,
+                epoch: None,
             })
             .unwrap();
         let snapshot_elapsed = started.elapsed();
-        let ServerEvent::SessionSnapshot { from, total, .. } = snapshot.event else {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+            epoch, from, total, ..
+        }) = snapshot.event
+        else {
             panic!("snapshot")
         };
         eprintln!("snapshot: {snapshot_elapsed:?} (from {from} of {total} records)");
@@ -8049,6 +8639,7 @@ fn history_paging_bench() {
             let QueryResponse::SessionHistoryPage { from, records, .. } = state
                 .session_history_page(
                     "bench",
+                    epoch,
                     before,
                     tcode_protocol::SESSION_HISTORY_RECORDS as u32,
                 )
@@ -8221,16 +8812,19 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     state.update(cx, |state, _| {
         state
             .event_records
-            .insert("outputs".into(), SessionLog::from_records(records.clone()));
+            .insert("outputs".into(), SessionLog::new(0, records.clone()));
         let snapshot = state
             .subscription_snapshot(&tcode_protocol::Subscription {
                 topic: Topic::SessionEvents {
                     session_id: "outputs".into(),
                 },
                 after: None,
+                epoch: None,
             })
             .unwrap();
-        let ServerEvent::SessionSnapshot { records: sent, .. } = snapshot.event else {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow { records: sent, .. }) =
+            snapshot.event
+        else {
             panic!("snapshot")
         };
         let AgentEvent::ItemCompleted(ThreadItem {
@@ -8319,9 +8913,9 @@ fn superseded_turn_changes_cross_without_diffs() {
     state.update(cx, |state, _| {
         state
             .event_records
-            .insert("changes".into(), SessionLog::from_records(records.clone()));
+            .insert("changes".into(), SessionLog::new(0, records.clone()));
         let QueryResponse::SessionHistoryPage { records: sent, .. } =
-            state.session_history_page("changes", 4, 200).unwrap()
+            state.session_history_page("changes", 0, 4, 200).unwrap()
         else {
             panic!("page")
         };
@@ -8330,10 +8924,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         };
         assert!(changes.iter().all(|change| change.diff.is_none()));
         assert_eq!(sent[3], records[3]);
-        assert_eq!(
-            format!("{:?}", Timeline::fold_events(sent).turns),
-            format!("{:?}", Timeline::fold_events(records).turns)
-        );
+        assert_eq!(Timeline::fold_events(sent), Timeline::fold_events(records));
     });
 }
 
@@ -8356,25 +8947,26 @@ fn history_windows_are_byte_budgeted() {
     state.update(cx, |state, _| {
         state
             .event_records
-            .insert("wide".into(), SessionLog::from_records(records.clone()));
+            .insert("wide".into(), SessionLog::new(0, records.clone()));
         let mut snapshot = state
             .subscription_snapshot(&tcode_protocol::Subscription {
                 topic: Topic::SessionEvents {
                     session_id: "wide".into(),
                 },
                 after: None,
+                epoch: None,
             })
             .unwrap();
         snapshot.request_id = Some(u64::MAX);
         let line = tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone())).unwrap();
         assert!(line.len() <= tcode_protocol::SESSION_WINDOW_BYTES);
-        let ServerEvent::SessionSnapshot {
+        let ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
             from,
             end,
             records: sent,
             truncated,
             ..
-        } = snapshot.event
+        }) = snapshot.event
         else {
             panic!("snapshot")
         };
@@ -8389,12 +8981,12 @@ fn history_windows_are_byte_budgeted() {
         };
         state
             .event_records
-            .insert("wide".into(), SessionLog::from_records(huge));
+            .insert("wide".into(), SessionLog::new(0, huge));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
             ..
-        } = state.session_history_page("wide", 200, 200).unwrap()
+        } = state.session_history_page("wide", 0, 200, 200).unwrap()
         else {
             panic!("page")
         };

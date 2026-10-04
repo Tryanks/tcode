@@ -154,6 +154,19 @@ impl TestAppContext {
         }
     }
 
+    /// Block until background work queues a completion on the mailbox,
+    /// without running it.
+    pub(super) fn wait_for_mailbox(&self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.mailbox_rx.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "background work did not complete within five seconds"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// Drain and decode every NDJSON line emitted by the host so tests assert
     /// on the same serialized traffic consumed by production clients.
     pub(super) fn drain_outgoing(&mut self) -> Vec<HostMessage> {

@@ -2764,14 +2764,15 @@ mod tests {
                 Topic::SessionEvents {
                     session_id: "thread-a".into(),
                 },
-                ServerEvent::SessionSnapshot {
+                ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                    epoch: 0,
                     from: 0,
                     end: 0,
                     records: Vec::new(),
                     total: 0,
                     total_turns: 0,
                     truncated: false,
-                },
+                }),
             ),
         ] {
             host.incoming
@@ -2904,7 +2905,8 @@ mod tests {
                     Topic::SessionEvents {
                         session_id: "thread-a".into(),
                     },
-                    ServerEvent::SessionSnapshot {
+                    ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         from: 1800,
                         end: 2000,
                         records: (0..200)
@@ -2918,7 +2920,7 @@ mod tests {
                         total: 2000,
                         total_turns: 1,
                         truncated: false,
-                    },
+                    }),
                 ),
             ] {
                 host.incoming
@@ -3059,14 +3061,15 @@ mod tests {
                 Topic::SessionEvents {
                     session_id: "thread-a".into(),
                 },
-                ServerEvent::SessionSnapshot {
+                ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                    epoch: 0,
                     from: 0,
                     end: 0,
                     records: Vec::new(),
                     total: 0,
                     total_turns: 0,
                     truncated: false,
-                },
+                }),
             ),
         ] {
             host.incoming
@@ -3352,14 +3355,15 @@ mod tests {
                 Topic::SessionEvents {
                     session_id: "thread-a".into(),
                 },
-                ServerEvent::SessionSnapshot {
+                ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                    epoch: 0,
                     total: 0,
                     total_turns: 0,
                     truncated: false,
                     from: 0,
                     end: 0,
                     records: vec![],
-                },
+                }),
             ),
         ] {
             host.incoming
@@ -3511,14 +3515,15 @@ mod tests {
                     Topic::SessionEvents {
                         session_id: session.into(),
                     },
-                    ServerEvent::SessionSnapshot {
+                    ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         total: 0,
                         total_turns: 0,
                         truncated: false,
                         from: 0,
                         end: 0,
                         records: vec![],
-                    },
+                    }),
                 ),
             ] {
                 host.incoming
@@ -3648,14 +3653,15 @@ mod tests {
                     topic: Topic::SessionEvents {
                         session_id: "thread-a".into(),
                     },
-                    event: ServerEvent::SessionSnapshot {
+                    event: ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                        epoch: 0,
                         total: 0,
                         total_turns: 0,
                         truncated: false,
                         from: 0,
                         end: 0,
                         records: vec![],
-                    },
+                    }),
                 }))
                 .unwrap(),
             )
@@ -4961,7 +4967,8 @@ mod tests {
                 Topic::SessionEvents {
                     session_id: session.into(),
                 },
-                ServerEvent::SessionSnapshot {
+                ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                    epoch: 0,
                     total: 0,
                     total_turns: 0,
                     truncated: false,
@@ -4980,7 +4987,7 @@ mod tests {
                         }
                         .into(),
                     ],
-                },
+                }),
             ),
         ];
         for (topic, event) in events {

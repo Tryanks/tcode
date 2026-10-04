@@ -293,14 +293,15 @@ impl AppState {
             Topic::SessionEvents {
                 session_id: session_id.clone(),
             },
-            ServerEvent::SessionSnapshot {
+            ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                epoch: 0,
                 total: 0,
                 total_turns: 0,
                 truncated: false,
                 from: 0,
                 end: 0,
                 records: Vec::new(),
-            },
+            }),
             cx,
         );
         self.refresh_session_git_branch(session_id.clone(), cwd, cx);

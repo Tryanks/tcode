@@ -265,14 +265,15 @@ mod tests {
     use std::path::PathBuf;
 
     use agent::{
-        AgentEvent, ItemContent, ItemStatus, PlanStep, PlanStepStatus, ProviderKind, ThreadItem,
-        TurnStatus,
+        AgentEvent, DeltaKind, ItemContent, ItemStatus, PlanStep, PlanStepStatus, ProviderKind,
+        ThreadItem, TurnStatus,
     };
     use tcode_core::project::Project;
     use tcode_protocol::{ExternalThread, SourceTool};
 
     use super::*;
     use crate::import::{ImportedThread, prepare_import};
+    use crate::store::CompactOutcome;
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("tcode-export-{label}-{}", uuid::Uuid::new_v4()))
@@ -352,76 +353,95 @@ mod tests {
         meta
     }
 
+    /// A rewritten log exports its records without the store's layout
+    /// header, so the export imports like any other.
     #[test]
     fn jsonl_export_import_round_trips_folded_timeline() {
-        let source_root = temp_root("source");
-        let destination_root = temp_root("destination");
-        let source = SessionStore::open_at(source_root.clone()).unwrap();
-        let destination = SessionStore::open_at(destination_root.clone()).unwrap();
-        let meta = fixture(&source);
-        let export_path = source_root.join("thread.jsonl");
-        fs::write(
-            &export_path,
-            render_thread(&source, &meta, ThreadExportFormat::Jsonl).unwrap(),
-        )
-        .unwrap();
-        let exported = fs::read_to_string(&export_path).unwrap();
-        let header: serde_json::Value =
-            serde_json::from_str(exported.lines().next().unwrap()).unwrap();
-        assert_eq!(header["type"], "tcode_thread");
-        assert_eq!(header["version"], 1);
-        assert_eq!(header["attachments"], "references_only");
-        assert_eq!(header["redaction"], "none");
-        assert_eq!(
-            exported.split_once('\n').unwrap().1.as_bytes(),
-            source.read_event_log(&meta.id).unwrap()
-        );
-
-        let project = Project::from_root(PathBuf::from("/restored/project"));
-        let thread = ExternalThread {
-            source: SourceTool::T3Code,
-            file: export_path,
-            external_id: "tcode:session-export-1".into(),
-            title_hint: None,
-            last_active_ms: 0,
-        };
-        let ImportedThread {
-            meta: restored,
-            event_log,
-        } = prepare_import(&project, &thread, &HashSet::new()).expect("a Tcode export must import");
-        destination
-            .write_event_log(&restored.id, &event_log)
+        for rewritten in [false, true] {
+            let source_root = temp_root("source");
+            let destination_root = temp_root("destination");
+            let source = SessionStore::open_at(source_root.clone()).unwrap();
+            let destination = SessionStore::open_at(destination_root.clone()).unwrap();
+            let meta = fixture(&source);
+            if rewritten {
+                for (offset, text) in ["The ", "project ", "builds."].iter().enumerate() {
+                    let delta = AgentEvent::Delta {
+                        item_id: "assistant-2".into(),
+                        kind: DeltaKind::AssistantText,
+                        text: (*text).into(),
+                    };
+                    source
+                        .append_event(&meta.id, 2_000 + offset as u64, &delta)
+                        .unwrap();
+                }
+                let finished = item(
+                    "assistant-2",
+                    ItemContent::AssistantMessage {
+                        text: "The project builds.".into(),
+                    },
+                );
+                source.append_event(&meta.id, 2_003, &finished).unwrap();
+                assert!(matches!(
+                    source.compact_log(&meta.id),
+                    CompactOutcome::Rewritten { .. }
+                ));
+            }
+            let export_path = source_root.join("thread.jsonl");
+            fs::write(
+                &export_path,
+                render_thread(&source, &meta, ThreadExportFormat::Jsonl).unwrap(),
+            )
             .unwrap();
-        assert_ne!(restored.id, meta.id);
-        assert_eq!(restored.cwd, project.root);
-        assert_eq!(restored.project_id.as_deref(), Some(project.id.as_str()));
-        assert_eq!(
-            restored.imported_from.as_deref(),
-            Some("tcode:session-export-1")
-        );
-        assert_eq!(
-            destination.read_event_log(&restored.id).unwrap(),
-            source.read_event_log(&meta.id).unwrap()
-        );
-        let source_timeline = Timeline::fold_events(source.read_events(&meta.id));
-        let restored_timeline = Timeline::fold_events(destination.read_events(&restored.id));
-        let summarize = |timeline: &Timeline| {
-            timeline
-                .entries
-                .iter()
-                .map(|entry| (entry.turn, format!("{:?}", entry.content)))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(summarize(&source_timeline), summarize(&restored_timeline));
-        assert_eq!(source_timeline.plan_steps, restored_timeline.plan_steps);
-        assert_eq!(
-            source_timeline.plan_explanation,
-            restored_timeline.plan_explanation
-        );
-        assert_eq!(source_timeline.turns.len(), restored_timeline.turns.len());
+            let exported = fs::read_to_string(&export_path).unwrap();
+            let header: serde_json::Value =
+                serde_json::from_str(exported.lines().next().unwrap()).unwrap();
+            assert_eq!(header["type"], "tcode_thread");
+            assert_eq!(header["version"], 1);
+            assert_eq!(header["attachments"], "references_only");
+            assert_eq!(header["redaction"], "none");
+            let records = exported.split_once('\n').unwrap().1;
+            assert_eq!(records.as_bytes(), source.read_event_log(&meta.id).unwrap());
+            assert!(
+                records.lines().all(|line| parse_stored_line(line).is_ok()),
+                "every exported line after the export header is a record"
+            );
 
-        let _ = fs::remove_dir_all(source_root);
-        let _ = fs::remove_dir_all(destination_root);
+            let project = Project::from_root(PathBuf::from("/restored/project"));
+            let thread = ExternalThread {
+                source: SourceTool::T3Code,
+                file: export_path,
+                external_id: "tcode:session-export-1".into(),
+                title_hint: None,
+                last_active_ms: 0,
+            };
+            let ImportedThread {
+                meta: restored,
+                event_log,
+            } = prepare_import(&project, &thread, &HashSet::new())
+                .expect("a Tcode export must import");
+            destination
+                .write_event_log(&restored.id, &event_log)
+                .unwrap();
+            assert_ne!(restored.id, meta.id);
+            assert_eq!(restored.cwd, project.root);
+            assert_eq!(restored.project_id.as_deref(), Some(project.id.as_str()));
+            assert_eq!(
+                restored.imported_from.as_deref(),
+                Some("tcode:session-export-1")
+            );
+            assert_eq!(
+                fs::read(destination_root.join(format!("{}.jsonl", restored.id))).unwrap(),
+                records.as_bytes(),
+                "an imported log starts a layout of its own"
+            );
+            assert_eq!(
+                Timeline::fold_events(destination.read_events(&restored.id)),
+                Timeline::fold_events(source.read_events(&meta.id))
+            );
+
+            let _ = fs::remove_dir_all(source_root);
+            let _ = fs::remove_dir_all(destination_root);
+        }
     }
 
     #[test]

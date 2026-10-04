@@ -59,8 +59,14 @@ pub enum HostMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     pub topic: Topic,
+    /// For [`Topic::SessionEvents`], the log position the client holds
+    /// records up to, in layout `epoch`. The host continues from it only when
+    /// `epoch` is the layout it serves; otherwise, and without an epoch, it
+    /// sends a baseline.
     #[serde(default)]
     pub after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
 }
 
 /// Encode one NDJSON record, including its trailing newline.

@@ -1004,6 +1004,7 @@ impl AppState {
                                 session_id: fork.id.clone(),
                             },
                             after: None,
+                            epoch: None,
                         })
                     {
                         cx.emit(HostEvent::Domain(snapshot));
@@ -1471,18 +1472,23 @@ impl AppState {
         {
             active.draft = false;
             let meta = active.meta.clone();
+            let epoch = self
+                .event_records
+                .get(&meta.id)
+                .map_or(0, SessionLog::epoch);
             self.emit_domain(
                 Topic::SessionEvents {
                     session_id: meta.id.clone(),
                 },
-                ServerEvent::SessionSnapshot {
+                ServerEvent::SessionSnapshot(tcode_protocol::SessionWindow {
+                    epoch,
                     total: 0,
                     total_turns: 0,
                     truncated: false,
                     from: 0,
                     end: 0,
                     records: Vec::new(),
-                },
+                }),
                 cx,
             );
             self.enqueue_store_write(
@@ -1530,36 +1536,34 @@ impl AppState {
         // snapshot that answers the subscription needs it in the same turn;
         // a background session parses off the mailbox and caches on completion.
         let cached = match target {
-            TimelineLoadTarget::Active { .. } => Some(
-                self.event_records
-                    .entry(session_id.clone())
-                    .or_insert_with(|| SessionLog::load(&self.store, &session_id)),
-            ),
-            TimelineLoadTarget::Background => self.event_records.get_mut(&session_id),
+            TimelineLoadTarget::Active { .. } => Some(&*self.resident_log(&session_id)),
+            TimelineLoadTarget::Background => self.event_records.get(&session_id),
         }
-        .map(|log| (log.records().len(), log.fold().clone()));
+        .map(|log| (log.end(), log.fold().clone()));
+        let (mark_idle, load_branch) = match target {
+            TimelineLoadTarget::Active { mark_idle } => (mark_idle, true),
+            TimelineLoadTarget::Background => (true, false),
+        };
         let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let read_id = session_id.clone();
-            let (timeline, folded, loaded, git_branch) = {
-                let (mut timeline, folded, loaded) = match cached {
-                    Some((folded, fold)) => (fold, folded, None),
-                    None => {
-                        let log = SessionLog::load(&store, &read_id);
-                        (log.fold().clone(), log.records().len(), Some(log))
+            let (timeline, folded, loaded, git_branch) = host_cx
+                .unblock(move || {
+                    let (mut timeline, folded, loaded) = match cached {
+                        Some((folded, fold)) => (fold, folded, None),
+                        None => {
+                            let log = SessionLog::load(&store, &read_id);
+                            (log.fold().clone(), log.end(), Some(log))
+                        }
+                    };
+                    if mark_idle {
+                        timeline.mark_idle();
                     }
-                };
-                let (mark_idle, load_branch) = match target {
-                    TimelineLoadTarget::Active { mark_idle } => (mark_idle, true),
-                    TimelineLoadTarget::Background => (true, false),
-                };
-                if mark_idle {
-                    timeline.mark_idle();
-                }
-                let git_branch = load_branch.then(|| read_git_branch(&cwd));
-                (timeline, folded, loaded, git_branch)
-            };
+                    let git_branch = load_branch.then(|| read_git_branch(&cwd));
+                    (timeline, folded, loaded, git_branch)
+                })
+                .await;
             host_cx.enqueue(move |state, cx| {
                 let generation_matches =
                     state.timeline_load_generations.get(&session_id).copied() == Some(generation);
@@ -1576,17 +1580,27 @@ impl AppState {
                 }
                 // An append during the parse already loaded and extended its
                 // own copy; that one carries the newer records.
-                if let Some(loaded) = loaded {
-                    state
-                        .event_records
-                        .entry(session_id.clone())
-                        .or_insert(loaded);
+                if let Some(loaded) = loaded
+                    && !state.event_records.contains_key(&session_id)
+                {
+                    state.cache_log(session_id.clone(), loaded);
                 }
                 let mut timeline = timeline;
-                // Records appended while the fold ran continue the same log.
                 if let Some(log) = state.event_records.get(&session_id) {
-                    for record in log.records().iter().skip(folded) {
-                        timeline.apply_at(record.ts, &record.event);
+                    if log.epoch() == folded.epoch {
+                        // Records appended while the fold ran continue the
+                        // same layout.
+                        for record in log.records().iter().skip(folded.position) {
+                            timeline.apply_at(record.ts, &record.event);
+                        }
+                    } else {
+                        // The cached copy was loaded after a rewrite renumbered
+                        // the log, so `folded` says nothing about which of its
+                        // records the fold covered; its own fold covers them all.
+                        timeline = log.fold().clone();
+                        if mark_idle {
+                            timeline.mark_idle();
+                        }
                     }
                 }
                 if let Some(session) = state.resident_mut(&session_id) {

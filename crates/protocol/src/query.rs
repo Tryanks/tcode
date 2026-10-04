@@ -14,9 +14,12 @@ pub enum Query {
     /// Read the agent host's system grants without requesting access.
     ComputerUsePermissions,
     Ping,
-    /// Records strictly before the absolute event cursor, oldest first.
+    /// Records strictly before the cursor `before` of layout `epoch`, oldest
+    /// first. A cursor in another layout than the host serves is answered
+    /// with [`QueryResponse::SessionHistoryReset`].
     SessionHistoryPage {
         session_id: String,
+        epoch: u64,
         before: u64,
         limit: u32,
     },
@@ -110,14 +113,18 @@ pub enum QueryResponse {
     Hosting(HostingState),
     ComputerUsePermissions(tcode_core::permissions::ComputerUsePermissions),
     Pong,
-    /// Records standing for the log cursors `from..end`, with the same
-    /// merging as [`crate::ServerEvent::SessionSnapshot`].
+    /// Records standing for the log cursors `from..end` of layout `epoch`,
+    /// with the same merging as [`crate::SessionWindow`].
     SessionHistoryPage {
+        epoch: u64,
         records: Vec<crate::SessionEventRecord>,
         from: u64,
         end: u64,
         truncated: bool,
     },
+    /// A baseline replacing every record the client holds: the page asked
+    /// for a layout the host no longer serves.
+    SessionHistoryReset(crate::SessionWindow),
     ActiveWorkspace(Vec<PathEntry>),
     IconImages {
         directory: PathBuf,

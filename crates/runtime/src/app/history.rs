@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 use tcode_protocol::{
     HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES, SESSION_HISTORY_RECORDS,
-    SESSION_WINDOW_BYTES,
+    SESSION_WINDOW_BYTES, SessionWindow,
 };
 
 /// Count serialized bytes without allocating a copy of a large record.
@@ -206,6 +206,15 @@ fn wire_window(
     Ok(Window { range, records })
 }
 
+/// A position in one layout of a session's log. Rewriting the JSONL
+/// renumbers its records under a new epoch, so a position alone does not say
+/// which record it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LogCursor {
+    pub(super) epoch: u64,
+    pub(super) position: usize,
+}
+
 /// The complete event log of one session, held in memory while the session
 /// is resident so history windows cost the page rather than a re-parse of the
 /// JSONL, plus the fold that decides where each window may start.
@@ -217,8 +226,14 @@ fn wire_window(
 /// and the store writer has flushed every append queued from it
 /// ([`AppState::release_stale_session_logs`]): until then the log, not the
 /// JSONL, is the whole conversation.
+///
+/// A resident log keeps the layout it was loaded in. Compaction rewrites the
+/// JSONL beneath it without touching it, so its positions, its fold and every
+/// client cursor into it stay valid; the rewritten layout is served once the
+/// log is next loaded, and cursors into the old one get a baseline then.
 #[derive(Clone)]
 pub(super) struct SessionLog {
+    epoch: u64,
     records: Vec<SessionEventRecord>,
     /// Indices of the records that opened a turn in `fold`, ascending.
     turn_starts: Vec<usize>,
@@ -226,17 +241,19 @@ pub(super) struct SessionLog {
     /// can tell whether it opens a turn, and cloned by timeline loads instead
     /// of folding the records again.
     fold: Timeline,
-    /// The length flushed by the release barrier in flight, if any.
-    release_barrier: Option<usize>,
+    /// The end flushed by the release barrier in flight, if any.
+    release_barrier: Option<LogCursor>,
 }
 
 impl SessionLog {
     pub(super) fn load(store: &SessionStore, session_id: &str) -> Self {
-        Self::from_records(store.read_events(session_id))
+        let log = store.read_log(session_id);
+        Self::new(log.epoch, log.records)
     }
 
-    pub(super) fn from_records(records: impl IntoIterator<Item = SessionEventRecord>) -> Self {
+    pub(super) fn new(epoch: u64, records: impl IntoIterator<Item = SessionEventRecord>) -> Self {
         let mut log = Self {
+            epoch,
             records: Vec::new(),
             turn_starts: Vec::new(),
             fold: Timeline::default(),
@@ -246,6 +263,18 @@ impl SessionLog {
             log.push(record);
         }
         log
+    }
+
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The cursor just past the last record.
+    pub(super) fn end(&self) -> LogCursor {
+        LogCursor {
+            epoch: self.epoch,
+            position: self.records.len(),
+        }
     }
 
     pub(super) fn push(&mut self, record: SessionEventRecord) {
@@ -281,36 +310,55 @@ impl SessionLog {
 }
 
 impl AppState {
+    /// The session's cached log, loaded from the JSONL when nothing is cached
+    /// yet. From then until it is released it is the whole conversation, in
+    /// the layout it was loaded in.
+    pub(super) fn resident_log(&mut self, session_id: &str) -> &mut SessionLog {
+        if !self.event_records.contains_key(session_id) {
+            let log = SessionLog::load(&self.store, session_id);
+            self.cache_log(session_id.to_string(), log);
+        }
+        self.event_records
+            .get_mut(session_id)
+            .expect("cached above")
+    }
+
+    /// Cache a log read from the JSONL. A rewrite of a cached log would
+    /// only renumber it for the next load, so the background pass leaves it
+    /// to the live triggers.
+    pub(super) fn cache_log(&mut self, session_id: String, log: SessionLog) {
+        self.withdraw_pass_compaction(&session_id);
+        self.event_records.insert(session_id, log);
+    }
+
     /// The session's log, cached for the resident session it belongs to. A
     /// non-resident session is read cold and not retained, so paging it never
     /// grows the cache.
     fn history_log(&mut self, session_id: &str) -> std::borrow::Cow<'_, SessionLog> {
-        if !self.event_records.contains_key(session_id) {
-            let log = SessionLog::load(&self.store, session_id);
-            if self.resident(session_id).is_none() {
-                return std::borrow::Cow::Owned(log);
-            }
-            self.event_records.insert(session_id.to_string(), log);
+        if !self.event_records.contains_key(session_id) && self.resident(session_id).is_none() {
+            return std::borrow::Cow::Owned(SessionLog::load(&self.store, session_id));
         }
-        std::borrow::Cow::Borrowed(&self.event_records[session_id])
+        std::borrow::Cow::Borrowed(self.resident_log(session_id))
     }
 
     /// Queue a store-writer barrier for every cached log whose session left
     /// residency, and drop the log once the barrier echoes: a cold read after
     /// that sees every append the log had accepted. Appends that race the
-    /// barrier re-arm it.
+    /// barrier re-arm it. The log is compacted first, so a turn that never
+    /// completed is compacted too, and the next load serves that layout.
     pub(super) fn release_stale_session_logs(&mut self, cx: &mut HostCx) {
-        let stale: Vec<(String, usize)> = self
+        let stale: Vec<(String, LogCursor)> = self
             .event_records
             .iter()
             .filter(|(id, log)| log.release_barrier.is_none() && self.resident(id).is_none())
-            .map(|(id, log)| (id.clone(), log.records.len()))
+            .map(|(id, log)| (id.clone(), log.end()))
             .collect();
         for (session_id, flushed) in stale {
             self.event_records
                 .get_mut(&session_id)
                 .expect("stale log collected above")
                 .release_barrier = Some(flushed);
+            self.schedule_compaction(&session_id, cx);
             let (completion, completed) = smol::channel::bounded(1);
             self.enqueue_store_write(StoreWrite::Flush(completion), cx);
             let host_cx = cx.clone();
@@ -323,7 +371,7 @@ impl AppState {
                         return;
                     };
                     log.release_barrier = None;
-                    let appended_since = log.records.len() != flushed;
+                    let appended_since = log.end() != flushed;
                     if state.resident(&session_id).is_some() {
                         return;
                     }
@@ -337,6 +385,9 @@ impl AppState {
         }
     }
 
+    /// The window answering a subscription: the records from its cursor on
+    /// when the cursor is in the layout this host serves, otherwise a
+    /// baseline that replaces whatever the client holds.
     pub(crate) fn session_events_snapshot(
         &mut self,
         subscription: &tcode_protocol::Subscription,
@@ -345,39 +396,20 @@ impl AppState {
             unreachable!()
         };
         let log = self.history_log(session_id);
-        let records = log.records();
-        let total = records.len();
-        let total_turns = log.fold().turns.len() as u64;
-        let after = subscription.after.filter(|after| *after <= total as u64);
-        let from = after.map_or_else(
-            || log.turn_aligned_start(total.saturating_sub(400)),
-            |after| after as usize,
-        );
+        let after = subscription.after.filter(|after| {
+            subscription.epoch == Some(log.epoch) && *after <= log.records.len() as u64
+        });
         let empty = HostMessage::Event(EventEnvelope {
             request_id: Some(u64::MAX),
             topic: subscription.topic.clone(),
-            event: ServerEvent::SessionSnapshot {
-                from: u64::MAX,
-                end: u64::MAX,
-                records: vec![],
-                total: u64::MAX,
-                total_turns: u64::MAX,
-                truncated: false,
-            },
+            event: ServerEvent::SessionSnapshot(empty_window()),
         });
-        let overhead = serde_json::to_vec(&empty)
-            .expect("serializable snapshot")
-            .len()
-            + 1;
-        match wire_window(records, from..total, after.is_none(), overhead) {
-            Ok(window) => ServerEvent::SessionSnapshot {
-                from: window.range.start as u64,
-                end: window.range.end as u64,
-                truncated: window.range.len() < total - from,
-                records: window.records,
-                total: total as u64,
-                total_turns,
-            },
+        match session_window(
+            &log,
+            after.map(|after| after as usize),
+            wire_overhead(&empty),
+        ) {
+            Ok(window) => ServerEvent::SessionSnapshot(window),
             Err(error) => ServerEvent::SessionHistoryError(error),
         }
     }
@@ -385,10 +417,19 @@ impl AppState {
     pub(crate) fn session_history_page(
         &mut self,
         session_id: &str,
+        epoch: u64,
         before: u64,
         limit: u32,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
         let log = self.history_log(session_id);
+        if epoch != log.epoch {
+            let empty = HostMessage::QueryResult {
+                id: u64::MAX,
+                result: Ok(QueryResponse::SessionHistoryReset(empty_window())),
+            };
+            return session_window(&log, None, wire_overhead(&empty))
+                .map(QueryResponse::SessionHistoryReset);
+        }
         let records = log.records();
         let end = before.min(records.len() as u64) as usize;
         let count = (limit as usize).clamp(1, SESSION_HISTORY_RECORDS);
@@ -396,15 +437,16 @@ impl AppState {
         let empty = HostMessage::QueryResult {
             id: u64::MAX,
             result: Ok(QueryResponse::SessionHistoryPage {
+                epoch: u64::MAX,
                 records: vec![],
                 from: u64::MAX,
                 end: u64::MAX,
                 truncated: false,
             }),
         };
-        let overhead = serde_json::to_vec(&empty).expect("serializable page").len() + 1;
-        let window = wire_window(records, requested.clone(), true, overhead)?;
+        let window = wire_window(records, requested.clone(), true, wire_overhead(&empty))?;
         Ok(QueryResponse::SessionHistoryPage {
+            epoch: log.epoch,
             from: window.range.start as u64,
             end: window.range.end as u64,
             truncated: window.range.len() < requested.len(),
@@ -443,5 +485,50 @@ impl AppState {
             });
         }
         Ok(QueryResponse::ItemOutput(output))
+    }
+}
+
+/// The bytes a reply spends besides its records, measured on `empty`, a reply
+/// without records whose numbers are as long as any reply's.
+fn wire_overhead(empty: &HostMessage) -> usize {
+    serde_json::to_vec(empty).expect("serializable reply").len() + 1
+}
+
+/// The records from cursor `after` to the end, or without one a baseline: the
+/// tail from a turn start about [`BASELINE_RECORDS`] records back, cut to the
+/// byte budget from its newest end.
+fn session_window(
+    log: &SessionLog,
+    after: Option<usize>,
+    overhead: usize,
+) -> Result<SessionWindow, tcode_protocol::ProtocolError> {
+    let total = log.records.len();
+    let from =
+        after.unwrap_or_else(|| log.turn_aligned_start(total.saturating_sub(BASELINE_RECORDS)));
+    let window = wire_window(&log.records, from..total, after.is_none(), overhead)?;
+    Ok(SessionWindow {
+        epoch: log.epoch,
+        from: window.range.start as u64,
+        end: window.range.end as u64,
+        truncated: window.range.len() < total - from,
+        records: window.records,
+        total: total as u64,
+        total_turns: log.fold.turns.len() as u64,
+    })
+}
+
+/// How far back a baseline reaches before its turn start and byte budget.
+const BASELINE_RECORDS: usize = 400;
+
+/// A window without records whose numbers are as long as any window's.
+fn empty_window() -> SessionWindow {
+    SessionWindow {
+        epoch: u64::MAX,
+        from: u64::MAX,
+        end: u64::MAX,
+        records: vec![],
+        total: u64::MAX,
+        total_turns: u64::MAX,
+        truncated: false,
     }
 }

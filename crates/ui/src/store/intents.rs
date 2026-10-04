@@ -255,9 +255,11 @@ impl WorkspaceStore {
                 },
                 tcode_protocol::Topic::GitStatus { session_id },
             ] {
-                let _ = self
-                    .host
-                    .unsubscribe(tcode_protocol::Subscription { topic, after: None });
+                let _ = self.host.unsubscribe(tcode_protocol::Subscription {
+                    topic,
+                    after: None,
+                    epoch: None,
+                });
             }
         }
         self.session_status_replica = None;
@@ -295,7 +297,9 @@ impl WorkspaceStore {
             .unwrap_or_default();
         self.session_records.entry(session_id.clone()).or_default();
         self.session_replica = None;
-        let after = self.session_end.get(&session_id).copied();
+        // A position is a cursor only with the layout it is in.
+        let epoch = self.session_epoch.get(&session_id).copied();
+        let after = epoch.and(self.session_end.get(&session_id).copied());
         for topic in [
             tcode_protocol::Topic::SessionStatus {
                 session_id: session_id.clone(),
@@ -317,12 +321,10 @@ impl WorkspaceStore {
             {
                 continue;
             }
+            let events = matches!(topic, tcode_protocol::Topic::SessionEvents { .. });
             let _ = self.host.subscribe(tcode_protocol::Subscription {
-                after: if matches!(topic, tcode_protocol::Topic::SessionEvents { .. }) {
-                    after
-                } else {
-                    None
-                },
+                after: after.filter(|_| events),
+                epoch: epoch.filter(|_| events),
                 topic,
             });
         }

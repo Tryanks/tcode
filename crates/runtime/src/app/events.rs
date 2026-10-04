@@ -512,17 +512,19 @@ impl AppState {
             event: event.clone(),
             elided: None,
         };
+        let end = self.resident_log(session_id).end();
         self.emit_domain(
             Topic::SessionEvents {
                 session_id: session_id.to_string(),
             },
-            ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
+            ServerEvent::SessionEvent {
+                epoch: end.epoch,
+                position: end.position as u64,
+                record: history::wire_record(&record).into_owned(),
+            },
             cx,
         );
-        self.event_records
-            .entry(session_id.to_string())
-            .or_insert_with(|| SessionLog::load(&self.store, session_id))
-            .push(record);
+        self.resident_log(session_id).push(record);
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
@@ -531,6 +533,11 @@ impl AppState {
             },
             cx,
         );
+        // A completed turn is an opportunity, not a seal: records that arrive
+        // later still append in order, and a later compaction takes them.
+        if matches!(event, AgentEvent::TurnCompleted { .. }) {
+            self.schedule_compaction(session_id, cx);
+        }
         if let Some(session) = self.resident_mut(session_id) {
             session.timeline.apply_at(Some(ts), event);
         } else {

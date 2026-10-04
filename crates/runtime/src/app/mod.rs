@@ -228,6 +228,7 @@ mod acp;
 mod active_session;
 mod approvals;
 mod command_validation;
+mod compaction;
 mod events;
 mod git;
 mod history;
@@ -261,7 +262,7 @@ use providers::{
 };
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
-use store_write::{StoreWrite, run_store_write};
+use store_write::{StoreWrite, StoreWriter};
 
 /// The result of a provider version check.
 #[derive(Debug, Clone, Default)]
@@ -389,6 +390,7 @@ pub struct AppState {
     /// Resident sessions' event logs; see [`SessionLog`] for what is cached
     /// and when it is dropped.
     event_records: HashMap<String, SessionLog>,
+    compactions: compaction::Compactions,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
@@ -536,6 +538,7 @@ impl AppState {
             timeline_load_generations: HashMap::new(),
             subscriptions: HashSet::new(),
             event_records: HashMap::new(),
+            compactions: Default::default(),
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
             external_imports: HashMap::new(),
@@ -551,15 +554,16 @@ impl AppState {
 
     fn start_store_writer(&mut self, cx: &mut HostCx) {
         if let Some(writes) = self.store_write_receiver.take() {
-            let store = self.store.clone();
-            let settings_store = self.settings_store.clone();
-            let terminal_preferences_path = self.terminal_preferences_path.clone();
+            let mut writer = StoreWriter::new(
+                self.store.clone(),
+                self.settings_store.clone(),
+                self.terminal_preferences_path.clone(),
+            );
             let failures = self.store_write_failures.clone();
+            let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 while let Ok(write) = writes.recv().await {
-                    if let Some(failure) =
-                        run_store_write(&store, &settings_store, &terminal_preferences_path, write)
-                    {
+                    if let Some(failure) = writer.run(write, &host_cx).await {
                         let _ = failures.send(failure).await;
                     }
                 }
