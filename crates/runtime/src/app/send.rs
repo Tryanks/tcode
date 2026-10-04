@@ -372,7 +372,7 @@ impl AppState {
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
 
-        self.persist_meta(&meta, cx);
+        self.persist_metas(vec![meta], cx);
         self.record_event(&session_id, &event, cx);
 
         let Some(active) = self.resident_mut(target_id) else {

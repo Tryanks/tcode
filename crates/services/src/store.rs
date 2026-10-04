@@ -7,6 +7,7 @@
 //! Replay accepts timestamped records and legacy bare [`AgentEvent`] lines,
 //! then folds [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -19,10 +20,35 @@ use tcode_core::session::StoredEvent;
 
 /// On-disk envelope wrapping each event with its record time. Kept private:
 /// callers deal in [`StoredEvent`] (which tolerates the legacy bare form).
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct EventEnvelope {
     ts: u64,
     event: AgentEvent,
+}
+
+/// The borrowed write side of [`EventEnvelope`].
+#[derive(Serialize)]
+struct EventRecord<'a> {
+    ts: u64,
+    event: &'a AgentEvent,
+}
+
+fn encode_record(ts: u64, event: &AgentEvent) -> std::io::Result<String> {
+    serde_json::to_string(&EventRecord { ts, event })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Encode timestamped events as a complete event log, byte for byte what
+/// appending them one at a time to an empty log writes.
+pub fn encode_event_log<'a>(
+    events: impl IntoIterator<Item = (u64, &'a AgentEvent)>,
+) -> std::io::Result<Vec<u8>> {
+    let mut log = Vec::new();
+    for (ts, event) in events {
+        log.extend_from_slice(encode_record(ts, event)?.as_bytes());
+        log.push(b'\n');
+    }
+    Ok(log)
 }
 
 /// Cheap, cloneable handle to the on-disk data directory.
@@ -234,13 +260,26 @@ impl SessionStore {
         metas
     }
 
-    /// Insert or replace a meta in the index (by id), then persist.
-    pub fn upsert_meta(&self, meta: &SessionMeta) -> std::io::Result<()> {
+    /// Insert or replace metas in the index (by id) with one index write.
+    pub fn upsert_metas<'a>(
+        &self,
+        metas: impl IntoIterator<Item = &'a SessionMeta>,
+    ) -> std::io::Result<()> {
         let mut file = self.read_file();
-        if let Some(existing) = file.sessions.iter_mut().find(|m| m.id == meta.id) {
-            *existing = meta.clone();
-        } else {
-            file.sessions.push(meta.clone());
+        let mut positions: HashMap<String, usize> = file
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(position, meta)| (meta.id.clone(), position))
+            .collect();
+        for meta in metas {
+            match positions.get(&meta.id) {
+                Some(&position) => file.sessions[position] = meta.clone(),
+                None => {
+                    positions.insert(meta.id.clone(), file.sessions.len());
+                    file.sessions.push(meta.clone());
+                }
+            }
         }
         self.persist_index(&file)
     }
@@ -298,12 +337,7 @@ impl SessionStore {
     /// Append one event to the session's JSONL log, wrapped in a timestamped
     /// envelope (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(&self, id: &str, ts: u64, event: &AgentEvent) -> std::io::Result<()> {
-        let envelope = EventEnvelope {
-            ts,
-            event: event.clone(),
-        };
-        let line = serde_json::to_string(&envelope)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let line = encode_record(ts, event)?;
         let mut file: File = OpenOptions::new()
             .create(true)
             .read(true)
@@ -365,16 +399,24 @@ impl SessionStore {
         fs::rename(tmp, dst)
     }
 
-    /// Remove a session from the index and delete its event log.
-    pub fn remove_session(&self, id: &str) -> std::io::Result<()> {
+    /// Remove sessions from the index with one index write, then delete their
+    /// event logs. Every log is attempted; the first failure is returned.
+    pub fn remove_sessions(&self, ids: &[String]) -> std::io::Result<()> {
+        let removed: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let mut file = self.read_file();
-        file.sessions.retain(|meta| meta.id != id);
+        file.sessions
+            .retain(|meta| !removed.contains(meta.id.as_str()));
         self.persist_index(&file)?;
-        match fs::remove_file(self.events_path(id)) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
+        let mut result = Ok(());
+        for id in removed {
+            match fs::remove_file(self.events_path(id)) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound && result.is_ok() => {
+                    result = Err(err);
+                }
+                _ => {}
+            }
         }
+        result
     }
 }
 
@@ -461,8 +503,7 @@ mod tests {
         a.updated_at = 100;
         let mut b = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/b"), None);
         b.updated_at = 200;
-        store.upsert_meta(&a).unwrap();
-        store.upsert_meta(&b).unwrap();
+        store.upsert_metas([&a, &b]).unwrap();
 
         let index = store.load_index();
         assert_eq!(index.len(), 2);
@@ -473,7 +514,7 @@ mod tests {
         // upsert replaces
         let mut a2 = a.clone();
         a2.title = "renamed".into();
-        store.upsert_meta(&a2).unwrap();
+        store.upsert_metas([&a2]).unwrap();
         let index = store.load_index();
         assert_eq!(index.len(), 2);
         assert_eq!(
@@ -498,8 +539,8 @@ mod tests {
                 },
             )
             .unwrap();
-        store.remove_session(&a.id).unwrap();
-        store.remove_session(&a.id).unwrap();
+        store.remove_sessions(std::slice::from_ref(&a.id)).unwrap();
+        store.remove_sessions(std::slice::from_ref(&a.id)).unwrap();
         let remaining = store.load_index();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, b.id);

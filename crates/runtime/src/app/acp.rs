@@ -193,7 +193,7 @@ impl AppState {
         }
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
-        self.persist_meta(&meta, cx);
+        self.persist_metas(vec![meta], cx);
     }
 
     /// Point the active draft at an installed ACP agent (the model picker's

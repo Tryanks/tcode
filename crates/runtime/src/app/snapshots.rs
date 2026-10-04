@@ -445,14 +445,20 @@ impl AppState {
         statuses
     }
 
-    pub(super) fn upsert_session_in_memory(&mut self, meta: SessionMeta) {
-        match self
-            .sessions
-            .iter_mut()
-            .find(|existing| existing.id == meta.id)
-        {
-            Some(existing) => *existing = meta,
-            None => self.sessions.push(meta),
+    /// `sessions` stays newest-first, matching `load_index`'s order.
+    pub(super) fn upsert_sessions_in_memory(
+        &mut self,
+        metas: impl IntoIterator<Item = SessionMeta>,
+    ) {
+        for meta in metas {
+            match self
+                .sessions
+                .iter_mut()
+                .find(|existing| existing.id == meta.id)
+            {
+                Some(existing) => *existing = meta,
+                None => self.sessions.push(meta),
+            }
         }
         self.sessions
             .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));

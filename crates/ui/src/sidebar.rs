@@ -1444,9 +1444,7 @@ impl SessionsSidebar {
                 )
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
-                        for session_id in &session_ids {
-                            store.archive_session(session_id.clone());
-                        }
+                        store.archive_sessions(session_ids.clone());
                     });
                     true
                 })
@@ -1517,7 +1515,7 @@ impl SessionsSidebar {
     }
 
     /// Archive a thread, honoring the delete-confirmation setting. Blocked while
-    /// the turn runs (`archive_session` no-ops then; the caller's tooltip warns).
+    /// the turn runs (`archive_sessions` skips it then; the caller's tooltip warns).
     fn archive_thread(
         &mut self,
         session_id: &str,
@@ -1532,7 +1530,7 @@ impl SessionsSidebar {
         let session_id = session_id.to_string();
         if store.read(cx).settings().skip_delete_confirmation {
             store.update(cx, |store, _cx| {
-                store.archive_session(session_id.clone());
+                store.archive_sessions(vec![session_id.clone()]);
             });
             return;
         }
@@ -1552,7 +1550,7 @@ impl SessionsSidebar {
                 )
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
-                        store.archive_session(session_id.clone());
+                        store.archive_sessions(vec![session_id.clone()]);
                     });
                     true
                 })
@@ -2916,7 +2914,7 @@ fn proceed_delete(
     let orphan = store.read(cx).worktree_orphaned_by_delete(&session_id);
     let Some(worktree) = orphan else {
         store.update(cx, |store, _cx| {
-            store.delete_session(session_id, false);
+            store.delete_sessions(vec![session_id], false);
         });
         return;
     };
@@ -2943,13 +2941,13 @@ fn proceed_delete(
             )
             .on_ok(move |_, _, cx| {
                 store_remove.update(cx, |store, _cx| {
-                    store.delete_session(remove.clone(), true);
+                    store.delete_sessions(vec![remove.clone()], true);
                 });
                 true
             })
             .on_cancel(move |_, _, cx| {
                 store.update(cx, |store, _cx| {
-                    store.delete_session(keep.clone(), false);
+                    store.delete_sessions(vec![keep.clone()], false);
                 });
                 true
             })

@@ -272,7 +272,7 @@ mod tests {
     use tcode_protocol::{ExternalThread, SourceTool};
 
     use super::*;
-    use crate::import::{ImportOutcome, import_thread};
+    use crate::import::{ImportedThread, prepare_import};
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("tcode-export-{label}-{}", uuid::Uuid::new_v4()))
@@ -349,7 +349,6 @@ mod tests {
                 .append_event(&meta.id, 1_000 + index as u64, event)
                 .unwrap();
         }
-        store.upsert_meta(&meta).unwrap();
         meta
     }
 
@@ -379,7 +378,6 @@ mod tests {
         );
 
         let project = Project::from_root(PathBuf::from("/restored/project"));
-        destination.upsert_project(&project).unwrap();
         let thread = ExternalThread {
             source: SourceTool::T3Code,
             file: export_path,
@@ -387,12 +385,13 @@ mod tests {
             title_hint: None,
             last_active_ms: 0,
         };
-        assert_eq!(
-            import_thread(&destination, &project, &thread, &mut HashSet::new()),
-            ImportOutcome::Imported
-        );
-
-        let restored = destination.load_index().pop().unwrap();
+        let ImportedThread {
+            meta: restored,
+            event_log,
+        } = prepare_import(&project, &thread, &HashSet::new()).expect("a Tcode export must import");
+        destination
+            .write_event_log(&restored.id, &event_log)
+            .unwrap();
         assert_ne!(restored.id, meta.id);
         assert_eq!(restored.cwd, project.root);
         assert_eq!(restored.project_id.as_deref(), Some(project.id.as_str()));

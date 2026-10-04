@@ -303,32 +303,40 @@ impl AppState {
             .map(|session| &mut session.meta)
     }
 
-    pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+    pub(super) fn persist_metas(&mut self, metas: Vec<SessionMeta>, cx: &mut HostCx) {
+        if metas.is_empty() {
+            return;
+        }
         // An update landing on the conversation the user is currently viewing
         // is already read: advance the last-visited watermark alongside it so
         // switching away later does not surface a stale unread dot. Threads the
         // user is not viewing keep their watermark (and their dot), as does an
         // explicit "mark unread" (which only rewrites the watermark).
-        if self.residents.live.contains_key(meta.id.as_str()) {
-            let visited = self.settings.last_visited.entry(meta.id.clone());
-            let visited = visited.or_insert(meta.updated_at);
-            if *visited < meta.updated_at {
-                *visited = meta.updated_at;
-                self.persist_settings(cx);
+        let mut visited_changed = false;
+        for meta in &metas {
+            if self.residents.live.contains_key(meta.id.as_str()) {
+                let visited = self.settings.last_visited.entry(meta.id.clone());
+                let visited = visited.or_insert(meta.updated_at);
+                if *visited < meta.updated_at {
+                    *visited = meta.updated_at;
+                    visited_changed = true;
+                }
             }
         }
+        if visited_changed {
+            self.persist_settings(cx);
+        }
         self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
+            StoreWrite::UpsertMetas {
+                metas: metas.clone(),
                 initial: false,
             },
             cx,
         );
         // Reflect the upsert in memory instead of reloading the whole index
-        // from disk: `persist_meta` runs on every turn,
+        // from disk: `persist_metas` runs on every turn,
         // where re-reading and re-parsing a large sessions.json stalls the UI.
-        // `sessions` stays newest-first, matching `load_index`'s order.
-        self.upsert_session_in_memory(meta.clone());
+        self.upsert_sessions_in_memory(metas);
     }
 
     pub(crate) fn shutdown_active(&mut self, target_id: &str, cx: &mut HostCx) {

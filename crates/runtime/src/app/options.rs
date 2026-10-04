@@ -274,13 +274,13 @@ impl AppState {
             cx,
         );
         self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
+            StoreWrite::UpsertMetas {
+                metas: vec![meta.clone()],
                 initial: true,
             },
             cx,
         );
-        self.upsert_session_in_memory(meta.clone());
+        self.upsert_sessions_in_memory([meta.clone()]);
         let session_id = meta.id.clone();
         let cwd = meta.cwd.clone();
         let provider_commands =
@@ -469,7 +469,7 @@ impl AppState {
         }
 
         let meta = active.meta.clone();
-        self.persist_meta(&meta, cx);
+        self.persist_metas(vec![meta], cx);
     }
 
     /// Toggle a model id in the persisted favorites list.

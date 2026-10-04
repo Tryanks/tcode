@@ -38,6 +38,18 @@ impl AppState {
                     "This thread is no longer available on the host.",
                 ));
             }
+            Command::ArchiveSessions { session_ids }
+            | Command::UnarchiveSessions { session_ids }
+            | Command::DeleteSessions { session_ids, .. }
+                if session_ids.iter().any(|id| {
+                    !self.sessions.iter().any(|meta| &meta.id == id) && self.resident(id).is_none()
+                }) =>
+            {
+                return Err(error(
+                    "unknown_session",
+                    "This thread is no longer available on the host.",
+                ));
+            }
             Command::ToggleProjectCollapsed { project_id }
             | Command::SetProjectIcon { project_id, .. }
             | Command::DeleteProject { project_id }
@@ -127,11 +139,8 @@ impl AppState {
             command,
             Command::SettleSession { .. }
                 | Command::MakeSessionActive { .. }
-                | Command::ArchiveSession { .. }
-                | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }
                 | Command::RegenerateSessionTitle { .. }
-                | Command::DeleteSession { .. }
                 | Command::MarkSessionUnread { .. }
                 | Command::ForkThread { .. }
         ) {

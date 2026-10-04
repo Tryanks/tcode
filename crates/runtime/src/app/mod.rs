@@ -66,7 +66,8 @@ use tcode_services::git::{
     read_git_branch, read_status, run_claude_headless,
 };
 use tcode_services::import::{
-    ExternalRoots, ImportOutcome, existing_external_ids, import_thread, scan_recent_dirs,
+    ExternalRoots, ImportSkip, ImportedThread, existing_external_ids, prepare_import,
+    scan_recent_dirs,
 };
 use tcode_services::provider_probe::{default_program, probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;

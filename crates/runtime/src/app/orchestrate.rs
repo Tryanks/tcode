@@ -176,7 +176,7 @@ impl AppState {
             live_meta.orchestrate_enabled = true;
             live_meta.updated_at = meta.updated_at;
         }
-        self.persist_meta(&meta, cx);
+        self.persist_metas(vec![meta.clone()], cx);
         let _ = self.orchestrate_registration_for(&meta);
         Ok(())
     }
@@ -385,13 +385,13 @@ impl AppState {
             brief
         };
         self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
+            StoreWrite::UpsertMetas {
+                metas: vec![meta.clone()],
                 initial: true,
             },
             cx,
         );
-        self.upsert_session_in_memory(meta.clone());
+        self.upsert_sessions_in_memory([meta.clone()]);
         let id = meta.id.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
@@ -427,7 +427,7 @@ impl AppState {
         if let Some(child) = self.resident_mut(thread_id) {
             child.meta.option_selections = meta.option_selections.clone();
         }
-        self.persist_meta(&meta, cx);
+        self.persist_metas(vec![meta], cx);
     }
 
     /// Resolve one MCP operation on the host owner thread.
@@ -632,7 +632,7 @@ impl AppState {
                     // A follow-up revives an archived child: it returns to the
                     // sidebar so the user can watch the retry it just received.
                     if archived {
-                        self.unarchive_session(&thread_id, cx);
+                        self.unarchive_sessions(std::slice::from_ref(&thread_id), cx);
                     }
                     self.reactivate_session(&thread_id, cx);
                     // A live turn accepts the message right away — same routing as

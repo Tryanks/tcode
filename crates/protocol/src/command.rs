@@ -236,11 +236,13 @@ pub enum Command {
     MakeSessionActive {
         session_id: String,
     },
-    ArchiveSession {
-        session_id: String,
+    /// Each listed thread is archived with its descendants, as one batch.
+    ArchiveSessions {
+        session_ids: Vec<String>,
     },
-    UnarchiveSession {
-        session_id: String,
+    /// Each listed thread is restored with the descendants archived alongside it.
+    UnarchiveSessions {
+        session_ids: Vec<String>,
     },
     AutoArchiveSweep {
         project_id: String,
@@ -255,9 +257,11 @@ pub enum Command {
     ForkThread {
         id: String,
     },
-    DeleteSession {
-        session_id: String,
-        remove_worktree: bool,
+    /// `remove_worktrees` removes each generated worktree once no remaining
+    /// thread uses it.
+    DeleteSessions {
+        session_ids: Vec<String>,
+        remove_worktrees: bool,
     },
     MergeWorktree {
         session_id: String,
@@ -426,11 +430,8 @@ impl Command {
             | Self::RemoveReviewComment { session_id, .. }
             | Self::SettleSession { session_id, .. }
             | Self::MakeSessionActive { session_id, .. }
-            | Self::ArchiveSession { session_id, .. }
-            | Self::UnarchiveSession { session_id, .. }
             | Self::RenameSession { session_id, .. }
             | Self::RegenerateSessionTitle { session_id }
-            | Self::DeleteSession { session_id, .. }
             | Self::MergeWorktree { session_id, .. }
             | Self::MarkSessionUnread { session_id, .. }
             | Self::SetDraftWorkspace { session_id, .. }

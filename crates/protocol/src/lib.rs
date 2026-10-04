@@ -40,8 +40,9 @@ pub use wire::{
 // compresses the native transport; version 7 carries the running turn and
 // the requests it waits on in the session status; version 8 adds the Cursor
 // and Grok provider kinds, which an older peer cannot decode because
-// `ProviderKind` has no unknown fallback.
-pub const PROTOCOL_VERSION: u32 = 8;
+// `ProviderKind` has no unknown fallback; version 9 replaces the single-thread
+// archive, unarchive and delete commands with batched ones.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]
 mod tests;

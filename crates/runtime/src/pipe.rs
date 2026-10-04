@@ -450,8 +450,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::PatchSettings { patch } => app.patch_settings(patch, cx),
         Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
         Command::MakeSessionActive { session_id } => app.make_session_active(&session_id, cx),
-        Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
-        Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
+        Command::ArchiveSessions { session_ids } => app.archive_sessions(&session_ids, cx),
+        Command::UnarchiveSessions { session_ids } => app.unarchive_sessions(&session_ids, cx),
         Command::AutoArchiveSweep { project_id } => {
             response = CommandResponse::ArchivedCount(app.auto_archive_sweep(&project_id, cx));
         }
@@ -463,10 +463,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             response = CommandResponse::SessionId(app.fork_thread(&id, cx));
         }
         Command::MergeWorktree { session_id } => app.merge_worktree(&session_id, cx),
-        Command::DeleteSession {
-            session_id,
-            remove_worktree,
-        } => app.delete_session(&session_id, remove_worktree, cx),
+        Command::DeleteSessions {
+            session_ids,
+            remove_worktrees,
+        } => app.delete_sessions(&session_ids, remove_worktrees, cx),
         Command::DeleteProject { project_id } => app.delete_project(&project_id, cx),
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
         Command::StartDraft { project_id, cwd } => {
@@ -1014,7 +1014,7 @@ mod tests {
                 },
             )
             .expect("append event");
-        store.upsert_meta(&meta).expect("write meta");
+        store.upsert_metas([&meta]).expect("write meta");
         let event_log = store.read_event_log(&meta.id).expect("read event log");
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
@@ -1123,7 +1123,7 @@ mod tests {
                 }),
             )
             .expect("append empty command output");
-        store.upsert_meta(&meta).expect("write meta");
+        store.upsert_metas([&meta]).expect("write meta");
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let link = host.link();

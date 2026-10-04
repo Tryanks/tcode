@@ -251,7 +251,6 @@ fn import_is_idempotent_and_replays_into_timeline() {
             json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Imported answer"}]},"timestamp":"2026-01-02T03:04:06.006Z","cwd":cwd,"sessionId":"session-1"}),
         ],
     );
-    let store = SessionStore::open_at(temp.path().join("store")).unwrap();
     let project = Project {
         id: "project-1".into(),
         name: "Project".into(),
@@ -259,7 +258,6 @@ fn import_is_idempotent_and_replays_into_timeline() {
         icon_path: None,
         created_at: 1,
     };
-    store.upsert_project(&project).unwrap();
     let thread = ExternalThread {
         source: SourceTool::ClaudeCode,
         file: transcript,
@@ -267,40 +265,36 @@ fn import_is_idempotent_and_replays_into_timeline() {
         title_hint: None,
         last_active_ms: 0,
     };
-    let mut existing = existing_external_ids(&store.load_index());
-    assert_eq!(
-        import_thread(&store, &project, &thread, &mut existing),
-        ImportOutcome::Imported
-    );
-    assert_eq!(
-        import_thread(&store, &project, &thread, &mut existing),
-        ImportOutcome::SkippedDuplicate
-    );
-
-    let index = store.load_index();
-    assert_eq!(index.len(), 1);
-    let meta = &index[0];
+    let ImportedThread { meta, event_log } = prepare_import(&project, &thread, &HashSet::new())
+        .expect("a transcript with messages must import");
     assert_eq!(meta.project_id.as_deref(), Some("project-1"));
     assert_eq!(meta.imported_from.as_deref(), Some("claude:session-1"));
     assert_eq!(
         meta.resume_cursor.as_ref().unwrap().0["session_id"],
         "session-1"
     );
+    let store = crate::store::SessionStore::open_at(temp.path().join("store")).unwrap();
+    store.write_event_log(&meta.id, &event_log).unwrap();
     let timeline = Timeline::fold_events(store.read_events(&meta.id));
     assert!(timeline.entries.iter().any(
         |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "Imported question")
     ));
     assert!(timeline.entries.iter().any(|entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Imported answer")));
 
-    let mut imported = meta.clone();
+    assert!(matches!(
+        prepare_import(
+            &project,
+            &thread,
+            &existing_external_ids(std::slice::from_ref(&meta))
+        ),
+        Err(ImportSkip::Duplicate)
+    ));
+    let mut imported = meta;
     imported.resume_cursor = None;
-    store.upsert_meta(&imported).unwrap();
-    let mut existing = existing_external_ids(&store.load_index());
-    assert_eq!(
-        import_thread(&store, &project, &thread, &mut existing),
-        ImportOutcome::SkippedDuplicate
-    );
-    assert_eq!(store.load_index().len(), 1);
+    assert!(matches!(
+        prepare_import(&project, &thread, &existing_external_ids(&[imported])),
+        Err(ImportSkip::Duplicate)
+    ));
 
     for (index, (provider, source, external_id, cursor, lines)) in [
         (ProviderKind::ClaudeCode, SourceTool::ClaudeCode, "claude:native-claude",
@@ -315,15 +309,14 @@ fn import_is_idempotent_and_replays_into_timeline() {
     ].into_iter().enumerate() {
         let mut native = SessionMeta::new(provider, project.root.clone(), None);
         native.resume_cursor = Some(ResumeCursor(cursor));
-        store.upsert_meta(&native).unwrap();
         let file = temp.path().join(format!("native-{index}.jsonl"));
         write_lines(&file, &lines);
         let thread = ExternalThread {
             source, file, external_id: external_id.into(), title_hint: None, last_active_ms: 0,
         };
-        let mut existing = existing_external_ids(&store.load_index());
-        assert_eq!(import_thread(&store, &project, &thread, &mut existing),
-            ImportOutcome::SkippedDuplicate, "{external_id}");
-        assert_eq!(store.load_index().len(), index + 2);
+        assert!(matches!(
+            prepare_import(&project, &thread, &existing_external_ids(&[native])),
+            Err(ImportSkip::Duplicate)
+        ), "{external_id}");
     }
 }

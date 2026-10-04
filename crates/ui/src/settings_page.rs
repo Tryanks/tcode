@@ -2229,7 +2229,7 @@ impl SettingsPage {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let id = id_unarchive.clone();
                                             this.store.update(cx, |store, _cx| {
-                                                store.unarchive_session(id);
+                                                store.unarchive_sessions(vec![id]);
                                             });
                                         })),
                                 )
@@ -2285,7 +2285,7 @@ impl SettingsPage {
                 )
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
-                        store.delete_session(session_id.clone(), false);
+                        store.delete_sessions(vec![session_id.clone()], false);
                     });
                     true
                 })
@@ -2324,10 +2324,7 @@ impl SettingsPage {
                             .into_iter()
                             .flat_map(|group| group.sessions.into_iter().map(|meta| meta.id))
                             .collect();
-                        // ponytail: one DeleteSession command per thread; add a bulk command if thousands feel slow.
-                        for id in ids {
-                            store.delete_session(id, false);
-                        }
+                        store.delete_sessions(ids, false);
                     });
                     true
                 })

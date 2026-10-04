@@ -3169,7 +3169,7 @@ mod tests {
         let root = scratch_root("tcode-deleted-pending");
         let disk = SessionStore::open_at(root.clone()).unwrap();
         disk.upsert_project(&project_at("p", &root)).unwrap();
-        disk.upsert_meta(&thread(&root, "deleted", "p", None))
+        disk.upsert_metas([&thread(&root, "deleted", "p", None)])
             .unwrap();
         let host = test_host(disk);
         let link = host.link();
@@ -3185,9 +3185,9 @@ mod tests {
         workspace.update(cx, |store, _| {
             store.send_turn("keep my failed send".into(), Vec::new())
         });
-        smol::block_on(
-            host.update_state_for_test(|state, cx| state.delete_session("deleted", false, cx)),
-        )
+        smol::block_on(host.update_state_for_test(|state, cx| {
+            state.delete_sessions(&["deleted".into()], false, cx)
+        }))
         .unwrap();
         workspace.update(cx, |store, cx| {
             store.apply_domain_event(
@@ -4008,7 +4008,8 @@ mod tests {
         let root = scratch_root("baseline-replay");
         let disk = SessionStore::open_at(root.clone()).unwrap();
         disk.upsert_project(&project_at("p", &root)).unwrap();
-        disk.upsert_meta(&thread(&root, "one", "p", None)).unwrap();
+        disk.upsert_metas([&thread(&root, "one", "p", None)])
+            .unwrap();
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session("one".into()));
@@ -4194,7 +4195,7 @@ mod tests {
             thread(&root, "child", "p", Some("parent")),
             thread(&root, "sibling", "p", None),
         ] {
-            disk.upsert_meta(&meta).expect("persist session");
+            disk.upsert_metas([&meta]).expect("persist session");
         }
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4210,8 +4211,8 @@ mod tests {
 
         command(
             &host,
-            Command::ArchiveSession {
-                session_id: "child".into(),
+            Command::ArchiveSessions {
+                session_ids: vec!["child".into()],
             },
         );
         wait_until(cx, &workspace, "parent reopened", |cx| {
@@ -4232,8 +4233,8 @@ mod tests {
 
         command(
             &host,
-            Command::ArchiveSession {
-                session_id: "sibling".into(),
+            Command::ArchiveSessions {
+                session_ids: vec!["sibling".into()],
             },
         );
         wait_until(cx, &workspace, "sibling archived", |cx| {
@@ -4266,7 +4267,7 @@ mod tests {
             thread(&root, "parent", "p", None),
             thread(&root, "child", "p", Some("parent")),
         ] {
-            disk.upsert_meta(&meta).expect("persist session");
+            disk.upsert_metas([&meta]).expect("persist session");
         }
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4305,8 +4306,8 @@ mod tests {
 
         command(
             &host,
-            Command::ArchiveSession {
-                session_id: "parent".into(),
+            Command::ArchiveSessions {
+                session_ids: vec!["parent".into()],
             },
         );
         wait_until(cx, &workspace, "the standing draft reopened", |cx| {
@@ -4386,7 +4387,7 @@ mod tests {
         let disk = SessionStore::open_at(root.clone()).unwrap();
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         meta.id = "reconnect".into();
-        disk.upsert_meta(&meta).unwrap();
+        disk.upsert_metas([&meta]).unwrap();
         let host = test_host(disk);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session("reconnect".into()));
@@ -4473,7 +4474,9 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         let session_id = meta.id.clone();
-        session_store.upsert_meta(&meta).expect("persist session");
+        session_store
+            .upsert_metas([&meta])
+            .expect("persist session");
         let events = [
             AgentEvent::ItemCompleted(ThreadItem {
                 id: "user-1".into(),
@@ -4640,7 +4643,7 @@ mod tests {
             .upsert_project(&seed_project)
             .expect("persist seed project");
         session_store
-            .upsert_meta(&seed_session)
+            .upsert_metas([&seed_session])
             .expect("persist seed session");
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4676,8 +4679,8 @@ mod tests {
         command(&host, Command::CreateProject { root: created_root });
         command(
             &host,
-            Command::ArchiveSession {
-                session_id: seed_session_id.clone(),
+            Command::ArchiveSessions {
+                session_ids: vec![seed_session_id.clone()],
             },
         );
         let mut settings = workspace.read_with(cx, |store, _cx| store.settings());
@@ -4774,7 +4777,9 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         let session_id = meta.id.clone();
-        session_store.upsert_meta(&meta).expect("persist session");
+        session_store
+            .upsert_metas([&meta])
+            .expect("persist session");
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4859,10 +4864,10 @@ mod tests {
         let first = SessionMeta::new(ProviderKind::Codex, root.join("first"), None);
         let second = SessionMeta::new(ProviderKind::Codex, root.join("second"), None);
         session_store
-            .upsert_meta(&first)
+            .upsert_metas([&first])
             .expect("persist first session");
         session_store
-            .upsert_meta(&second)
+            .upsert_metas([&second])
             .expect("persist second session");
 
         let host = test_host(session_store);
@@ -4983,10 +4988,10 @@ mod tests {
         let first = SessionMeta::new(ProviderKind::ClaudeCode, root.join("first"), None);
         let second = SessionMeta::new(ProviderKind::ClaudeCode, root.join("second"), None);
         session_store
-            .upsert_meta(&first)
+            .upsert_metas([&first])
             .expect("persist first session");
         session_store
-            .upsert_meta(&second)
+            .upsert_metas([&second])
             .expect("persist second session");
 
         let host = test_host(session_store);
@@ -5058,7 +5063,9 @@ mod tests {
         let root = scratch_root("tcode-fallback-lifecycle-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, root.join("worktree"), None);
-        session_store.upsert_meta(&meta).expect("persist session");
+        session_store
+            .upsert_metas([&meta])
+            .expect("persist session");
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -5159,7 +5166,7 @@ mod tests {
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         meta.id = "git-replica".into();
-        session_store.upsert_meta(&meta).unwrap();
+        session_store.upsert_metas([&meta]).unwrap();
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
@@ -5262,7 +5269,7 @@ mod tests {
                 disk.upsert_project(&project_at(project, &root))
                     .expect("persist project");
             }
-            disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
+            disk.upsert_metas([&thread(&root, "kept-thread", "kept", None)])
                 .expect("persist session");
             let host = test_host(disk);
             let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));

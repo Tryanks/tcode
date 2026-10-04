@@ -171,7 +171,7 @@ impl AppState {
                         OptionDescriptors::Wire
                     )
                 }) {
-                    self.persist_meta(&meta, cx);
+                    self.persist_metas(vec![meta], cx);
                 }
                 return;
             }
@@ -197,7 +197,7 @@ impl AppState {
                     }
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
-                    self.persist_meta(&meta, cx);
+                    self.persist_metas(vec![meta], cx);
                 }
                 if filled_default_model && let Some(resident) = self.resident_mut(session_id) {
                     resident.live_model = model.clone();
@@ -207,7 +207,7 @@ impl AppState {
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
-                    self.persist_meta(&meta, cx);
+                    self.persist_metas(vec![meta], cx);
                 }
                 // The turn may have switched branches (checkout) or made the
                 // first commit; refresh the display-only branch label and the
@@ -247,7 +247,7 @@ impl AppState {
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
-                    self.persist_meta(&meta, cx);
+                    self.persist_metas(vec![meta], cx);
                 }
                 emit_runtime(
                     cx,
@@ -586,7 +586,7 @@ impl AppState {
         }) else {
             return;
         };
-        self.persist_meta(&fallback_meta, cx);
+        self.persist_metas(vec![fallback_meta.clone()], cx);
 
         self.spawn_title_generation(
             fallback_meta,
@@ -793,7 +793,7 @@ impl AppState {
         if let Some(session) = self.resident_mut(session_id) {
             session.meta.title = meta.title.clone();
         }
-        self.persist_meta(&meta, cx);
+        self.persist_metas(vec![meta], cx);
     }
 }
 

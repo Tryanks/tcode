@@ -210,8 +210,11 @@ impl AppState {
     /// as replicated host state on [`Topic::ExternalImport`]. Returns `false`
     /// for an unknown project; a second concurrent run is rejected outright.
     ///
-    /// Completion is runtime-owned: the importer's last update finalizes the
-    /// index here regardless of whether any client is still subscribed.
+    /// Each event log is installed by the store writer before its thread counts
+    /// as imported; the index entries follow in one batch when the run
+    /// completes. Completion is runtime-owned: the importer's last update
+    /// finalizes the index here regardless of whether any client is still
+    /// subscribed.
     pub fn start_external_import(
         &mut self,
         project_id: &str,
@@ -254,21 +257,38 @@ impl AppState {
             cx,
         );
 
-        let store = self.store.clone();
+        self.start_store_writer(cx);
+        let writes = self.store_writes.clone();
         let metas = self.sessions.clone();
         let id = project_id.to_string();
         let updates = cx.clone();
         cx.unblock(move || {
-            let mut imported = 0;
+            let mut imported = Vec::new();
             let mut skipped = 0;
             let mut existing = existing_external_ids(&metas);
             for (index, thread) in threads.into_iter().enumerate() {
                 let tool = thread.source.display_name().to_string();
-                match import_thread(&store, &project, &thread, &mut existing) {
-                    ImportOutcome::Imported => imported += 1,
-                    ImportOutcome::SkippedDuplicate
-                    | ImportOutcome::SkippedEmpty
-                    | ImportOutcome::Failed(_) => skipped += 1,
+                match prepare_import(&project, &thread, &existing) {
+                    Ok(ImportedThread { meta, event_log }) => {
+                        let (completion, written) = smol::channel::bounded(1);
+                        let installed = writes
+                            .try_send(StoreWrite::WriteEventLog {
+                                id: meta.id.clone(),
+                                bytes: event_log,
+                                completion,
+                            })
+                            .is_ok()
+                            && written.recv_blocking().is_ok_and(|result| result.is_ok());
+                        if installed {
+                            existing.extend(meta.imported_from.clone());
+                            imported.push(meta);
+                        } else {
+                            skipped += 1;
+                        }
+                    }
+                    Err(ImportSkip::Duplicate | ImportSkip::Empty | ImportSkip::Failed(_)) => {
+                        skipped += 1
+                    }
                 }
                 let (id, done) = (id.clone(), index + 1);
                 updates.enqueue(move |state, cx| {
@@ -312,15 +332,15 @@ impl AppState {
         );
     }
 
-    /// Finalize a finished run. The index is reloaded in this mailbox turn, so
-    /// its replacement reaches clients before the `Finished` status published
-    /// by the follow-up turn — a subscriber never sees `Finished` with a stale
-    /// session list.
+    /// Finalize a finished run. The imported threads enter the index in this
+    /// mailbox turn, so they reach clients before the `Finished` status
+    /// published by the follow-up turn — a subscriber never sees `Finished`
+    /// with a stale session list.
     fn complete_external_import(
         &mut self,
         project_id: &str,
         run_id: u64,
-        imported: usize,
+        imported: Vec<SessionMeta>,
         skipped: usize,
         cx: &mut HostCx,
     ) {
@@ -330,15 +350,34 @@ impl AppState {
             .map(|status| status.run_id)
             != Some(run_id)
         {
+            // The project was deleted mid-run: its threads go with it.
+            let logs = imported.into_iter().map(|meta| meta.id).collect::<Vec<_>>();
+            if !logs.is_empty() {
+                self.enqueue_store_write(StoreWrite::RemoveSessions(logs), cx);
+            }
             return;
         }
-        self.finish_external_import(project_id, cx);
+        let imported_count = imported.len();
+        if !imported.is_empty() {
+            self.enqueue_store_write(
+                StoreWrite::UpsertMetas {
+                    metas: imported.clone(),
+                    initial: true,
+                },
+                cx,
+            );
+            self.upsert_sessions_in_memory(imported);
+        }
+        self.expand_imported_project(project_id, cx);
         let project_id = project_id.to_string();
         cx.enqueue(move |state, cx| {
             state.advance_external_import(
                 &project_id,
                 run_id,
-                ExternalImportState::Finished { imported, skipped },
+                ExternalImportState::Finished {
+                    imported: imported_count,
+                    skipped,
+                },
                 cx,
             );
         });
@@ -399,10 +438,7 @@ impl AppState {
         executor.unblock(move || cwd.map(|cwd| list_workspace(&cwd)).unwrap_or_default())
     }
 
-    /// Reload sessions written by the external-history importer and expand its
-    /// project group.
-    fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
-        self.sessions = self.store.load_index();
+    fn expand_imported_project(&mut self, project_id: &str, cx: &mut HostCx) {
         if self
             .settings
             .collapsed_projects
@@ -686,27 +722,31 @@ impl AppState {
             return;
         }
         let timestamp = now_secs();
-        for id in descendant_session_ids(&self.sessions, session_id) {
-            if let Some(mut meta) = self.find_meta(&id)
-                && meta.settled_at.is_none()
-            {
+        let settled = descendant_session_ids(&self.sessions, session_id)
+            .iter()
+            .filter_map(|id| self.find_meta(id))
+            .filter(|meta| meta.settled_at.is_none())
+            .map(|mut meta| {
                 meta.settled_at = Some(timestamp);
-                self.persist_settled_meta(meta, cx);
-            }
-        }
+                meta
+            })
+            .collect();
+        self.persist_settled_metas(settled, cx);
     }
 
     /// Restore the matching settle cascade, then expose all of its ancestors.
     pub fn make_session_active(&mut self, session_id: &str, cx: &mut HostCx) {
         if let Some(timestamp) = self.find_meta(session_id).and_then(|meta| meta.settled_at) {
-            for id in descendant_session_ids(&self.sessions, session_id) {
-                if let Some(mut meta) = self.find_meta(&id)
-                    && meta.settled_at == Some(timestamp)
-                {
+            let restored = descendant_session_ids(&self.sessions, session_id)
+                .iter()
+                .filter_map(|id| self.find_meta(id))
+                .filter(|meta| meta.settled_at == Some(timestamp))
+                .map(|mut meta| {
                     meta.settled_at = None;
-                    self.persist_settled_meta(meta, cx);
-                }
-            }
+                    meta
+                })
+                .collect();
+            self.persist_settled_metas(restored, cx);
         }
         self.reactivate_session(session_id, cx);
     }
@@ -715,6 +755,7 @@ impl AppState {
     pub(super) fn reactivate_session(&mut self, session_id: &str, cx: &mut HostCx) {
         let mut next = Some(session_id.to_string());
         let mut visited = HashSet::new();
+        let mut reactivated = Vec::new();
         while let Some(id) = next.take() {
             if !visited.insert(id.clone()) {
                 break;
@@ -724,58 +765,70 @@ impl AppState {
             };
             next = meta.parent_session_id.clone();
             if meta.settled_at.take().is_some() {
-                self.persist_settled_meta(meta, cx);
+                reactivated.push(meta);
             }
         }
+        self.persist_settled_metas(reactivated, cx);
     }
 
-    fn persist_settled_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
-        if let Some(session) = self.resident_mut(&meta.id) {
-            session.meta.settled_at = meta.settled_at;
+    fn persist_settled_metas(&mut self, metas: Vec<SessionMeta>, cx: &mut HostCx) {
+        for meta in &metas {
+            if let Some(session) = self.resident_mut(&meta.id) {
+                session.meta.settled_at = meta.settled_at;
+            }
         }
-        self.persist_meta(&meta, cx);
+        self.persist_metas(metas, cx);
     }
 
-    /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
-    /// its turn is running (returns without changing anything so the caller's
-    /// tooltip stands). The active thread is closed back to the empty state.
-    pub fn archive_session(&mut self, session_id: &str, cx: &mut HostCx) {
-        if self.turn_running_for(session_id)
-            || self
+    /// Archive threads with their descendants (reversible; they vanish from
+    /// the sidebar). A thread whose turn is running, or that is already
+    /// archived, is skipped so the caller's tooltip stands. An archived active
+    /// thread is closed back to the empty state.
+    pub fn archive_sessions(&mut self, session_ids: &[String], cx: &mut HostCx) {
+        let mut ids = Vec::new();
+        for session_id in session_ids {
+            if self.turn_running_for(session_id)
+                || self
+                    .sessions
+                    .iter()
+                    .find(|meta| &meta.id == session_id)
+                    .is_none_or(|meta| meta.archived_at.is_some())
+            {
+                continue;
+            }
+            ids.extend(descendant_session_ids(&self.sessions, session_id));
+        }
+        if !ids.is_empty() {
+            self.archive_session_ids(&ids, now_secs(), cx);
+        }
+    }
+
+    /// Restore archived threads (Settings → Archived Threads → Unarchive), each
+    /// with the descendants archived alongside it.
+    pub fn unarchive_sessions(&mut self, session_ids: &[String], cx: &mut HostCx) {
+        let mut restored = Vec::new();
+        for session_id in session_ids {
+            let Some(archived_at) = self
                 .sessions
                 .iter()
-                .find(|meta| meta.id == session_id)
-                .is_none_or(|meta| meta.archived_at.is_some())
-        {
-            return;
-        }
-        let ids = descendant_session_ids(&self.sessions, session_id);
-        self.archive_session_ids(&ids, now_secs(), cx);
-    }
-
-    /// Restore an archived thread (Settings → Archived Threads → Unarchive).
-    pub fn unarchive_session(&mut self, session_id: &str, cx: &mut HostCx) {
-        let Some(archived_at) = self
-            .sessions
-            .iter()
-            .find(|meta| meta.id == session_id)
-            .and_then(|meta| meta.archived_at)
-        else {
-            return;
-        };
-        let ids = descendant_session_ids(&self.sessions, session_id);
-        for id in ids {
-            let Some(meta) = self
-                .sessions
-                .iter_mut()
-                .find(|meta| meta.id == id && meta.archived_at == Some(archived_at))
+                .find(|meta| &meta.id == session_id)
+                .and_then(|meta| meta.archived_at)
             else {
                 continue;
             };
-            meta.archived_at = None;
-            let meta = meta.clone();
-            self.persist_meta(&meta, cx);
+            for id in descendant_session_ids(&self.sessions, session_id) {
+                let Some(meta) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|meta| meta.id == id && meta.archived_at == Some(archived_at))
+                else {
+                    continue;
+                };
+                meta.archived_at = None;
+                restored.push(meta.clone());
+            }
         }
+        self.persist_metas(restored, cx);
     }
 
     /// Sweep one project's visible sessions using the configured idle and
@@ -845,9 +898,7 @@ impl AppState {
                 changed.push(meta.clone());
             }
         }
-        for meta in changed {
-            self.persist_meta(&meta, cx);
-        }
+        self.persist_metas(changed, cx);
     }
 
     /// Rename a thread (context-menu inline edit). Empty titles are rejected.
@@ -863,7 +914,7 @@ impl AppState {
             meta.title = title.to_string();
             meta.updated_at = now_secs();
             let meta = meta.clone();
-            self.persist_meta(&meta, cx);
+            self.persist_metas(vec![meta], cx);
         }
     }
 
@@ -939,13 +990,13 @@ impl AppState {
             host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
                     state.enqueue_store_write(
-                        StoreWrite::UpsertMeta {
-                            meta: Box::new(fork.clone()),
+                        StoreWrite::UpsertMetas {
+                            metas: vec![fork.clone()],
                             initial: true,
                         },
                         cx,
                     );
-                    state.upsert_session_in_memory(fork.clone());
+                    state.upsert_sessions_in_memory([fork.clone()]);
                     state.select_session(&fork.id, cx);
                     if let Some(snapshot) =
                         state.subscription_snapshot(&tcode_protocol::Subscription {
@@ -966,71 +1017,100 @@ impl AppState {
         Some(fork_id)
     }
 
-    /// Permanently delete a thread: stop the provider, close its terminal,
-    /// delete meta + JSONL, and (when `remove_worktree`) remove the git worktree
-    /// it was the last user of.
-    pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
-        self.clear_approvals(session_id);
-        let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
-        if self.residents.live.contains_key(session_id) {
-            // shutdown_active drops the ActiveSession (and its terminal PTY).
-            self.shutdown_active(session_id, cx);
+    /// Permanently delete threads: stop their providers, close their
+    /// terminals, delete meta + JSONL, and (when `remove_worktrees`) remove
+    /// each git worktree its thread was the last user of.
+    pub fn delete_sessions(
+        &mut self,
+        session_ids: &[String],
+        remove_worktrees: bool,
+        cx: &mut HostCx,
+    ) {
+        if session_ids.is_empty() {
+            return;
         }
-        // Deleting a thread that is working in the background kills it for real.
-        self.drop_background(session_id, cx);
-        self.terminal_workspaces
-            .remove(&ConversationDestination::Thread(session_id.to_string()));
-        if self.terminal_preferences.remove(session_id).is_some() {
+        if self.forget_sessions(session_ids, remove_worktrees, cx) {
             self.write_terminal_preferences(cx);
         }
-        self.close_orchestrator_children(session_id, cx);
-        let worktree_remove = meta.as_ref().and_then(|meta| {
-            let worktree = meta.worktree.as_ref().filter(|_| remove_worktree)?;
-            let shared = self
-                .sessions
-                .iter()
-                .chain(self.residents.live.values().map(|session| &session.meta))
-                .any(|other| meta.shares_worktree_with(other));
-            if shared {
-                log::info!(
-                    "keeping worktree {} in use by another thread",
-                    meta.cwd.display()
-                );
-                return None;
-            }
-            Some((worktree.root_project_path.clone(), meta.cwd.clone()))
-        });
-        self.settings.last_visited.remove(session_id);
-        self.settings
-            .collapsed_threads
-            .retain(|id| id != session_id);
-        self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
-        self.sessions.retain(|meta| meta.id != session_id);
-        if let Some((root, cwd)) = worktree_remove {
-            let deleted_id = session_id.to_string();
-            let host_cx = cx.clone();
-            HostCx::spawn_detached(cx, async move {
-                let result = host_cx
-                    .unblock(move || remove_git_worktree(&root, &cwd))
-                    .await;
-                host_cx.enqueue(move |state, cx| {
-                    if let Err(err) = result
-                        && !state.sessions.iter().any(|meta| meta.id == deleted_id)
-                        && !state.residents.live.contains_key(&deleted_id)
-                        && !state.residents.parked.contains_key(&deleted_id)
-                    {
-                        state.report_error(
-                            RuntimeError::WorktreeRemove {
-                                error: err.to_string(),
-                            },
-                            cx,
-                        );
-                    }
-                });
+    }
+
+    /// Everything `delete_sessions` does except persisting settings and
+    /// terminal preferences, which the caller does once for the whole batch.
+    /// Returns whether terminal preferences changed.
+    fn forget_sessions(
+        &mut self,
+        session_ids: &[String],
+        remove_worktrees: bool,
+        cx: &mut HostCx,
+    ) -> bool {
+        let mut terminal_preferences_changed = false;
+        for session_id in session_ids {
+            let session_id = session_id.as_str();
+            self.clear_approvals(session_id);
+            let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
+            if self.residents.live.contains_key(session_id) {
+                // shutdown_active drops the ActiveSession (and its terminal PTY).
+                self.shutdown_active(session_id, cx);
+            }
+            // Deleting a thread that is working in the background kills it for real.
+            self.drop_background(session_id, cx);
+            self.terminal_workspaces
+                .remove(&ConversationDestination::Thread(session_id.to_string()));
+            terminal_preferences_changed |= self.terminal_preferences.remove(session_id).is_some();
+            self.close_orchestrator_children(session_id, cx);
+            // Threads earlier in the batch are already gone, so the last of
+            // several threads sharing a worktree is the one that removes it.
+            let worktree_remove = meta.as_ref().and_then(|meta| {
+                let worktree = meta.worktree.as_ref().filter(|_| remove_worktrees)?;
+                let shared = self
+                    .sessions
+                    .iter()
+                    .chain(self.residents.live.values().map(|session| &session.meta))
+                    .any(|other| meta.shares_worktree_with(other));
+                if shared {
+                    log::info!(
+                        "keeping worktree {} in use by another thread",
+                        meta.cwd.display()
+                    );
+                    return None;
+                }
+                Some((worktree.root_project_path.clone(), meta.cwd.clone()))
             });
+            self.settings.last_visited.remove(session_id);
+            self.settings
+                .collapsed_threads
+                .retain(|id| id != session_id);
+            self.sessions.retain(|meta| meta.id != session_id);
+            if let Some((root, cwd)) = worktree_remove {
+                let deleted_id = session_id.to_string();
+                let host_cx = cx.clone();
+                HostCx::spawn_detached(cx, async move {
+                    let result = host_cx
+                        .unblock(move || remove_git_worktree(&root, &cwd))
+                        .await;
+                    host_cx.enqueue(move |state, cx| {
+                        if let Err(err) = result
+                            && !state.sessions.iter().any(|meta| meta.id == deleted_id)
+                            && !state.residents.live.contains_key(&deleted_id)
+                            && !state.residents.parked.contains_key(&deleted_id)
+                        {
+                            state.report_error(
+                                RuntimeError::WorktreeRemove {
+                                    error: err.to_string(),
+                                },
+                                cx,
+                            );
+                        }
+                    });
+                });
+            }
         }
+        if !session_ids.is_empty() {
+            self.enqueue_store_write(StoreWrite::RemoveSessions(session_ids.to_vec()), cx);
+        }
+        terminal_preferences_changed
     }
 
     /// Permanently remove a project and all of its threads from tcode. Project
@@ -1054,15 +1134,12 @@ impl AppState {
         }
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.terminal_workspaces.remove(&draft_destination);
-        if self
+        let draft_preferences_changed = self
             .terminal_preferences
             .remove(&draft_destination.preference_key())
-            .is_some()
-        {
+            .is_some();
+        if self.forget_sessions(&session_ids, false, cx) || draft_preferences_changed {
             self.write_terminal_preferences(cx);
-        }
-        for session_id in session_ids {
-            self.delete_session(&session_id, false, cx);
         }
         self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
@@ -1409,13 +1486,13 @@ impl AppState {
                 cx,
             );
             self.enqueue_store_write(
-                StoreWrite::UpsertMeta {
-                    meta: Box::new(meta.clone()),
+                StoreWrite::UpsertMetas {
+                    metas: vec![meta.clone()],
                     initial: true,
                 },
                 cx,
             );
-            self.upsert_session_in_memory(meta);
+            self.upsert_sessions_in_memory([meta]);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)

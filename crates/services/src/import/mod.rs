@@ -11,7 +11,7 @@ use agent::{AgentEvent, ProviderKind, ResumeCursor, ThreadItem, TurnStatus};
 use serde_json::json;
 
 use crate::export::{ReadExportError, TcodeThreadExport, read_tcode_export};
-use crate::store::SessionStore;
+use crate::store::encode_event_log;
 use tcode_core::project::{Project, SessionMeta};
 pub use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
 
@@ -61,11 +61,19 @@ pub fn existing_external_ids(metas: &[SessionMeta]) -> HashSet<String> {
     ids
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImportOutcome {
-    Imported,
-    SkippedDuplicate,
-    SkippedEmpty,
+/// A converted thread ready to install: its index entry and its complete
+/// event log. Nothing is written until the caller installs it.
+#[derive(Debug)]
+pub struct ImportedThread {
+    pub meta: SessionMeta,
+    pub event_log: Vec<u8>,
+}
+
+/// Why a selected thread was not imported.
+#[derive(Debug)]
+pub enum ImportSkip {
+    Duplicate,
+    Empty,
     Failed(String),
 }
 
@@ -93,24 +101,23 @@ impl ConvertedThread {
     }
 }
 
-pub fn import_thread(
-    store: &SessionStore,
+pub fn prepare_import(
     project: &Project,
     thread: &ExternalThread,
-    existing: &mut HashSet<String>,
-) -> ImportOutcome {
+    existing: &HashSet<String>,
+) -> Result<ImportedThread, ImportSkip> {
     if existing.contains(&thread.external_id) {
-        return ImportOutcome::SkippedDuplicate;
+        return Err(ImportSkip::Duplicate);
     }
 
     if thread.source == SourceTool::T3Code {
         match read_tcode_export(&thread.file) {
-            Ok(export) => return import_tcode_thread(store, project, export, existing),
+            Ok(export) => return prepare_tcode_import(project, export, existing),
             Err(ReadExportError::NotTcode) => {
                 // Older T3 releases persisted Claude's native transcript and
                 // are still handled by the Claude converter below.
             }
-            Err(ReadExportError::Invalid(error)) => return ImportOutcome::Failed(error),
+            Err(ReadExportError::Invalid(error)) => return Err(ImportSkip::Failed(error)),
         }
     }
 
@@ -125,11 +132,11 @@ pub fn import_thread(
     };
     let converted = match converted {
         Ok(Some(converted)) => converted,
-        Ok(None) => return ImportOutcome::SkippedEmpty,
-        Err(err) => return ImportOutcome::Failed(err),
+        Ok(None) => return Err(ImportSkip::Empty),
+        Err(err) => return Err(ImportSkip::Failed(err)),
     };
     if converted.item_count() == 0 {
-        return ImportOutcome::SkippedEmpty;
+        return Err(ImportSkip::Empty);
     }
 
     let (provider, cursor) = if converted.external_id.starts_with("claude:") {
@@ -233,30 +240,22 @@ pub fn import_thread(
         ));
     }
 
-    for (ts, event) in &events {
-        if let Err(err) = store.append_event(&meta.id, *ts, event) {
-            return ImportOutcome::Failed(format!("failed to write imported events: {err}"));
-        }
-    }
-    if let Err(err) = store.upsert_meta(&meta) {
-        return ImportOutcome::Failed(format!("failed to write imported session: {err}"));
-    }
-    existing.insert(converted.external_id);
-    ImportOutcome::Imported
+    let event_log = encode_event_log(events.iter().map(|(ts, event)| (*ts, event)))
+        .map_err(|err| ImportSkip::Failed(format!("failed to encode imported events: {err}")))?;
+    Ok(ImportedThread { meta, event_log })
 }
 
-fn import_tcode_thread(
-    store: &SessionStore,
+fn prepare_tcode_import(
     project: &Project,
     export: TcodeThreadExport,
-    existing: &mut HashSet<String>,
-) -> ImportOutcome {
+    existing: &HashSet<String>,
+) -> Result<ImportedThread, ImportSkip> {
     if export.events.is_empty() {
-        return ImportOutcome::SkippedEmpty;
+        return Err(ImportSkip::Empty);
     }
     let external_id = format!("tcode:{}", export.meta.id);
     if existing.contains(&external_id) {
-        return ImportOutcome::SkippedDuplicate;
+        return Err(ImportSkip::Duplicate);
     }
 
     let mut meta = export.meta;
@@ -267,16 +266,11 @@ fn import_tcode_thread(
     meta.archived_at = None;
     meta.worktree = None;
     meta.parent_session_id = None;
-    meta.imported_from = Some(external_id.clone());
-
-    if let Err(error) = store.write_event_log(&meta.id, &export.event_log) {
-        return ImportOutcome::Failed(format!("failed to write imported events: {error}"));
-    }
-    if let Err(error) = store.upsert_meta(&meta) {
-        return ImportOutcome::Failed(format!("failed to write imported session: {error}"));
-    }
-    existing.insert(external_id);
-    ImportOutcome::Imported
+    meta.imported_from = Some(external_id);
+    Ok(ImportedThread {
+        meta,
+        event_log: export.event_log,
+    })
 }
 
 fn title_from_text(text: &str) -> String {

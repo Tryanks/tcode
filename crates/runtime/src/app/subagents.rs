@@ -173,7 +173,7 @@ impl AppState {
             }
         });
         if let Some(meta) = meta.flatten() {
-            self.persist_meta(&meta, cx);
+            self.persist_metas(vec![meta], cx);
         }
         let turn_status = match status {
             ItemStatus::Failed | ItemStatus::Declined => TurnStatus::Failed,
@@ -287,13 +287,13 @@ impl AppState {
         );
 
         self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
+            StoreWrite::UpsertMetas {
+                metas: vec![meta.clone()],
                 initial: true,
             },
             cx,
         );
-        self.upsert_session_in_memory(meta.clone());
+        self.upsert_sessions_in_memory([meta.clone()]);
 
         let id = meta.id.clone();
         let commands = self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
@@ -344,7 +344,7 @@ impl AppState {
                 meta.clone()
             });
             if let Some(meta) = meta {
-                self.persist_meta(&meta, cx);
+                self.persist_metas(vec![meta], cx);
             }
         }
     }

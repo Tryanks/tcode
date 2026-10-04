@@ -185,11 +185,11 @@ impl WorkspaceStore {
     pub fn make_session_active(&mut self, session_id: String) {
         self.dispatch(Command::MakeSessionActive { session_id });
     }
-    pub fn archive_session(&mut self, session_id: String) {
-        self.dispatch(Command::ArchiveSession { session_id });
+    pub fn archive_sessions(&mut self, session_ids: Vec<String>) {
+        self.dispatch(Command::ArchiveSessions { session_ids });
     }
-    pub fn unarchive_session(&mut self, session_id: String) {
-        self.dispatch(Command::UnarchiveSession { session_id });
+    pub fn unarchive_sessions(&mut self, session_ids: Vec<String>) {
+        self.dispatch(Command::UnarchiveSessions { session_ids });
     }
     pub fn auto_archive_sweep(
         &self,
@@ -211,10 +211,10 @@ impl WorkspaceStore {
     pub fn merge_worktree(&mut self, session_id: String) {
         self.dispatch(Command::MergeWorktree { session_id });
     }
-    pub fn delete_session(&mut self, session_id: String, remove_worktree: bool) {
-        self.dispatch(Command::DeleteSession {
-            session_id,
-            remove_worktree,
+    pub fn delete_sessions(&mut self, session_ids: Vec<String>, remove_worktrees: bool) {
+        self.dispatch(Command::DeleteSessions {
+            session_ids,
+            remove_worktrees,
         });
     }
     pub fn mark_session_unread(&mut self, session_id: String) {

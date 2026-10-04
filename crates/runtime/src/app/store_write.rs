@@ -6,16 +6,21 @@ pub(super) enum StoreWrite {
         ts: u64,
         event: Box<AgentEvent>,
     },
-    UpsertMeta {
-        meta: Box<SessionMeta>,
+    UpsertMetas {
+        metas: Vec<SessionMeta>,
         initial: bool,
     },
     UpsertProject(Project),
-    RemoveSession(String),
+    RemoveSessions(Vec<String>),
     RemoveProject(String),
     CloneEvents {
         src: String,
         dst: String,
+        completion: smol::channel::Sender<Result<(), String>>,
+    },
+    WriteEventLog {
+        id: String,
+        bytes: Vec<u8>,
         completion: smol::channel::Sender<Result<(), String>>,
     },
     SaveCommands {
@@ -54,7 +59,7 @@ pub(super) fn run_store_write(
                 })
             })
         }
-        StoreWrite::UpsertMeta { meta, initial } => store.upsert_meta(&meta).err().map(|err| {
+        StoreWrite::UpsertMetas { metas, initial } => store.upsert_metas(&metas).err().map(|err| {
             if initial {
                 Ok(RuntimeError::PersistSession {
                     error: err.to_string(),
@@ -70,7 +75,7 @@ pub(super) fn run_store_write(
                 error: err.to_string(),
             })
         }),
-        StoreWrite::RemoveSession(id) => store.remove_session(&id).err().map(|err| {
+        StoreWrite::RemoveSessions(ids) => store.remove_sessions(&ids).err().map(|err| {
             Ok(RuntimeError::DeleteSession {
                 error: err.to_string(),
             })
@@ -87,6 +92,17 @@ pub(super) fn run_store_write(
         } => {
             let result = store
                 .clone_events(&src, &dst)
+                .map_err(|err| err.to_string());
+            let _ = completion.try_send(result);
+            None
+        }
+        StoreWrite::WriteEventLog {
+            id,
+            bytes,
+            completion,
+        } => {
+            let result = store
+                .write_event_log(&id, &bytes)
                 .map_err(|err| err.to_string());
             let _ = completion.try_send(result);
             None
