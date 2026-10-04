@@ -4732,8 +4732,13 @@ mod tests {
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, _| store.select_session("parent".into()));
-        wait_until(cx, &workspace, "parent selected", |cx| {
+        wait_until(cx, &workspace, "parent on screen", |cx| {
             selected_status(cx, &workspace, "parent")
+                && workspace.read_with(cx, |store, _| held_window(store, "parent").is_some())
+        });
+        let parent_cursor = workspace.read_with(cx, |store, _| {
+            let held = held_history(store, "parent");
+            (Some(held.epoch), Some(held.end))
         });
         workspace.update(cx, |store, _| store.select_session("child".into()));
         wait_until(cx, &workspace, "child selected", |cx| {
@@ -4753,6 +4758,17 @@ mod tests {
             assert!(
                 held_window(store, "parent").is_some(),
                 "the parent's replicated records were dropped on the way back"
+            );
+            let events_cursor = store
+                .host
+                .subscriptions()
+                .into_iter()
+                .find(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
+                .map(|sub| (sub.epoch, sub.after));
+            assert_eq!(
+                events_cursor,
+                Some(parent_cursor),
+                "the parent resumes from its cursor, not from nothing"
             );
         });
         // The index and its summary replicate on their own topics: the
