@@ -166,24 +166,20 @@ pub struct WorkspaceStore {
     settings_hydrated: bool,
     baseline_topics: HashSet<Topic>,
     index_hydrated: bool,
-    hydrated_sessions: HashSet<String>,
     selected_session_id: Option<String>,
-    session_records: HashMap<String, Vec<StoredEvent>>,
-    /// The log cursors `session_records` stands for. The host may merge
-    /// records, so the range can be longer than the records.
-    session_from: HashMap<String, u64>,
-    session_end: HashMap<String, u64>,
-    /// The layout `session_from` and `session_end` are positions in.
-    session_epoch: HashMap<String, u64>,
+    /// The selected thread's replicas, and those of the threads left most
+    /// recently ([`KEPT_THREADS`]).
+    threads: HashMap<String, ThreadReplica>,
     selection_generation: u64,
     session_turn_offset: usize,
     history_task: Option<Task<()>>,
+    /// Drops the pages fetched above the tail once the reader has stayed
+    /// there ([`history::HISTORY_TRIM_DELAY`]).
+    history_trim: Option<Task<()>>,
     history_error: Option<String>,
     history_pages_fetched: usize,
     history_logged_records: Option<usize>,
     session_catching_up: bool,
-    session_statuses: HashMap<String, SessionStatus>,
-    git_statuses: HashMap<String, GitStatusStatus>,
     session_replica: Option<(String, Timeline)>,
     session_status_replica: Option<SessionStatus>,
     providers_replica: ProvidersStatus,
@@ -201,6 +197,25 @@ pub struct WorkspaceStore {
     /// A project-draft fallback is in flight, so the reconcile step does not
     /// ask for one more draft per index event while it resolves.
     draft_fallback_pending: bool,
+}
+
+/// How many threads the user left keep their replicas besides the selected
+/// one. Re-selecting a kept thread sends its cursor and gets only what it
+/// missed; any other thread gets a baseline, as on first open. A thread
+/// receives nothing while it is not selected, so keeping one longer saves no
+/// more than that baseline: the bound is on how many are kept, not for how
+/// long.
+const KEPT_THREADS: usize = 4;
+
+/// What the client holds of one thread.
+#[derive(Default)]
+struct ThreadReplica {
+    /// Absent until the first window of the thread's log arrives.
+    history: Option<history::HeldHistory>,
+    status: Option<SessionStatus>,
+    git: Option<GitStatusStatus>,
+    /// The `selection_generation` the user left the thread at.
+    left_at: u64,
 }
 
 /// A turn stopped by Claude Code's safety classifier, kept per session so the
@@ -348,21 +363,16 @@ impl WorkspaceStore {
             settings_hydrated: false,
             baseline_topics: HashSet::new(),
             index_hydrated: false,
-            hydrated_sessions: HashSet::new(),
             selected_session_id: None,
-            session_records: HashMap::new(),
-            session_from: HashMap::new(),
-            session_end: HashMap::new(),
-            session_epoch: HashMap::new(),
+            threads: HashMap::new(),
             selection_generation: 0,
             session_turn_offset: 0,
             history_task: None,
+            history_trim: None,
             history_error: None,
             history_pages_fetched: 0,
             history_logged_records: None,
             session_catching_up: false,
-            session_statuses: HashMap::new(),
-            git_statuses: HashMap::new(),
             session_replica: None,
             session_status_replica: None,
             providers_replica: ProvidersStatus::default(),
@@ -742,10 +752,8 @@ impl WorkspaceStore {
         if !self.index_hydrated || !self.settings_hydrated {
             return true;
         }
-        if let Some(id) = &self.selected_session_id {
+        if self.selected_session_id.is_some() {
             self.session_loading()
-                || !self.hydrated_sessions.contains(id)
-                || !self.session_statuses.contains_key(id)
         } else {
             self.threads_loading()
         }
@@ -929,6 +937,10 @@ impl WorkspaceStore {
                             snapshot.sessions.iter().any(|meta| meta.id == *session_id)
                         }
                     });
+                self.threads.retain(|session_id, _| {
+                    self.selected_session_id.as_ref() == Some(session_id)
+                        || snapshot.sessions.iter().any(|meta| meta.id == *session_id)
+                });
                 self.apply_index_summary(&snapshot.summary);
                 if self.archived_replica.is_some() {
                     self.load_archived_sessions(cx);
@@ -954,7 +966,9 @@ impl WorkspaceStore {
                 self.providers_replica = status.clone();
             }
             (Topic::GitStatus { session_id }, ServerEvent::GitStatusReplaced(status)) => {
-                self.git_statuses.insert(session_id.clone(), status.clone());
+                if let Some(thread) = self.threads.get_mut(session_id) {
+                    thread.git = Some(status.clone());
+                }
                 if self.selected_session_id.as_ref() == Some(session_id) {
                     self.git_status_replica = status.clone();
                 }
@@ -963,8 +977,9 @@ impl WorkspaceStore {
                 if status.session_id == *session_id =>
             {
                 self.baseline_topics.insert(envelope.topic.clone());
-                self.session_statuses
-                    .insert(session_id.clone(), status.clone());
+                if let Some(thread) = self.threads.get_mut(session_id) {
+                    thread.status = Some(status.clone());
+                }
                 if self.selected_session_id.as_ref() == Some(session_id) {
                     let mut status = status.clone();
                     status.native_rewind_prefill_available =
@@ -1012,10 +1027,12 @@ impl WorkspaceStore {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
-                let (Some(&held_epoch), Some(&held_end)) = (
-                    self.session_epoch.get(session_id),
-                    self.session_end.get(session_id),
-                ) else {
+                let Some((held_epoch, held_end)) = self
+                    .threads
+                    .get(session_id)
+                    .and_then(|thread| thread.history.as_ref())
+                    .map(|held| (held.epoch, held.end))
+                else {
                     return;
                 };
                 if self.session_catching_up {
@@ -1037,11 +1054,13 @@ impl WorkspaceStore {
                     });
                     return;
                 }
-                self.session_records
-                    .entry(session_id.clone())
-                    .or_default()
-                    .push(record.clone());
-                self.session_end.insert(session_id.clone(), held_end + 1);
+                let held = self
+                    .threads
+                    .get_mut(session_id)
+                    .and_then(|thread| thread.history.as_mut())
+                    .expect("cursor read above");
+                held.records.push(record.clone());
+                held.end += 1;
                 let _ = self
                     .host
                     .update_after(&envelope.topic, held_epoch, held_end + 1);
@@ -1118,6 +1137,13 @@ impl WorkspaceStore {
         if envelope.topic == Topic::Index {
             self.reconcile_destination(cx);
             self.removed_session = None;
+            // A thread kept on screen (its failed send still offers Retry)
+            // keeps its replicas until the user leaves it.
+            if let ServerEvent::IndexRemoveSession { session_id } = &envelope.event
+                && self.selected_session_id.as_ref() != Some(session_id)
+            {
+                self.threads.remove(session_id);
+            }
         }
     }
 
@@ -1324,8 +1350,10 @@ impl WorkspaceStore {
         let Topic::SessionEvents { session_id } = topic else {
             return;
         };
-        let continues = self.session_epoch.get(session_id) == Some(&window.epoch)
-            && self.session_end.get(session_id) == Some(&window.from);
+        let held = &mut self.threads.entry(session_id.clone()).or_default().history;
+        let continues = held
+            .as_ref()
+            .is_some_and(|held| (held.epoch, held.end) == (window.epoch, window.from));
         if continues
             && window.records.is_empty()
             && window.from != 0
@@ -1333,17 +1361,12 @@ impl WorkspaceStore {
         {
             self.session_catching_up = false;
             self.baseline_topics.insert(topic.clone());
-            self.hydrated_sessions.insert(session_id.clone());
             return;
         }
-        let held = self.session_records.entry(session_id.clone()).or_default();
-        if !continues {
-            held.clear();
-            self.session_from.insert(session_id.clone(), window.from);
-            self.session_epoch.insert(session_id.clone(), window.epoch);
+        match held {
+            Some(held) if continues => held.extend(window),
+            _ => *held = Some(history::HeldHistory::new(window)),
         }
-        held.extend(window.records.iter().cloned());
-        self.session_end.insert(session_id.clone(), window.end);
         self.session_catching_up = window.end < window.total;
         let _ = self.host.update_after(topic, window.epoch, window.end);
         if self.session_catching_up {
@@ -1351,7 +1374,6 @@ impl WorkspaceStore {
         }
         let mut timeline = self.fold_held_records(session_id);
         self.baseline_topics.insert(topic.clone());
-        self.hydrated_sessions.insert(session_id.clone());
         self.session_turn_offset =
             (window.total_turns as usize).saturating_sub(timeline.turns.len());
         self.settle_running_turn(&mut timeline);
@@ -1359,7 +1381,13 @@ impl WorkspaceStore {
     }
 
     fn fold_held_records(&self, session_id: &str) -> Timeline {
-        Timeline::fold_stored(self.session_records.get(session_id).into_iter().flatten())
+        Timeline::fold_stored(
+            self.threads
+                .get(session_id)
+                .and_then(|thread| thread.history.as_ref())
+                .into_iter()
+                .flat_map(|held| &held.records),
+        )
     }
 
     /// Records folded after their provider stopped still end running, and a
@@ -2952,6 +2980,7 @@ mod tests {
 
     use super::{
         ConversationDestination, WorkspaceAttachment, WorkspaceStore, effective_client_settings,
+        history::HeldHistory,
     };
 
     #[cfg(all(
@@ -3537,7 +3566,10 @@ mod tests {
                 cx,
             );
             assert_eq!(
-                (store.session_from["merged"], store.session_end["merged"]),
+                (
+                    held_history(store, "merged").from,
+                    held_history(store, "merged").end
+                ),
                 (10, 20)
             );
             assert_eq!(
@@ -3555,7 +3587,7 @@ mod tests {
                 }),
                 cx,
             );
-            assert_eq!(store.session_end["merged"], 21);
+            assert_eq!(held_history(store, "merged").end, 21);
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -3638,7 +3670,7 @@ mod tests {
             );
         });
         while outgoing.try_recv().is_ok() {}
-        workspace.update(cx, |store, cx| store.update_history_window(1., cx));
+        workspace.update(cx, |store, cx| store.update_history_window(1., true, cx));
         cx.run_until_parked();
         let mut request =
             tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
@@ -3746,7 +3778,9 @@ mod tests {
                 )
                 .unwrap();
             wait_until(cx, &workspace, "prefetched page applied", |cx| {
-                workspace.read_with(cx, |store, _| store.session_from["large"] == before - 200)
+                workspace.read_with(cx, |store, _| {
+                    held_history(store, "large").from == before - 200
+                })
             });
             assert!(
                 outgoing.try_recv().is_err(),
@@ -3756,7 +3790,7 @@ mod tests {
                 .advance_clock(std::time::Duration::from_millis(250));
             cx.run_until_parked();
             workspace.update(cx, |store, cx| {
-                store.update_history_window(if page < 3 { 2. + page as f32 } else { 6. }, cx);
+                store.update_history_window(if page < 3 { 2. + page as f32 } else { 6. }, true, cx);
             });
             cx.run_until_parked();
             if page < 3 {
@@ -3772,8 +3806,8 @@ mod tests {
             "stop when six screens are covered, without a scroll event"
         );
         workspace.read_with(cx, |store, _| {
-            assert_eq!(store.session_from["large"], 1000);
-            assert_eq!(store.session_records["large"].len(), 1000);
+            assert_eq!(held_history(store, "large").from, 1000);
+            assert_eq!(held_history(store, "large").records.len(), 1000);
             assert!(!store.history_loading());
         });
     }
@@ -3877,7 +3911,7 @@ mod tests {
             );
         });
         sent(&outgoing);
-        workspace.update(cx, |store, cx| store.update_history_window(1., cx));
+        workspace.update(cx, |store, cx| store.update_history_window(1., true, cx));
         cx.run_until_parked();
         let page = outgoing
             .try_recv()
@@ -3912,9 +3946,12 @@ mod tests {
                 Some(50)
             );
             assert_eq!(store.session_turn_offset, 150);
-            assert_eq!(store.session_records["thread"], baseline);
+            assert_eq!(held_history(store, "thread").records, baseline);
             assert_eq!(
-                (store.session_epoch["thread"], store.session_from["thread"]),
+                (
+                    held_history(store, "thread").epoch,
+                    held_history(store, "thread").from
+                ),
                 (1, 150)
             );
         });
@@ -3941,25 +3978,31 @@ mod tests {
         cx.run_until_parked();
         workspace.update(cx, |store, cx| {
             assert_eq!(
-                store.session_records["thread"], baseline,
+                held_history(store, "thread").records,
+                baseline,
                 "the old page is dropped"
             );
-            assert_eq!(store.session_from["thread"], 150);
+            assert_eq!(held_history(store, "thread").from, 150);
             assert_eq!(store.history_error(), None);
             store.apply_domain_event(&live(0, 600, 600), cx);
             assert_eq!(
-                store.session_end["thread"], 300,
+                held_history(store, "thread").end,
+                300,
                 "a record of the old layout"
             );
             store.apply_domain_event(&live(1, 300, 300), cx);
-            assert_eq!(store.session_end["thread"], 301);
+            assert_eq!(held_history(store, "thread").end, 301);
             store.apply_domain_event(&live(1, 300, 300), cx);
-            assert_eq!(store.session_end["thread"], 301, "a record already held");
+            assert_eq!(
+                held_history(store, "thread").end,
+                301,
+                "a record already held"
+            );
         });
         sent(&outgoing);
         workspace.update(cx, |store, cx| {
             store.apply_domain_event(&live(1, 305, 305), cx);
-            assert_eq!(store.session_end["thread"], 301);
+            assert_eq!(held_history(store, "thread").end, 301);
         });
         assert_eq!(
             sent(&outgoing),
@@ -3984,13 +4027,13 @@ mod tests {
                 })),
                 cx,
             );
-            assert_eq!(store.session_end["thread"], 306);
+            assert_eq!(held_history(store, "thread").end, 306);
         });
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(250));
         cx.run_until_parked();
         sent(&outgoing);
-        workspace.update(cx, |store, cx| store.update_history_window(1., cx));
+        workspace.update(cx, |store, cx| store.update_history_window(1., true, cx));
         cx.run_until_parked();
         let page = outgoing
             .try_recv()
@@ -4019,12 +4062,12 @@ mod tests {
         );
         cx.run_until_parked();
         workspace.read_with(cx, |store, _| {
-            assert_eq!(store.session_records["thread"], reset);
+            assert_eq!(held_history(store, "thread").records, reset);
             assert_eq!(
                 (
-                    store.session_epoch["thread"],
-                    store.session_from["thread"],
-                    store.session_end["thread"]
+                    held_history(store, "thread").epoch,
+                    held_history(store, "thread").from,
+                    held_history(store, "thread").end
                 ),
                 (2, 60, 150)
             );
@@ -4257,6 +4300,14 @@ mod tests {
         );
     }
 
+    fn held_window<'a>(store: &'a WorkspaceStore, session_id: &str) -> Option<&'a HeldHistory> {
+        store.threads.get(session_id)?.history.as_ref()
+    }
+
+    fn held_history<'a>(store: &'a WorkspaceStore, session_id: &str) -> &'a HeldHistory {
+        held_window(store, session_id).expect("a held window")
+    }
+
     fn test_host(store: SessionStore) -> SpawnedHost {
         spawn_host(store, HostServices::default()).expect("spawn test host")
     }
@@ -4402,6 +4453,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A client that visits many threads keeps the replicas of the selected
+    /// one and of the few it left last. Re-selecting a released thread asks
+    /// for a baseline and holds exactly what a client opening it fresh holds;
+    /// re-selecting a kept one sends its cursor and receives only what it
+    /// missed. Records appended while a thread was away and live afterwards
+    /// are each held once, and a thread deleted from the index is released at
+    /// once.
+    #[gpui::test]
+    fn visiting_many_threads_keeps_the_replicas_of_the_last_few(cx: &mut TestAppContext) {
+        let root = scratch_root("visited-threads");
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        let ids: Vec<String> = (0..50).map(|index| format!("thread-{index:02}")).collect();
+        let answer = |id: &str, turn: usize| {
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: format!("{id}-answer-{turn}"),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: format!("answer {turn} in {id}"),
+                },
+            })
+        };
+        let turn = |id: &str, turn: usize| {
+            [
+                AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                },
+                answer(id, turn),
+                AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            ]
+        };
+        seed_index(&disk, &[project_at("p", &root)], &[]);
+        let metas: Vec<SessionMeta> = ids.iter().map(|id| thread(&root, id, "p", None)).collect();
+        seed_index(&disk, &[], &metas);
+        for id in &ids {
+            for (ts, event) in (0..3).flat_map(|index| turn(id, index)).enumerate() {
+                disk.append_event(id, ts as u64 + 1, &event).unwrap();
+            }
+        }
+        let host = test_host(disk);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let open = |cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>, id: &str| {
+            workspace.update(cx, |store, _| store.select_session(id.into()));
+            wait_until(cx, workspace, id, |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store.baseline_ready() && !store.session_loading() && !store.session_catching_up
+                })
+            });
+        };
+        let events_cursor = |store: &WorkspaceStore| {
+            store
+                .host
+                .subscriptions()
+                .into_iter()
+                .find(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
+                .map(|sub| (sub.epoch, sub.after))
+        };
+        let held_count = |store: &WorkspaceStore, id: &str, event: &AgentEvent| {
+            held_history(store, id)
+                .records
+                .iter()
+                .filter(|record| record.event == *event)
+                .count()
+        };
+        for id in &ids {
+            open(cx, &workspace, id);
+        }
+        workspace.read_with(cx, |store, _| {
+            let mut held: Vec<&String> = store.threads.keys().collect();
+            held.sort();
+            assert_eq!(held, ids[45..].iter().collect::<Vec<_>>());
+        });
+
+        // A kept thread continues from its cursor even past what a baseline
+        // would carry: the baseline would begin hundreds of records later.
+        let kept = &ids[46];
+        let (epoch, end) = workspace.read_with(cx, |store, _| {
+            let held = held_history(store, kept);
+            (held.epoch, held.end)
+        });
+        let missed: Vec<AgentEvent> = (3..153).flat_map(|index| turn(kept, index)).collect();
+        update_host!(&host, {
+            let (kept, missed) = (kept.clone(), missed.clone());
+            move |state, cx| {
+                for (offset, event) in missed.iter().enumerate() {
+                    state.record_event_for_replica_test(&kept, 100 + offset as u64, event, cx);
+                }
+            }
+        });
+        workspace.update(cx, |store, _| {
+            store.select_session(kept.clone());
+            assert_eq!(events_cursor(store), Some((Some(epoch), Some(end))));
+        });
+        let total = end + missed.len() as u64;
+        wait_until(cx, &workspace, "the kept thread's continuation", |cx| {
+            workspace.read_with(cx, |store, _| {
+                held_history(store, kept).end == total && store.session_replica.is_some()
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            let held = held_history(store, kept);
+            assert_eq!(held.from, 0, "a continuation, not a baseline");
+            for event in [answer(kept, 0), answer(kept, 152)] {
+                assert_eq!(held_count(store, kept, &event), 1);
+            }
+        });
+
+        // A released thread opens as on a fresh client, with what was
+        // appended while it was away and what arrives live once it is open.
+        let released = &ids[3];
+        let away = answer(released, 3);
+        let live = answer(released, 4);
+        update_host!(&host, {
+            let (released, away) = (released.clone(), away.clone());
+            move |state, cx| state.record_event_for_replica_test(&released, 100, &away, cx)
+        });
+        workspace.update(cx, |store, _| {
+            store.select_session(released.clone());
+            assert_eq!(events_cursor(store), Some((None, None)));
+        });
+        wait_until(cx, &workspace, "the released thread's baseline", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.session_loading()
+            })
+        });
+        update_host!(&host, {
+            let (released, live) = (released.clone(), live.clone());
+            move |state, cx| state.record_event_for_replica_test(&released, 101, &live, cx)
+        });
+        wait_until(cx, &workspace, "the live record", |cx| {
+            workspace.read_with(cx, |store, _| held_history(store, released).end == 11)
+        });
+        let fresh = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        open(cx, &fresh, released);
+        let fresh = fresh.read_with(cx, |store, _| {
+            (store.session_replica.clone(), store.session_turn_offset)
+        });
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(
+                (store.session_replica.clone(), store.session_turn_offset),
+                fresh
+            );
+            for event in [&away, &live] {
+                assert_eq!(held_count(store, released, event), 1);
+            }
+        });
+
+        let deleted = ids[47].clone();
+        assert!(workspace.read_with(cx, |store, _| store.threads.contains_key(&deleted)));
+        command(
+            &host,
+            Command::DeleteSessions {
+                session_ids: vec![deleted.clone()],
+                remove_worktrees: false,
+            },
+        );
+        wait_until(cx, &workspace, "the deletion", |cx| {
+            workspace.read_with(cx, |store, _| {
+                !store.index_replica.0.iter().any(|meta| meta.id == deleted)
+            })
+        });
+        assert!(!workspace.read_with(cx, |store, _| store.threads.contains_key(&deleted)));
+
+        shutdown_test_host(&host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn scratch_root(label: &str) -> std::path::PathBuf {
         static NEXT_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
@@ -4530,7 +4751,7 @@ mod tests {
         });
         workspace.read_with(cx, |store, _| {
             assert!(
-                store.session_records.contains_key("parent"),
+                held_window(store, "parent").is_some(),
                 "the parent's replicated records were dropped on the way back"
             );
         });
@@ -4791,7 +5012,8 @@ mod tests {
         workspace.update(cx, |store, _| store.select_session("stale".into()));
         wait_until(cx, &workspace, "the streaming turn", |cx| {
             workspace.read_with(cx, |store, _| {
-                store.session_end.get("stale") == Some(&4) && store.session_replica.is_some()
+                held_window(store, "stale").is_some_and(|held| held.end == 4)
+                    && store.session_replica.is_some()
             })
         });
 
@@ -4853,16 +5075,19 @@ mod tests {
         link.set_connection_state(ConnectionState::Connected { path: None });
         wait_until(cx, &workspace, "a baseline in the rewritten layout", |cx| {
             workspace.read_with(cx, |store, _| {
-                store.session_epoch.get("stale") == Some(&rewritten.epoch)
+                held_window(store, "stale").is_some_and(|held| held.epoch == rewritten.epoch)
                     && !store.session_catching_up
             })
         });
         workspace.read_with(cx, |store, _| {
             assert!(
-                store.session_from["stale"] > 0,
+                held_history(store, "stale").from > 0,
                 "the baseline is a recent window"
             );
-            assert_eq!(store.session_end["stale"], rewritten.records.len() as u64);
+            assert_eq!(
+                held_history(store, "stale").end,
+                rewritten.records.len() as u64
+            );
         });
         // Earlier pages continue from the baseline in its layout. (The store's
         // own page task awaits a reply the host thread delivers, which the
@@ -4870,8 +5095,8 @@ mod tests {
         // against a scripted host.)
         let (mut held, mut before) = workspace.read_with(cx, |store, _| {
             (
-                store.session_records["stale"].clone(),
-                store.session_from["stale"],
+                held_history(store, "stale").records.clone(),
+                held_history(store, "stale").from,
             )
         });
         while before > 0 {
@@ -4924,11 +5149,12 @@ mod tests {
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         let end = rewritten.records.len() as u64 + 1;
         wait_until(cx, &workspace, "the live record", |cx| {
-            workspace.read_with(cx, |store, _| store.session_end["stale"] == end)
+            workspace.read_with(cx, |store, _| held_history(store, "stale").end == end)
         });
         workspace.read_with(cx, |store, _| {
             assert_eq!(
-                store.session_records["stale"]
+                held_history(store, "stale")
+                    .records
                     .iter()
                     .filter(|record| matches!(
                         &record.event,
@@ -5084,10 +5310,8 @@ mod tests {
             "incremental session timeline replica",
             |cx| {
                 workspace.read_with(cx, |store, _| {
-                    store
-                        .session_records
-                        .get(&session_id)
-                        .and_then(|records| records.last())
+                    held_window(store, &session_id)
+                        .and_then(|held| held.records.last())
                         .is_some_and(|record| {
                             matches!(
                                 &record.event,
@@ -5428,7 +5652,7 @@ mod tests {
         assert!(workspace.read_with(cx, |store, _| store.pending_approval_for(&first.id)));
         assert!(!workspace.read_with(cx, |store, _| store.pending_user_input_for(&second.id)));
         workspace.update(cx, |store, cx| {
-            let mut finished = store.session_statuses[&first.id].clone();
+            let mut finished = store.threads[&first.id].status.clone().unwrap();
             finished.turn_running = false;
             finished.working = false;
             finished.pending_user_input = None;

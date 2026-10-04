@@ -13,7 +13,7 @@ use tcode_core::{
 };
 use tcode_protocol::{Command, CommandResponse, ProtocolError, SettingsPatch};
 
-use super::{StoreChange, TopicKind, WorkspaceStore};
+use super::{KEPT_THREADS, StoreChange, TopicKind, WorkspaceStore};
 
 impl WorkspaceStore {
     pub(super) fn dispatch(&mut self, command: Command) {
@@ -223,6 +223,7 @@ impl WorkspaceStore {
     pub(crate) fn leave_session(&mut self) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.history_task = None;
+        self.history_trim = None;
         self.history_error = None;
         self.history_pages_fetched = 0;
         self.history_logged_records = None;
@@ -243,6 +244,14 @@ impl WorkspaceStore {
             );
         }
         if let Some(session_id) = self.selected_session_id.take() {
+            if let Some(thread) = self.threads.get_mut(&session_id) {
+                thread.left_at = self.selection_generation;
+                // The thread reopens at its tail.
+                if let Some(held) = &mut thread.history {
+                    held.drop_pages_above_tail();
+                }
+            }
+            self.release_left_threads();
             for topic in [
                 tcode_protocol::Topic::SessionEvents {
                     session_id: session_id.clone(),
@@ -268,6 +277,22 @@ impl WorkspaceStore {
         self.git_status_replica = Default::default();
     }
 
+    /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently.
+    fn release_left_threads(&mut self) {
+        if self.threads.len() <= KEPT_THREADS {
+            return;
+        }
+        let mut left: Vec<(u64, String)> = self
+            .threads
+            .iter()
+            .map(|(id, thread)| (thread.left_at, id.clone()))
+            .collect();
+        left.sort_unstable_by(|a, b| b.cmp(a));
+        for (_, id) in &left[KEPT_THREADS..] {
+            self.threads.remove(id);
+        }
+    }
+
     pub fn select_session(&mut self, session_id: String) {
         if self.selected_session_id.as_ref() == Some(&session_id) {
             return;
@@ -289,17 +314,16 @@ impl WorkspaceStore {
             .remove(&tcode_protocol::Topic::SessionEvents {
                 session_id: session_id.clone(),
             });
-        self.session_status_replica = self.session_statuses.get(&session_id).cloned();
-        self.git_status_replica = self
-            .git_statuses
-            .get(&session_id)
-            .cloned()
-            .unwrap_or_default();
-        self.session_records.entry(session_id.clone()).or_default();
+        let thread = self.threads.entry(session_id.clone()).or_default();
+        self.session_status_replica = thread.status.clone();
+        self.git_status_replica = thread.git.clone().unwrap_or_default();
         self.session_replica = None;
         // A position is a cursor only with the layout it is in.
-        let epoch = self.session_epoch.get(&session_id).copied();
-        let after = epoch.and(self.session_end.get(&session_id).copied());
+        let (epoch, after) = thread
+            .history
+            .as_ref()
+            .map(|held| (held.epoch, held.end))
+            .unzip();
         for topic in [
             tcode_protocol::Topic::SessionStatus {
                 session_id: session_id.clone(),
