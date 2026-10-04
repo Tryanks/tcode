@@ -512,19 +512,34 @@ impl AppState {
             event: event.clone(),
             elided: None,
         };
-        let end = self.resident_log(session_id).end();
-        self.emit_domain(
-            Topic::SessionEvents {
-                session_id: session_id.to_string(),
-            },
-            ServerEvent::SessionEvent {
-                epoch: end.epoch,
-                position: end.position as u64,
-                record: history::wire_record(&record).into_owned(),
-            },
-            cx,
-        );
-        self.resident_log(session_id).push(record);
+        let topic = Topic::SessionEvents {
+            session_id: session_id.to_string(),
+        };
+        // A session nobody holds needs no position: the append alone keeps
+        // the record, and any later read of the log is queued behind it.
+        if let Some(end) = self.event_records.get(session_id).map(SessionLog::end) {
+            self.emit_domain(
+                topic,
+                ServerEvent::SessionEvent {
+                    epoch: end.epoch,
+                    position: end.position as u64,
+                    record: history::wire_record(&record).into_owned(),
+                },
+                cx,
+            );
+            self.event_records
+                .get_mut(session_id)
+                .expect("cached above")
+                .push(record);
+        } else if self.log_hydrations.contains_key(session_id)
+            || self.resident(session_id).is_some()
+            || self.subscriptions.contains(&topic)
+        {
+            // Its position comes after whatever the log holds, so it is
+            // sent once the log is read; the read is queued before the
+            // append below, which it therefore does not see.
+            self.hydrate_log(session_id, None, cx).pending.push(record);
+        }
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
@@ -629,11 +644,13 @@ impl AppState {
         let previous_title = meta.title;
         let title_meta = title_session_meta(&self.settings, meta.cwd);
         let regenerate = first_message.is_none();
-        // The cache includes accepted messages whose disk writes are still queued.
+        // The cache includes accepted messages whose disk writes are still
+        // queued; without it the JSONL is read once they are written.
         let records = regenerate
             .then(|| self.event_records.get(&session_id))
             .flatten()
             .map(|log| log.records().to_vec());
+        let written = (regenerate && records.is_none()).then(|| self.store_write_barrier(cx));
         let store = self.store.clone();
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
@@ -642,6 +659,9 @@ impl AppState {
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
+            if let Some(written) = written {
+                let _ = written.recv().await;
+            }
             let read_id = session_id.clone();
             let old_title = previous_title.clone();
             let input = host_cx

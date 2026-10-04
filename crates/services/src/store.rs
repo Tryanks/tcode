@@ -132,8 +132,8 @@ impl SessionStore {
         })
     }
 
-    /// How many times [`SessionStore::read_events`] parsed a log through this
-    /// store or any of its clones.
+    /// How many times a log was parsed through this store or any of its
+    /// clones.
     #[cfg(any(test, feature = "test-support"))]
     pub fn event_reads(&self) -> usize {
         self.event_reads.load(std::sync::atomic::Ordering::Relaxed)
@@ -312,18 +312,50 @@ impl SessionStore {
         self.read_log(id).records
     }
 
-    /// [`SessionStore::read_events`] with the layout the records are in. Both
-    /// come from one open file, so a rewrite renamed over the log meanwhile
-    /// cannot pair one layout's epoch with the other's records.
+    /// [`SessionStore::read_events`] with the layout the records are in.
     pub fn read_log(&self, id: &str) -> EventLog {
+        self.snapshot_log(id).read()
+    }
+
+    /// Open a session's log as it is now, without reading it. Cheap enough
+    /// for the store writer to take between two writes.
+    pub fn snapshot_log(&self, id: &str) -> LogSnapshot {
+        let file = File::open(self.events_path(id)).ok().and_then(|file| {
+            let len = file.metadata().ok()?.len();
+            Some((file, len))
+        });
+        LogSnapshot {
+            id: id.to_string(),
+            file,
+            #[cfg(any(test, feature = "test-support"))]
+            event_reads: self.event_reads.clone(),
+        }
+    }
+}
+
+/// A session's log file opened at one moment, with the length it had then.
+pub struct LogSnapshot {
+    id: String,
+    file: Option<(File, u64)>,
+    #[cfg(any(test, feature = "test-support"))]
+    event_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl LogSnapshot {
+    /// Parse every record the log held when it was opened. The epoch and the
+    /// records come from that one open file, so a rewrite renamed over the
+    /// log since cannot pair one layout's epoch with the other's records, and
+    /// what was appended since is not read.
+    pub fn read(self) -> EventLog {
         #[cfg(any(test, feature = "test-support"))]
         self.event_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self.id;
         let mut log = EventLog::default();
-        let Ok(file) = File::open(self.events_path(id)) else {
+        let Some((file, len)) = self.file else {
             return log;
         };
-        for (number, line) in BufReader::new(file).lines().enumerate() {
+        for (number, line) in BufReader::new(file.take(len)).lines().enumerate() {
             let Ok(line) = line else { break };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -342,7 +374,9 @@ impl SessionStore {
         }
         log
     }
+}
 
+impl SessionStore {
     /// Atomically clone one session's append-only event log. A missing source
     /// is an empty transcript and therefore succeeds without creating a file.
     /// The copy is byte for byte, layout header included: it starts in the

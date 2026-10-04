@@ -12,7 +12,7 @@ use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
 use tcode_services::store::SessionStore;
 
 use crate::app::{AppState, DomainDiff};
-use crate::host::{HostCx, HostEvent, HostFn};
+use crate::host::{HostCx, HostFn};
 
 /// Optional process-local services attached before the host starts accepting
 /// client traffic.
@@ -290,14 +290,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         }
         ClientPayload::Subscribe(subscription) => {
             state.subscribe(&subscription, cx);
-            if let Some(mut snapshot) = state.subscription_snapshot(&subscription) {
-                snapshot.request_id = Some(id);
-                cx.emit(HostEvent::Domain(snapshot));
-            }
-            cx.send_message(HostMessage::Ack {
-                id,
-                result: Ok(CommandResponse::Unit),
-            });
+            state.reply_to_subscription(Some(id), subscription, cx);
         }
         ClientPayload::Unsubscribe(subscription) => {
             state.unsubscribe(&subscription, cx);
@@ -607,10 +600,7 @@ fn dispatch_query(
             epoch,
             before,
             limit,
-        } => {
-            let result = app.session_history_page(&session_id, epoch, before, limit);
-            cx.spawn_background(async move { result })
-        }
+        } => app.session_history_page(&session_id, epoch, before, limit, cx),
         Query::Hosting { .. } => cx.spawn_background(async {
             Err(ProtocolError {
                 code: "unsupported".into(),
@@ -739,10 +729,7 @@ fn dispatch_query(
         Query::ReadItemOutput {
             session_id,
             item_id,
-        } => {
-            let result = app.item_output(&session_id, &item_id);
-            cx.spawn_background(async move { result })
-        }
+        } => app.item_output(&session_id, item_id, cx),
         Query::ArchivedSessions => {
             let sessions = app.archived_sessions();
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(sessions)) })

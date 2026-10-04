@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use super::compaction::{Compacted, CompactionRequest};
 use super::*;
-use tcode_services::store::{CompactOutcome, CompactRejection, IndexWrite};
+use tcode_services::store::{CompactOutcome, CompactRejection, IndexWrite, LogSnapshot};
 
 pub(super) enum StoreWrite {
     AppendEvent {
@@ -48,6 +48,11 @@ pub(super) enum StoreWrite {
     /// Delete the originals and temporary files earlier runs' compactions
     /// left beside the logs.
     DiscardCompactionLeftovers,
+    /// Open one log as every write queued before this one left it.
+    SnapshotLog {
+        id: String,
+        snapshot: smol::channel::Sender<LogSnapshot>,
+    },
     Flush(smol::channel::Sender<()>),
 }
 
@@ -376,6 +381,10 @@ fn run_store_write(
                     error: err.to_string(),
                 })
             }),
+        StoreWrite::SnapshotLog { id, snapshot } => {
+            let _ = snapshot.try_send(store.snapshot_log(&id));
+            None
+        }
         StoreWrite::Flush(completion) => {
             let _ = completion.try_send(());
             None

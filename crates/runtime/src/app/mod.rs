@@ -204,6 +204,22 @@ enum TimelineLoadTarget {
     Background,
 }
 
+/// One request to rebuild a resident session's timeline from its log.
+#[derive(Debug, Clone, Copy)]
+struct TimelineLoad {
+    generation: u64,
+    target: TimelineLoadTarget,
+}
+
+impl TimelineLoad {
+    fn mark_idle(&self) -> bool {
+        match self.target {
+            TimelineLoadTarget::Active { mark_idle } => mark_idle,
+            TimelineLoadTarget::Background => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TerminalPreferences {
     open: bool,
@@ -232,7 +248,7 @@ mod compaction;
 mod events;
 mod git;
 mod history;
-use history::SessionLog;
+use history::{Hydration, SessionLog};
 mod lifecycle;
 mod options;
 mod orchestrate;
@@ -395,6 +411,9 @@ pub struct AppState {
     /// Resident sessions' event logs; see [`SessionLog`] for what is cached
     /// and when it is dropped.
     event_records: HashMap<String, SessionLog>,
+    /// Logs being read off the mailbox, by session; never one that is in
+    /// `event_records`.
+    log_hydrations: HashMap<String, Hydration>,
     compactions: compaction::Compactions,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
@@ -559,6 +578,7 @@ impl AppState {
             timeline_load_generations: HashMap::new(),
             subscriptions: HashSet::new(),
             event_records: HashMap::new(),
+            log_hydrations: HashMap::new(),
             compactions: Default::default(),
             review_comment_drafts: HashMap::new(),
             pending_relaunch,

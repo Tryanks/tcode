@@ -3,8 +3,8 @@ use agent::DeltaKind;
 use std::borrow::Cow;
 use std::ops::Range;
 use tcode_protocol::{
-    HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES, SESSION_HISTORY_RECORDS,
-    SESSION_WINDOW_BYTES, SessionWindow,
+    CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
+    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, SessionWindow, Subscription,
 };
 
 /// Count serialized bytes without allocating a copy of a large record.
@@ -221,11 +221,11 @@ pub(super) struct LogCursor {
 ///
 /// Memory policy: [`AppState::event_records`] holds a log for every live or
 /// parked session (bounded by the resident LRU) and for nothing else. A log
-/// is loaded when a client opens the session or when the session first
-/// appends in this process, and is dropped once the session leaves residency
-/// and the store writer has flushed every append queued from it
-/// ([`AppState::release_stale_session_logs`]): until then the log, not the
-/// JSONL, is the whole conversation.
+/// is read off the mailbox ([`Hydration`]) when a client opens the session
+/// or when the session first appends in this process, and is dropped once
+/// the session leaves residency and the store writer has flushed every
+/// append queued from it ([`AppState::release_stale_session_logs`]): until
+/// then the log, not the JSONL, is the whole conversation.
 ///
 /// A resident log keeps the layout it was loaded in. Compaction rewrites the
 /// JSONL beneath it without touching it, so its positions, its fold and every
@@ -246,11 +246,6 @@ pub(super) struct SessionLog {
 }
 
 impl SessionLog {
-    pub(super) fn load(store: &SessionStore, session_id: &str) -> Self {
-        let log = store.read_log(session_id);
-        Self::new(log.epoch, log.records)
-    }
-
     pub(super) fn new(epoch: u64, records: impl IntoIterator<Item = SessionEventRecord>) -> Self {
         let mut log = Self {
             epoch,
@@ -307,38 +302,353 @@ impl SessionLog {
             .checked_sub(1)
             .map_or(start, |last| self.turn_starts[last])
     }
+
+    /// The window answering a subscription: the records from its cursor on
+    /// when the cursor is in this log's layout, otherwise a baseline that
+    /// replaces whatever the client holds.
+    pub(super) fn events_window(&self, subscription: &Subscription) -> ServerEvent {
+        let after = subscription.after.filter(|after| {
+            subscription.epoch == Some(self.epoch) && *after <= self.records.len() as u64
+        });
+        let empty = HostMessage::Event(EventEnvelope {
+            request_id: Some(u64::MAX),
+            topic: subscription.topic.clone(),
+            event: ServerEvent::SessionSnapshot(empty_window()),
+        });
+        match session_window(
+            self,
+            after.map(|after| after as usize),
+            wire_overhead(&empty),
+        ) {
+            Ok(window) => ServerEvent::SessionSnapshot(window),
+            Err(error) => ServerEvent::SessionHistoryError(error),
+        }
+    }
+
+    pub(super) fn history_page(
+        &self,
+        epoch: u64,
+        before: u64,
+        limit: u32,
+    ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
+        if epoch != self.epoch {
+            let empty = HostMessage::QueryResult {
+                id: u64::MAX,
+                result: Ok(QueryResponse::SessionHistoryReset(empty_window())),
+            };
+            return session_window(self, None, wire_overhead(&empty))
+                .map(QueryResponse::SessionHistoryReset);
+        }
+        let records = self.records();
+        let end = before.min(records.len() as u64) as usize;
+        let count = (limit as usize).clamp(1, SESSION_HISTORY_RECORDS);
+        let requested = self.turn_aligned_start(end.saturating_sub(count))..end;
+        let empty = HostMessage::QueryResult {
+            id: u64::MAX,
+            result: Ok(QueryResponse::SessionHistoryPage {
+                epoch: u64::MAX,
+                records: vec![],
+                from: u64::MAX,
+                end: u64::MAX,
+                truncated: false,
+            }),
+        };
+        let window = wire_window(records, requested.clone(), true, wire_overhead(&empty))?;
+        Ok(QueryResponse::SessionHistoryPage {
+            epoch: self.epoch,
+            from: window.range.start as u64,
+            end: window.range.end as u64,
+            truncated: window.range.len() < requested.len(),
+            records: window.records,
+        })
+    }
+
+    /// The whole output of one item, as the full log folds it.
+    pub(super) fn item_output(
+        &self,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
+        let output = self
+            .fold()
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.id == item_id)
+            .and_then(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::ToolCall { output, .. }) => output.clone(),
+                EntryContent::Item(ItemContent::CommandExecution { output, .. }) => {
+                    Some(output.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| tcode_protocol::ProtocolError {
+                code: "unknown_item_output".into(),
+                message: format!("no output for item {item_id} in {session_id}"),
+            })?;
+        if output.len() > MAX_SESSION_HISTORY_BYTES {
+            return Err(tcode_protocol::ProtocolError {
+                code: "item_output_too_large".into(),
+                message: "The output exceeds the 8 MiB response limit.".into(),
+            });
+        }
+        Ok(QueryResponse::ItemOutput(output))
+    }
 }
 
+/// A session's log being read and folded off the mailbox, and what waits for
+/// it. A session has at most one, and none while its log is resident.
+///
+/// The read is of a [`LogSnapshot`](tcode_services::store::LogSnapshot) the
+/// store writer takes in its queue order, so it holds every record whose
+/// append was queued before the hydration began and none queued after. Every record accepted for the
+/// session from then on is held in `pending`, in order, and takes the
+/// positions after the snapshot's end; it reaches subscribers once the log is
+/// resident, after the replies that end where the snapshot ends.
+pub(super) struct Hydration {
+    pub(super) pending: Vec<SessionEventRecord>,
+    /// Subscription replies; one without a request id answers no request.
+    replies: Vec<(Option<u64>, Subscription)>,
+    /// Queries answered from the whole log.
+    queries: Vec<LogQuery>,
+    /// The timeline load waiting for the log, with how many `pending` records
+    /// had been accepted when it was requested.
+    timeline: Option<(TimelineLoad, usize)>,
+}
+
+type LogQuery = Box<dyn FnOnce(&SessionLog) + Send>;
+
 impl AppState {
-    /// The session's cached log, loaded from the JSONL when nothing is cached
-    /// yet. From then until it is released it is the whole conversation, in
-    /// the layout it was loaded in.
-    pub(super) fn resident_log(&mut self, session_id: &str) -> &mut SessionLog {
-        if !self.event_records.contains_key(session_id) {
-            let log = SessionLog::load(&self.store, session_id);
-            self.cache_log(session_id.to_string(), log);
+    /// The session's hydration, begun unless its log is being read already.
+    /// Callers check first that the log is not resident.
+    pub(super) fn hydrate_log(
+        &mut self,
+        session_id: &str,
+        timeline: Option<TimelineLoad>,
+        cx: &mut HostCx,
+    ) -> &mut Hydration {
+        if !self.log_hydrations.contains_key(session_id) {
+            let (snapshot, taken) = smol::channel::bounded(1);
+            self.enqueue_store_write(
+                StoreWrite::SnapshotLog {
+                    id: session_id.to_string(),
+                    snapshot,
+                },
+                cx,
+            );
+            let read_id = session_id.to_string();
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
+                // The store writer stops only with the host.
+                let Ok(snapshot) = taken.recv().await else {
+                    return;
+                };
+                let log = host_cx
+                    .unblock(move || {
+                        let read = snapshot.read();
+                        SessionLog::new(read.epoch, read.records)
+                    })
+                    .await;
+                host_cx.enqueue(move |state, cx| state.finish_hydration(read_id, log, cx));
+            });
+            self.log_hydrations.insert(
+                session_id.to_string(),
+                Hydration {
+                    pending: Vec::new(),
+                    replies: Vec::new(),
+                    queries: Vec::new(),
+                    timeline: None,
+                },
+            );
         }
-        self.event_records
+        let hydration = self
+            .log_hydrations
             .get_mut(session_id)
-            .expect("cached above")
-    }
-
-    /// Cache a log read from the JSONL. A rewrite of a cached log would
-    /// only renumber it for the next load, so the background pass leaves it
-    /// to the live triggers.
-    pub(super) fn cache_log(&mut self, session_id: String, log: SessionLog) {
-        self.withdraw_pass_compaction(&session_id);
-        self.event_records.insert(session_id, log);
-    }
-
-    /// The session's log, cached for the resident session it belongs to. A
-    /// non-resident session is read cold and not retained, so paging it never
-    /// grows the cache.
-    fn history_log(&mut self, session_id: &str) -> std::borrow::Cow<'_, SessionLog> {
-        if !self.event_records.contains_key(session_id) && self.resident(session_id).is_none() {
-            return std::borrow::Cow::Owned(SessionLog::load(&self.store, session_id));
+            .expect("inserted above");
+        if let Some(load) = timeline {
+            hydration.timeline = Some((load, hydration.pending.len()));
         }
-        std::borrow::Cow::Borrowed(self.resident_log(session_id))
+        hydration
+    }
+
+    /// Serve everything that waited for the log, in the order of its
+    /// records, and keep the log only if its session is resident.
+    fn finish_hydration(&mut self, session_id: String, mut log: SessionLog, cx: &mut HostCx) {
+        let hydration = self
+            .log_hydrations
+            .remove(&session_id)
+            .expect("a hydration is removed only when it finishes");
+        let retained = self.resident(&session_id).is_some();
+        for (request_id, subscription) in &hydration.replies {
+            self.reply_from_log(&log, *request_id, subscription, cx);
+        }
+        let topic = Topic::SessionEvents {
+            session_id: session_id.clone(),
+        };
+        let mut pending = hydration.pending.into_iter();
+        let accepted_before = hydration.timeline.map_or(0, |(_, accepted)| accepted);
+        for record in pending.by_ref().take(accepted_before) {
+            self.accept_pending(&mut log, record, &topic, cx);
+        }
+        // A timeline load folds what had been accepted when it was requested;
+        // what came after follows any `mark_idle`, as it arrived.
+        let folded = hydration
+            .timeline
+            .filter(|_| retained)
+            .map(|(load, _)| (load, log.end(), log.fold().clone()));
+        for record in pending {
+            self.accept_pending(&mut log, record, &topic, cx);
+        }
+        for query in hydration.queries {
+            query(&log);
+        }
+        if !retained {
+            return;
+        }
+        self.withdraw_pass_compaction(&session_id);
+        self.event_records.insert(session_id.clone(), log);
+        if let Some((load, cursor, fold)) = folded {
+            self.fold_timeline(session_id, load, cursor, fold, cx);
+        }
+    }
+
+    /// Append a record accepted while the log was being read, sending it as
+    /// `record_event` would have.
+    fn accept_pending(
+        &self,
+        log: &mut SessionLog,
+        record: SessionEventRecord,
+        topic: &Topic,
+        cx: &mut HostCx,
+    ) {
+        let end = log.end();
+        self.emit_domain(
+            topic.clone(),
+            ServerEvent::SessionEvent {
+                epoch: end.epoch,
+                position: end.position as u64,
+                record: wire_record(&record).into_owned(),
+            },
+            cx,
+        );
+        log.push(record);
+    }
+
+    /// Answer a subscription with a window of `log` unless nobody is
+    /// subscribed any more, and acknowledge the request.
+    fn reply_from_log(
+        &self,
+        log: &SessionLog,
+        request_id: Option<u64>,
+        subscription: &Subscription,
+        cx: &mut HostCx,
+    ) {
+        if self.subscriptions.contains(&subscription.topic) {
+            cx.emit(HostEvent::Domain(EventEnvelope {
+                request_id,
+                topic: subscription.topic.clone(),
+                event: log.events_window(subscription),
+            }));
+        }
+        if let Some(id) = request_id {
+            cx.send_message(HostMessage::Ack {
+                id,
+                result: Ok(CommandResponse::Unit),
+            });
+        }
+    }
+
+    /// Answer a subscription with its snapshot and acknowledge the request.
+    /// A session's events are answered from its log: now when it is
+    /// resident, otherwise once it has been read, and the acknowledgement
+    /// waits with it, so the window is the request's first reply.
+    pub(crate) fn reply_to_subscription(
+        &mut self,
+        request_id: Option<u64>,
+        subscription: Subscription,
+        cx: &mut HostCx,
+    ) {
+        if let Topic::SessionEvents { session_id } = &subscription.topic {
+            match self.event_records.get(session_id) {
+                Some(log) => self.reply_from_log(log, request_id, &subscription, cx),
+                None => {
+                    let session_id = session_id.clone();
+                    self.hydrate_log(&session_id, None, cx)
+                        .replies
+                        .push((request_id, subscription));
+                }
+            }
+            return;
+        }
+        if let Some(mut snapshot) = self.subscription_snapshot(&subscription) {
+            snapshot.request_id = request_id;
+            cx.emit(HostEvent::Domain(snapshot));
+        }
+        if let Some(id) = request_id {
+            cx.send_message(HostMessage::Ack {
+                id,
+                result: Ok(CommandResponse::Unit),
+            });
+        }
+    }
+
+    /// Answer a query from the session's log: now when it is resident,
+    /// otherwise once it has been read.
+    fn query_session_log(
+        &mut self,
+        session_id: &str,
+        query: impl FnOnce(&SessionLog) -> Result<QueryResponse, tcode_protocol::ProtocolError>
+        + Send
+        + 'static,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
+        if let Some(log) = self.event_records.get(session_id) {
+            let result = query(log);
+            return cx.spawn_background(async move { result });
+        }
+        let (answer, answered) = smol::channel::bounded(1);
+        self.hydrate_log(session_id, None, cx)
+            .queries
+            .push(Box::new(move |log| {
+                let _ = answer.try_send(query(log));
+            }));
+        cx.spawn_background(async move {
+            answered.recv().await.unwrap_or_else(|_| {
+                Err(tcode_protocol::ProtocolError {
+                    code: "host_stopped".into(),
+                    message: "the host stopped before the session's log was read".into(),
+                })
+            })
+        })
+    }
+
+    pub(crate) fn session_history_page(
+        &mut self,
+        session_id: &str,
+        epoch: u64,
+        before: u64,
+        limit: u32,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
+        self.query_session_log(
+            session_id,
+            move |log| log.history_page(epoch, before, limit),
+            cx,
+        )
+    }
+
+    pub(crate) fn item_output(
+        &mut self,
+        session_id: &str,
+        item_id: String,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
+        let read_id = session_id.to_string();
+        self.query_session_log(
+            session_id,
+            move |log| log.item_output(&read_id, &item_id),
+            cx,
+        )
     }
 
     /// Queue a store-writer barrier for every cached log whose session left
@@ -383,108 +693,6 @@ impl AppState {
                 });
             });
         }
-    }
-
-    /// The window answering a subscription: the records from its cursor on
-    /// when the cursor is in the layout this host serves, otherwise a
-    /// baseline that replaces whatever the client holds.
-    pub(crate) fn session_events_snapshot(
-        &mut self,
-        subscription: &tcode_protocol::Subscription,
-    ) -> ServerEvent {
-        let Topic::SessionEvents { session_id } = &subscription.topic else {
-            unreachable!()
-        };
-        let log = self.history_log(session_id);
-        let after = subscription.after.filter(|after| {
-            subscription.epoch == Some(log.epoch) && *after <= log.records.len() as u64
-        });
-        let empty = HostMessage::Event(EventEnvelope {
-            request_id: Some(u64::MAX),
-            topic: subscription.topic.clone(),
-            event: ServerEvent::SessionSnapshot(empty_window()),
-        });
-        match session_window(
-            &log,
-            after.map(|after| after as usize),
-            wire_overhead(&empty),
-        ) {
-            Ok(window) => ServerEvent::SessionSnapshot(window),
-            Err(error) => ServerEvent::SessionHistoryError(error),
-        }
-    }
-
-    pub(crate) fn session_history_page(
-        &mut self,
-        session_id: &str,
-        epoch: u64,
-        before: u64,
-        limit: u32,
-    ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
-        let log = self.history_log(session_id);
-        if epoch != log.epoch {
-            let empty = HostMessage::QueryResult {
-                id: u64::MAX,
-                result: Ok(QueryResponse::SessionHistoryReset(empty_window())),
-            };
-            return session_window(&log, None, wire_overhead(&empty))
-                .map(QueryResponse::SessionHistoryReset);
-        }
-        let records = log.records();
-        let end = before.min(records.len() as u64) as usize;
-        let count = (limit as usize).clamp(1, SESSION_HISTORY_RECORDS);
-        let requested = log.turn_aligned_start(end.saturating_sub(count))..end;
-        let empty = HostMessage::QueryResult {
-            id: u64::MAX,
-            result: Ok(QueryResponse::SessionHistoryPage {
-                epoch: u64::MAX,
-                records: vec![],
-                from: u64::MAX,
-                end: u64::MAX,
-                truncated: false,
-            }),
-        };
-        let window = wire_window(records, requested.clone(), true, wire_overhead(&empty))?;
-        Ok(QueryResponse::SessionHistoryPage {
-            epoch: log.epoch,
-            from: window.range.start as u64,
-            end: window.range.end as u64,
-            truncated: window.range.len() < requested.len(),
-            records: window.records,
-        })
-    }
-
-    /// The whole output of one item, as the full log folds it.
-    pub(crate) fn item_output(
-        &mut self,
-        session_id: &str,
-        item_id: &str,
-    ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
-        let log = self.history_log(session_id);
-        let output = log
-            .fold()
-            .entries
-            .iter()
-            .rev()
-            .find(|entry| entry.id == item_id)
-            .and_then(|entry| match &entry.content {
-                EntryContent::Item(ItemContent::ToolCall { output, .. }) => output.clone(),
-                EntryContent::Item(ItemContent::CommandExecution { output, .. }) => {
-                    Some(output.clone())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| tcode_protocol::ProtocolError {
-                code: "unknown_item_output".into(),
-                message: format!("no output for item {item_id} in {session_id}"),
-            })?;
-        if output.len() > MAX_SESSION_HISTORY_BYTES {
-            return Err(tcode_protocol::ProtocolError {
-                code: "item_output_too_large".into(),
-                message: "The output exceeds the 8 MiB response limit.".into(),
-            });
-        }
-        Ok(QueryResponse::ItemOutput(output))
     }
 }
 
