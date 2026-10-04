@@ -21,9 +21,7 @@ use tcode_core::settings::orchestrate_efforts;
 
 use crate::provider_card::provider_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
-use crate::settings::{
-    ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, provider_label,
-};
+use crate::settings::{ChildApprovalMode, OrchestrateChildModel, provider_label};
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 
 struct ChildRowState {
@@ -192,17 +190,19 @@ impl OrchestrateSettingsPanel {
         self.child_model_picker
             .update(cx, |picker, cx| picker.set_excluded(child_excluded, cx));
 
+        let decisions = orchestrate.decision_models.len();
         for (index, entry) in orchestrate
             .decision_models
             .into_iter()
             .chain(orchestrate.child_models)
             .enumerate()
         {
+            let guidance = entry.guidance(index < decisions).to_string();
             let description = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 9)
                     .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
-                    .default_value(entry.description)
+                    .default_value(guidance)
             });
             self.input_subscriptions
                 .push(cx.subscribe(&description, move |this, _, event, cx| {
@@ -263,18 +263,14 @@ impl OrchestrateSettingsPanel {
         {
             return;
         }
-        let description = if decision {
-            OrchestrateSettings::builtin_decision_definition(option.provider, &option.id)
-        } else {
-            OrchestrateSettings::builtin_child_definition(option.provider, &option.id)
-        };
         let profile = OrchestrateChildModel {
             provider: option.provider,
             model: option.id.clone(),
             profile_id: option.profile_id.clone(),
             enabled: true,
             fast: false,
-            description: description.unwrap_or_default().to_string(),
+            description: String::new(),
+            bundled: None,
         };
         self.update_models(
             decision,
@@ -309,26 +305,26 @@ impl OrchestrateSettingsPanel {
 
     /// Restore the bundled model description without changing routing state.
     fn reset_child_definition(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let settings = self.store.read(cx).settings();
-        let models: Vec<_> = settings
-            .orchestrate
-            .decision_models
-            .into_iter()
-            .chain(settings.orchestrate.child_models)
-            .collect();
-        let (decision, _) = self.profile_location(index, cx);
-        let Some(target) = builtin_child_target(&models, index, decision) else {
+        let (decision, position) = self.profile_location(index, cx);
+        let orchestrate = self.store.read(cx).settings().orchestrate;
+        let models = if decision {
+            orchestrate.decision_models
+        } else {
+            orchestrate.child_models
+        };
+        let Some(entry) = models.get(position) else {
             return;
         };
-        let provider = target.provider;
-        let model = target.model.clone();
-        let description = target.description;
-        let persisted_description = description.clone();
+        let Some(description) = entry.bundled_guidance(decision) else {
+            return;
+        };
+        let provider = entry.provider;
+        let model = entry.model.clone();
         self.update_profile(
             index,
             move |entry| {
                 if entry.provider == provider && entry.model == model {
-                    entry.description = persisted_description;
+                    entry.description.clear();
                 }
             },
             cx,
@@ -795,15 +791,15 @@ impl OrchestrateSettingsPanel {
             } else {
                 format!("{} · {}", provider_label(provider), row.model)
             };
-            let reset = builtin_child_target(&models, index, decision)
-                .filter(|target| target.description != profile.description)
-                .map(|_| {
-                    self.reset_button(
-                        ("reset-orchestrate-child", index),
-                        cx,
-                        move |this, window, cx| this.reset_child_definition(index, window, cx),
-                    )
-                });
+            let reset = (!profile.description.is_empty()
+                && profile.bundled_guidance(decision).is_some())
+            .then(|| {
+                self.reset_button(
+                    ("reset-orchestrate-child", index),
+                    cx,
+                    move |this, window, cx| this.reset_child_definition(index, window, cx),
+                )
+            });
             rows.push(
                 v_flex()
                     .w_full()
@@ -956,24 +952,6 @@ impl OrchestrateSettingsPanel {
             .child(crate::material::grouped(rows, cx))
             .into_any_element()
     }
-}
-
-/// The bundled description for this model and role, independent of endpoint.
-fn builtin_child_target(
-    rows: &[OrchestrateChildModel],
-    index: usize,
-    decision: bool,
-) -> Option<OrchestrateChildModel> {
-    let row = rows.get(index)?;
-    let defaults = OrchestrateSettings::default();
-    let defaults = if decision {
-        defaults.decision_models
-    } else {
-        defaults.child_models
-    };
-    defaults
-        .into_iter()
-        .find(|entry| entry.provider == row.provider && entry.model == row.model)
 }
 
 impl Render for OrchestrateSettingsPanel {
