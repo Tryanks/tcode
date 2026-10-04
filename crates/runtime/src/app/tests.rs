@@ -6684,6 +6684,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
                     enabled: true,
                     fast: false,
                     description: String::new(),
+                    bundled: None,
                 },
             );
             state.providers.model_catalogs.insert(
