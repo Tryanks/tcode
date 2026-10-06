@@ -34,6 +34,11 @@ pub use wire::{
     decode_client_line, decode_host_line, encode_line,
 };
 
+// The number changes once per release whose wire differs from the previous
+// release's, when the release is cut (CONTRIBUTING.md, principle 9). A wire
+// change between releases keeps the number and adds a note under "unreleased";
+// cutting the release bumps the number once and folds the notes into its line.
+//
 // Version 4 adds client-generated command deduplication keys; version 5 moves
 // authentication into the transport, so hello carries no token; version 6
 // sends index and history changes instead of whole replacements and
@@ -42,6 +47,8 @@ pub use wire::{
 // and Grok provider kinds, which an older peer cannot decode because
 // `ProviderKind` has no unknown fallback; version 9 sends Orchestrate rows that
 // leave bundled guidance out, which an older peer would read as no guidance.
+//
+// Unreleased: (none)
 pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]

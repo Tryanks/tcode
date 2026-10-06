@@ -92,6 +92,16 @@ is derived from it. **Process** is how to build, check and submit work.
    maintainer explicitly asks for it, with the maintainer taking part
    throughout.
 
+9. **The protocol version follows releases, not changes.** `PROTOCOL_VERSION`
+   (`crates/protocol/src/lib.rs`) is bumped once per release whose wire
+   differs from the previous release's, when that release is cut, never in
+   the pull request that changes the wire. Between releases, `main` may
+   change the wire freely under the same number: every client and host are
+   built from one tree, and compatibility is promised between releases, not
+   between commits. A wire change notes itself in the version-history comment
+   above the constant; cutting a release that has such notes bumps the number
+   once and folds the notes into one line for that version.
+
 ## Process
 
 ### Reporting bugs and asking for features
