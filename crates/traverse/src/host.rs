@@ -1168,7 +1168,7 @@ mod tests {
         let manifest_path = dir.join("relays.json");
         let (to_host, _host_rx) = async_channel::unbounded::<String>();
         let (_host_tx, from_host) = async_channel::unbounded::<String>();
-        let host = TraverseHost::start(
+        let mut host = TraverseHost::start(
             HostMux::new(to_host, from_host),
             HostConfig {
                 host_name: "Late".into(),
@@ -1193,7 +1193,12 @@ mod tests {
         )
         .unwrap();
         let loader = host.loader.clone().unwrap();
-        // The failed startup fetch paces the next attempt; the loop would wait it out.
+        // The failed startup fetch paces the next attempt; the loop would wait
+        // it out. The loop is stopped before the stamp is reset: its first
+        // pass runs as soon as the runtime schedules it, and once unpaced it
+        // would fetch the written manifest itself, leaving this refresh with
+        // nothing to return.
+        host.refresh.take().unwrap().abort();
         loader.state().last_attempt_ms = None;
         let manifest = block_on(loader.refresh()).expect("the manifest arrived");
         block_on(host.shared.apply_manifest(manifest));
