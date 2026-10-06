@@ -190,7 +190,8 @@ can provide a shared project icon.
 
 The interface is localized and follows your system language; you can override it
 in Settings. Everything Tcode stores — sessions, settings, installed ACP agents —
-lives under your platform's app-data directory.
+lives in `~/.tcode` on every platform. A data directory an earlier version kept
+in your platform's app-data directory moves there on the first start.
 
 <div align="center">
 <img src="docs/images/chat-dark.png" width="840" alt="Tcode in dark mode">

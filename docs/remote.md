@@ -166,8 +166,8 @@ process. The password and browser tokens are separate from native pairing:
 ### Data directory
 
 The `tcode-headless --data-dir` option takes precedence over `TCODE_DATA_DIR`.
-Without the option, `TCODE_DATA_DIR` selects the store; otherwise Tcode uses the
-platform app-data directory with a `tcode` subdirectory. This includes settings,
+Without the option, `TCODE_DATA_DIR` selects the store; otherwise Tcode uses
+`~/.tcode` on every platform. This includes settings,
 threads, the machine key and allow list (`traverse.json`), browser login
 records (`remote.json`), the cached Traverse manifest and the current
 invitation. It does not move project working directories into the store.
@@ -184,6 +184,17 @@ machine's identity, and a device stays paired with that key, not with an
 address. Use a separate directory for a separate machine identity. The desktop
 app also honors `TCODE_DATA_DIR`, including as a device when adding or
 connecting to a machine.
+
+Earlier versions kept the data directory in the platform app-data directory
+(`~/Library/Application Support/tcode`, `~/.local/share/tcode`,
+`%APPDATA%\tcode`). When neither the option nor `TCODE_DATA_DIR` is given, the
+first start of this version moves that directory into `~/.tcode`, provided
+`~/.tcode` holds no data yet; `serve` prints its progress, Ctrl-C stops it
+without losing anything, and the next start continues. `LEGACY_TCODE_DATA_DIR`
+names another directory to move from, and moves it even into a data directory
+chosen with `--data-dir` or `TCODE_DATA_DIR`. A name present in both
+directories stops the move before anything is moved. Until the move is done,
+`set-password` refuses to write into the new directory.
 
 ### Run with systemd
 
