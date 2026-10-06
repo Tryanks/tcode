@@ -953,6 +953,8 @@ impl AppState {
         });
         let state = if running {
             "running"
+        } else if trailing_start_error(timeline).is_some() {
+            "failed"
         } else {
             match timeline.last_turn_status {
                 Some(TurnStatus::Completed) => "completed",
@@ -1020,6 +1022,9 @@ impl AppState {
             "last_output_tail": tail_chars(&final_message, 600),
             "updated_at": meta.updated_at,
         });
+        if let Some(error) = trailing_start_error(timeline) {
+            status["start_error"] = serde_json::json!(error);
+        }
         if let Some(usage) = usage.as_ref() {
             status["tokens"] = token_usage_json(usage);
         }
@@ -1099,23 +1104,32 @@ impl AppState {
                     return;
                 }
                 let turn = timeline.turns.len();
-                if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
-                    return;
-                }
-                // A report pushed via the child's report_result tool supersedes
-                // the last-message digest and is delivered in full; consuming it
-                // here keeps the fallback per turn.
-                let reported = state.child_reported_results.remove(&child_id);
-                let text = assemble_callback_text(
-                    &child_id,
-                    &title,
-                    status,
-                    &final_assistant_message(&timeline),
-                    reported.as_deref(),
-                    timeline.usage.as_ref(),
-                    result_max_chars,
-                    auto_archive,
-                );
+                // A failed start folds into the turn that was already reported,
+                // so it is not deduplicated against that turn's callback; and its
+                // final message is that old turn's, so it is not repeated.
+                let text = if let Some(error) = trailing_start_error(&timeline) {
+                    format!(
+                        "[orchestrate] thread {child_id} (\"{title}\") failed to start: {error}"
+                    )
+                } else {
+                    if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
+                        return;
+                    }
+                    // A report pushed via the child's report_result tool supersedes
+                    // the last-message digest and is delivered in full; consuming it
+                    // here keeps the fallback per turn.
+                    let reported = state.child_reported_results.remove(&child_id);
+                    assemble_callback_text(
+                        &child_id,
+                        &title,
+                        status,
+                        &final_assistant_message(&timeline),
+                        reported.as_deref(),
+                        timeline.usage.as_ref(),
+                        result_max_chars,
+                        auto_archive,
+                    )
+                };
                 state.callback_last_turn.insert(child_id.clone(), turn);
                 state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
                 if auto_archive
@@ -1741,6 +1755,14 @@ pub(super) fn final_assistant_message(timeline: &Timeline) -> String {
     }
     parts.reverse();
     parts.concat()
+}
+
+/// The error of a provider start that failed after the thread's last entry.
+fn trailing_start_error(timeline: &Timeline) -> Option<&str> {
+    match &timeline.entries.last()?.content {
+        EntryContent::ProviderStartError { error } => Some(error),
+        _ => None,
+    }
 }
 
 pub(super) fn tail_chars(text: &str, max: usize) -> String {
