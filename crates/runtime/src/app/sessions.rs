@@ -1001,7 +1001,8 @@ impl AppState {
 
     /// Permanently delete a thread: stop the provider, close its terminal,
     /// delete meta + event log, and (when `remove_worktree`) remove the git worktree
-    /// it was the last user of.
+    /// it was the last user of. A worktree it owns that is not removed is
+    /// recorded as kept, so the startup sweep leaves it.
     pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
         self.clear_approvals(session_id);
         let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
@@ -1033,7 +1034,17 @@ impl AppState {
         self.settings
             .collapsed_threads
             .retain(|id| id != session_id);
-        self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
+        let kept_worktree = meta
+            .as_ref()
+            .filter(|meta| meta.worktree.is_some() && !remove_worktree)
+            .map(|meta| meta.cwd.clone());
+        self.enqueue_store_write(
+            StoreWrite::RemoveSession {
+                id: session_id.to_string(),
+                kept_worktree,
+            },
+            cx,
+        );
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
         if meta
@@ -1157,24 +1168,13 @@ impl AppState {
                 .is_some_and(|&visited| meta.updated_at > visited)
     }
 
-    /// Remove app-owned worktrees that no session in the loaded store owns or
-    /// works in.
+    /// Remove app-owned worktrees that no thread in the store works in and the
+    /// user did not keep.
     pub(crate) fn recover_orphaned_worktrees(&self, cx: &mut HostCx) {
-        let known_ids = self
-            .sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect();
-        let cwds: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|session| session.cwd.clone())
-            .collect();
+        let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let summary = host_cx
-                .unblock(move || cleanup_orphans(&known_ids, &cwds))
-                .await;
+            let summary = host_cx.unblock(move || cleanup_orphans(&store)).await;
             if !summary.removed.is_empty() || !summary.skipped.is_empty() {
                 log::info!(
                     "worktree orphan recovery removed {}, left {}",
@@ -1212,12 +1212,13 @@ impl AppState {
         let root = active.meta.cwd.clone();
 
         let root_for_task = root.clone();
+        let data_dir = self.store.root().clone();
         let target_id = target_id.to_string();
         let delivery_key = cx.delivery_key.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
-                .unblock(move || provision(&root_for_task, &session_id_for_task))
+                .unblock(move || provision(&root_for_task, &session_id_for_task, &data_dir))
                 .await;
             host_cx.enqueue(move |state, cx| {
                 if state

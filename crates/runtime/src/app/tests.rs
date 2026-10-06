@@ -7282,34 +7282,9 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
 
 #[test]
 fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
-    let Some(root) = std::env::var_os("TCODE_TEST_WORKTREE_DISPATCH_ROOT") else {
-        let data = TestStore::new("tcode-dispatch-worktree");
-        // The override must be inherited at process creation: other tests and
-        // their background workers can read it without participating in a lock.
-        let output = tcode_services::process::command(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "app::tests::orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree",
-                "--nocapture",
-            ])
-            .env("TCODE_TEST_WORKTREE_DISPATCH_ROOT", data.root())
-            .env(
-                "TCODE_WORKTREES_DIR",
-                data.root().join("tcode-owned-worktrees"),
-            )
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "child test failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    };
-    let root = PathBuf::from(root);
-    let isolated_worktrees = root.join("tcode-owned-worktrees");
     let cx = &mut TestAppContext::default();
+    let root =
+        std::env::temp_dir().join(format!("tcode-dispatch-worktree-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     run_git(&root, &["init", "-b", "main"]).unwrap();
     run_git(&root, &["config", "commit.gpgsign", "false"]).unwrap();
@@ -7322,6 +7297,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     run_git(&root, &["commit", "-m", "initial"]).unwrap();
 
     let test_store = TestStore::new("tcode-dispatch-worktree-data");
+    let data_worktrees = test_store.root().join("worktrees");
     let scripted = scripted_provider(ProviderKind::Codex);
     let state = cx.new_entity({
         let mut state = TestClientState::new((*test_store).clone());
@@ -7358,7 +7334,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     let response = recv_dispatch_reply(cx, &response).unwrap();
     let child_id = response["thread_id"].as_str().unwrap().to_string();
     let expected_branch = format!("tcode/{child_id}");
-    let expected_path = isolated_worktrees.join(&child_id);
+    let expected_path = data_worktrees.join(&child_id);
     assert_eq!(
         response["worktree_path"],
         expected_path.display().to_string(),
@@ -7378,6 +7354,80 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     });
     remove_git_worktree(&root, &expected_path).unwrap();
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn orphan_sweep_leaves_worktrees_a_thread_works_in_or_the_user_kept() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orphan-sweep");
+    let store = (*test_store).clone();
+    let repo = test_store.root().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-b", "main"][..],
+        &["config", "commit.gpgsign", "false"],
+        &["config", "core.hooksPath", ".no-hooks"],
+        &["config", "user.name", "tcode"],
+        &["config", "user.email", "tcode@localhost"],
+    ] {
+        run_git(&repo, args).unwrap();
+    }
+    std::fs::write(repo.join("tracked.txt"), "initial\n").unwrap();
+    run_git(&repo, &["add", "tracked.txt"]).unwrap();
+    run_git(&repo, &["commit", "-m", "initial"]).unwrap();
+    let owner = |id: &str| {
+        let created = provision(&repo, id, store.root()).unwrap();
+        let mut meta = SessionMeta::new(ProviderKind::Codex, created.path, None);
+        meta.id = id.into();
+        meta.worktree = Some(WorktreeInfo {
+            root_project_path: repo.clone(),
+            base: created.base,
+            branch: created.branch,
+        });
+        meta
+    };
+    let source = owner("source");
+    let kept = owner("kept");
+    let orphan = owner("orphan").cwd;
+    let mut fork = SessionMeta::new(ProviderKind::Codex, source.cwd.clone(), None);
+    fork.id = "fork".into();
+    for meta in [&source, &kept, &fork] {
+        store.upsert_meta(meta).unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new(store.clone()));
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::DeleteSession {
+            session_id: "source".into(),
+            remove_worktree: true,
+        },
+    );
+    state.dispatch_command(
+        cx,
+        2,
+        Command::DeleteSession {
+            session_id: "kept".into(),
+            remove_worktree: false,
+        },
+    );
+    cx.run_until_parked();
+    assert!(source.cwd.exists(), "the fork still works in it");
+    // The next start is past the age that marks a worktree as abandoned.
+    let abandoned = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60),
+    );
+    for path in [&source.cwd, &kept.cwd, &orphan] {
+        filetime::set_file_mtime(path, abandoned).unwrap();
+    }
+
+    let summary = cleanup_orphans(&store);
+
+    assert_eq!(summary.removed, std::slice::from_ref(&orphan));
+    assert!(!orphan.exists());
+    assert!(source.cwd.join("tracked.txt").exists());
+    assert!(kept.cwd.join("tracked.txt").exists());
 }
 
 #[test]
