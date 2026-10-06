@@ -1,8 +1,19 @@
 use super::super::*;
 
 impl Composer {
-    pub(in super::super) fn menu_visible(&self) -> bool {
-        self.active_trigger.is_some() && !self.menu_dismissed
+    /// Whether the trigger menu is shown and owns Enter/arrows. A `/` or `$`
+    /// token that matches nothing is ordinary text (a path, a shell variable,
+    /// a provider command Tcode does not know), so no menu opens for it and
+    /// Enter submits as usual; only the asynchronous `@` menu keeps an empty
+    /// or loading state.
+    pub(in super::super) fn menu_visible(&self, cx: &App) -> bool {
+        let Some(trigger) = self.active_trigger.as_ref() else {
+            return false;
+        };
+        if self.menu_dismissed {
+            return false;
+        }
+        trigger.kind == TriggerKind::Path || !self.menu_rows(cx).0.is_empty()
     }
 
     /// Recompute the active trigger from the input text + cursor, resetting the
@@ -103,7 +114,7 @@ impl Composer {
                             group: Some("composer.group_skills"),
                         })
                         .collect();
-                (rows, crate::tr!("composer.no_skills").into_owned(), false)
+                (rows, String::new(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
                 let builtins: [(&str, Option<&str>, &str, MenuAccept); 5] = [
@@ -154,8 +165,9 @@ impl Composer {
                         group: Some("composer.group_builtin"),
                     })
                     .collect();
-                // Provider-native slash commands (Claude `slash_commands`), shown
-                // after the built-in group, fuzzily filtered without truncation.
+                // Provider-native slash commands (Claude `slash_commands`, which
+                // include its skills), shown after the built-in group, fuzzily
+                // filtered without truncation.
                 let commands = self
                     .workspace_store
                     .read(cx)
@@ -178,7 +190,7 @@ impl Composer {
                         group: Some("composer.group_provider"),
                     }),
                 );
-                (rows, crate::tr!("composer.no_command").into_owned(), false)
+                (rows, String::new(), false)
             }
         }
     }
@@ -244,7 +256,7 @@ impl Composer {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.menu_visible() {
+        if !self.menu_visible(cx) {
             return None;
         }
         let (rows, empty_text, loading) = self.menu_rows(cx);
@@ -463,6 +475,33 @@ mod tests {
             composer.read_with(cx, |composer, cx| {
                 assert_eq!(composer.menu_rows(cx).0[0].primary, first_row, "{trigger}");
             });
+        }
+    }
+
+    /// A `/` or `$` token that matches nothing is ordinary text: no menu opens,
+    /// so Enter submits it instead of accepting a row that does not exist.
+    #[gpui::test]
+    fn unmatched_command_and_skill_tokens_open_no_menu(cx: &mut TestAppContext) {
+        let (_store, composer, cx) = composer_window(false, cx);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        composer.update_in(cx, |composer, window, cx| {
+            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        });
+        for (text, visible) in [
+            ("/mod", true),
+            ("/nosuchcommand", false),
+            ("$HOME", false),
+            ("/Users/me/notes.md", false),
+        ] {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_draft("", window, cx)
+            });
+            cx.simulate_input(text);
+            cx.update(|window, cx| _ = window.draw(cx));
+            composer.read_with(cx, |composer, cx| {
+                assert_eq!(composer.menu_visible(cx), visible, "{text:?}");
+            });
+            assert_eq!(cx.debug_bounds("menu-row-0").is_some(), visible, "{text:?}");
         }
     }
 

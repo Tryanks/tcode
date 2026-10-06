@@ -11,9 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agent::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, CatalogRefresh,
     InteractionMode, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
-    OptionDescriptors, OptionSelection, PlanResolution, ProviderCommand, ProviderKind, RewindMode,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TurnOptions, TurnStatus,
-    list_models,
+    OptionDescriptors, OptionSelection, PlanResolution, ProviderCommand, ProviderCommandKind,
+    ProviderKind, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
+    TurnOptions, TurnStatus, list_models,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};

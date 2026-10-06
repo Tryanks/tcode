@@ -5009,6 +5009,49 @@ fn send_routing_matrix() {
     assert_eq!(dead.route(true), SendRouting::QueueUnsupported);
 }
 
+/// Claude Code expands a slash command only at byte 0 of the message, so the
+/// Ultrathink keyword trails a command instead of displacing it.
+#[test]
+fn ultrathink_keyword_trails_a_slash_command() {
+    assert_eq!(ultrathink_text("deep".into()), "Ultrathink:\ndeep");
+    assert_eq!(
+        ultrathink_text("/review the diff".into()),
+        "/review the diff\n\nultrathink"
+    );
+}
+
+/// A `$skill` the provider also exposes as a slash command (Claude) goes out
+/// as that command; a skill-only mention (Codex) and an unknown `$word` are
+/// sent as typed.
+#[test]
+fn skill_mentions_use_the_providers_native_invocation() {
+    let command = |name: &str, kind| ProviderCommand {
+        name: name.into(),
+        description: None,
+        kind,
+    };
+    let claude = [
+        command("review", ProviderCommandKind::Command),
+        command("review", ProviderCommandKind::Skill),
+    ];
+    let codex = [command("review", ProviderCommandKind::Skill)];
+    assert_eq!(
+        native_skill_invocation("$review the diff".into(), &claude),
+        "/review the diff"
+    );
+    assert_eq!(
+        native_skill_invocation("$review".into(), &claude),
+        "/review"
+    );
+    assert_eq!(
+        native_skill_invocation("$review the diff".into(), &codex),
+        "$review the diff"
+    );
+    for text in ["$HOME is set", "please $review", "$"] {
+        assert_eq!(native_skill_invocation(text.into(), &claude), text);
+    }
+}
+
 /// Ultrathink is per-send: it rides with the message it was armed for, not
 /// with whatever happens to be dispatched later.
 #[test]
