@@ -2654,7 +2654,7 @@ impl SettingsPage {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     // Toggle rows are clickable as a whole; a click that lands
                     // on this button must not also flip the switch.
-                    cx.stop_propagation();
+                    crate::widgets::stop_click_propagation(window, cx);
                     on_reset(this, window, cx);
                 }))
                 .into_any_element(),

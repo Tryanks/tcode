@@ -387,8 +387,8 @@ impl Composer {
             } else {
                 crate::tr!("userinput.answer")
             })
-            .on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
+            .on_click(cx.listener(|this, _, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
                 this.ui_async_expanded = !this.ui_async_expanded;
                 cx.notify();
             }));
@@ -402,8 +402,8 @@ impl Composer {
             })
             .icon(IconName::Close)
             .tooltip(crate::tr!("userinput.dismiss"))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
+            .on_click(cx.listener(move |this, _, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
                 this.ui_dismissed_request_id = Some(request_dismiss.clone());
                 cx.notify();
             }));
@@ -454,7 +454,7 @@ impl Composer {
                             .disabled(index == 0)
                             .tooltip(crate::tr!("userinput.previous"))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
+                                crate::widgets::stop_click_propagation(window, cx);
                                 this.ui_go(-1, &questions_previous, window, cx);
                             })),
                     )
@@ -481,7 +481,7 @@ impl Composer {
                             .disabled(index + 1 >= total)
                             .tooltip(crate::tr!("userinput.next_question"))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
+                                crate::widgets::stop_click_propagation(window, cx);
                                 this.ui_go(1, &questions_next, window, cx);
                             })),
                     )
