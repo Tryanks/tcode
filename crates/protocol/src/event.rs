@@ -173,6 +173,7 @@ pub struct ProvidersStatus {
     pub model_catalogs: HashMap<ProviderKind, Vec<agent::ModelSpec>>,
     pub models_loading: HashMap<ProviderKind, bool>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
+    pub update_run: Option<ProviderUpdateRun>,
     pub tcode_update: TcodeUpdateStatus,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
     /// Latest account usage per profile id (Codex / Claude Code only).
@@ -289,6 +290,21 @@ pub enum PluginOperationTarget {
     RemoveMarketplace {
         name: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderUpdateRun {
+    pub total: usize,
+    pub completed: usize,
+    pub current: Option<ProviderKind>,
+    pub failed: Vec<ProviderKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderUpdateAvailable {
+    pub provider: ProviderKind,
+    pub version: String,
+    pub automatic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -501,6 +517,21 @@ pub enum MergeWorktreeFailure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeToast {
+    ProviderUpdatesAvailable {
+        updates: Vec<ProviderUpdateAvailable>,
+    },
+    ProviderUpdateStarted {
+        operation: RuntimeOperationId,
+        run: ProviderUpdateRun,
+    },
+    ProviderUpdateProgress {
+        operation: RuntimeOperationId,
+        run: ProviderUpdateRun,
+    },
+    ProviderUpdateFinished {
+        operation: RuntimeOperationId,
+        run: ProviderUpdateRun,
+    },
     GitBusy,
     GitStarted {
         operation: RuntimeOperationId,
@@ -558,8 +589,6 @@ pub enum RuntimeToast {
 pub enum RuntimeError {
     External(String),
     PersistSettings { error: String },
-    UpdateUnknown { provider: ProviderKind },
-    UpdateFailed { provider: ProviderKind },
     TerminalStart { error: String },
     TerminalRestart { error: String },
     PersistProject { error: String },
@@ -586,18 +615,8 @@ pub enum RuntimeError {
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeNotice {
     ProviderMessage(String),
-    UpdateAvailable {
-        provider: ProviderKind,
-        version: String,
-    },
     TcodeUpdateAvailable {
         version: String,
-    },
-    UpdatingProvider {
-        provider: ProviderKind,
-    },
-    UpdateDone {
-        provider: ProviderKind,
     },
     NativeRewindCompleted {
         mode: RewindMode,
@@ -631,10 +650,7 @@ impl RuntimeNotice {
     pub fn severity(&self) -> NoticeSeverity {
         match self {
             Self::ProviderMessage(_) | Self::WorktreeMergeFailed { .. } => NoticeSeverity::Warning,
-            Self::UpdateAvailable { .. }
-            | Self::TcodeUpdateAvailable { .. }
-            | Self::UpdatingProvider { .. }
-            | Self::UpdateDone { .. }
+            Self::TcodeUpdateAvailable { .. }
             | Self::NativeRewindCompleted { .. }
             | Self::PlanSaved { .. }
             | Self::SwitchedBranch { .. }

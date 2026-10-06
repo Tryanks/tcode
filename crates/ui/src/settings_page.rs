@@ -1748,17 +1748,24 @@ impl SettingsPage {
         }
         let checked_at = self.store.read(cx).providers_checked_at();
         let checking = self.store.read(cx).providers_checking();
+        let run = self.store.read(cx).provider_update_run();
+        let automatic = self.store.read(cx).automatic_provider_updates();
         let muted = cx.theme().muted_foreground;
 
-        let mut header = gpui_base::h_flex().w_full().items_center().gap_2().child(
-            div()
-                .flex_1()
-                .pl_3()
-                .text_size(px(11.))
-                .font_medium()
-                .text_color(muted)
-                .child(crate::tr!("settings.providers_section")),
-        );
+        let mut header = gpui_base::h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .pl_3()
+                    .text_size(px(11.))
+                    .font_medium()
+                    .text_color(muted)
+                    .child(crate::tr!("settings.providers_section")),
+            );
         if let Some(checked_at) = checked_at {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
             header = header.child(
@@ -1781,6 +1788,19 @@ impl SettingsPage {
                     this.open_acp_dialog(window, cx);
                 })),
         );
+        if !automatic.is_empty() {
+            header = header.child(
+                Button::new("update-all-providers")
+                    .outline()
+                    .xsmall()
+                    .loading(run.is_some())
+                    .label(crate::tr!("providers.update_all"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.store
+                            .update(cx, |store, _cx| store.update_providers(automatic.clone()));
+                    })),
+            );
+        }
         header = header.child(
             Button::new("refresh-providers")
                 .ghost()
@@ -1802,11 +1822,34 @@ impl SettingsPage {
             .map(|(_, card)| card.clone().into_any_element())
             .collect();
 
-        let mut section = v_flex()
-            .w_full()
-            .gap_3()
-            .child(header)
-            .child(crate::material::grouped(provider_rows, cx));
+        let mut section = v_flex().w_full().gap_3().child(header);
+        if let Some(run) = run {
+            section = section.child(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .px_3()
+                    .child(
+                        div().text_size(px(12.)).text_color(muted).child(
+                            crate::tr!(
+                                "providers.update_progress",
+                                provider = run
+                                    .current
+                                    .map(|provider| provider.display_name())
+                                    .unwrap_or_default(),
+                                completed = run.completed,
+                                total = run.total
+                            )
+                            .into_owned(),
+                        ),
+                    )
+                    .child(
+                        crate::widgets::progress::Progress::new("provider-update-progress")
+                            .value(100. * run.completed as f32 / run.total.max(1) as f32),
+                    ),
+            );
+        }
+        section = section.child(crate::material::grouped(provider_rows, cx));
         for (_, card) in &self.acp_cards {
             section = section.child(card.clone());
         }
