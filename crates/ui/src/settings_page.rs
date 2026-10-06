@@ -2456,26 +2456,21 @@ impl SettingsPage {
                     .child(self.section_label(crate::tr!("computer_use.section"), cx))
                     .child(self.grouped_plain(rows, cx))
                     .children(
-                        [
-                            agent::ProviderKind::ClaudeCode,
-                            agent::ProviderKind::Codex,
-                            agent::ProviderKind::Pi,
-                            agent::ProviderKind::OpenCode,
-                            agent::ProviderKind::Acp,
-                        ]
-                        .into_iter()
-                        .filter(|kind| kind.caps().native_computer_use)
-                        .map(|kind| {
-                            div()
-                                .pt_2()
-                                .pl_3()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!(
-                                    "providers.native_computer_use",
-                                    name = kind.display_name()
-                                ))
-                        }),
+                        agent::ProviderKind::NATIVE
+                            .into_iter()
+                            .chain([agent::ProviderKind::Acp])
+                            .filter(|kind| kind.caps().native_computer_use)
+                            .map(|kind| {
+                                div()
+                                    .pt_2()
+                                    .pl_3()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::tr!(
+                                        "providers.native_computer_use",
+                                        name = kind.display_name()
+                                    ))
+                            }),
                     ),
             )
             .child(self.permissions_group(cx))
@@ -2717,7 +2712,7 @@ impl SettingsPage {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     // Toggle rows are clickable as a whole; a click that lands
                     // on this button must not also flip the switch.
-                    cx.stop_propagation();
+                    crate::widgets::stop_click_propagation(window, cx);
                     on_reset(this, window, cx);
                 }))
                 .into_any_element(),

@@ -161,7 +161,7 @@ impl AppState {
     /// at app start and after a binary-path change). Results update
     /// `model_catalogs` and are persisted so the next launch is instant.
     pub fn refresh_model_catalogs(&mut self, cx: &mut HostCx) {
-        for provider in NATIVE_PROVIDER_KINDS {
+        for provider in ProviderKind::NATIVE {
             let binary = self.settings.provider(provider).binary_path;
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
@@ -231,8 +231,8 @@ impl AppState {
     }
 
     // A *profile* is a named configuration on top of a protocol `ProviderKind`.
-    // The built-in native-provider cards are profiles too (with stable ids such
-    // as "claude", "codex", "pi", and "opencode").
+    // The built-in native-provider cards are profiles too, with the stable ids
+    // of `Settings::builtin_profile_id`.
     // The model catalog and update-check version stay keyed by kind; status
     // probes and card config (env, binary, home, accent, custom/hidden models)
     // are profile-specific, as are secrets.
@@ -240,7 +240,7 @@ impl AppState {
     /// Every selectable native profile, grouped by kind. ACP is handled
     /// separately through the installed-agent list.
     pub(super) fn all_profiles(&self) -> Vec<ResolvedProfile> {
-        NATIVE_PROVIDER_KINDS
+        ProviderKind::NATIVE
             .iter()
             .flat_map(|kind| self.settings.profiles_for_kind(*kind))
             .collect()
@@ -532,7 +532,7 @@ impl AppState {
     /// Check every provider and the running tcode build in the background,
     /// storing results and toasting once for each newly available update.
     pub fn check_provider_versions(&mut self, cx: &mut HostCx) {
-        for provider in NATIVE_PROVIDER_KINDS {
+        for provider in ProviderKind::NATIVE {
             let binary = self.resolve_provider_binary(provider);
             let status = self
                 .providers
@@ -736,7 +736,9 @@ impl AppState {
             ProviderKind::Codex
             | ProviderKind::ClaudeCode
             | ProviderKind::Pi
-            | ProviderKind::OpenCode => self
+            | ProviderKind::OpenCode
+            | ProviderKind::Cursor
+            | ProviderKind::Grok => self
                 .settings
                 .resolved_profile(
                     profile_id.unwrap_or_else(|| Settings::builtin_profile_id(provider)),
@@ -839,24 +841,19 @@ pub(super) fn provider_secret_names(
     settings: &Settings,
     settings_store: &SettingsStore,
 ) -> HashMap<String, HashSet<String>> {
-    [
-        ProviderKind::Codex,
-        ProviderKind::ClaudeCode,
-        ProviderKind::Pi,
-        ProviderKind::OpenCode,
-    ]
-    .into_iter()
-    .flat_map(|kind| settings.profiles_for_kind(kind))
-    .map(|profile| {
-        let id = profile.id;
-        let names = launch_env_for_profile(settings, &id, settings_store.profile_secrets(&id))
-            .env
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-        (id, names)
-    })
-    .collect()
+    ProviderKind::NATIVE
+        .into_iter()
+        .flat_map(|kind| settings.profiles_for_kind(kind))
+        .map(|profile| {
+            let id = profile.id;
+            let names = launch_env_for_profile(settings, &id, settings_store.profile_secrets(&id))
+                .env
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            (id, names)
+        })
+        .collect()
 }
 
 pub(super) fn session_launch_env(
@@ -869,7 +866,9 @@ pub(super) fn session_launch_env(
         ProviderKind::Codex
         | ProviderKind::ClaudeCode
         | ProviderKind::Pi
-        | ProviderKind::OpenCode => {
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok => {
             let profile_id = meta
                 .profile_id
                 .clone()
@@ -966,7 +965,10 @@ pub(super) fn session_options(
         // an ACP agent carries its own from the installed-agent card.
         extra_args: if meta.provider.caps().launch_args {
             match meta.provider {
-                ProviderKind::ClaudeCode | ProviderKind::OpenCode => provider_settings.extra_args(),
+                ProviderKind::ClaudeCode
+                | ProviderKind::OpenCode
+                | ProviderKind::Cursor
+                | ProviderKind::Grok => provider_settings.extra_args(),
                 ProviderKind::Pi => {
                     let mut extra_args = provider_settings.extra_args();
                     if provider_settings.pi.trust_project_extensions {

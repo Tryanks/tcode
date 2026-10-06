@@ -595,7 +595,7 @@ impl AppState {
 
     pub fn update_settings(&mut self, settings: Settings, cx: &mut HostCx) {
         self.enqueue_settings(&settings, cx);
-        if NATIVE_PROVIDER_KINDS
+        if ProviderKind::NATIVE
             .iter()
             .any(|&provider| self.settings.provider(provider) != settings.provider(provider))
         {

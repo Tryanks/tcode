@@ -50,21 +50,62 @@ pub(super) enum QueuedMessageKind {
 }
 
 impl QueuedMessage {
-    /// The text actually sent to the provider (image-only placeholder and
-    /// Ultrathink prefix applied). The recorded user message keeps `text`
-    /// verbatim, so an image-only bubble renders as just its thumbnails.
-    pub(super) fn wire_text(&self) -> String {
+    /// The text actually sent to the provider (image-only placeholder, native
+    /// skill invocation and Ultrathink keyword applied). The recorded user
+    /// message keeps `text` verbatim, so an image-only bubble renders as just
+    /// its thumbnails.
+    pub(super) fn wire_text(&self, provider_commands: &[ProviderCommand]) -> String {
         let text = if let Some(transcript) = &self.relay_transcript {
             assemble_relay_prompt(transcript, &self.text)
         } else {
             self.text.clone()
         };
         let text = wire_text_with_placeholder(text, &self.attachments);
+        let text = native_skill_invocation(text, provider_commands);
         if self.ultrathink {
-            format!("Ultrathink:\n{text}")
+            ultrathink_text(text)
         } else {
             text
         }
+    }
+}
+
+/// Send a leading `$name` skill mention as `/name` when the provider also lists
+/// `name` as a slash command. Claude Code reports every user-invocable skill
+/// under both `skills` and `slash_commands`, and expands only the `/name` form
+/// (at byte 0 of the message); Codex lists skills alone and expands `$name`
+/// itself, so its mentions are left as typed.
+pub(super) fn native_skill_invocation(
+    text: String,
+    provider_commands: &[ProviderCommand],
+) -> String {
+    let Some(rest) = text.strip_prefix('$') else {
+        return text;
+    };
+    let name_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..name_len];
+    let listed = |kind: ProviderCommandKind| {
+        provider_commands
+            .iter()
+            .any(|command| command.kind == kind && command.name == name)
+    };
+    if name.is_empty()
+        || !listed(ProviderCommandKind::Skill)
+        || !listed(ProviderCommandKind::Command)
+    {
+        return text;
+    }
+    format!("/{rest}")
+}
+
+/// Add the `ultrathink` keyword, which Claude Code honours anywhere in the
+/// prompt. A message that starts with `/` is a slash command, and the CLI
+/// expands one only at byte 0, so there the keyword trails the text instead.
+pub(super) fn ultrathink_text(text: String) -> String {
+    if text.starts_with('/') {
+        format!("{text}\n\nultrathink")
+    } else {
+        format!("Ultrathink:\n{text}")
     }
 }
 
@@ -177,7 +218,7 @@ pub struct ActiveSession {
     /// retention and LRU eviction. Active or working sessions keep this clear.
     pub(super) idle_since: Option<Instant>,
     /// Provider-native commands / skills discovered at session start (Claude
-    /// `slash_commands` + `skills`; Codex `skills/list` + custom prompts).
+    /// `slash_commands` + `skills`; Codex `skills/list`).
     /// Seeded from the per-provider cache, then replaced by live updates.
     pub(super) provider_commands: Vec<ProviderCommand>,
     /// The agent's self-described options (ACP `modes` / `models` /
@@ -505,7 +546,7 @@ impl ActiveSession {
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,
-                text: send.wire_text(),
+                text: send.wire_text(&self.provider_commands),
                 options: Some(send.options),
                 attachments: send.attachments,
             })

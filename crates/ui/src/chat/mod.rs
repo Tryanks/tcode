@@ -18,6 +18,7 @@ mod residency;
 use crate::overlay::OverlayExt as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::copy::CopiedMark;
 use crate::widgets::menu::{ContextMenuExt as _, PopupMenu, open_in_zed};
 use crate::widgets::tooltip::Tooltip;
 use crate::{
@@ -414,10 +415,8 @@ pub struct ChatView {
     _tick: Option<Task<()>>,
     /// 1s ticker kept alive while an error card shows a scheduled resume.
     _limit_tick: Option<Task<()>>,
-    /// Which copy button is currently showing its "Copied!" confirmation (2s):
-    /// the copy target's key (`plan`, `user:<id>`, `assistant:<id>`).
-    copied: Option<String>,
-    _copied_task: Option<Task<()>>,
+    /// Keyed `plan`, `user:<id>`, `assistant:<id>` or `error:<id>`.
+    copied: CopiedMark,
     /// The live commit dialog entity while it is open (kept alive across frames).
     commit_dialog: Option<Entity<CommitDialog>>,
     /// A system scrolling screenshot is driving the timeline: where it was
@@ -705,8 +704,7 @@ impl ChatView {
             highlighted_turn: None,
             _tick: None,
             _limit_tick: None,
-            copied: None,
-            _copied_task: None,
+            copied: CopiedMark::default(),
             commit_dialog: None,
             capture: None,
             _subscriptions: subscriptions,
@@ -1471,7 +1469,7 @@ impl ChatView {
                         |md| (Some(md.state.clone()), md.synced.clone()),
                     );
                     let copy_key = format!("assistant:{}", entry.id);
-                    let copied = self.copied.as_deref() == Some(copy_key.as_str());
+                    let copied = self.copied.is(&copy_key);
                     let mark = copy_key;
                     column = column.child(components::assistant::assistant(
                         components::assistant::AssistantData {
@@ -1535,7 +1533,7 @@ impl ChatView {
                         _ => None,
                     };
                     let copy_key = format!("error:{}", entry.id);
-                    let copied = self.copied.as_deref() == Some(copy_key.as_str());
+                    let copied = self.copied.is(&copy_key);
                     let mark = copy_key;
                     let copy_text = message.to_string();
                     column = column.child(components::error_card::error_card(
@@ -1760,7 +1758,7 @@ impl ChatView {
             .flatten();
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
-        let copied = self.copied.as_deref() == Some(copy_key.as_str());
+        let copied = self.copied.is(&copy_key);
         let mark = copy_key;
         let copy_text: Arc<str> = Arc::from(visible);
         let images = attachments
@@ -2244,7 +2242,7 @@ impl ChatView {
         let md_copy = markdown.to_string();
         let md_download = markdown.to_string();
         let md_save = markdown.to_string();
-        let copied = self.copied.as_deref() == Some("plan");
+        let copied = self.copied.is("plan");
         let toggle_key = collapse_key;
         components::disclosure::proposed_plan_card(
             components::disclosure::PlanCardData {
@@ -2284,17 +2282,7 @@ impl ChatView {
 
     /// Show the "Copied!" confirmation on `key` for 2s; a second copy re-arms the timer.
     fn mark_copied(&mut self, key: String, cx: &mut Context<Self>) {
-        self.copied = Some(key.clone());
-        self._copied_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.copied.as_deref() == Some(key.as_str()) {
-                    this.copied = None;
-                    cx.notify();
-                }
-            });
-        }));
-        cx.notify();
+        self.copied.mark(key, |this| &mut this.copied, cx);
     }
 
     fn render_header(

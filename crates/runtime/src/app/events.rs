@@ -175,7 +175,12 @@ impl AppState {
                     apply(resident);
                     resident.meta.clone()
                 });
-                if let Some(meta) = meta.filter(|meta| meta.acp_agent_id.is_some()) {
+                if let Some(meta) = meta.filter(|meta| {
+                    matches!(
+                        meta.provider.caps().option_descriptors,
+                        OptionDescriptors::Wire
+                    )
+                }) {
                     self.persist_meta(&meta, cx);
                 }
                 return;

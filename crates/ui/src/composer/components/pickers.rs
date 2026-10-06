@@ -94,7 +94,7 @@ impl Composer {
         let query = self.model_search.read(cx).value().to_lowercase();
         let fav_profiles: Vec<(String, ProviderKind)> = {
             let profiles = store.enabled_profiles();
-            PICKER_PROVIDER_KINDS
+            ProviderKind::NATIVE
                 .into_iter()
                 .flat_map(|kind| {
                     profiles
@@ -195,7 +195,7 @@ impl Composer {
         let acp_rail_agents: Vec<(String, String)> = store
             .settings_installed_acp_agents()
             .into_iter()
-            .filter(|agent| agent.enabled)
+            .filter(|agent| agent.enabled && agent.offered_for_new_sessions())
             .map(|agent| (agent.id.clone(), agent.name.clone()))
             .collect();
 
@@ -723,7 +723,7 @@ fn render_model_pane(
     let profile_ids: Vec<String> = {
         let store = store_entity.read(cx);
         let profiles = store.enabled_profiles();
-        PICKER_PROVIDER_KINDS
+        ProviderKind::NATIVE
             .into_iter()
             .flat_map(|kind| {
                 profiles
@@ -1202,8 +1202,8 @@ fn render_model_row(
                     muted
                 }),
             )
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
+            .on_click(move |_, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
                 let fav_id = fav_id.clone();
                 store_fav.update(cx, |store, _cx| store.toggle_favorite_model(fav_id));
                 // Refresh the open popover so the star + ordering update.
@@ -1687,8 +1687,8 @@ fn render_fast_mode_bolt(
                 compact,
             )
             .debug_selector(|| "traits-fast-mode".into())
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
+            .on_click(move |_, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
                 let value = fast.value(on != Some(true));
                 store.update(cx, |store, _cx| {
                     store.set_active_option(fast.option_id.clone(), Some(value));

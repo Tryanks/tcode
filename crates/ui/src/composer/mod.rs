@@ -81,12 +81,6 @@ use crate::usage::{METER_BLUE, METER_RED};
 /// File mentions are potentially unbounded; command and skill feeds are not
 /// capped and instead use the trigger menu's scrolling viewport.
 const FILE_MENU_ROW_CAP: usize = 50;
-const PICKER_PROVIDER_KINDS: [ProviderKind; 4] = [
-    ProviderKind::ClaudeCode,
-    ProviderKind::Codex,
-    ProviderKind::Pi,
-    ProviderKind::OpenCode,
-];
 
 /// Stop-button red-orange.
 const STOP_TINT: u32 = 0xF4562E;
@@ -341,7 +335,7 @@ impl Composer {
                         // injected into the turn that is already running rather
                         // than held until it finishes. With no turn running the
                         // two are equivalent (there is nothing to steer into).
-                        if this.menu_visible() {
+                        if this.menu_visible(cx) {
                             this.accept_menu(this.menu_highlight, window, cx);
                         } else {
                             let input = input.clone();
@@ -612,8 +606,7 @@ impl Composer {
             window.push_notification(Notification::info(crate::tr!("composer.no_session")), cx);
             return;
         }
-        if !self.compact
-            && terminal_contexts.is_empty()
+        if terminal_contexts.is_empty()
             && let Some(later) = parse_later(&text, Local::now())
         {
             let Ok((fire_at_unix_secs, message)) = later else {
@@ -1312,7 +1305,7 @@ impl Render for Composer {
                     cx.stop_propagation();
                     return;
                 }
-                if key == "escape" && this.menu_visible() {
+                if key == "escape" && this.menu_visible(cx) {
                     this.menu_dismissed = true;
                     cx.notify();
                 }
@@ -1320,14 +1313,14 @@ impl Render for Composer {
             // The editor binds Up and Down to cursor moves, which consume the
             // keystroke before any key-down listener runs.
             .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                if this.menu_visible() {
+                if this.menu_visible(cx) {
                     this.menu_highlight = this.menu_highlight.saturating_sub(1);
                     cx.stop_propagation();
                     cx.notify();
                 }
             }))
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
-                if this.menu_visible() {
+                if this.menu_visible(cx) {
                     let (rows, _, _) = this.menu_rows(cx);
                     this.menu_highlight =
                         (this.menu_highlight + 1).min(rows.len().saturating_sub(1));

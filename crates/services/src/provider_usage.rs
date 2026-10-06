@@ -177,7 +177,11 @@ pub async fn fetch_provider_usage(
         ProviderKind::ClaudeCode => agent::claude::read_usage(binary, launch_env)
             .await
             .map(|value| parse_claude_usage(&value, fetched_at)),
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Acp => return None,
+        ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => return None,
     };
     Some(result.unwrap_or_else(|error| error_usage(fetched_at, error.to_string())))
 }

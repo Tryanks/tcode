@@ -92,15 +92,26 @@ is derived from it. **Process** is how to build, check and submit work.
    maintainer explicitly asks for it, with the maintainer taking part
    throughout.
 
+9. **The protocol version follows releases, not changes.** `PROTOCOL_VERSION`
+   (`crates/protocol/src/lib.rs`) is bumped once per release whose wire
+   differs from the previous release's, when that release is cut, never in
+   the pull request that changes the wire. Between releases, `main` may
+   change the wire freely under the same number: every client and host are
+   built from one tree, and compatibility is promised between releases, not
+   between commits. A wire change notes itself in the version-history comment
+   above the constant; cutting a release that has such notes bumps the number
+   once and folds the notes into one line for that version.
+
 ## Process
 
 ### Reporting bugs and asking for features
 
 Open an [issue](https://github.com/Tryanks/tcode/issues). For a bug, include
-your OS, which agent (Claude Code / Codex / which ACP agent), what you did, what
-happened and what you expected. A screenshot beats a paragraph for anything
-visual. If you are unsure whether something is a bug or intended, open an issue
-anyway — the answer is worth writing down either way.
+your OS, which agent (Claude Code, Codex, pi, OpenCode, Cursor, Grok, or which
+ACP agent), what you did, what happened and what you expected. A screenshot
+beats a paragraph for anything visual. If you are unsure whether something is a
+bug or intended, open an issue anyway — the answer is worth writing down either
+way.
 
 ### Building
 
@@ -121,8 +132,8 @@ Platform prerequisites:
   `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`).
   The embedded preview browser is compiled out on Linux.
 
-Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`) and
-can be overridden in **Settings → Providers**.
+Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`,
+`cursor-agent`, `grok`) and can be overridden in **Settings → Providers**.
 
 ### Before you open a pull request
 
@@ -275,7 +286,8 @@ crates/ios, crates/android, crates/web
                          `tcode_ui::run_shell`
 crates/platform/*        GPUI platform backends for iOS and Android
 crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, pi.rs,
-                         opencode.rs, acp.rs
+                         opencode.rs, cursor.rs, grok.rs, acp.rs; the ACP
+                         session they share is acp_session.rs
 crates/term              terminal implementation (PTY, host-side emulator)
 crates/mcp-host          shared authenticated loopback host for in-process MCP servers
 crates/preview-mcp       MCP server exposing the preview browser to the agent
