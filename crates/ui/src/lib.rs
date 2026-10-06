@@ -73,9 +73,13 @@ pub use i18n::{
     LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale, resolve_locale, set_locale,
     translate, translate_with_args,
 };
-pub use run::{ShellOptions, THEME_JSON, flattened_theme_json, last_host_target, run_shell};
+pub use run::{
+    ShellOptions, THEME_JSON, flattened_theme_json, init_client, last_host_target,
+    open_client_window, run_shell,
+};
 pub(crate) use shell::window_drag_area;
 pub use shell::{AppShell, Quit, ShellSetup, TogglePalette, handle_back};
+pub use thread_export::format_size;
 pub use window_seam::force_mobile_layout;
 pub use window_state::{OpenThread, WindowState};
 

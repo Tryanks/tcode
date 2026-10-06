@@ -219,6 +219,16 @@ quit:
   description: "仍有 %{count} 个会话正在工作。退出将停止这些会话。"
   confirm: "退出"
   startup_failed: "Tcode 无法启动"
+migration:
+  title: "正在升级对话存储"
+  description: "Tcode 正在把你的对话复制到新的数据库 tcode.db，原始文件会保留在数据目录的 legacy/ 文件夹中。"
+  scanning: "正在查找对话…"
+  importing: "正在复制对话：%{done}/%{total} · %{bytes}/%{total_bytes}"
+  verifying: "正在校验副本：%{done}/%{total} · %{bytes}/%{total_bytes}"
+  publishing: "即将完成…"
+  archiving: "正在把原始文件移入 legacy/…"
+  quitting: "正在停止，原始文件未被改动。"
+  failed: "升级未能完成：%{reason}"
 settings:
   title: "设置"
   sections: "全部设置"

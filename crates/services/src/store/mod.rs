@@ -19,12 +19,14 @@ mod migrate;
 #[cfg(test)]
 mod tests;
 
+pub use migrate::{Migration, MigrationPhase, MigrationProgress};
+
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -94,6 +96,11 @@ enum State {
     /// Opened on first use, so a handle that only needs the directory (a
     /// subcommand, a settings file) never takes the data dir.
     Unopened,
+    /// The data dir is owned, for a migration and then the database, but the
+    /// database is not open yet.
+    Owned(File),
+    /// [`SessionStore::migrate`] holds the ownership lock while it runs.
+    Migrating,
     Open(Live),
     /// [`SessionStore::close`] is waiting for in-flight operations.
     Closing(Live),
@@ -261,11 +268,88 @@ impl SessionStore {
         &self.root
     }
 
-    /// Take ownership of the data dir and open its database now, migrating the
-    /// JSON index and JSONL logs on first start. Fails with
+    /// Take ownership of the data dir and open its database now. A data dir
+    /// that still needs migrating ([`SessionStore::needs_migration`]) is
+    /// refused. Fails with
     /// [`io::ErrorKind::ResourceBusy`] while another host owns the directory.
     pub fn open(&self) -> io::Result<()> {
         self.run("open", |_| Ok(()))
+    }
+
+    /// Take ownership of the data dir, keeping it for the database opened
+    /// later, and say whether it holds the JSON index or JSONL logs of an
+    /// older build that [`SessionStore::migrate`] must move into `tcode.db`
+    /// before the store opens. Fails with [`io::ErrorKind::ResourceBusy`]
+    /// while another host owns the directory.
+    pub fn needs_migration(&self) -> io::Result<bool> {
+        let mut state = self.shared.lock_state()?;
+        match &*state {
+            State::Unopened => *state = State::Owned(acquire_ownership(&self.root)?),
+            State::Owned(_) => {}
+            State::Open(_) => return Ok(false),
+            other => return Err(unavailable(other, "check for a migration")),
+        }
+        migrate::needed(&self.root)
+    }
+
+    /// Migrate an older build's files into `tcode.db` under the data dir's
+    /// ownership lock, which the store keeps for the database afterwards.
+    /// `progress` is called after every chunk of about 8 MiB and every log;
+    /// `cancel` is checked at the same points and between phases until the
+    /// migrated database is complete. A cancelled migration removes its
+    /// staging files and changes nothing else; a later one starts over.
+    pub fn migrate(
+        &self,
+        mut progress: impl FnMut(MigrationProgress),
+        cancel: &AtomicBool,
+    ) -> io::Result<Migration> {
+        let ownership = {
+            let mut state = self.shared.lock_state()?;
+            match std::mem::replace(&mut *state, State::Migrating) {
+                State::Unopened => match acquire_ownership(&self.root) {
+                    Ok(ownership) => ownership,
+                    Err(error) => {
+                        *state = State::Unopened;
+                        return Err(error);
+                    }
+                },
+                State::Owned(ownership) => ownership,
+                State::Open(live) => {
+                    *state = State::Open(live);
+                    return Ok(Migration::Completed);
+                }
+                other => {
+                    let error = unavailable(&other, "migrate");
+                    *state = other;
+                    return Err(error);
+                }
+            }
+        };
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            migrate::run(&self.root, &mut progress, cancel)
+        }));
+        let mut state = self.shared.lock_state()?;
+        let result = match outcome {
+            Ok(result) => {
+                *state = State::Owned(ownership);
+                result
+            }
+            Err(panic) => {
+                let reason = format!(
+                    "session store panicked while migrating {}: {}",
+                    self.root.display(),
+                    panic_message(panic.as_ref())
+                );
+                log::error!("{reason}");
+                *state = State::Failed {
+                    reason: reason.clone(),
+                    _ownership: Some(ownership),
+                };
+                Err(io::Error::other(reason))
+            }
+        };
+        self.shared.idle.notify_all();
+        result
     }
 
     /// Whether the store stopped serving after a panic or a broken connection.
@@ -280,15 +364,23 @@ impl SessionStore {
         )
     }
 
-    /// Wait for every in-flight operation, checkpoint the WAL into the main
-    /// file and release the database and the data dir. Every handle of this
-    /// store fails afterwards; a store that already failed is not
-    /// checkpointed.
+    /// Wait for every in-flight operation and a running migration, checkpoint
+    /// the WAL into the main file and release the database and the data dir.
+    /// Every handle of this store fails afterwards; a store that already
+    /// failed is not checkpointed.
     pub fn close(&self) -> io::Result<()> {
         let mut state = self.shared.lock_state()?;
         loop {
             match std::mem::replace(&mut *state, State::Closed) {
-                State::Unopened | State::Closed => return Ok(()),
+                State::Unopened | State::Closed | State::Owned(_) => return Ok(()),
+                State::Migrating => {
+                    *state = State::Migrating;
+                    state = self
+                        .shared
+                        .idle
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
                 State::Open(live) => *state = State::Closing(live),
                 State::Closing(live) if live.in_flight > 0 => {
                     *state = State::Closing(live);
@@ -354,8 +446,17 @@ impl SessionStore {
 
     fn acquire(&self, operation: &str) -> io::Result<Arc<Db>> {
         let mut state = self.shared.lock_state()?;
-        if matches!(*state, State::Unopened) {
-            match catch_unwind(AssertUnwindSafe(|| open_live(&self.root))) {
+        let ownership = match std::mem::replace(&mut *state, State::Unopened) {
+            State::Unopened => Some(acquire_ownership(&self.root)?),
+            State::Owned(ownership) => Some(ownership),
+            other => {
+                *state = other;
+                None
+            }
+        };
+        if let Some(ownership) = ownership {
+            // Dropping the ownership on failure lets the next attempt start over.
+            match catch_unwind(AssertUnwindSafe(|| open_live(&self.root, ownership))) {
                 Ok(Ok(live)) => *state = State::Open(live),
                 Ok(Err(error)) => return Err(error),
                 Err(panic) => {
@@ -378,12 +479,7 @@ impl SessionStore {
                 live.in_flight += 1;
                 Ok(live.db.clone())
             }
-            State::Closing(_) | State::Closed => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                format!("cannot {operation}: the session store is closed"),
-            )),
-            failed @ State::Failed { .. } => Err(failed_error(failed)),
-            State::Unopened => unreachable!("opened above"),
+            other => Err(unavailable(other, operation)),
         }
     }
 
@@ -687,8 +783,9 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let ownership = match std::mem::replace(&mut *state, State::Closed) {
             State::Open(live) | State::Closing(live) => Some(live.ownership),
+            State::Owned(ownership) => Some(ownership),
             State::Failed { _ownership, .. } => _ownership,
-            State::Unopened | State::Closed => None,
+            State::Unopened | State::Migrating | State::Closed => None,
         };
         *state = State::Failed {
             reason,
@@ -707,6 +804,21 @@ fn failed_error(state: &State) -> io::Error {
     )))
 }
 
+/// Why a store in `state` cannot `operation` now.
+fn unavailable(state: &State, operation: &str) -> io::Error {
+    match state {
+        State::Migrating => io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            format!("cannot {operation}: the data directory is being migrated"),
+        ),
+        failed @ State::Failed { .. } => failed_error(failed),
+        _ => io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            format!("cannot {operation}: the session store is closed"),
+        ),
+    }
+}
+
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     panic
         .downcast_ref::<&str>()
@@ -715,10 +827,8 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "unknown panic".into())
 }
 
-/// Take the data dir, bring `tcode.db` up to date (migrating on first start)
-/// and open it.
-fn open_live(root: &Path) -> io::Result<Live> {
-    let ownership = acquire_ownership(root)?;
+/// Bring `tcode.db` up to date in the data dir `ownership` holds, and open it.
+fn open_live(root: &Path, ownership: File) -> io::Result<Live> {
     migrate::prepare(root)?;
     let path = root.join(DB_FILE);
     let db = Db::open(&path, false)?;
