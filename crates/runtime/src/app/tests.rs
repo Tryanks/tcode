@@ -174,6 +174,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         let persisted = state
             .store
             .load_index()
+            .unwrap()
             .into_iter()
             .find(|meta| meta.id == mirror.id)
             .unwrap();
@@ -183,7 +184,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             serde_json::json!("low")
         );
         assert_eq!(persisted.interaction_mode, InteractionMode::Plan);
-        let mirror_events = state.store.read_events(&mirror.id);
+        let mirror_events = state.store.read_events(&mirror.id).unwrap();
         assert!(mirror_events.iter().any(|stored| matches!(
             &stored.event,
             AgentEvent::ItemCompleted(ThreadItem {
@@ -192,7 +193,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
                 ..
             }) if id == "child-answer"
         )));
-        let parent_events = state.store.read_events("parent");
+        let parent_events = state.store.read_events("parent").unwrap();
         assert!(parent_events.iter().any(|stored| matches!(
             &stored.event,
             AgentEvent::ItemCompleted(ThreadItem {
@@ -311,7 +312,7 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
         TurnStatus::Completed
     };
     state.update(cx, |state, cx| {
-        let events = state.store.read_events(&mirror_id);
+        let events = state.store.read_events(&mirror_id).unwrap();
         let mut open = false;
         let mut boundaries = 0;
         let mut items = 0;
@@ -614,7 +615,7 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
-        let events = state.store.read_events(&grandchild_id);
+        let events = state.store.read_events(&grandchild_id).unwrap();
         assert!(matches!(
             &events.first().unwrap().event,
             AgentEvent::TurnStarted { turn_id } if turn_id == "toolu_grandchild"
@@ -627,22 +628,18 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
             }
         ));
         assert!(matches!(
-            &state.store.read_events(&second_id).last().unwrap().event,
+            &state.store.read_events(&second_id).unwrap().last().unwrap().event,
             AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
                 if turn_id == "toolu_grandchild_2"
         ));
-        assert!(
-            state
-                .store
-                .read_events(&child_id)
-                .iter()
-                .all(|stored| match &stored.event {
-                    AgentEvent::ItemStarted(item)
-                    | AgentEvent::ItemUpdated(item)
-                    | AgentEvent::ItemCompleted(item) => item.parent_item_id.is_none(),
-                    _ => true,
-                })
-        );
+        assert!(state.store.read_events(&child_id).unwrap().iter().all(
+            |stored| match &stored.event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item) => item.parent_item_id.is_none(),
+                _ => true,
+            }
+        ));
     });
 }
 
@@ -687,7 +684,7 @@ fn unknown_parent_mirror_closes_when_the_parent_session_closes() {
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
-        let events = state.store.read_events(&mirror_id);
+        let events = state.store.read_events(&mirror_id).unwrap();
         assert!(matches!(
             &events.last().unwrap().event,
             AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
@@ -753,7 +750,7 @@ fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
             mirror.timeline.last_turn_status,
             Some(TurnStatus::Interrupted)
         );
-        let events = state.store.read_events("mirror");
+        let events = state.store.read_events("mirror").unwrap();
         assert_eq!(events.len(), 3);
         assert!(matches!(
             &events[2].event,
@@ -773,7 +770,7 @@ fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
-        assert_eq!(state.store.read_events("mirror").len(), 3);
+        assert_eq!(state.store.read_events("mirror").unwrap().len(), 3);
     });
 }
 
@@ -1075,6 +1072,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             !state
                 .store
                 .load_index()
+                .unwrap()
                 .iter()
                 .any(|meta| meta.id == session_id)
         );
@@ -1143,6 +1141,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             state
                 .store
                 .load_index()
+                .unwrap()
                 .into_iter()
                 .find(|meta| meta.id == session_id)
                 .unwrap(),
@@ -1324,7 +1323,7 @@ fn archive_and_unarchive_apply_exact_timestamp_cascades() {
         );
     });
     cx.run_until_parked();
-    let persisted = store.load_index();
+    let persisted = store.load_index().unwrap();
     assert!(
         persisted
             .iter()
@@ -1666,7 +1665,11 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 .find(|meta| meta.id == id)
                 .map(|meta| meta.title.as_str());
             assert_eq!(title, expected, "{outcome}");
-            let persisted = store.load_index().into_iter().find(|meta| meta.id == id);
+            let persisted = store
+                .load_index()
+                .unwrap()
+                .into_iter()
+                .find(|meta| meta.id == id);
             assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
             if !matches!(outcome, "renamed" | "deleted") {
                 assert_eq!(state.sessions[0].updated_at, 123, "{outcome}");
@@ -2416,7 +2419,7 @@ fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
-        let events = state.store.read_events("orchestrator");
+        let events = state.store.read_events("orchestrator").unwrap();
         let recorded = events
             .iter()
             .find_map(|stored| match &stored.event {
@@ -2907,7 +2910,7 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
                 vec![]
             };
             assert_eq!(draft.meta.option_selections, expected, "{name}");
-            assert!(state.store.load_index().is_empty(), "{name}");
+            assert!(state.store.load_index().unwrap().is_empty(), "{name}");
         });
     }
 }
@@ -2952,7 +2955,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
         assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5-1"));
         assert!(draft.meta.acp_agent_id.is_none());
         assert!(draft.meta.option_selections.is_empty());
-        assert!(state.store.load_index().is_empty());
+        assert!(state.store.load_index().unwrap().is_empty());
     });
 }
 
@@ -4152,7 +4155,7 @@ fn steering_parked_orchestrator_callback_uses_recorded_id() {
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
-        let timeline = Timeline::fold_events(state.store.read_events("parent"));
+        let timeline = Timeline::fold_events(state.store.read_events("parent").unwrap());
         assert!(timeline.entries.iter().any(|entry| matches!(
             &entry.content,
             EntryContent::Steer {
@@ -5285,15 +5288,22 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
         let active = state.selected_session().unwrap();
         assert_eq!(active.queue.len(), 1);
         assert_eq!(active.delivery_in_flight, Some(delivery_id));
-        assert!(!state.store.read_events(&session_id).iter().any(|stored| {
-            matches!(
-                &stored.event,
-                AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::UserMessage { text, .. },
-                    ..
-                }) if text == "survive the eof race"
-            )
-        }));
+        assert!(
+            !state
+                .store
+                .read_events(&session_id)
+                .unwrap()
+                .iter()
+                .any(|stored| {
+                    matches!(
+                        &stored.event,
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            content: ItemContent::UserMessage { text, .. },
+                            ..
+                        }) if text == "survive the eof race"
+                    )
+                })
+        );
 
         // EOF wins before the first actor writes, so no TurnAccepted exists.
         state.on_event(
@@ -5343,6 +5353,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
         let delivered = state
             .store
             .read_events(&session_id)
+            .unwrap()
             .iter()
             .filter(|stored| {
                 matches!(
@@ -5449,7 +5460,7 @@ fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() 
         assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
     });
     cx.run_until_parked();
-    assert_eq!(test_store.load_index()[0].updated_at, updated_at);
+    assert_eq!(test_store.load_index().unwrap()[0].updated_at, updated_at);
 }
 
 #[test]
@@ -5666,7 +5677,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         serde_json::json!({"thread_id": "native-empty-source"}),
     ));
     store.upsert_meta(&empty_source).unwrap();
-    assert!(!root.join(format!("{}.jsonl", empty_source.id)).exists());
+    assert!(store.read_event_log(&empty_source.id).unwrap().is_empty());
     let state = cx.new_entity(TestClientState::new(store));
 
     state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
@@ -5688,10 +5699,10 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         assert_eq!(fork.cwd, source.cwd);
         assert_eq!(fork.worktree, None);
         assert!(!active.timeline.turn_running);
-        assert_eq!(state.store.read_events(&fork.id).len(), 1);
+        assert_eq!(state.store.read_events(&fork.id).unwrap().len(), 1);
         assert_eq!(
-            std::fs::read(root.join(format!("{}.jsonl", fork.id))).unwrap(),
-            std::fs::read(root.join(format!("{}.jsonl", source.id))).unwrap()
+            state.store.read_event_log(&fork.id).unwrap(),
+            state.store.read_event_log(&source.id).unwrap()
         );
     });
 
@@ -5718,11 +5729,18 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
             state
                 .store
                 .load_index()
+                .unwrap()
                 .iter()
                 .any(|meta| meta.id == fork.id)
         );
-        assert!(!root.join(format!("{}.jsonl", empty_source.id)).exists());
-        assert!(!root.join(format!("{}.jsonl", fork.id)).exists());
+        assert!(
+            state
+                .store
+                .read_event_log(&empty_source.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(state.store.read_event_log(&fork.id).unwrap().is_empty());
     });
 }
 
@@ -5739,6 +5757,14 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
         state.record_event(&id, &persisted_assistant_event("first"), cx);
         state.set_profile_secret("profile", "ANTHROPIC_API_KEY", Some("writer-secret"), cx);
         state.record_event(&id, &persisted_assistant_event("second"), cx);
+        // More than one batch's worth, so the flush waits for several commits.
+        for index in 0..600 {
+            state.record_event(
+                &id,
+                &persisted_assistant_event(&format!("bulk {index}")),
+                cx,
+            );
+        }
     });
     cx.run_until_parked();
 
@@ -5746,13 +5772,14 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
     assert_eq!(
         fresh
             .load_index()
+            .unwrap()
             .iter()
             .find(|meta| meta.id == id)
             .unwrap()
             .title,
         "persisted by writer"
     );
-    let events = fresh.read_events(&id);
+    let events = fresh.read_events(&id).unwrap();
     let texts: Vec<_> = events
         .iter()
         .filter_map(|stored| match &stored.event {
@@ -5763,7 +5790,9 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
             _ => None,
         })
         .collect();
-    assert_eq!(texts, ["first", "second"]);
+    let bulk: Vec<_> = (0..600).map(|index| format!("bulk {index}")).collect();
+    assert_eq!(texts[..2], ["first", "second"]);
+    assert_eq!(texts[2..], bulk);
     let settings = SettingsStore::new(test_store.root().clone());
     assert_eq!(
         settings
@@ -5772,6 +5801,75 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
             .map(String::as_str),
         Some("writer-secret")
     );
+}
+
+/// A write the store cannot commit is reported once per write, every later
+/// flush says the store lost something, and the in-memory history that holds
+/// the unsaved records is kept instead of being released.
+#[test]
+fn failed_store_writes_are_reported_and_keep_the_unsaved_history() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-writer-failure");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, _receiver) = smol::channel::unbounded();
+    let parked = live_session(ProviderKind::Codex, commands);
+    let id = parked.meta.id.clone();
+    state.update(cx, |state, cx| {
+        state.residents.parked.insert(id.clone(), parked);
+        state.record_event(&id, &persisted_assistant_event("saved"), cx);
+    });
+    cx.run_until_parked();
+    cx.drain_outgoing();
+
+    // The database stops accepting writes underneath the host.
+    test_store.close().unwrap();
+    state.update(cx, |state, cx| {
+        for text in ["unsaved one", "unsaved two"] {
+            state.record_event(&id, &persisted_assistant_event(text), cx);
+        }
+    });
+    cx.run_until_parked();
+    let failures = cx
+        .drain_outgoing()
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message,
+                HostMessage::Event(EventEnvelope {
+                    event: ServerEvent::Runtime(RuntimeEvent::Error(
+                        RuntimeError::PersistEvent { .. }
+                    )),
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(failures, 2);
+
+    // The session leaves residency; its log is the only copy of the unsaved
+    // records, so the release barrier's failure keeps it.
+    state.update(cx, |state, cx| {
+        state.residents.parked.remove(&id);
+        state.release_stale_session_logs(cx);
+    });
+    cx.run_until_parked();
+    let barrier = state.update(cx, |state, cx| state.store_write_barrier(cx));
+    cx.run_until_parked();
+    assert!(barrier.try_recv().unwrap().is_err());
+    state.read(|state| {
+        let texts: Vec<_> = state.event_records[&id]
+            .records()
+            .iter()
+            .filter_map(|record| match &record.event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::AssistantMessage { text },
+                    ..
+                }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["saved", "unsaved one", "unsaved two"]);
+    });
 }
 
 /// A project's unsent draft is keyed by the project, so deleting the project
@@ -6210,7 +6308,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
     cx.run_until_parked();
     state.update(cx, |state, _| {
         // And it is durable: a replay of the JSONL shows the same thing.
-        let replayed = Timeline::fold_events(state.store.read_events(&id_b));
+        let replayed = Timeline::fold_events(state.store.read_events(&id_b).unwrap());
         assert!(replayed.entries.iter().any(
             |e| matches!(&e.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "second message")
         ));
@@ -6232,7 +6330,7 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index();
+        state.sessions = state.store.load_index().unwrap();
         state.install_selected(session);
         state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -6321,6 +6419,7 @@ fn event_stream_end_closes_only_its_own_live_provider_in_any_residency() {
             cx.run_until_parked();
             let closes = store
                 .read_events("session")
+                .unwrap()
                 .iter()
                 .filter(|stored| matches!(stored.event, AgentEvent::SessionClosed { .. }))
                 .count();
@@ -6431,7 +6530,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
 
         // A live session with a running turn (the overnight workflow).
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index();
+        state.sessions = state.store.load_index().unwrap();
         state.install_selected(session);
         state.send_turn(&id_a, "run the long migration".into(), Vec::new(), cx);
         state.send_turn(&id_a, "queued follow-up".into(), Vec::new(), cx);
@@ -6559,7 +6658,7 @@ fn drained_parked_session_stays_resident() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index();
+        state.sessions = state.store.load_index().unwrap();
         state.install_selected(session);
         state.send_turn(&id, "one last thing".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -7410,7 +7509,7 @@ fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<Ses
                 .unwrap();
         }
     }
-    store.read_events(id)
+    store.read_events(id).unwrap()
 }
 
 /// A client scrolling to the top of a long thread fetches one page per turn;
@@ -7569,7 +7668,7 @@ fn session_log_follows_residency_and_flushes_before_release() {
     state.update(cx, |state, _| {
         assert!(!state.event_records.contains_key("resident"));
         assert_eq!(
-            state.store.read_events("resident").len() as u64,
+            state.store.read_events("resident").unwrap().len() as u64,
             persisted + 1
         );
     });
@@ -7762,7 +7861,7 @@ fn settled_commands_persist_without_closing_the_selected_conversation() {
                 .all(|meta| meta.settled_at.is_some() && meta.archived_at.is_none())
         );
     });
-    let restarted = AppState::new(store.clone());
+    let restarted = AppState::new(store.clone()).unwrap();
     assert!(
         restarted
             .sessions
@@ -7806,6 +7905,7 @@ fn settled_commands_persist_without_closing_the_selected_conversation() {
     assert!(
         store
             .load_index()
+            .unwrap()
             .iter()
             .all(|meta| meta.settled_at.is_none())
     );
@@ -7931,7 +8031,7 @@ fn settling_rejects_busy_descendants_and_accepted_input_reactivates_ancestors() 
 #[test]
 fn interrupt_reports_stopping_until_the_turn_completes() {
     let store = TestStore::new("interrupt-stopping");
-    let mut state = AppState::new((*store).clone());
+    let mut state = AppState::new((*store).clone()).unwrap();
     let context = TestAppContext::default();
     let mut cx = context.host_cx();
     let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
@@ -7961,7 +8061,7 @@ fn interrupt_reports_stopping_until_the_turn_completes() {
 #[test]
 fn status_carries_the_running_turn_and_its_question_only_while_in_flight() {
     let store = TestStore::new("status-running-turn");
-    let mut state = AppState::new((*store).clone());
+    let mut state = AppState::new((*store).clone()).unwrap();
     let context = TestAppContext::default();
     let mut cx = context.host_cx();
     let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
@@ -8032,7 +8132,12 @@ fn history_paging_bench() {
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
     meta.id = "bench".into();
     store.upsert_meta(&meta).unwrap();
-    fs::copy(&source, store.root().join("bench.jsonl")).unwrap();
+    store
+        .apply(&[tcode_services::store::Mutation::replace_event_log(
+            "bench",
+            fs::read(&source).unwrap(),
+        )])
+        .unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let started = Instant::now();
     state.update(cx, |state, cx| state.select_session("bench", cx));
@@ -8410,4 +8515,187 @@ fn history_windows_are_byte_budgeted() {
         };
         assert_eq!((from, sent.len()), (199, 1));
     });
+}
+
+const CRASH_CHILD_DIR: &str = "TCODE_CRASH_CHILD_DIR";
+const CRASH_ACK: &str = "crash child acked: ";
+
+/// The process [`store_writer_survives_sigkill`] kills: it streams numbered
+/// events through the real store writer and prints the last index every
+/// flush barrier confirmed, until it is killed.
+#[test]
+#[ignore = "the child process of store_writer_survives_sigkill, which runs it"]
+fn store_writer_crash_child() {
+    use std::io::Write as _;
+    let root = PathBuf::from(std::env::var_os(CRASH_CHILD_DIR).unwrap());
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new(SessionStore::open_at(root).unwrap()));
+    let (commands, _receiver) = smol::channel::unbounded();
+    let parked = live_session(ProviderKind::Codex, commands);
+    let id = parked.meta.id.clone();
+    state.update(cx, |state, _| {
+        state.residents.parked.insert(id.clone(), parked);
+    });
+    println!("{CRASH_ACK}session {id}");
+    // About 2 KiB a record, so the WAL passes the 1000-page auto-checkpoint
+    // within the first few thousand records.
+    let padding = "x".repeat(2048);
+    let mut next = 0_u64;
+    loop {
+        let barrier = state.update(cx, |state, cx| {
+            for _ in 0..1 + next % 97 {
+                state.record_event(
+                    &id,
+                    &persisted_assistant_event(&format!("{next} {padding}")),
+                    cx,
+                );
+                next += 1;
+            }
+            state.store_write_barrier(cx)
+        });
+        cx.drain_outgoing();
+        barrier.recv_blocking().unwrap().unwrap();
+        println!("{CRASH_ACK}{}", next - 1);
+        std::io::stdout().flush().unwrap();
+    }
+}
+
+/// Kill a process mid-stream through the store writer, over and over: every
+/// record a flush acknowledged is still there after a restart, the records
+/// form a gapless prefix with no torn row, and the files pass sqlite3's
+/// integrity check. `TCODE_CRASH_RUNS` sets the number of kills.
+#[test]
+#[ignore = "spawns and SIGKILLs child processes and needs the sqlite3 CLI; run deliberately"]
+fn store_writer_survives_sigkill() {
+    use std::io::BufRead as _;
+    let runs: usize = std::env::var("TCODE_CRASH_RUNS")
+        .ok()
+        .and_then(|runs| runs.parse().ok())
+        .unwrap_or(50);
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+        | 1;
+    let mut random = move |range: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % range
+    };
+    let (mut checkpointed_runs, mut acknowledged, mut unacknowledged) = (0, 0, 0);
+    for run in 0..runs {
+        let root = std::env::temp_dir().join(format!("tcode-crash-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut child = tcode_services::process::command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::store_writer_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CRASH_CHILD_DIR, &root)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let (lines, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in stdout.lines().map_while(Result::ok) {
+                if let Some((_, report)) = line.split_once(CRASH_ACK) {
+                    let _ = lines.send(report.to_owned());
+                }
+            }
+        });
+        let session = received
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap()
+            .strip_prefix("session ")
+            .unwrap()
+            .to_owned();
+        std::thread::sleep(Duration::from_millis(200 + random(2_800)));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        reader.join().unwrap();
+        let acked = received
+            .try_iter()
+            .filter_map(|report| report.parse::<u64>().ok())
+            .max();
+
+        // Preserve the files exactly as the kill left them, before anything
+        // opens them again.
+        let preserved = root.join("preserved");
+        std::fs::create_dir_all(&preserved).unwrap();
+        for name in ["tcode.db", "tcode.db-wal"] {
+            if root.join(name).exists() {
+                std::fs::copy(root.join(name), preserved.join(name)).unwrap();
+            }
+        }
+        let main_file = std::fs::metadata(root.join("tcode.db")).unwrap().len();
+        // A fresh database is a handful of pages; anything larger was
+        // written there by a checkpoint while records streamed.
+        if main_file > 64 * 1024 {
+            checkpointed_runs += 1;
+        }
+
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let log = store.read_event_log(&session).unwrap();
+        let rows = log
+            .split_inclusive(|byte| *byte == b'\n')
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter().all(|row| row.ends_with(b"\n")),
+            "run {run}: torn row"
+        );
+        let events = store.read_events(&session).unwrap();
+        assert_eq!(events.len(), rows.len(), "run {run}: a row does not parse");
+        let indices: Vec<u64> = events
+            .iter()
+            .map(|stored| match &stored.event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::AssistantMessage { text },
+                    ..
+                }) => text.split(' ').next().unwrap().parse().unwrap(),
+                other => panic!("run {run}: unexpected record {other:?}"),
+            })
+            .collect();
+        let expected: Vec<u64> = (0..indices.len() as u64).collect();
+        assert_eq!(
+            indices, expected,
+            "run {run}: records are not a gapless prefix"
+        );
+        if let Some(acked) = acked {
+            assert!(
+                indices.len() as u64 > acked,
+                "run {run}: acknowledged record {acked} lost ({} survived)",
+                indices.len()
+            );
+            acknowledged += acked + 1;
+            unacknowledged += indices.len() as u64 - (acked + 1);
+        }
+        store.close().unwrap();
+        drop(store);
+
+        let check = tcode_services::process::command("sqlite3")
+            .arg(preserved.join("tcode.db"))
+            .arg("PRAGMA integrity_check;")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&check.stdout).trim(),
+            "ok",
+            "run {run}: sqlite3 integrity_check: {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        println!(
+            "run {run}: acked {acked:?}, survived {}, main file {main_file} bytes",
+            indices.len()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    println!(
+        "{runs} kills: {acknowledged} acknowledged records all survived, {unacknowledged} \
+         committed but unacknowledged, {checkpointed_runs} runs crossed an auto-checkpoint"
+    );
+    assert!(checkpointed_runs > 0, "no run crossed an auto-checkpoint");
 }
