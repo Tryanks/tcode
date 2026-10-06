@@ -52,7 +52,9 @@ pub use wire::{
 //
 // Unreleased: provider plugin catalogs, their commands, challenges and switches;
 // provider update availability merged per check round, UpdateProvider replaced
-// by UpdateProviders, and sequential update run status with toast progress.
+// by UpdateProviders, and sequential update run status with toast progress;
+// MarkSessionRead, the client's acknowledgement that a thread's conversation
+// loaded, replaces marking a thread read when it is subscribed.
 pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]

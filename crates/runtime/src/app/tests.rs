@@ -2746,52 +2746,56 @@ fn orchestrate_dispatch_access_maps_known_values() {
     );
 }
 
+/// A remote client on a bad network can queue a thread's subscription and its
+/// unsubscription together and deliver both after it reconnects, although the
+/// conversation never loaded on its screen. Only the client's acknowledgement
+/// that it showed the thread marks it read.
 #[test]
-fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
+fn only_a_loaded_conversation_marks_a_thread_read() {
+    use tcode_protocol::{ClientPayload, Subscription, Topic};
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-viewed-unread-test");
+    let test_store = TestStore::new("tcode-read-on-load-test");
     let store = (*test_store).clone();
-    let mut first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
-    first.updated_at = 100;
-    let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
-    store.upsert_meta(&first).unwrap();
-    store.upsert_meta(&second).unwrap();
-    let first_id = first.id.clone();
-    let second_id = second.id.clone();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
+    meta.updated_at = 100;
+    store.upsert_meta(&meta).unwrap();
+    let id = meta.id.clone();
     let state = cx.new_entity(TestClientState::new(store));
+    state.update(cx, |state, _| {
+        state.settings.last_visited.insert(id.clone(), 50);
+    });
+    let unread = |state: &TestEntity| state.read(|state| state.session_unread(&id));
+    assert!(unread(&state), "updated after the last visit");
+
+    let subscription = Subscription {
+        topic: Topic::SessionEvents {
+            session_id: id.clone(),
+        },
+        after: None,
+    };
+    state.deliver(cx, 1, ClientPayload::Subscribe(subscription.clone()));
+    state.deliver(cx, 2, ClientPayload::Unsubscribe(subscription));
+    cx.run_until_parked();
+    assert!(unread(&state), "a late subscription is not a read");
+
+    let read = |through| Command::MarkSessionRead {
+        session_id: id.clone(),
+        through,
+    };
+    state.dispatch_command(cx, 3, read(100));
+    assert!(!unread(&state), "read through what the client showed");
+    state.dispatch_command(cx, 4, read(80));
+    assert!(
+        !unread(&state),
+        "a delayed older acknowledgement does not rewind"
+    );
 
     state.update(cx, |state, cx| {
-        assert!(!state.session_unread(&first_id), "never visited");
-        state.settings.last_visited.insert(first_id.clone(), 50);
-        assert!(state.session_unread(&first_id), "newer than the last visit");
-        state.settings.last_visited.insert(first_id.clone(), 100);
-        assert!(!state.session_unread(&first_id), "equal to the last visit");
-        state.select_session(&first_id, cx);
-
-        // A turn finishes while the user is watching: updated_at moves past
-        // the watermark stamped on entry, and the meta is persisted.
-        let active = state.selected_session_mut().unwrap();
-        active.meta.updated_at = now_secs() + 10;
-        let meta = active.meta.clone();
-        state.persist_meta(&meta, cx);
-
-        // Switching away must not surface an unread dot for what the user
-        // already saw happen on screen.
-        state.select_session(&second_id, cx);
-        assert!(!state.session_unread(&first_id));
-
-        // But an update landing on a thread the user is NOT viewing still
-        // marks it unread.
-        let mut parked = state
-            .sessions
-            .iter()
-            .find(|m| m.id == first_id)
-            .cloned()
-            .unwrap();
-        parked.updated_at = now_secs() + 20;
+        let mut parked = state.sessions.iter().find(|m| m.id == id).cloned().unwrap();
+        parked.updated_at = 120;
         state.persist_meta(&parked, cx);
-        assert!(state.session_unread(&first_id));
     });
+    assert!(unread(&state), "newer than anything the client showed");
 }
 
 #[test]
@@ -8272,7 +8276,14 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
         );
     });
 
-    state.update(cx, |state, cx| state.mark_visited("kept", cx));
+    state.dispatch_command(
+        cx,
+        2,
+        Command::MarkSessionRead {
+            session_id: "kept".into(),
+            through: 1,
+        },
+    );
     cx.run_until_parked();
     let settings: Vec<_> = cx
         .drain_outgoing()
