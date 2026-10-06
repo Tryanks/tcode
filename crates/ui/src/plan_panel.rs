@@ -134,6 +134,7 @@ impl PlanPanel {
         let md_save = markdown;
 
         v_flex()
+            .debug_selector(|| "panel-proposed-plan".into())
             .w_full()
             .gap_2()
             .child(
@@ -305,6 +306,7 @@ impl PlanPanel {
 
         h_flex()
             .id(("plan-step", index))
+            .debug_selector(move || format!("plan-step-{index}"))
             .w_full()
             .py_1()
             .gap_2()
@@ -339,7 +341,17 @@ impl PlanPanel {
 
 impl Render for PlanPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (markdown, steps) = self.store.read(cx).plan_panel_state();
+        let (markdown, steps) = self
+            .store
+            .read(cx)
+            .session_plan()
+            .map(|plan| {
+                (
+                    plan.proposed.as_ref().map(|plan| plan.markdown.clone()),
+                    plan.steps.clone(),
+                )
+            })
+            .unwrap_or_default();
 
         if markdown.is_none() && steps.is_empty() {
             return v_flex().size_full().child(self.render_empty(cx));
