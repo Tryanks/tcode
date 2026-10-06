@@ -5645,13 +5645,8 @@ mod tests {
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
-        wait_until(cx, &workspace, "selected session", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store
-                    .session_status_replica
-                    .as_ref()
-                    .is_some_and(|status| status.session_id == meta.id)
-            })
+        wait_until(cx, &workspace, "selected session baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
         });
 
         let session_id = meta.id.clone();
