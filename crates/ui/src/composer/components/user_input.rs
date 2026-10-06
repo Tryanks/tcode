@@ -653,23 +653,24 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(move |state, cx| {
-            let id = state.start_draft("question".into(), std::env::temp_dir(), cx);
-            for event in [
-                agent::AgentEvent::TurnStarted {
-                    turn_id: "turn".into(),
-                },
-                agent::AgentEvent::UserInputRequested {
-                    request_id: "ask".into(),
-                    questions: vec![question("first"), question("second")],
-                    delivery,
-                },
-            ] {
-                state.provider_event_for_test(&id, event, cx);
-            }
-            (id.clone(), state.residents.live[&id].timeline.clone())
-        }))
-        .unwrap();
+        let (session_id, timeline) =
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                let id = state.start_draft("question".into(), std::env::temp_dir(), cx);
+                for event in [
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: "turn".into(),
+                    },
+                    agent::AgentEvent::UserInputRequested {
+                        request_id: "ask".into(),
+                        questions: vec![question("first"), question("second")],
+                        delivery,
+                    },
+                ] {
+                    state.provider_event_for_test(&id, event, cx);
+                }
+                (id.clone(), state.residents.live[&id].timeline.clone())
+            }))
+            .unwrap();
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
