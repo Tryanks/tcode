@@ -1,46 +1,6 @@
 //! Attachment presentation with core-owned validation semantics and localized errors.
 
-use crate::overlay::OverlayExt as _;
-use crate::theme::ActiveTheme as _;
-use gpui::{App, ImageSource, ParentElement as _, Styled as _, Window, div, img, px};
 use tcode_core::attachments::AttachError;
-
-/// Open an image as a window-level lightbox. The dialog lives on the Root
-/// layer, so its backdrop covers the whole window and it inherits
-/// backdrop-click / Escape / `x` dismissal. Shared by the composer's pending
-/// strip, sent-message thumbnails, Markdown images and image-link badges.
-pub(crate) fn open_image_lightbox(
-    source: ImageSource,
-    title: String,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    window.open_dialog(cx, move |builder, window, cx| {
-        let viewport = window.viewport_size();
-        // Leave room for the dialog header, padding and bottom margin in short windows.
-        let max_h = (viewport.height * 0.75).min(viewport.height * 0.9 - px(96.));
-        let source = source.clone();
-        let image_radius = crate::material::radius_card(cx);
-        builder
-            .w(px(1200.))
-            .rounded(crate::material::radius_overlay(cx))
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
-            .title(title.clone())
-            .content(move |content_el, _, _| {
-                content_el.child(
-                    div().w_full().flex().items_center().justify_center().child(
-                        img(source.clone())
-                            .max_w_full()
-                            .max_h(max_h)
-                            .rounded(image_radius),
-                    ),
-                )
-            })
-    });
-}
 
 /// How this client reaches the machine that stores the attachment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
