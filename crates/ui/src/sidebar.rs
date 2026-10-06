@@ -1591,7 +1591,12 @@ impl SessionsSidebar {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
-                    proceed_delete(store.clone(), session_id.clone(), window, cx);
+                    let store = store.clone();
+                    let session_id = session_id.clone();
+                    // The alert closes after this callback; open the next prompt afterwards.
+                    window.defer(cx, move |window, cx| {
+                        proceed_delete(store, session_id, window, cx);
+                    });
                     true
                 })
         });
@@ -2907,7 +2912,7 @@ impl SessionsSidebar {
 }
 
 /// Delete `session_id`, first asking whether to also remove an orphaned worktree.
-fn proceed_delete(
+pub(crate) fn proceed_delete(
     store: Entity<WorkspaceStore>,
     session_id: String,
     window: &mut Window,
@@ -3708,9 +3713,14 @@ fn compact_status_glyph(
             .into_any_element();
     }
     if working {
+        let color = if state.background {
+            cx.theme().muted_foreground
+        } else {
+            cx.theme().primary
+        };
         return slot
             .justify_center()
-            .child(Spinner::new().small().color(cx.theme().primary))
+            .child(Spinner::new().small().color(color))
             .into_any_element();
     }
     if state.show_unread {
@@ -3737,6 +3747,11 @@ fn compact_status_line(
         Some((crate::tr!("mobile.approval"), cx.theme().warning))
     } else if state.waiting_for_input {
         Some((crate::tr!("mobile.answer"), cx.theme().primary))
+    } else if working && state.background {
+        Some((
+            crate::tr!("sidebar.background_tasks"),
+            cx.theme().muted_foreground,
+        ))
     } else if working {
         Some((crate::tr!("mobile.working"), cx.theme().primary))
     } else if state.show_unread {
@@ -4176,6 +4191,119 @@ mod tests {
     }
 
     #[gpui::test]
+    fn compact_thread_distinguishes_host_background_activity(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            EventEnvelope, HostMessage, IndexSnapshot, IndexSummary, ServerEvent, SessionActivity,
+            Topic, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let send = |topic, event| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        let summary = |background_only: bool| IndexSummary {
+            activity: HashMap::from([(
+                "background".into(),
+                SessionActivity {
+                    working: true,
+                    turn_running: !background_only,
+                    background_only,
+                    waiting_for_approval: false,
+                    waiting_for_input: false,
+                    unread: false,
+                    fork: ForkAvailability::Available,
+                },
+            )]),
+            ..Default::default()
+        };
+        let project = Project::from_root(PathBuf::from("/project"));
+        let mut meta = session("background", None);
+        meta.project_id = Some(project.id.clone());
+        send(
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(Default::default()),
+        );
+        send(
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                sessions: vec![meta],
+                projects: vec![project],
+                summary: summary(true),
+            }),
+        );
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| store.select_session("background".into()));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        for (background_only, expected) in [(true, "Background"), (false, "Working")] {
+            send(
+                Topic::Index,
+                ServerEvent::IndexSummaryReplaced(summary(background_only)),
+            );
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            assert!(cx.debug_bounds("compact-row-background").is_some());
+            sidebar.read_with(cx, |sidebar, cx| {
+                let row = sidebar
+                    .compact_model
+                    .as_ref()
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .find_map(|row| match row {
+                        CompactListRow::Thread(row) if row.state.session_id == "background" => {
+                            Some(row)
+                        }
+                        _ => None,
+                    })
+                    .expect("rendered phone thread");
+                let (label, color) = compact_status_line(&row.state, row.working, cx).unwrap();
+                assert_eq!(label, expected);
+                assert_eq!(
+                    color,
+                    if background_only {
+                        cx.theme().muted_foreground
+                    } else {
+                        cx.theme().primary
+                    }
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
     fn thread_navigation_matches_displayed_rows_and_disclosures(cx: &mut TestAppContext) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
@@ -4567,8 +4695,30 @@ mod tests {
                 SidebarLayout::Flat,
                 attention,
                 HashMap::from([
-                    ("waiting-root".to_string(), (false, true, false, false)),
-                    ("working-root".to_string(), (true, false, false, false)),
+                    (
+                        "waiting-root".to_string(),
+                        tcode_protocol::SessionActivity {
+                            working: false,
+                            turn_running: false,
+                            background_only: false,
+                            waiting_for_approval: true,
+                            waiting_for_input: false,
+                            unread: false,
+                            fork: ForkAvailability::Available,
+                        },
+                    ),
+                    (
+                        "working-root".to_string(),
+                        tcode_protocol::SessionActivity {
+                            working: true,
+                            turn_running: true,
+                            background_only: false,
+                            waiting_for_approval: false,
+                            waiting_for_input: false,
+                            unread: false,
+                            fork: ForkAvailability::Available,
+                        },
+                    ),
                 ]),
                 false,
                 vec![
@@ -4584,8 +4734,30 @@ mod tests {
                 SidebarLayout::Flat,
                 lifted,
                 HashMap::from([
-                    ("lifted-child".to_string(), (false, false, true, false)),
-                    ("working-root".to_string(), (true, false, false, false)),
+                    (
+                        "lifted-child".to_string(),
+                        tcode_protocol::SessionActivity {
+                            working: false,
+                            turn_running: false,
+                            background_only: false,
+                            waiting_for_approval: false,
+                            waiting_for_input: true,
+                            unread: false,
+                            fork: ForkAvailability::Available,
+                        },
+                    ),
+                    (
+                        "working-root".to_string(),
+                        tcode_protocol::SessionActivity {
+                            working: true,
+                            turn_running: true,
+                            background_only: false,
+                            waiting_for_approval: false,
+                            waiting_for_input: false,
+                            unread: false,
+                            fork: ForkAvailability::Available,
+                        },
+                    ),
                 ]),
                 false,
                 vec!["lifted-root", "lifted-child", "working-root"],
@@ -4604,33 +4776,7 @@ mod tests {
                 Topic::Index,
                 ServerEvent::IndexSnapshot(IndexSnapshot {
                     summary: tcode_protocol::IndexSummary {
-                        activity: activity
-                            .into_iter()
-                            .map(
-                                |(
-                                    id,
-                                    (
-                                        working,
-                                        waiting_for_approval,
-                                        waiting_for_input,
-                                        background_only,
-                                    ),
-                                )| {
-                                    (
-                                        id,
-                                        tcode_protocol::SessionActivity {
-                                            working,
-                                            turn_running: working && !background_only,
-                                            waiting_for_approval,
-                                            waiting_for_input,
-                                            background_only,
-                                            unread: false,
-                                            fork: tcode_protocol::ForkAvailability::Available,
-                                        },
-                                    )
-                                },
-                            )
-                            .collect(),
+                        activity,
                         ..Default::default()
                     },
                     sessions,
