@@ -896,6 +896,17 @@ impl AppShell {
         });
         self.mounted.truncate(common);
         self.mounted.extend(pushed);
+        let state = self.window_state.read(cx);
+        let on_screen = if state.compact {
+            state.destination() == Destination::Thread
+        } else {
+            state.route() == Route::Chat
+        };
+        if let Some(attachment) = &self.attachment {
+            attachment.link.store.update(cx, |store, _| {
+                store.set_conversation_on_screen(on_screen);
+            });
+        }
     }
 
     /// A software keyboard the IME dismissed on its own (its own hide or Back
@@ -2803,6 +2814,43 @@ mod tests {
                 .unwrap();
         }
         await_restore_update(shell, cx, WorkspaceStore::baseline_ready);
+    }
+
+    /// A phone that goes back to the thread list before the thread's
+    /// conversation arrives keeps the thread selected, so the conversation
+    /// still loads behind the list. That is not a read; showing the thread
+    /// page again is.
+    #[gpui::test]
+    fn a_conversation_that_loads_behind_the_thread_list_is_not_read(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
+        let reads = |host: &MountedShell| {
+            sent(host)
+                .into_iter()
+                .filter_map(|payload| match payload {
+                    ClientPayload::Command(Command::MarkSessionRead { session_id, .. }) => {
+                        Some(session_id)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        host.states
+            .try_send(tcode_client::ConnectionState::Syncing { path: None })
+            .unwrap();
+        draw(cx);
+        assert!(cx.debug_bounds("compact-thread-page").is_some());
+        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        draw(cx);
+
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        restore_settings_and_events(&shell, &host, cx);
+        assert_eq!(reads(&host), Vec::<String>::new());
+
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        assert_eq!(reads(&host), ["thread-a"]);
     }
 
     /// The phone's direct path dying is reported by the transport as a new

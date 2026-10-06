@@ -322,6 +322,14 @@ pub enum Command {
     MarkSessionUnread {
         session_id: String,
     },
+    /// The client has loaded the thread's conversation and shown it as of
+    /// the thread's `updated_at` value `through`. A subscription alone never
+    /// marks a thread read: it may arrive long after the user gave up on a
+    /// view that never loaded.
+    MarkSessionRead {
+        session_id: String,
+        through: u64,
+    },
     StartDraft {
         project_id: String,
         cwd: PathBuf,
@@ -487,6 +495,7 @@ impl Command {
             | Self::DeleteSession { session_id, .. }
             | Self::MergeWorktree { session_id, .. }
             | Self::MarkSessionUnread { session_id, .. }
+            | Self::MarkSessionRead { session_id, .. }
             | Self::SetDraftWorkspace { session_id, .. }
             | Self::SendTurn { session_id, .. }
             | Self::ScheduleTurn { session_id, .. }

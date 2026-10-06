@@ -1634,6 +1634,9 @@ fn verbatim(text: String, cx: &App) -> AnyElement {
 fn apply_note(apply: ApplyNote) -> String {
     match apply {
         ApplyNote::ReloadOrRestart => crate::tr!("providers.plugins.apply_reload_or_restart"),
+        ApplyNote::ReloadOrNextSession => {
+            crate::tr!("providers.plugins.apply_reload_or_next_session")
+        }
         ApplyNote::NextSession => crate::tr!("providers.plugins.apply_next_session"),
         ApplyNote::Unverified => crate::tr!("providers.plugins.apply_unverified"),
     }

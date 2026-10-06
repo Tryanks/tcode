@@ -40,6 +40,8 @@ const FORK: &str = "_x.ai/session/fork";
 const DEFAULT_MODE: &str = "default";
 const PLAN_MODE: &str = "plan";
 
+pub(crate) mod plugins;
+
 /// Start (or resume, or fork) a Grok session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let grok = Grok {
