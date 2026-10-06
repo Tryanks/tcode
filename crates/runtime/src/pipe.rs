@@ -1524,11 +1524,6 @@ mod tests {
             );
             assert!(!data_root.join("sessions.json").exists(), "{start}");
             assert!(!data_root.join("legacy-thread.jsonl").exists(), "{start}");
-            assert_eq!(
-                std::fs::read_to_string(data_root.join("legacy/legacy-thread.jsonl")).unwrap(),
-                log,
-                "{start}"
-            );
         }
         std::fs::remove_dir_all(data_root).unwrap();
     }

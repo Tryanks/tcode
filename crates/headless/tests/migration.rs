@@ -54,6 +54,8 @@ fn sigint_cancels_the_startup_migration_and_leaves_every_source_as_it_was() {
     let mut serve = tcode_services::process::command(env!("CARGO_BIN_EXE_tcode-headless"))
         .args(["serve", "--traverse", "off", "--data-dir"])
         .arg(&root)
+        // Would move that directory into `root`.
+        .env_remove("LEGACY_TCODE_DATA_DIR")
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();

@@ -20,3 +20,4 @@ tcode-client = { path = "../client" }
 tcode-traverse = { path = "../traverse", default-features = false, features = ["native"] }
 tcode-ui = { path = "../ui", default-features = false }
 async-channel = "2"
+dirs = "7"

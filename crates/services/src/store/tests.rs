@@ -151,24 +151,8 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
     for name in LEGACY_FILES {
         assert!(!root.join(name).exists(), "{name} left in the data dir");
     }
-    assert_eq!(
-        fs::read(root.join("legacy/sessions.json")).unwrap(),
-        legacy_index().to_string().as_bytes()
-    );
-    assert_eq!(
-        fs::read(root.join("legacy/mixed.jsonl")).unwrap(),
-        MIXED_LOG
-    );
-    assert_eq!(
-        fs::read(root.join("legacy/orphan.jsonl")).unwrap(),
-        ORPHAN_LOG
-    );
-    assert!(
-        fs::read(root.join("legacy/empty.jsonl"))
-            .unwrap()
-            .is_empty()
-    );
     for leftover in [
+        LEGACY_DIR_NAME,
         "tcode.db.migrating",
         "tcode.db.migrating-wal",
         "tcode.db.archive",
@@ -218,10 +202,6 @@ fn first_start_migrates_the_json_index_and_every_log_byte_for_byte() {
     assert_eq!(reopened.read_event_log("mixed").unwrap(), expected);
     assert_eq!(reopened.read_file().unwrap().sessions.len(), 2);
     assert_eq!(fs::read(dir.path().join("sessions.json")).unwrap(), b"[]");
-    assert_eq!(
-        fs::read(dir.path().join("legacy/mixed.jsonl")).unwrap(),
-        MIXED_LOG
-    );
 }
 
 #[test]
@@ -277,7 +257,7 @@ fn legacy_bare_array_index_migrates_with_one_derived_project_per_root() {
 }
 
 #[test]
-fn an_unparseable_index_is_archived_unchanged_and_the_logs_still_migrate() {
+fn an_unparseable_index_does_not_stop_the_logs_migrating() {
     let dir = DataDir::new();
     let corrupt = b"not valid session json";
     fs::write(dir.path().join("sessions.json"), corrupt).unwrap();
@@ -288,10 +268,6 @@ fn an_unparseable_index_is_archived_unchanged_and_the_logs_still_migrate() {
     assert!(file.projects.is_empty() && file.sessions.is_empty());
     assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
     assert!(!dir.path().join("sessions.json").exists());
-    assert_eq!(
-        fs::read(dir.path().join("legacy/sessions.json")).unwrap(),
-        corrupt
-    );
 }
 
 #[test]
@@ -322,13 +298,6 @@ fn duplicate_index_ids_fail_the_migration_and_leave_the_sources_alone() {
 
 const LEGACY_DIR_NAME: &str = "legacy";
 
-/// Put the migrated sources back where an interruption would have left them.
-fn restore_sources(root: &Path) {
-    for name in LEGACY_FILES {
-        fs::rename(root.join("legacy").join(name), root.join(name)).unwrap();
-    }
-}
-
 fn archive_list(names: &[&str]) -> Vec<u8> {
     serde_json::to_vec(names).unwrap()
 }
@@ -352,7 +321,7 @@ fn a_start_after_an_interrupted_migration_discards_the_staging_files_and_starts_
         dir.path().join("tcode.db.migrating"),
     )
     .unwrap();
-    restore_sources(dir.path());
+    write_legacy_fixture(dir.path());
     fs::write(
         dir.path().join("tcode.db.archive"),
         archive_list(&LEGACY_FILES),
@@ -487,14 +456,14 @@ fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
 }
 
 #[test]
-fn a_start_after_an_interrupted_archival_finishes_it_without_overwriting() {
+fn a_start_after_an_interrupted_archival_finishes_it_and_loses_no_source() {
     let dir = DataDir::new();
     write_legacy_fixture(dir.path());
     dir.migrated().close().unwrap();
 
     // Killed after the rename while moving the sources: two are still in the
-    // data dir. One of them also has a copy in legacy/ already, which must
-    // survive untouched while the source stays where it is.
+    // data dir. One of them also has a copy in legacy/ already, so the source
+    // stays where it is rather than replace it.
     fs::rename(
         dir.path().join("legacy/mixed.jsonl"),
         dir.path().join("mixed.jsonl"),
@@ -517,17 +486,11 @@ fn a_start_after_an_interrupted_archival_finishes_it_without_overwriting() {
     assert!(!dir.path().join("tcode.db.archive").exists());
     assert!(!dir.path().join("mixed.jsonl").exists());
     assert_eq!(
-        fs::read(dir.path().join("legacy/mixed.jsonl")).unwrap(),
-        MIXED_LOG
-    );
-    assert_eq!(
         fs::read(dir.path().join("orphan.jsonl")).unwrap(),
         ORPHAN_LOG
     );
-    assert_eq!(
-        fs::read(dir.path().join("legacy/orphan.jsonl")).unwrap(),
-        b"older copy"
-    );
+    // Removed with the archived sources once the database opened.
+    assert!(!dir.path().join(LEGACY_DIR_NAME).exists());
     assert_eq!(store.read_event_log("mixed").unwrap(), MIXED_LOG);
 }
 
@@ -562,11 +525,18 @@ fn an_unfinished_newer_or_corrupt_database_is_refused_and_left_untouched() {
             .unwrap();
         dir.store().close().unwrap();
         set_version(dir.path(), version);
+        // The sources a migration archived stay until a database opens.
+        fs::create_dir(dir.path().join(LEGACY_DIR_NAME)).unwrap();
+        fs::write(dir.path().join("legacy/mixed.jsonl"), MIXED_LOG).unwrap();
         let before = fs::read(dir.path().join(DB_FILE)).unwrap();
         let error = dir.store().open().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(fs::read(dir.path().join(DB_FILE)).unwrap(), before);
+        assert_eq!(
+            fs::read(dir.path().join("legacy/mixed.jsonl")).unwrap(),
+            MIXED_LOG
+        );
     }
 
     let dir = DataDir::new();
@@ -715,17 +685,23 @@ fn command_cache_roundtrips_per_provider_and_acp_agent() {
     );
 }
 
-/// This test binary, re-run as another process that opens `root` and holds
-/// it until its stdin closes. It reports `OPEN` or `ERR <kind> <message>`.
+/// This test binary, re-run as another process that starts as a host does —
+/// with `TCODE_DATA_DIR` set to `root`, and `LEGACY_TCODE_DATA_DIR` to
+/// `previous` if given — and holds the data dir until its stdin closes. It
+/// reports the phases its preparation went through, then `OPEN` or
+/// `ERR <kind> <message>`.
 struct Child {
     process: std::process::Child,
     stdout: BufReader<std::process::ChildStdout>,
+    /// Each phase by its `Debug` name.
+    phases: Vec<String>,
     report: String,
 }
 
 impl Child {
-    fn spawn(root: &Path) -> std::process::Child {
-        crate::process::command(std::env::current_exe().unwrap())
+    fn spawn(root: &Path, previous: Option<&Path>) -> std::process::Child {
+        let mut command = crate::process::command(std::env::current_exe().unwrap());
+        command
             .args([
                 "--exact",
                 "store::tests::store_owner_process",
@@ -733,7 +709,12 @@ impl Child {
                 "--nocapture",
                 "--test-threads=1",
             ])
-            .env("TCODE_STORE_OWNER_DIR", root)
+            .env("TCODE_DATA_DIR", root)
+            .env_remove("LEGACY_TCODE_DATA_DIR");
+        if let Some(previous) = previous {
+            command.env("LEGACY_TCODE_DATA_DIR", previous);
+        }
+        command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -745,12 +726,16 @@ impl Child {
         let mut stdout = BufReader::new(process.stdout.take().unwrap());
         // libtest prints the test's name on the same line first.
         let mut line = String::new();
+        let mut phases = Vec::new();
         let report = loop {
             line.clear();
             assert!(
                 stdout.read_line(&mut line).unwrap() > 0,
                 "the child exited without reporting"
             );
+            if let Some((_, phase)) = line.trim_end().split_once(OWNER_PHASE) {
+                phases.push(phase.to_owned());
+            }
             if let Some((_, report)) = line.trim_end().split_once(OWNER_REPORT) {
                 break report.to_owned();
             }
@@ -758,6 +743,7 @@ impl Child {
         Self {
             process,
             stdout,
+            phases,
             report,
         }
     }
@@ -771,15 +757,25 @@ impl Child {
 }
 
 const OWNER_REPORT: &str = "store owner: ";
+const OWNER_PHASE: &str = "store owner phase: ";
 
 #[test]
 #[ignore = "the other process of the ownership tests below, which run it"]
 fn store_owner_process() {
-    let root = PathBuf::from(std::env::var_os("TCODE_STORE_OWNER_DIR").unwrap());
-    let store = SessionStore::open_at(root).unwrap();
+    let store = SessionStore::open_host(None).unwrap();
     let opened = store.needs_migration().and_then(|needed| {
         if needed {
-            migrate(&store)?;
+            let mut last = None;
+            let outcome = store.migrate(
+                |progress| {
+                    if last != Some(progress.phase) {
+                        println!("{OWNER_PHASE}{:?}", progress.phase);
+                        last = Some(progress.phase);
+                    }
+                },
+                &AtomicBool::new(false),
+            )?;
+            assert_eq!(outcome, Migration::Completed);
         }
         store.open()
     });
@@ -795,7 +791,7 @@ fn store_owner_process() {
 #[test]
 fn a_second_process_is_refused_and_a_relaunch_waits_for_the_owner_to_exit() {
     let dir = DataDir::new();
-    let owner = Child::report(Child::spawn(dir.path()));
+    let owner = Child::report(Child::spawn(dir.path(), None));
     assert_eq!(owner.report, "OPEN");
 
     let error = dir.store().open().unwrap_err();
@@ -832,7 +828,10 @@ fn a_second_process_is_refused_and_a_relaunch_waits_for_the_owner_to_exit() {
 fn two_simultaneous_first_launches_migrate_once() {
     let dir = DataDir::new();
     write_legacy_fixture(dir.path());
-    let (first, second) = (Child::spawn(dir.path()), Child::spawn(dir.path()));
+    let (first, second) = (
+        Child::spawn(dir.path(), None),
+        Child::spawn(dir.path(), None),
+    );
     let (first, second) = (Child::report(first), Child::report(second));
     let mut reports = [first.report.clone(), second.report.clone()];
     reports.sort();
@@ -843,6 +842,97 @@ fn two_simultaneous_first_launches_migrate_once() {
 
     let store = dir.store();
     assert_fixture_migrated(&store, dir.path());
+}
+
+/// Every file, directory and link under `root` by relative path: a file's
+/// bytes, a link's target, or `<dir>`.
+pub(super) fn tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let kind = fs::symlink_metadata(&path).unwrap().file_type();
+            let relative = path.strip_prefix(root).unwrap().to_owned();
+            if kind.is_symlink() {
+                let target = fs::read_link(&path).unwrap();
+                out.insert(relative, target.to_string_lossy().as_bytes().to_vec());
+            } else if kind.is_dir() {
+                out.insert(relative, b"<dir>".to_vec());
+                walk(root, &path, out);
+            } else {
+                out.insert(relative, fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// An older build's data dir with every kind of entry it can hold.
+pub(super) fn write_older_data_dir(previous: &Path) {
+    fs::create_dir_all(previous.join("attachments/session-1")).unwrap();
+    fs::create_dir_all(previous.join("project-icons")).unwrap();
+    fs::create_dir_all(previous.join("profile-homes/claude/.claude")).unwrap();
+    fs::create_dir_all(previous.join("legacy")).unwrap();
+    fs::write(previous.join("settings.json"), br#"{"locale":"en"}"#).unwrap();
+    fs::write(previous.join("traverse.json"), br#"{"key":"machine"}"#).unwrap();
+    fs::write(
+        previous.join("attachments/session-1/a.png"),
+        [0x89, b'P', b'N', b'G'],
+    )
+    .unwrap();
+    fs::write(previous.join("project-icons/p1.png"), b"icon").unwrap();
+    fs::write(
+        previous.join("profile-homes/claude/.claude/settings.json"),
+        b"{}",
+    )
+    .unwrap();
+    fs::write(previous.join("legacy/older.jsonl"), ORPHAN_LOG).unwrap();
+    fs::write(previous.join(".DS_Store"), b"finder").unwrap();
+}
+
+#[test]
+fn a_start_moves_an_older_data_dir_in_then_migrates_it_and_leaves_nothing_behind() {
+    let home = DataDir::new();
+    let previous = home.path().join("Application Support/tcode");
+    let root = home.path().join(".tcode");
+    write_older_data_dir(&previous);
+    write_legacy_fixture(&previous);
+    // Orchestrate's worktrees already live under ~/.tcode.
+    fs::create_dir_all(root.join("worktrees/thread-1")).unwrap();
+    fs::write(root.join("worktrees/thread-1/README"), b"checkout").unwrap();
+    let mut expected = tree(&previous);
+    expected.retain(|path, _| {
+        !path.starts_with("legacy")
+            && path != Path::new(".DS_Store")
+            && !LEGACY_FILES.iter().any(|name| path == Path::new(name))
+    });
+    expected.extend(tree(&root));
+
+    let owner = Child::report(Child::spawn(&root, Some(&previous)));
+    assert_eq!(owner.report, "OPEN");
+    assert_eq!(
+        owner.phases,
+        [
+            MigrationPhase::Relocating,
+            MigrationPhase::Scanning,
+            MigrationPhase::Importing,
+            MigrationPhase::Verifying,
+            MigrationPhase::Publishing,
+            MigrationPhase::Archiving,
+        ]
+        .map(|phase| format!("{phase:?}"))
+    );
+    owner.release();
+
+    assert!(!previous.exists(), "the older data dir is left behind");
+    let mut after = tree(&root);
+    // The store's own files, `tcode.db` among them.
+    after.retain(|path, _| {
+        path != Path::new(LOCK_FILE) && !path.to_string_lossy().starts_with(DB_FILE)
+    });
+    assert_eq!(after, expected);
+    assert_fixture_migrated(&SessionStore::open_at(root.clone()).unwrap(), &root);
 }
 
 /// Kill the migration at random points — while logs are copied, around the
@@ -885,7 +975,7 @@ fn migration_survives_sigkill() {
         fs::copy(originals.path().join(name), calibration.path().join(name)).unwrap();
     }
     let started = Instant::now();
-    let full = Child::report(Child::spawn(calibration.path()));
+    let full = Child::report(Child::spawn(calibration.path(), None));
     let window = started.elapsed().as_millis() as u64;
     assert_eq!(full.report, "OPEN");
     full.release();
@@ -898,13 +988,15 @@ fn migration_survives_sigkill() {
         for name in &names {
             fs::copy(originals.path().join(name), dir.path().join(name)).unwrap();
         }
-        let mut owner = Child::spawn(dir.path());
+        let mut owner = Child::spawn(dir.path(), None);
         std::thread::sleep(Duration::from_millis(seed % (window + window / 10)));
         owner.kill().unwrap();
         owner.wait().unwrap();
 
-        // What the kill left: no database and untouched sources, or a
-        // completed database and every source in the data dir or legacy/.
+        // What the kill left: no database and untouched sources, a published
+        // database and every source in the data dir or legacy/, or a complete
+        // one whose sources the first open removes (checked below against the
+        // database instead).
         let source = |name: &str| {
             [dir.path().join(name), dir.path().join("legacy").join(name)]
                 .into_iter()
@@ -933,7 +1025,7 @@ fn migration_survives_sigkill() {
             }
         };
         *outcomes.entry(outcome).or_default() += 1;
-        for name in &names {
+        for name in names.iter().filter(|_| outcome != "complete") {
             assert_eq!(
                 fs::read(source(name).unwrap_or_else(|| panic!("run {run}: {name} lost"))).unwrap(),
                 fs::read(originals.path().join(name)).unwrap(),

@@ -108,12 +108,14 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             "--port",
         ],
     )?;
-    let store = match data_dir {
-        Some(path) => SessionStore::open_at(path),
-        None => SessionStore::open_default(),
-    }
-    .map_err(|error| format!("could not open session store: {error}"))?;
+    let store = SessionStore::open_host(data_dir)
+        .map_err(|error| format!("could not open session store: {error}"))?;
     let remote_data_dir = store.root().clone();
+    // The password lives in the data dir, which may still have to move in.
+    install_interrupt_handler();
+    if migrate_store(&store)? == Migration::Cancelled {
+        return Ok(());
+    }
     if let Some(password) =
         option_value(args, "--password").or_else(|| std::env::var("TCODE_PASSWORD").ok())
     {
@@ -121,10 +123,6 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     }
     // Nothing else starts for a bind the listener would refuse anyway.
     check_bind(browser_listen, &remote_data_dir).map_err(|error| error.to_string())?;
-    install_interrupt_handler();
-    if migrate_store(&store)? == Migration::Cancelled {
-        return Ok(());
-    }
     let mut services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -240,19 +238,28 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Move an older build's threads into `tcode.db` before the host starts,
-/// printing progress; an interrupt cancels it and leaves them as they were.
+/// Move an older build's data dir in and its threads into `tcode.db` before
+/// the host starts, printing progress; an interrupt cancels it, losing
+/// nothing, and the next start continues.
 fn migrate_store(store: &SessionStore) -> Result<Migration, String> {
-    let needed = store
-        .needs_migration()
-        .map_err(|error| format!("could not open session store: {error}"))?;
+    let open_error = |error: std::io::Error| format!("could not open session store: {error}");
+    let needed = store.needs_migration().map_err(open_error)?;
     if !needed {
         return Ok(Migration::Completed);
     }
-    println!(
-        "Migrating threads into {}; the original files are kept in legacy/. Ctrl-C cancels.",
-        store.root().join("tcode.db").display()
-    );
+    match store.pending_relocation().map_err(open_error)? {
+        Some(previous) => println!(
+            "Moving {} to {}, then migrating any older threads into tcode.db. Ctrl-C cancels; \
+             the next start continues.",
+            previous.display(),
+            store.root().display()
+        ),
+        None => println!(
+            "Migrating threads into {}; each copy is verified before the original files are \
+             removed. Ctrl-C cancels.",
+            store.root().join("tcode.db").display()
+        ),
+    }
     let mut last: Option<(MigrationPhase, Instant)> = None;
     let outcome = store
         .migrate(
@@ -270,22 +277,25 @@ fn migrate_store(store: &SessionStore) -> Result<Migration, String> {
         .map_err(|error| format!("migration failed: {error}"))?;
     match outcome {
         Migration::Completed => println!("Migration complete"),
-        Migration::Cancelled => println!("Migration cancelled; no file was changed"),
+        Migration::Cancelled => {
+            println!("Migration cancelled; nothing was lost, and the next start continues")
+        }
     }
     Ok(outcome)
 }
 
 fn migration_line(progress: &MigrationProgress) -> String {
-    let phase = match progress.phase {
-        MigrationPhase::Scanning => "scanning",
-        MigrationPhase::Importing => "importing",
-        MigrationPhase::Verifying => "verifying",
-        MigrationPhase::Publishing => "publishing",
-        MigrationPhase::Archiving => "archiving",
+    let (phase, items) = match progress.phase {
+        MigrationPhase::Relocating => ("moving", "entries"),
+        MigrationPhase::Scanning => ("scanning", "threads"),
+        MigrationPhase::Importing => ("importing", "threads"),
+        MigrationPhase::Verifying => ("verifying", "threads"),
+        MigrationPhase::Publishing => ("publishing", "threads"),
+        MigrationPhase::Archiving => ("archiving", "threads"),
     };
     let mib = |bytes: u64| bytes as f64 / (1024. * 1024.);
     format!(
-        "{phase}: {}/{} threads, {:.1}/{:.1} MiB",
+        "{phase}: {}/{} {items}, {:.1}/{:.1} MiB",
         progress.threads_done,
         progress.threads_total,
         mib(progress.bytes_done),
@@ -304,11 +314,19 @@ fn set_password_command(args: &[String]) -> Result<(), String> {
     let password = option_value(&values, "--password")
         .or_else(|| std::env::var("TCODE_PASSWORD").ok())
         .ok_or("supply --password or TCODE_PASSWORD")?;
-    let store = match option_value(&values, "--data-dir") {
-        Some(path) => SessionStore::open_at(PathBuf::from(path)),
-        None => SessionStore::open_default(),
+    let store = SessionStore::open_host(option_value(&values, "--data-dir").map(PathBuf::from))
+        .map_err(|error| error.to_string())?;
+    // The move would stop at the password file this writes.
+    if let Some(previous) = store
+        .pending_relocation()
+        .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "{} has not been moved into {} yet; run `tcode-headless serve` once first",
+            previous.display(),
+            store.root().display()
+        ));
     }
-    .map_err(|error| error.to_string())?;
     set_password(store.root(), &password, revoke).map_err(|error| error.to_string())?;
     println!(
         "Password changed. {}",
@@ -356,11 +374,8 @@ fn sync_invitation_file(data_dir: &Path, invitation: Option<&Invitation>) -> Res
 
 fn pair_command(args: &[String]) -> Result<(), String> {
     reject_unknown_options(args, &["--data-dir"])?;
-    let store = match option_value(args, "--data-dir") {
-        Some(path) => SessionStore::open_at(PathBuf::from(path)),
-        None => SessionStore::open_default(),
-    }
-    .map_err(|error| error.to_string())?;
+    let store = SessionStore::open_host(option_value(args, "--data-dir").map(PathBuf::from))
+        .map_err(|error| error.to_string())?;
     let path = store.root().join(INVITATION_FILE);
     let file: Option<InvitationFile> = std::fs::read(&path)
         .ok()
