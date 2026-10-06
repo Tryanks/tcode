@@ -352,7 +352,7 @@ impl OrchestrateSettingsPanel {
             .tooltip(label.clone())
             .aria_label(label)
             .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
+                crate::widgets::stop_click_propagation(window, cx);
                 on_reset(this, window, cx);
             }))
             .into_any_element()

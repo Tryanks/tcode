@@ -29,7 +29,9 @@ impl Composer {
             self.ui_question_index = 0;
             self.ui_selections.clear();
             self.ui_dismissed_request_id = None;
-            self.ui_async_expanded = false;
+            self.ui_expanded = current
+                .as_ref()
+                .is_some_and(|pending| pending.delivery.is_blocking());
             let prefill = current
                 .as_ref()
                 .and_then(|pending| pending.questions.first())
@@ -41,50 +43,206 @@ impl Composer {
         }
     }
 
+    /// One card for every question, whichever way it was delivered. A strip
+    /// names the question and stays one line tall; the answer area below it
+    /// collapses so the conversation behind it can be read while deciding,
+    /// and scrolls inside a fraction of the window so the composer never
+    /// leaves the screen however long the question runs. A blocking question
+    /// arrives open, because the agent is waiting; a non-blocking one arrives
+    /// closed and can be hidden, because the agent keeps working.
     pub(in super::super) fn render_user_input_panel(
         &self,
         pending: &PendingUserInput,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if !pending.delivery.is_blocking() {
-            return self.render_async_question(pending, cx);
-        }
         let request_id = pending.request_id.clone();
+        let blocking = pending.delivery.is_blocking();
+        let touch = if self.compact { 44. } else { 24. };
+        // Hiding is local to this client; the question stays open on the host,
+        // so a way back remains while the sidebar still asks for an answer.
+        if !blocking && self.ui_dismissed_request_id.as_ref() == Some(&request_id) {
+            return h_flex()
+                .w_full()
+                .child(
+                    Button::new("ui-reveal")
+                        .debug_selector(|| "ui-reveal".into())
+                        .ghost()
+                        .xsmall()
+                        .when(self.compact, |button| button.min_h(px(touch)))
+                        .icon(IconName::Info)
+                        .label(crate::tr!("userinput.async_header"))
+                        .tooltip(crate::tr!("userinput.answer"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ui_dismissed_request_id = None;
+                            this.ui_expanded = true;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
         let questions = pending.questions.clone();
-        let muted = cx.theme().muted_foreground;
-        let primary = cx.theme().primary;
         let total = questions.len();
         let index = self.ui_question_index.min(total.saturating_sub(1));
         let Some(question) = questions.get(index).cloned() else {
             return div().into_any_element();
         };
+        let muted = cx.theme().muted_foreground;
+        let primary = cx.theme().primary;
+        let expanded = self.ui_expanded;
         let multi = question.multi_select;
+
+        let toggle = Button::new("ui-toggle")
+            .debug_selector(|| "ui-toggle".into())
+            .ghost()
+            .xsmall()
+            .when(self.compact, |button| {
+                button.min_w(px(touch)).min_h(px(touch))
+            })
+            .icon(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronUp
+            })
+            .tooltip(if expanded {
+                crate::tr!("userinput.collapse")
+            } else {
+                crate::tr!("userinput.answer")
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
+                this.ui_expanded = !this.ui_expanded;
+                cx.notify();
+            }));
+        let title = if blocking && !question.header.trim().is_empty() {
+            question.header.clone()
+        } else {
+            crate::tr!("userinput.async_header").into_owned()
+        };
+        let mut strip = h_flex()
+            .id("ui-strip")
+            .w_full()
+            .gap_2()
+            .items_center()
+            .cursor_pointer()
+            .child(Icon::new(IconName::Info).small().text_color(primary))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w_1_2()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_medium()
+                    .child(title),
+            )
+            .when(!expanded, |strip| {
+                strip.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .child(question.question.clone()),
+                )
+            })
+            .when(expanded, |strip| strip.child(div().flex_1()))
+            .when(total > 1, |strip| {
+                let questions_previous = questions.clone();
+                let questions_next = questions.clone();
+                strip
+                    .child(
+                        Button::new("ui-prev")
+                            .debug_selector(|| "ui-prev".into())
+                            .ghost()
+                            .xsmall()
+                            .when(self.compact, |button| {
+                                button.min_w(px(touch)).min_h(px(touch))
+                            })
+                            .icon(IconName::ChevronLeft)
+                            .disabled(index == 0)
+                            .tooltip(crate::tr!("userinput.previous"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                crate::widgets::stop_click_propagation(window, cx);
+                                this.ui_expanded = true;
+                                this.ui_go(-1, &questions_previous, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(crate::tr!(
+                                "userinput.question_count",
+                                index = index + 1,
+                                total = total
+                            )),
+                    )
+                    .child(
+                        Button::new("ui-next")
+                            .debug_selector(|| "ui-next".into())
+                            .ghost()
+                            .xsmall()
+                            .when(self.compact, |button| {
+                                button.min_w(px(touch)).min_h(px(touch))
+                            })
+                            .icon(IconName::ChevronRight)
+                            .disabled(index + 1 >= total)
+                            .tooltip(crate::tr!("userinput.next_question"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                crate::widgets::stop_click_propagation(window, cx);
+                                this.ui_expanded = true;
+                                this.ui_go(1, &questions_next, window, cx);
+                            })),
+                    )
+            })
+            .child(toggle);
+        if !blocking {
+            let request_dismiss = request_id.clone();
+            strip = strip.child(
+                Button::new("ui-dismiss")
+                    .debug_selector(|| "ui-dismiss".into())
+                    .ghost()
+                    .xsmall()
+                    .when(self.compact, |button| {
+                        button.min_w(px(touch)).min_h(px(touch))
+                    })
+                    .icon(IconName::Close)
+                    .tooltip(crate::tr!("userinput.dismiss"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        crate::widgets::stop_click_propagation(window, cx);
+                        this.ui_dismissed_request_id = Some(request_dismiss.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        let strip = strip.on_click(cx.listener(|this, _, _, cx| {
+            this.ui_expanded = !this.ui_expanded;
+            cx.notify();
+        }));
+
+        let card = v_flex()
+            .w_full()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded(crate::material::radius_card(cx))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .shadow_sm()
+            .child(strip);
+        if !expanded {
+            return card.into_any_element();
+        }
+
         let selected = self
             .ui_selections
             .get(&question.id)
             .cloned()
             .unwrap_or_default();
-
-        let header = h_flex()
-            .w_full()
-            .gap_2()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(question.header.clone()),
-            )
-            .when(total > 1, |this| {
-                this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
-                    "userinput.question_count",
-                    index = index + 1,
-                    total = total
-                )))
-            });
-
-        let mut options_content = v_flex().w_full().gap_1();
+        let mut options = v_flex().w_full().gap_1();
         for (opt_index, option) in question.options.iter().enumerate() {
             let is_selected = selected.iter().any(|l| l == &option.label);
             let label = option.label.clone();
@@ -107,7 +265,7 @@ impl Composer {
                     mark.bg(primary)
                         .child(div().size(px(6.)).rounded_full().bg(gpui::white()))
                 });
-            options_content = options_content.child(
+            options = options.child(
                 h_flex()
                     .id(("ui-opt", opt_index))
                     .flex_none()
@@ -132,12 +290,16 @@ impl Composer {
                                     .gap_1p5()
                                     .items_center()
                                     .text_size(px(13.))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(muted)
-                                            .child(format!("{}", opt_index + 1)),
-                                    )
+                                    // Digits select only while the agent is
+                                    // blocked; the composer keeps them otherwise.
+                                    .when(blocking, |row| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(muted)
+                                                .child(format!("{}", opt_index + 1)),
+                                        )
+                                    })
                                     .child(div().font_medium().child(option.label.clone())),
                             )
                             .when(!option.description.is_empty(), |this| {
@@ -164,383 +326,22 @@ impl Composer {
                     })),
             );
         }
-        let options = div()
-            .id("user-input-options-scroll")
+        // The question and its options scroll together within a share of the
+        // window, leaving the rest to the conversation and the composer.
+        let body_cap = px((f32::from(window.viewport_size().height) * 0.4).clamp(120., 360.));
+        let body = div()
+            .id("user-input-body-scroll")
             .w_full()
-            .max_h(px(240.))
+            .max_h(body_cap)
             .overflow_y_scroll_area()
-            .child(options_content);
-
-        let custom_input = self.user_input_custom.clone();
-        let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
-        let custom_answer = h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded(cx.theme().tokens.radius.md)
-            .border_1()
-            .border_color(cx.theme().input)
-            .bg(cx.theme().popover)
             .child(
-                div().flex_1().min_w_0().child(
-                    Textarea::new(&self.user_input_custom)
-                        .appearance(false)
-                        .text_size(px(13.)),
-                ),
-            )
-            .child(
-                crate::material::accessible_clickable(
-                    div(),
-                    "ui-custom-answer-submit",
-                    Role::Button,
-                    crate::tr!("userinput.submit_custom"),
-                    cx,
-                )
-                .size(px(if self.compact { 44. } else { 28. }))
-                .rounded(crate::material::radius_input(cx))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(if custom_has_text {
-                    cx.theme().primary
-                } else {
-                    cx.theme().muted
-                })
-                .cursor_pointer()
-                .when(custom_has_text, |this| this.hover(|this| this.opacity(0.9)))
-                .child(
-                    Icon::new(IconName::ArrowUp)
-                        .xsmall()
-                        .text_color(if custom_has_text {
-                            cx.theme().primary_foreground
-                        } else {
-                            cx.theme().muted_foreground
-                        }),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.submit_custom_user_input(&custom_input, window, cx);
-                })),
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(div().text_size(px(13.)).child(question.question.clone()))
+                    .when(!question.options.is_empty(), |this| this.child(options)),
             );
 
-        // Actions row: navigation only. Answers submit themselves — a
-        // single-select click that completes the set submits it, so the only
-        // finishing affordance left is Done on a multi-select question (clicks
-        // there cannot signal "I'm finished").
-        let is_last = index + 1 >= total;
-        let all_answered = user_input_all_answered(&questions, &self.ui_selections);
-        let questions_submit = questions.clone();
-        let request_submit = request_id.clone();
-        let mut actions = h_flex().w_full().gap_2().items_center();
-        if index > 0 {
-            let questions_previous = questions.clone();
-            actions = actions.child(
-                Button::new("ui-prev")
-                    .ghost()
-                    .small()
-                    .h(px(28.))
-                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-                    .rounded(crate::material::radius_input(cx))
-                    .label(crate::tr!("userinput.previous"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.ui_go(-1, &questions_previous, window, cx)
-                    })),
-            );
-        }
-        actions = actions.child(div().flex_1());
-        if !is_last {
-            let questions_next = questions.clone();
-            actions = actions.child(
-                Button::new("ui-next")
-                    .outline()
-                    .small()
-                    .h(px(28.))
-                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-                    .rounded(crate::material::radius_input(cx))
-                    .label(crate::tr!("userinput.next_question"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.ui_go(1, &questions_next, window, cx)
-                    })),
-            );
-        }
-        if multi && all_answered {
-            actions = actions.child(
-                Button::new("ui-done")
-                    .primary()
-                    .small()
-                    .h(px(28.))
-                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-                    .rounded(crate::material::radius_input(cx))
-                    .label(crate::tr!("userinput.done"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.ui_submit(&questions_submit, request_submit.clone(), window, cx);
-                    })),
-            );
-        }
-
-        let pager = h_flex()
-            .w_full()
-            .h(px(12.))
-            .gap_1()
-            .items_center()
-            .justify_center()
-            .children((0..total).map(|page| {
-                let questions = questions.clone();
-                div()
-                    .id(("ui-page", page))
-                    .size(px(if page == index { 9. } else { 7. }))
-                    .rounded_full()
-                    .bg(if page == index {
-                        primary
-                    } else {
-                        muted.opacity(0.35)
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let delta = page as i32 - this.ui_question_index as i32;
-                        this.ui_go(delta, &questions, window, cx);
-                    }))
-            }));
-
-        v_flex()
-            .w_full()
-            .gap_2()
-            .p(px(14.))
-            .rounded(crate::material::radius_card(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_sm()
-            .child(header)
-            .child(div().text_size(px(13.)).child(question.question.clone()))
-            .child(options)
-            .child(custom_answer)
-            .when(multi, |this| {
-                this.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .child(crate::tr!("userinput.multi_hint")),
-                )
-            })
-            .child(actions)
-            .when(total > 1, |this| this.child(pager))
-            .into_any_element()
-    }
-
-    /// A non-blocking question: the agent keeps working, so it never takes
-    /// the composer's place. It arrives as a one-line strip and opens into a
-    /// light inline answer area on demand, as Codex's own clients do.
-    fn render_async_question(
-        &self,
-        pending: &PendingUserInput,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let request_id = pending.request_id.clone();
-        let touch = if self.compact { 44. } else { 24. };
-        // Hiding is local to this client; the question stays open on the host,
-        // so a way back remains while the sidebar still asks for an answer.
-        if self.ui_dismissed_request_id.as_ref() == Some(&request_id) {
-            return h_flex()
-                .w_full()
-                .child(
-                    Button::new("ui-async-reveal")
-                        .debug_selector(|| "ui-async-reveal".into())
-                        .ghost()
-                        .xsmall()
-                        .when(self.compact, |button| button.min_h(px(touch)))
-                        .icon(IconName::Info)
-                        .label(crate::tr!("userinput.async_header"))
-                        .tooltip(crate::tr!("userinput.answer"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.ui_dismissed_request_id = None;
-                            this.ui_async_expanded = true;
-                            cx.notify();
-                        })),
-                )
-                .into_any_element();
-        }
-        let questions = pending.questions.clone();
-        let total = questions.len();
-        let index = self.ui_question_index.min(total.saturating_sub(1));
-        let Some(question) = questions.get(index).cloned() else {
-            return div().into_any_element();
-        };
-        let muted = cx.theme().muted_foreground;
-        let expanded = self.ui_async_expanded;
-
-        let toggle = Button::new("ui-async-toggle")
-            .debug_selector(|| "ui-async-toggle".into())
-            .ghost()
-            .xsmall()
-            .when(self.compact, |button| {
-                button.min_w(px(touch)).min_h(px(touch))
-            })
-            .icon(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronUp
-            })
-            .tooltip(if expanded {
-                crate::tr!("userinput.collapse")
-            } else {
-                crate::tr!("userinput.answer")
-            })
-            .on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.ui_async_expanded = !this.ui_async_expanded;
-                cx.notify();
-            }));
-        let request_dismiss = request_id.clone();
-        let dismiss = Button::new("ui-dismiss")
-            .debug_selector(|| "ui-dismiss".into())
-            .ghost()
-            .xsmall()
-            .when(self.compact, |button| {
-                button.min_w(px(touch)).min_h(px(touch))
-            })
-            .icon(IconName::Close)
-            .tooltip(crate::tr!("userinput.dismiss"))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.ui_dismissed_request_id = Some(request_dismiss.clone());
-                cx.notify();
-            }));
-
-        let strip = h_flex()
-            .id("ui-async-strip")
-            .w_full()
-            .gap_2()
-            .items_center()
-            .cursor_pointer()
-            .child(
-                Icon::new(IconName::Info)
-                    .small()
-                    .text_color(cx.theme().primary),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(12.))
-                    .font_medium()
-                    .text_color(cx.theme().primary)
-                    .child(crate::tr!("userinput.async_header")),
-            )
-            .when(!expanded, |strip| {
-                strip.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(13.))
-                        .child(question.question.clone()),
-                )
-            })
-            .when(expanded, |strip| strip.child(div().flex_1()))
-            .when(total > 1, |strip| {
-                let questions_previous = questions.clone();
-                let questions_next = questions.clone();
-                strip
-                    .child(
-                        Button::new("ui-async-prev")
-                            .debug_selector(|| "ui-async-prev".into())
-                            .ghost()
-                            .xsmall()
-                            .when(self.compact, |button| {
-                                button.min_w(px(touch)).min_h(px(touch))
-                            })
-                            .icon(IconName::ChevronLeft)
-                            .disabled(index == 0)
-                            .tooltip(crate::tr!("userinput.previous"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.ui_go(-1, &questions_previous, window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(crate::tr!(
-                                "userinput.question_count",
-                                index = index + 1,
-                                total = total
-                            )),
-                    )
-                    .child(
-                        Button::new("ui-async-next")
-                            .debug_selector(|| "ui-async-next".into())
-                            .ghost()
-                            .xsmall()
-                            .when(self.compact, |button| {
-                                button.min_w(px(touch)).min_h(px(touch))
-                            })
-                            .icon(IconName::ChevronRight)
-                            .disabled(index + 1 >= total)
-                            .tooltip(crate::tr!("userinput.next_question"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.ui_go(1, &questions_next, window, cx);
-                            })),
-                    )
-            })
-            .child(toggle)
-            .child(dismiss)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.ui_async_expanded = !this.ui_async_expanded;
-                cx.notify();
-            }));
-
-        let container = v_flex()
-            .w_full()
-            .gap_2()
-            .px_3()
-            .py_1p5()
-            .rounded(crate::material::radius_card(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .child(strip);
-        if !expanded {
-            return container.into_any_element();
-        }
-
-        let selected = self
-            .ui_selections
-            .get(&question.id)
-            .cloned()
-            .unwrap_or_default();
-        let chips = h_flex().w_full().flex_wrap().gap_1p5().children(
-            question
-                .options
-                .iter()
-                .enumerate()
-                .map(|(opt_index, option)| {
-                    let label = option.label.clone();
-                    let question_for_click = question.clone();
-                    let questions_for_click = questions.clone();
-                    let request_for_click = request_id.clone();
-                    let is_selected = selected.iter().any(|l| l == &option.label);
-                    Button::new(("ui-async-opt", opt_index))
-                        .small()
-                        .when(is_selected, |button| button.primary())
-                        .when(!is_selected, |button| button.outline())
-                        .when(self.compact, |button| button.min_h(px(touch)))
-                        .rounded(crate::material::radius_chip(cx))
-                        .label(option.label.clone())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.ui_toggle_option(&question_for_click, label.clone(), cx);
-                            this.ui_advance_or_submit(
-                                &questions_for_click,
-                                request_for_click.clone(),
-                                window,
-                                cx,
-                            );
-                        }))
-                }),
-        );
         let custom_input = self.user_input_custom.clone();
         let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
         let custom_answer = h_flex()
@@ -560,7 +361,7 @@ impl Composer {
                 ),
             )
             .child(
-                Button::new("ui-async-custom-submit")
+                Button::new("ui-custom-submit")
                     .ghost()
                     .xsmall()
                     .when(self.compact, |button| {
@@ -574,16 +375,48 @@ impl Composer {
                     })),
             );
 
-        container
-            .child(div().text_size(px(13.)).child(question.question.clone()))
-            .when(!question.options.is_empty(), |this| this.child(chips))
-            .child(custom_answer)
+        // Answers submit themselves: a single-select click that completes the
+        // set submits it, so the only finishing affordance is Done on a
+        // multi-select question, where clicks cannot signal "I'm finished".
+        let all_answered = user_input_all_answered(&questions, &self.ui_selections);
+        let questions_submit = questions.clone();
+        let hint = if multi {
+            Some(crate::tr!("userinput.multi_hint"))
+        } else if !blocking {
+            Some(crate::tr!("userinput.async_hint"))
+        } else {
+            None
+        };
+        let footer = h_flex()
+            .w_full()
+            .gap_2()
+            .items_center()
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(crate::tr!("userinput.async_hint")),
+                    .children(hint),
             )
+            .when(multi && all_answered, |this| {
+                this.child(
+                    Button::new("ui-done")
+                        .primary()
+                        .small()
+                        .h(px(28.))
+                        .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
+                        .rounded(crate::material::radius_input(cx))
+                        .label(crate::tr!("userinput.done"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.ui_submit(&questions_submit, request_id.clone(), window, cx);
+                        })),
+                )
+            });
+
+        card.child(body)
+            .child(custom_answer)
+            .child(footer)
             .into_any_element()
     }
 
@@ -802,14 +635,17 @@ mod tests {
         }
     }
 
-    /// The strip's own buttons sit inside a clickable strip; a click on one
-    /// must act once, not also reach the strip underneath.
-    #[gpui::test]
-    fn async_question_strip_controls(cx: &mut TestAppContext) {
+    /// A composer over a session whose agent asked `first` and `second` with
+    /// `delivery`, plus a click driver returning the card state afterwards:
+    /// (expanded, question index, toggle present, dismiss present).
+    fn question_card(
+        cx: &mut TestAppContext,
+        delivery: agent::UserInputDelivery,
+    ) -> impl FnMut(&'static str) -> ((bool, usize), bool, bool) {
         cx.update(crate::theme::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
-                "tcode-async-question-test-{}-{}",
+                "tcode-question-test-{}-{}",
                 std::process::id(),
                 tcode_services::store::now_millis()
             )))
@@ -817,23 +653,24 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("async-question".into(), std::env::temp_dir(), cx);
-            for event in [
-                agent::AgentEvent::TurnStarted {
-                    turn_id: "turn".into(),
-                },
-                agent::AgentEvent::UserInputRequested {
-                    request_id: "ask".into(),
-                    questions: vec![question("first"), question("second")],
-                    delivery: agent::UserInputDelivery::Async,
-                },
-            ] {
-                state.provider_event_for_test(&id, event, cx);
-            }
-            (id.clone(), state.residents.live[&id].timeline.clone())
-        }))
-        .unwrap();
+        let (session_id, timeline) =
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                let id = state.start_draft("question".into(), std::env::temp_dir(), cx);
+                for event in [
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: "turn".into(),
+                    },
+                    agent::AgentEvent::UserInputRequested {
+                        request_id: "ask".into(),
+                        questions: vec![question("first"), question("second")],
+                        delivery,
+                    },
+                ] {
+                    state.provider_event_for_test(&id, event, cx);
+                }
+                (id.clone(), state.residents.live[&id].timeline.clone())
+            }))
+            .unwrap();
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
@@ -841,25 +678,46 @@ mod tests {
         let (composer, cx) =
             cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
         cx.simulate_resize(size(px(800.), px(600.)));
-        let mut click = |selector: &'static str| {
+        move |selector: &'static str| {
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            let bounds = cx.debug_bounds(selector).expect(selector);
-            cx.simulate_click(bounds.center(), Default::default());
-            cx.update(|window, cx| window.draw(cx).clear(cx));
+            if !selector.is_empty() {
+                let bounds = cx.debug_bounds(selector).expect(selector);
+                cx.simulate_click(bounds.center(), Default::default());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
             (
                 composer.read_with(cx, |composer, _| {
-                    (composer.ui_async_expanded, composer.ui_question_index)
+                    (composer.ui_expanded, composer.ui_question_index)
                 }),
-                cx.debug_bounds("ui-async-toggle").is_some(),
+                cx.debug_bounds("ui-toggle").is_some(),
+                cx.debug_bounds("ui-dismiss").is_some(),
             )
-        };
+        }
+    }
 
-        assert_eq!(click("ui-async-toggle"), ((true, 0), true));
-        assert_eq!(click("ui-async-next"), ((true, 1), true));
-        assert_eq!(click("ui-async-prev"), ((true, 0), true));
-        assert_eq!(click("ui-async-toggle"), ((false, 0), true));
+    /// The strip's own buttons sit inside a clickable strip; a click on one
+    /// must act once, not also reach the strip underneath. A non-blocking
+    /// question arrives closed and can be hidden, with a way back.
+    #[gpui::test]
+    fn async_question_strip_controls(cx: &mut TestAppContext) {
+        let mut click = question_card(cx, agent::UserInputDelivery::Async);
+        assert_eq!(click(""), ((false, 0), true, true));
+        assert_eq!(click("ui-toggle"), ((true, 0), true, true));
+        assert_eq!(click("ui-next"), ((true, 1), true, true));
+        assert_eq!(click("ui-prev"), ((true, 0), true, true));
+        assert_eq!(click("ui-toggle"), ((false, 0), true, true));
         // Hidden, the still-open question keeps an entry that reopens it.
-        assert_eq!(click("ui-dismiss"), ((false, 0), false));
-        assert_eq!(click("ui-async-reveal"), ((true, 0), true));
+        assert_eq!(click("ui-dismiss"), ((false, 0), false, false));
+        assert_eq!(click("ui-reveal"), ((true, 0), true, true));
+    }
+
+    /// A blocking question arrives open, folds away so the conversation can
+    /// be read while deciding, and cannot be hidden while the agent waits.
+    #[gpui::test]
+    fn blocking_question_collapses_but_stays(cx: &mut TestAppContext) {
+        let mut click = question_card(cx, agent::UserInputDelivery::Blocking);
+        assert_eq!(click(""), ((true, 0), true, false));
+        assert_eq!(click("ui-toggle"), ((false, 0), true, false));
+        assert_eq!(click("ui-next"), ((true, 1), true, false));
     }
 }

@@ -1227,10 +1227,6 @@ impl AppShell {
 // Compact chrome
 // ---------------------------------------------------------------------------
 
-/// Left inset so the nav bar's back control clears the native macOS traffic
-/// lights, which a compact *desktop* window still draws over this strip.
-const TRAFFIC_LIGHT_INSET: f32 = 80.;
-
 /// Room a nav bar reserves on each side for its controls, so the centered title
 /// keeps the same box on every page: enough for the widest fixed back label
 /// ([`Destination::back_label`]) — which never truncates — and for two 44pt
@@ -1252,13 +1248,13 @@ fn nav_bar(
     );
     // A compact window on the desktop is still a window: it keeps the platform's
     // own controls out of the content and stays draggable by its top strip.
-    let clears_traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
+    let traffic_lights = window_caption::traffic_light_inset(window);
     let hosts_caption = window_caption::compact_hosts_caption();
     let leading = h_flex()
         .absolute()
         .inset_0()
         .px(px(4.))
-        .when(clears_traffic_lights, |row| row.pl(px(TRAFFIC_LIGHT_INSET)))
+        .when(traffic_lights > Pixels::ZERO, |row| row.pl(traffic_lights))
         .items_center()
         .children(back)
         .child(window_caption::drag_region(div().flex_1().h_full()))
@@ -1281,11 +1277,7 @@ fn nav_bar(
                     v_flex()
                         .absolute()
                         .inset_0()
-                        .pl(px(if clears_traffic_lights {
-                            TRAFFIC_LIGHT_INSET + NAV_CONTROL_WIDTH
-                        } else {
-                            NAV_CONTROL_WIDTH
-                        }))
+                        .pl(traffic_lights + px(NAV_CONTROL_WIDTH))
                         .pr(px(NAV_CONTROL_WIDTH))
                         .items_center()
                         .justify_center()

@@ -325,8 +325,8 @@ impl AppState {
             cx,
         );
         // Reflect the upsert in memory instead of reloading the whole index
-        // from disk: `persist_meta` runs on every turn,
-        // where re-reading and re-parsing a large sessions.json stalls the UI.
+        // from the store: `persist_meta` runs on every turn, where re-reading
+        // and re-parsing every session's meta would stall the mailbox.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
     }

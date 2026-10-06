@@ -2051,8 +2051,8 @@ impl SessionsSidebar {
             .tooltip(|window, cx| {
                 Tooltip::new(crate::tr!("sidebar.create_thread").into_owned()).build(window, cx)
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
+            .on_click(cx.listener(move |this, _, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
                 let cwd = plus_cwd.clone();
                 let project_id = plus_project_id.clone();
                 this.store.update(cx, |store, cx| {
@@ -2670,7 +2670,7 @@ impl SessionsSidebar {
                         Tooltip::new(crate::tr!("sidebar.archive").into_owned()).build(window, cx)
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
+                        crate::widgets::stop_click_propagation(window, cx);
                         this.archive_thread(&archive_id, &archive_title, window, cx);
                     }))
                     .child(
@@ -3634,8 +3634,8 @@ impl SessionsSidebar {
                     .gap(px(2.))
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        crate::widgets::stop_click_propagation(window, cx);
                         this.store.update(cx, |store, _| {
                             store.set_thread_collapsed(disclosure_id.clone(), !children_collapsed)
                         });

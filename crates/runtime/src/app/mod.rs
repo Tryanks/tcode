@@ -260,7 +260,7 @@ use providers::{
 };
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
-use store_write::{StoreWrite, run_store_write};
+use store_write::{StoreWrite, StoreWriteFailure, StoreWriter};
 
 /// The result of a provider version check.
 #[derive(Debug, Clone, Default)]
@@ -310,8 +310,12 @@ pub struct AppState {
     settings_store: SettingsStore,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
-    store_write_failures: smol::channel::Sender<Result<RuntimeError, String>>,
-    store_write_failure_receiver: Option<smol::channel::Receiver<Result<RuntimeError, String>>>,
+    store_write_failures: smol::channel::Sender<StoreWriteFailure>,
+    store_write_failure_receiver: Option<smol::channel::Receiver<StoreWriteFailure>>,
+    /// The store-writer thread, joined by [`AppState::close_store`].
+    store_writer: Option<std::thread::JoinHandle<()>>,
+    /// Set once the store failed and every thread was stopped.
+    store_failed: bool,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
     pub residents: ResidentSessions,
@@ -436,16 +440,18 @@ pub(crate) fn startup_collapsed_threads(sessions: &[SessionMeta]) -> Vec<String>
 }
 
 impl AppState {
-    pub fn new(store: SessionStore) -> Self {
+    pub fn new(store: SessionStore) -> std::io::Result<Self> {
         Self::with_ai_titles(store, false)
     }
 
-    pub(crate) fn with_ai_titles(store: SessionStore, ai_title_generation_enabled: bool) -> Self {
-        // Load + migrate once and persist so derived project ids stay stable.
-        let file = store.read_file();
-        if let Err(err) = store.persist_index(&file) {
-            log::warn!("failed to persist migrated session index: {err}");
-        }
+    /// Take ownership of the data dir and load its threads. Fails while
+    /// another host owns the directory, or when its database cannot be opened.
+    pub(crate) fn with_ai_titles(
+        store: SessionStore,
+        ai_title_generation_enabled: bool,
+    ) -> std::io::Result<Self> {
+        store.open()?;
+        let file = store.read_file()?;
         let mut sessions = file.sessions;
         sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         let projects = file.projects;
@@ -488,13 +494,15 @@ impl AppState {
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
         let session_search = Arc::new(std::sync::Mutex::new(SessionSearch::new(store.clone())));
-        Self {
+        Ok(Self {
             store,
             settings_store,
             store_writes,
             store_write_receiver: Some(store_write_receiver),
             store_write_failures,
             store_write_failure_receiver: Some(store_write_failure_receiver),
+            store_writer: None,
+            store_failed: false,
             sessions,
             projects,
             residents: ResidentSessions::default(),
@@ -540,7 +548,7 @@ impl AppState {
             external_imports: HashMap::new(),
             next_import_run_id: 1,
             session_search,
-        }
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -550,27 +558,32 @@ impl AppState {
 
     fn start_store_writer(&mut self, cx: &mut HostCx) {
         if let Some(writes) = self.store_write_receiver.take() {
-            let store = self.store.clone();
-            let settings_store = self.settings_store.clone();
-            let terminal_preferences_path = self.terminal_preferences_path.clone();
-            let failures = self.store_write_failures.clone();
-            HostCx::spawn_detached(cx, async move {
-                while let Ok(write) = writes.recv().await {
-                    if let Some(failure) =
-                        run_store_write(&store, &settings_store, &terminal_preferences_path, write)
-                    {
-                        let _ = failures.send(failure).await;
-                    }
+            let writer = StoreWriter::new(
+                self.store.clone(),
+                self.settings_store.clone(),
+                self.terminal_preferences_path.clone(),
+                self.store_write_failures.clone(),
+            );
+            // Its own thread: every commit blocks on the database's fsync.
+            match std::thread::Builder::new()
+                .name("tcode-store-writer".into())
+                .spawn(move || writer.run(writes))
+            {
+                Ok(handle) => self.store_writer = Some(handle),
+                Err(error) => {
+                    log::error!("could not start the session store writer: {error}");
+                    self.store_writes.close();
                 }
-            });
+            }
         }
         if let Some(failures) = self.store_write_failure_receiver.take() {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 while let Ok(failure) = failures.recv().await {
                     host_cx.enqueue(move |state, cx| match failure {
-                        Ok(error) => state.report_error(error, cx),
-                        Err(message) => log::warn!("{message}"),
+                        StoreWriteFailure::Error(error) => state.report_error(error, cx),
+                        StoreWriteFailure::Warning(message) => log::warn!("{message}"),
+                        StoreWriteFailure::StoreFailed(reason) => state.store_failed(&reason, cx),
                     });
                 }
             });
@@ -579,9 +592,38 @@ impl AppState {
 
     fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut HostCx) {
         self.start_store_writer(cx);
-        if self.store_writes.try_send(write).is_err() {
+        if let Err(rejected) = self.store_writes.try_send(write) {
             log::error!("session store writer stopped before accepting a write");
+            if let Some(StoreWriteFailure::Error(error)) = rejected
+                .into_inner()
+                .reject("the session store writer has stopped")
+            {
+                self.report_error(error, cx);
+            }
         }
+    }
+
+    /// The store stopped serving: stop every provider so nothing keeps
+    /// producing events that can no longer be saved. The failed writes were
+    /// reported with the reason.
+    fn store_failed(&mut self, reason: &str, cx: &mut HostCx) {
+        if std::mem::replace(&mut self.store_failed, true) {
+            return;
+        }
+        log::error!("session store failed ({reason}); stopping every thread");
+        self.shutdown_all(cx);
+    }
+
+    /// Drain the store writer, then checkpoint and close the database. Only
+    /// after the host loop has stopped, so nothing enqueues behind it.
+    pub(crate) fn close_store(&mut self) -> std::io::Result<()> {
+        self.store_writes.close();
+        if let Some(writer) = self.store_writer.take()
+            && writer.join().is_err()
+        {
+            log::error!("the session store writer panicked");
+        }
+        self.store.close()
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {

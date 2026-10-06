@@ -155,9 +155,10 @@ pub struct Composer {
     /// hidden until a newer request replaces it. The agent keeps working and
     /// the question text remains in the transcript.
     ui_dismissed_request_id: Option<String>,
-    /// Whether the non-blocking question strip is open for answering. It
-    /// arrives closed so it never takes focus from the composer.
-    ui_async_expanded: bool,
+    /// Whether the question card shows its answer area. A blocking request
+    /// opens it; a non-blocking one arrives closed so it never takes the
+    /// composer's place.
+    ui_expanded: bool,
     /// The placeholder text last applied to the input (so it is only re-set —
     /// which notifies — when it actually changes).
     applied_placeholder: String,
@@ -435,7 +436,7 @@ impl Composer {
             ui_question_index: 0,
             ui_selections: std::collections::HashMap::new(),
             ui_dismissed_request_id: None,
-            ui_async_expanded: false,
+            ui_expanded: false,
             applied_placeholder: crate::tr!("composer.placeholder").into_owned(),
             model_picker_token: 0,
             control_width: Rc::new(Cell::new(None)),
@@ -1402,7 +1403,7 @@ impl Render for Composer {
                         this.child(self.render_approval_panel(&request, approval_count, cx))
                     })
                     .when_some(user_input, |this, pending| {
-                        this.child(self.render_user_input_panel(&pending, cx))
+                        this.child(self.render_user_input_panel(&pending, window, cx))
                     })
                     .when_some(fallback_block, |this, block| {
                         this.child(self.render_fallback_panel(&block, cx))
