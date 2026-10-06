@@ -267,7 +267,7 @@ fn import_is_idempotent_and_replays_into_timeline() {
         title_hint: None,
         last_active_ms: 0,
     };
-    let mut existing = existing_external_ids(&store.load_index());
+    let mut existing = existing_external_ids(&store.load_index().unwrap());
     assert_eq!(
         import_thread(&store, &project, &thread, &mut existing),
         ImportOutcome::Imported
@@ -277,7 +277,7 @@ fn import_is_idempotent_and_replays_into_timeline() {
         ImportOutcome::SkippedDuplicate
     );
 
-    let index = store.load_index();
+    let index = store.load_index().unwrap();
     assert_eq!(index.len(), 1);
     let meta = &index[0];
     assert_eq!(meta.project_id.as_deref(), Some("project-1"));
@@ -286,7 +286,7 @@ fn import_is_idempotent_and_replays_into_timeline() {
         meta.resume_cursor.as_ref().unwrap().0["session_id"],
         "session-1"
     );
-    let timeline = Timeline::fold_events(store.read_events(&meta.id));
+    let timeline = Timeline::fold_events(store.read_events(&meta.id).unwrap());
     assert!(timeline.entries.iter().any(
         |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "Imported question")
     ));
@@ -295,12 +295,12 @@ fn import_is_idempotent_and_replays_into_timeline() {
     let mut imported = meta.clone();
     imported.resume_cursor = None;
     store.upsert_meta(&imported).unwrap();
-    let mut existing = existing_external_ids(&store.load_index());
+    let mut existing = existing_external_ids(&store.load_index().unwrap());
     assert_eq!(
         import_thread(&store, &project, &thread, &mut existing),
         ImportOutcome::SkippedDuplicate
     );
-    assert_eq!(store.load_index().len(), 1);
+    assert_eq!(store.load_index().unwrap().len(), 1);
 
     for (index, (provider, source, external_id, cursor, lines)) in [
         (ProviderKind::ClaudeCode, SourceTool::ClaudeCode, "claude:native-claude",
@@ -321,9 +321,9 @@ fn import_is_idempotent_and_replays_into_timeline() {
         let thread = ExternalThread {
             source, file, external_id: external_id.into(), title_hint: None, last_active_ms: 0,
         };
-        let mut existing = existing_external_ids(&store.load_index());
+        let mut existing = existing_external_ids(&store.load_index().unwrap());
         assert_eq!(import_thread(&store, &project, &thread, &mut existing),
             ImportOutcome::SkippedDuplicate, "{external_id}");
-        assert_eq!(store.load_index().len(), index + 2);
+        assert_eq!(store.load_index().unwrap().len(), index + 2);
     }
 }

@@ -75,7 +75,7 @@ pub(super) fn badge(
         .on_click(move |_, window, cx| {
             crate::widgets::stop_click_propagation(window, cx);
             let source = view.read(cx).image_source(&url.to_string().into());
-            crate::attachments::open_image_lightbox(source, label.to_string(), window, cx);
+            crate::image_viewer::open(source, label.to_string(), window, cx);
         });
     // Preserve the line's spacing while shortening only the visible badge.
     div()

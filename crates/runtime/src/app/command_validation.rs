@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn writes_blocked_by_host_state_receive_rejected_acks() {
         let store = TestStore::new("write-preconditions");
-        let mut state = AppState::new((*store).clone());
+        let mut state = AppState::new((*store).clone()).unwrap();
         let mut context = TestAppContext::default();
         let mut cx = context.host_cx();
         let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn provider_channel_rejection_is_not_acknowledged_as_success() {
         let store = TestStore::new("provider-write-rejection");
-        let mut state = AppState::new((*store).clone());
+        let mut state = AppState::new((*store).clone()).unwrap();
         let mut context = TestAppContext::default();
         let mut cx = context.host_cx();
         let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);

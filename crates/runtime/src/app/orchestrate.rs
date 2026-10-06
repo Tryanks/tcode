@@ -874,18 +874,23 @@ impl AppState {
                     unloaded
                         .into_iter()
                         .map(|id| {
-                            let timeline = Timeline::fold_events(store.read_events(&id));
-                            (id, timeline)
+                            let events = store
+                                .read_events(&id)
+                                .map_err(|error| format!("could not read thread {id}: {error}"))?;
+                            Ok((id, Timeline::fold_events(events)))
                         })
-                        .collect::<HashMap<_, _>>()
+                        .collect::<Result<HashMap<_, _>, String>>()
                 })
                 .await;
-            let result = host_cx
-                .enqueue_and_wait(move |state, _| {
-                    state.orchestrate_status_json(&children, &timelines)
-                })
-                .await
-                .map_err(|_| "tcode orchestrator is not available".to_string());
+            let result = match timelines {
+                Ok(timelines) => host_cx
+                    .enqueue_and_wait(move |state, _| {
+                        state.orchestrate_status_json(&children, &timelines)
+                    })
+                    .await
+                    .map_err(|_| "tcode orchestrator is not available".to_string()),
+                Err(error) => Err(error),
+            };
             let _ = reply.send(result).await;
         });
     }
@@ -914,15 +919,18 @@ impl AppState {
         HostCx::spawn_detached(cx, async move {
             let read_id = thread_id.clone();
             let timeline = host_cx
-                .unblock(move || Timeline::fold_events(store.read_events(&read_id)))
+                .unblock(move || store.read_events(&read_id).map(Timeline::fold_events))
                 .await;
-            let result = host_cx
-                .enqueue_and_wait(move |state, _| {
-                    let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
-                    state.orchestrate_result_json(&meta, timeline)
-                })
-                .await
-                .unwrap_or_else(|_| Err("tcode orchestrator is not available".to_string()));
+            let result = match timeline {
+                Ok(timeline) => host_cx
+                    .enqueue_and_wait(move |state, _| {
+                        let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
+                        state.orchestrate_result_json(&meta, timeline)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("tcode orchestrator is not available".to_string())),
+                Err(error) => Err(format!("could not read thread {thread_id}: {error}")),
+            };
             let _ = reply.send(result).await;
         });
     }
@@ -1046,14 +1054,43 @@ impl AppState {
         // attention.
         let auto_archive = child.archive_on_complete && matches!(status, TurnStatus::Completed);
         let result_max_chars = child.result_max_chars;
+        // The cached log holds appends the store writer may not have committed
+        // yet; without one, the store is read only after a barrier.
+        let source = match self.event_records.get(&child_id) {
+            Some(log) => Ok(log.fold().clone()),
+            None => Err(self.store_write_barrier(cx)),
+        };
         let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let read_id = child_id.clone();
-            let timeline = host_cx
-                .unblock(move || Timeline::fold_events(store.read_events(&read_id)))
-                .await;
+            let timeline = match source {
+                Ok(timeline) => Ok(timeline),
+                Err(barrier) => match barrier.recv().await {
+                    Ok(Ok(())) => {
+                        host_cx
+                            .unblock(move || store.read_events(&read_id).map(Timeline::fold_events))
+                            .await
+                    }
+                    Ok(Err(error)) => Err(std::io::Error::other(error)),
+                    Err(_) => Err(std::io::Error::other(
+                        "the session store writer has stopped",
+                    )),
+                },
+            };
             host_cx.enqueue(move |state, cx| {
+                let timeline = match timeline {
+                    Ok(timeline) => timeline,
+                    Err(error) => {
+                        state.report_error(
+                            RuntimeError::External(format!(
+                                "could not read thread {child_id} to report its completion: {error}"
+                            )),
+                            cx,
+                        );
+                        return;
+                    }
+                };
                 let child_still_exists = state.sessions.iter().any(|meta| {
                     meta.id == child_id
                         && meta.parent_session_id.as_deref() == Some(parent_id.as_str())

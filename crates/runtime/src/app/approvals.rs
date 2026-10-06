@@ -100,7 +100,7 @@ mod tests {
 
     fn state(name: &str) -> (TestStore, AppState) {
         let store = TestStore::new(name);
-        let state = AppState::new((*store).clone());
+        let state = AppState::new((*store).clone()).unwrap();
         (store, state)
     }
 
