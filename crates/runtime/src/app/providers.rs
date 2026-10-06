@@ -1,9 +1,25 @@
 use super::*;
+use tcode_protocol::{ProviderUpdateAvailable, ProviderUpdateRun};
+
+#[derive(Default)]
+struct VersionCheckRound {
+    pending: usize,
+    updates: Vec<ProviderUpdateAvailable>,
+}
+
+struct UpdateRun {
+    operation: RuntimeOperationId,
+    status: ProviderUpdateRun,
+    pending: std::collections::VecDeque<ProviderKind>,
+}
 
 pub struct ProviderCatalog {
     pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
     pub models_loading: HashMap<ProviderKind, bool>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
+    version_rounds: HashMap<u64, VersionCheckRound>,
+    next_version_round: u64,
+    update_run: Option<UpdateRun>,
     pub tcode_update: TcodeUpdateState,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
     /// Latest account usage per profile id (Codex / Claude Code).
@@ -23,6 +39,9 @@ impl ProviderCatalog {
             model_catalogs,
             models_loading: HashMap::new(),
             provider_versions: HashMap::new(),
+            version_rounds: HashMap::new(),
+            next_version_round: 0,
+            update_run: None,
             tcode_update: TcodeUpdateState::default(),
             provider_snapshots: HashMap::new(),
             provider_usage: HashMap::new(),
@@ -50,26 +69,59 @@ impl ProviderCatalog {
 
     fn complete_version_check(
         &mut self,
+        round: u64,
         provider: ProviderKind,
         revision: u64,
         installation: Option<Installation>,
         assessment: provider_updates::Assessment,
-    ) -> Option<String> {
+    ) -> Option<RuntimeToast> {
         let status = self.provider_versions.entry(provider).or_default();
-        if status.revision != revision {
-            return None;
-        }
-        let already = status.update_available;
-        status.checking = false;
-        status.installation = installation;
-        status.installed = assessment.current;
-        status.latest = assessment.latest;
-        status.update_available = assessment.update_available;
-        if status.update_available && !already {
-            status.latest.clone()
+        let update = if status.revision == revision {
+            let already = status.update_available;
+            status.checking = false;
+            status.installation = installation;
+            status.installed = assessment.current;
+            status.latest = assessment.latest;
+            status.update_available = assessment.update_available;
+            if status.update_available
+                && !already
+                && let Some(version) = &status.latest
+            {
+                Some(ProviderUpdateAvailable {
+                    provider,
+                    version: version.clone(),
+                    automatic: status
+                        .installation
+                        .as_ref()
+                        .and_then(|installation| installation.update.as_ref())
+                        .is_some_and(|command| !command.requires_terminal),
+                })
+            } else {
+                None
+            }
         } else {
             None
+        };
+        if let Some(round_state) = self.version_rounds.get_mut(&round) {
+            if let Some(update) = update {
+                round_state.updates.push(update);
+            }
+            round_state.pending -= 1;
+            if round_state.pending == 0 {
+                let mut round = self.version_rounds.remove(&round).unwrap();
+                round.updates.sort_by_key(|update| {
+                    ProviderKind::NATIVE
+                        .iter()
+                        .position(|provider| *provider == update.provider)
+                });
+                return (!round.updates.is_empty()).then_some(
+                    RuntimeToast::ProviderUpdatesAvailable {
+                        updates: round.updates,
+                    },
+                );
+            }
         }
+        None
     }
 
     fn complete_usage(
@@ -122,6 +174,7 @@ impl ProviderCatalog {
                     )
                 })
                 .collect(),
+            update_run: self.update_run.as_ref().map(|run| run.status.clone()),
             tcode_update: TcodeUpdateStatus {
                 current: self.tcode_update.current.clone(),
                 latest: self.tcode_update.latest.clone(),
@@ -530,8 +583,13 @@ impl AppState {
     }
 
     /// Check every provider and the running tcode build in the background,
-    /// storing results and toasting once for each newly available update.
+    /// emitting one merged toast for newly available CLI updates per round.
     pub fn check_provider_versions(&mut self, cx: &mut HostCx) {
+        let round = self.providers.next_version_round;
+        self.providers.next_version_round += 1;
+        self.providers
+            .version_rounds
+            .insert(round, VersionCheckRound::default());
         for provider in ProviderKind::NATIVE {
             let binary = self.resolve_provider_binary(provider);
             let status = self
@@ -543,6 +601,11 @@ impl AppState {
                 continue;
             }
             status.checking = true;
+            self.providers
+                .version_rounds
+                .get_mut(&round)
+                .unwrap()
+                .pending += 1;
             let revision = status.revision;
             let program = binary
                 .as_ref()
@@ -580,24 +643,22 @@ impl AppState {
                     latest_output: latest.as_deref(),
                 });
                 host_cx.enqueue(move |state, cx| {
-                    if let Some(version) = state.providers.complete_version_check(
+                    if let Some(toast) = state.providers.complete_version_check(
+                        round,
                         provider,
                         revision,
                         installation,
                         assessment,
                     ) {
-                        emit_runtime(
-                            cx,
-                            RuntimeEvent::Notice(RuntimeNotice::UpdateAvailable {
-                                provider,
-                                version,
-                            }),
-                        );
+                        emit_runtime(cx, RuntimeEvent::Toast(toast));
                     }
                 });
             });
         }
 
+        if self.providers.version_rounds[&round].pending == 0 {
+            self.providers.version_rounds.remove(&round);
+        }
         if self.providers.tcode_update.checking {
             return;
         }
@@ -633,8 +694,83 @@ impl AppState {
         });
     }
 
-    /// Revalidate the displayed installation before executing its update plan.
-    pub fn update_provider(&mut self, provider: ProviderKind, cx: &mut HostCx) {
+    pub fn update_providers(&mut self, providers: Vec<ProviderKind>, cx: &mut HostCx) {
+        if self.providers.update_run.is_some() {
+            return;
+        }
+        let mut seen = HashSet::new();
+        let pending: std::collections::VecDeque<_> = providers
+            .into_iter()
+            .filter(|provider| seen.insert(*provider))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let operation = self.next_operation_id();
+        let status = ProviderUpdateRun {
+            total: pending.len(),
+            completed: 0,
+            current: pending.front().copied(),
+            failed: Vec::new(),
+        };
+        emit_runtime(
+            cx,
+            RuntimeEvent::Toast(RuntimeToast::ProviderUpdateStarted {
+                operation,
+                run: status.clone(),
+            }),
+        );
+        self.providers.update_run = Some(UpdateRun {
+            operation,
+            status,
+            pending,
+        });
+        self.start_next_provider_update(cx);
+    }
+
+    fn complete_provider_update(&mut self, provider: ProviderKind, ok: bool, cx: &mut HostCx) {
+        if let Some(status) = self.providers.provider_versions.get_mut(&provider) {
+            status.updating = false;
+            if ok {
+                status.update_available = false;
+            }
+        }
+        let Some(run) = self.providers.update_run.as_mut() else {
+            return;
+        };
+        run.status.completed += 1;
+        if !ok {
+            run.status.failed.push(provider);
+        }
+        self.start_next_provider_update(cx);
+    }
+
+    fn start_next_provider_update(&mut self, cx: &mut HostCx) {
+        let Some(run) = self.providers.update_run.as_mut() else {
+            return;
+        };
+        let Some(provider) = run.pending.pop_front() else {
+            let mut run = self.providers.update_run.take().unwrap();
+            run.status.current = None;
+            emit_runtime(
+                cx,
+                RuntimeEvent::Toast(RuntimeToast::ProviderUpdateFinished {
+                    operation: run.operation,
+                    run: run.status,
+                }),
+            );
+            self.refresh_provider_status(cx);
+            self.check_provider_versions(cx);
+            return;
+        };
+        run.status.current = Some(provider);
+        emit_runtime(
+            cx,
+            RuntimeEvent::Toast(RuntimeToast::ProviderUpdateProgress {
+                operation: run.operation,
+                run: run.status.clone(),
+            }),
+        );
         let installation = self
             .providers
             .provider_versions
@@ -646,11 +782,11 @@ impl AppState {
                 .as_ref()
                 .is_some_and(|command| !command.requires_terminal)
         }) else {
-            self.report_error(RuntimeError::UpdateUnknown { provider }, cx);
+            self.complete_provider_update(provider, false, cx);
             return;
         };
         let Some(binary) = self.resolve_provider_binary(provider) else {
-            self.report_error(RuntimeError::UpdateUnknown { provider }, cx);
+            self.complete_provider_update(provider, false, cx);
             return;
         };
         let status = self
@@ -658,17 +794,11 @@ impl AppState {
             .provider_versions
             .entry(provider)
             .or_default();
-        if status.updating {
-            return;
-        }
         status.updating = true;
         status.checking = false;
         status.revision += 1;
         let revision = status.revision;
-        emit_runtime(
-            cx,
-            RuntimeEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
-        );
+
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
         let host_cx = cx.clone();
@@ -695,8 +825,7 @@ impl AppState {
                         status.updating = false;
                         status.installation = None;
                     }
-                    state.report_error(RuntimeError::UpdateUnknown { provider }, cx);
-                    state.check_provider_versions(cx);
+                    state.complete_provider_update(provider, false, cx);
                     return;
                 }
                 let command = current.update.expect("validated automatic update plan");
@@ -704,19 +833,7 @@ impl AppState {
                 HostCx::spawn_detached(cx, async move {
                     let ok = command.run().await;
                     host_cx.enqueue(move |state, cx| {
-                        if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
-                            status.updating = false;
-                        }
-                        if ok {
-                            emit_runtime(
-                                cx,
-                                RuntimeEvent::Notice(RuntimeNotice::UpdateDone { provider }),
-                            );
-                            state.refresh_provider_status(cx);
-                        } else {
-                            state.report_error(RuntimeError::UpdateFailed { provider }, cx);
-                        }
-                        state.check_provider_versions(cx);
+                        state.complete_provider_update(provider, ok, cx);
                     });
                 });
             });
@@ -998,6 +1115,67 @@ mod provider_lifecycle_tests {
     use super::*;
 
     #[test]
+    fn version_round_merges_new_updates_and_finishes_after_stale_completion() {
+        let mut catalog = ProviderCatalog::new(HashMap::new(), HashMap::new());
+        catalog.version_rounds.insert(
+            0,
+            VersionCheckRound {
+                pending: 3,
+                updates: Vec::new(),
+            },
+        );
+        let assessment = provider_updates::check(ProviderCheckInput {
+            installed_output: Some("1.0.0"),
+            latest_output: Some("2.0.0"),
+        });
+        assert_eq!(
+            catalog.complete_version_check(0, ProviderKind::Codex, 0, None, assessment.clone()),
+            None
+        );
+        assert_eq!(
+            catalog.complete_version_check(
+                0,
+                ProviderKind::ClaudeCode,
+                0,
+                None,
+                assessment.clone()
+            ),
+            None
+        );
+        let toast =
+            catalog.complete_version_check(0, ProviderKind::Pi, 1, None, assessment.clone());
+        assert_eq!(
+            toast,
+            Some(RuntimeToast::ProviderUpdatesAvailable {
+                updates: vec![
+                    ProviderUpdateAvailable {
+                        provider: ProviderKind::ClaudeCode,
+                        version: "2.0.0".into(),
+                        automatic: false
+                    },
+                    ProviderUpdateAvailable {
+                        provider: ProviderKind::Codex,
+                        version: "2.0.0".into(),
+                        automatic: false
+                    },
+                ]
+            })
+        );
+        catalog.version_rounds.insert(
+            1,
+            VersionCheckRound {
+                pending: 1,
+                updates: Vec::new(),
+            },
+        );
+        assert_eq!(
+            catalog.complete_version_check(1, ProviderKind::Codex, 0, None, assessment),
+            None,
+            "unchanged availability must not notify again"
+        );
+    }
+
+    #[test]
     fn changing_binary_discards_old_update_results_without_finishing_the_new_check() {
         use crate::app::test_support::*;
         let cx = &mut TestAppContext::default();
@@ -1034,6 +1212,20 @@ mod provider_lifecycle_tests {
             );
             status.checking = true;
 
+            state.providers.version_rounds.insert(
+                0,
+                VersionCheckRound {
+                    pending: 1,
+                    updates: Vec::new(),
+                },
+            );
+            state.providers.version_rounds.insert(
+                1,
+                VersionCheckRound {
+                    pending: 1,
+                    updates: Vec::new(),
+                },
+            );
             let result = provider_updates::check(ProviderCheckInput {
                 installed_output: Some("3.0.0"),
                 latest_output: Some("3.0.1"),
@@ -1041,7 +1233,7 @@ mod provider_lifecycle_tests {
             assert_eq!(
                 state
                     .providers
-                    .complete_version_check(provider, previous, None, result.clone()),
+                    .complete_version_check(0, provider, previous, None, result.clone()),
                 None
             );
             let status = &state.providers.provider_versions[&provider];
@@ -1049,12 +1241,9 @@ mod provider_lifecycle_tests {
             assert!(!status.update_available);
             assert!(status.latest.is_none());
             let revision = status.revision;
-            assert_eq!(
-                state
-                    .providers
-                    .complete_version_check(provider, revision, None, result,),
-                Some("3.0.1".into())
-            );
+            state
+                .providers
+                .complete_version_check(1, provider, revision, None, result);
             let status = &state.providers.provider_versions[&provider];
             assert!(!status.checking);
             assert_eq!(status.installed.as_deref(), Some("3.0.0"));
@@ -1067,10 +1256,17 @@ mod provider_lifecycle_tests {
                 installed_output: Some("3.0.0"),
                 latest_output: Some("3.0.2"),
             });
+            state.providers.version_rounds.insert(
+                2,
+                VersionCheckRound {
+                    pending: 1,
+                    updates: Vec::new(),
+                },
+            );
             assert_eq!(
                 state
                     .providers
-                    .complete_version_check(provider, revision, None, result),
+                    .complete_version_check(2, provider, revision, None, result),
                 None
             );
             assert!(!state.providers.provider_versions[&provider].update_available);

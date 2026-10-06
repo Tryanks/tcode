@@ -112,8 +112,8 @@ pub enum Command {
     /// provider profile (Codex, Claude Code).
     RefreshProviderUsage,
     CheckProviderVersions,
-    UpdateProvider {
-        provider: ProviderKind,
+    UpdateProviders {
+        providers: Vec<ProviderKind>,
     },
     SetSidebarCollapsed {
         collapsed: bool,
