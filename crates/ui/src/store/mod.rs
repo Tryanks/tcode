@@ -10,7 +10,7 @@ use tcode_client::{
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
-        Project, ProjectGroup, SessionMeta, WorktreeInfo, group_sessions,
+        Project, ProjectGroup, SessionMeta, WorktreeInfo, descendant_session_ids, group_sessions,
         order_sessions_with_children,
     },
     provider_models::{ResolvedModel, picker_models, resolve_models},
@@ -2972,6 +2972,41 @@ impl WorkspaceStore {
         self.session_status_replica.as_ref()
     }
 
+    /// How many threads deleting `session_id` removes (the host deletes every
+    /// thread under it too), while the archived threads are held: archived
+    /// descendants are not in the index.
+    pub fn held_deletion_count(&self, session_id: &str) -> Option<usize> {
+        let archived = self.archived_replica.as_ref()?;
+        Some(self.deletion_count(session_id, &archived.sessions))
+    }
+
+    /// [`Self::held_deletion_count`] over the archived threads, fetched once.
+    pub fn fetch_deletion_count(&self, session_id: &str, cx: &mut Context<Self>) -> Task<usize> {
+        let host = self.host.clone();
+        let session_id = session_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let archived = match host.query(Query::ArchivedSessions).await {
+                Ok(QueryResponse::ArchivedSessions(archived)) => archived.sessions,
+                Ok(other) => {
+                    log::warn!("unexpected archived-sessions response: {other:?}");
+                    Vec::new()
+                }
+                Err(error) => {
+                    log::warn!("archived sessions failed: {}", error.message);
+                    Vec::new()
+                }
+            };
+            this.read_with(cx, |store, _| store.deletion_count(&session_id, &archived))
+                .unwrap_or(1)
+        })
+    }
+
+    fn deletion_count(&self, session_id: &str, archived: &[SessionMeta]) -> usize {
+        descendant_session_ids(self.index_replica.0.iter().chain(archived), session_id)
+            .len()
+            .max(1)
+    }
+
     pub fn worktree_orphaned_by_delete(&self, session_id: &str) -> Option<WorktreeInfo> {
         let (meta, shared) = if let Some(meta) = self
             .index_replica
@@ -4585,6 +4620,90 @@ mod tests {
             !store.index_replica.0.iter().any(|meta| meta.id == id)
                 && store.index_summary.archived_counts.values().sum::<usize>() > 0
         })
+    }
+
+    /// Deleting a thread deletes every thread under it, archived ones too,
+    /// though the index carries no archived thread: the confirmation counts
+    /// them all.
+    #[gpui::test]
+    fn delete_confirmation_counts_archived_descendants(cx: &mut TestAppContext) {
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let root = std::path::Path::new("/project");
+        let archived = |id: &str, parent: &str| {
+            let mut meta = thread(root, id, "p", Some(parent));
+            meta.archived_at = Some(1);
+            meta
+        };
+        store.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        summary: Default::default(),
+                        sessions: vec![
+                            thread(root, "parent", "p", None),
+                            thread(root, "other", "p", None),
+                        ],
+                        projects: Vec::new(),
+                    }),
+                },
+                cx,
+            );
+        });
+
+        let count = std::rc::Rc::new(std::cell::Cell::new(None));
+        let result = count.clone();
+        store.update(cx, |store, cx| {
+            let task = store.fetch_deletion_count("parent", cx);
+            cx.spawn(async move |_, _| result.set(Some(task.await)))
+                .detach();
+        });
+        cx.run_until_parked();
+        let query = std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+            .find(|message| {
+                message.payload
+                    == tcode_protocol::ClientPayload::Query(tcode_protocol::Query::ArchivedSessions)
+            })
+            .expect("the count fetches the archived threads");
+        replies
+            .try_send(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                    id: query.id,
+                    result: Ok(tcode_protocol::QueryResponse::ArchivedSessions(
+                        tcode_protocol::ArchivedSessions {
+                            sessions: vec![
+                                archived("child", "parent"),
+                                archived("grandchild", "child"),
+                            ],
+                            worktree_shared: Default::default(),
+                            revision: 0,
+                        },
+                    )),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+
+        assert_eq!(count.get(), Some(3));
+        link.close();
     }
 
     /// An Orchestrate child auto-archived on completion hands the workspace to

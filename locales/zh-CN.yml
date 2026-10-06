@@ -207,6 +207,7 @@ sidebar:
   ctx_delete: "删除"
   delete_title: "删除对话“%{title}”？"
   delete_description: "这将永久清除该对话的历史记录。"
+  delete_tree_description: "这将永久清除该对话及其下所有对话的历史记录，共 %{count} 个对话。"
   delete_action: "删除"
   worktree_cleanup_title: "移除工作树？"
   worktree_cleanup_description: "此对话是唯一关联到位于 %{path} 的工作树的对话。要一并删除该工作树吗？"

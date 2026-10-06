@@ -18,11 +18,11 @@ pub(super) enum StoreWrite {
         initial: bool,
     },
     UpsertProject(Project),
-    /// A thread's meta and event log, committed together with the record of
-    /// the worktree it leaves behind.
-    RemoveSession {
-        id: String,
-        kept_worktree: Option<PathBuf>,
+    /// Threads' metas and event logs, removed together and with the record of
+    /// the worktrees they leave behind.
+    RemoveSessions {
+        ids: Vec<String>,
+        kept_worktrees: Vec<PathBuf>,
     },
     RemoveProject(String),
     /// The source's event log copied to a new thread, committed together with
@@ -87,11 +87,18 @@ impl StoreWrite {
             }
             StoreWrite::UpsertMeta { meta, .. } => vec![Mutation::upsert_meta((**meta).clone())],
             StoreWrite::UpsertProject(project) => vec![Mutation::upsert_project(project.clone())],
-            StoreWrite::RemoveSession { id, kept_worktree } => {
-                let mut mutations = vec![Mutation::remove_session(id)];
-                mutations.extend(kept_worktree.as_deref().map(Mutation::keep_worktree));
-                mutations
-            }
+            StoreWrite::RemoveSessions {
+                ids,
+                kept_worktrees,
+            } => ids
+                .iter()
+                .map(|id| Mutation::remove_session(id))
+                .chain(
+                    kept_worktrees
+                        .iter()
+                        .map(|path| Mutation::keep_worktree(path)),
+                )
+                .collect(),
             StoreWrite::RemoveProject(id) => vec![Mutation::remove_project(id)],
             StoreWrite::Fork { src, meta, .. } => vec![
                 Mutation::clone_events(src, &meta.id),
@@ -111,7 +118,7 @@ impl StoreWrite {
                 (|error| RuntimeError::PersistSessionIndex { error }, None)
             }
             StoreWrite::UpsertProject(_) => (|error| RuntimeError::PersistProject { error }, None),
-            StoreWrite::RemoveSession { .. } => {
+            StoreWrite::RemoveSessions { .. } => {
                 (|error| RuntimeError::DeleteSession { error }, None)
             }
             StoreWrite::RemoveProject(_) => (|error| RuntimeError::DeleteProject { error }, None),
@@ -325,7 +332,7 @@ impl StoreWriter {
             StoreWrite::AppendEvent { .. }
             | StoreWrite::UpsertMeta { .. }
             | StoreWrite::UpsertProject(_)
-            | StoreWrite::RemoveSession { .. }
+            | StoreWrite::RemoveSessions { .. }
             | StoreWrite::RemoveProject(_)
             | StoreWrite::Fork { .. } => unreachable!("database writes are batched"),
         }
