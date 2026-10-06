@@ -1347,6 +1347,70 @@ fn archive_and_unarchive_apply_exact_timestamp_cascades() {
 }
 
 #[test]
+fn deleting_a_thread_deletes_every_descendant_in_one_command() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-delete-cascade-test");
+    let root = test_store.root().clone();
+    let store = (*test_store).clone();
+    for (id, parent) in [
+        ("parent", None),
+        ("child", Some("parent")),
+        ("grandchild", Some("child")),
+        ("other", None),
+    ] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_string);
+        if id == "child" {
+            meta.archived_at = Some(1);
+        }
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(id, 1, &AgentEvent::Warning { message: id.into() })
+            .unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new(store.clone()));
+    let (commands, background) = smol::channel::unbounded();
+    state.update(cx, |state, _| {
+        let mut grandchild = live_session(ProviderKind::Codex, commands);
+        grandchild.meta = state.find_meta("grandchild").unwrap();
+        state
+            .residents
+            .parked
+            .insert("grandchild".into(), grandchild);
+    });
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::DeleteSession {
+            session_id: "parent".into(),
+            remove_worktree: false,
+        },
+    );
+    cx.run_until_parked();
+
+    assert!(matches!(
+        background.try_recv(),
+        Ok(SessionCommand::Shutdown)
+    ));
+    state.update(cx, |state, _| state.close_store().unwrap());
+    let reopened = SessionStore::open_at(root).unwrap();
+    let remaining: Vec<_> = reopened
+        .load_index()
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.id)
+        .collect();
+    assert_eq!(remaining, ["other"]);
+    for id in ["parent", "child", "grandchild"] {
+        assert!(reopened.read_event_log(id).unwrap().is_empty(), "{id}");
+    }
+    assert!(!reopened.read_event_log("other").unwrap().is_empty());
+    reopened.close().unwrap();
+}
+
+#[test]
 fn unarchived_thread_survives_the_next_auto_archive_sweep() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-unarchive-sweep-test");

@@ -207,6 +207,7 @@ sidebar:
   ctx_delete: "Delete"
   delete_title: 'Delete thread "%{title}"?'
   delete_description: "This permanently clears conversation history for this thread."
+  delete_tree_description: "This permanently clears conversation history for this thread and every thread under it: %{count} threads in all."
   delete_action: "Delete"
   worktree_cleanup_title: "Remove worktree?"
   worktree_cleanup_description: "This thread is the only one linked to the worktree at %{path}. Delete the worktree too?"

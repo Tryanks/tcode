@@ -999,63 +999,93 @@ impl AppState {
         Some(fork_id)
     }
 
-    /// Permanently delete a thread: stop the provider, close its terminal,
-    /// delete meta + event log, and (when `remove_worktree`) remove the git worktree
-    /// it was the last user of. A worktree it owns that is not removed is
-    /// recorded as kept, so the startup sweep leaves it.
+    /// Permanently delete a thread and every thread under it (the tree
+    /// archive acts on): stop their providers, close their terminals, delete
+    /// their metas and event logs in one transaction, and (when
+    /// `remove_worktree`) remove each git worktree they own that no remaining
+    /// thread works in. A worktree they own that is not removed is recorded as
+    /// kept, so the startup sweep leaves it.
     pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
-        self.clear_approvals(session_id);
-        let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
-        if self.residents.live.contains_key(session_id) {
-            // shutdown_active drops the ActiveSession (and its terminal PTY).
-            self.shutdown_active(session_id, cx);
+        let mut ids = descendant_session_ids(&self.sessions, session_id);
+        if ids.is_empty() {
+            ids.push(session_id.to_string());
         }
-        // Deleting a thread that is working in the background kills it for real.
-        self.drop_background(session_id, cx);
-        self.terminal_workspaces
-            .remove(&ConversationDestination::Thread(session_id.to_string()));
-        if self.terminal_preferences.remove(session_id).is_some() {
+        self.delete_session_ids(&ids, remove_worktree, cx);
+    }
+
+    fn delete_session_ids(&mut self, ids: &[String], remove_worktree: bool, cx: &mut HostCx) {
+        if ids.is_empty() {
+            return;
+        }
+        let deleted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let metas: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| deleted.contains(meta.id.as_str()))
+            .cloned()
+            .collect();
+        let mut terminal_preferences_changed = false;
+        for id in ids {
+            self.clear_approvals(id);
+            if self.residents.live.contains_key(id) {
+                // shutdown_active drops the ActiveSession (and its terminal PTY).
+                self.shutdown_active(id, cx);
+            }
+            // Deleting a thread that is working in the background kills it for real.
+            self.drop_background(id, cx);
+            self.terminal_workspaces
+                .remove(&ConversationDestination::Thread(id.clone()));
+            terminal_preferences_changed |= self.terminal_preferences.remove(id).is_some();
+            self.revoke_orchestrate_child_registration(id);
+            self.close_orchestrator_children(id, cx);
+            self.settings.last_visited.remove(id);
+        }
+        if terminal_preferences_changed {
             self.write_terminal_preferences(cx);
         }
-        self.close_orchestrator_children(session_id, cx);
-        let worktree_remove = meta.as_ref().and_then(|meta| {
-            let worktree = meta.worktree.as_ref().filter(|_| remove_worktree)?;
-            let shared = self.worktree_sharing().is_shared(meta);
-            if shared {
+        self.settings
+            .collapsed_threads
+            .retain(|id| !deleted.contains(id.as_str()));
+        if metas
+            .iter()
+            .any(|meta| meta.archived_at.is_some() || self.archived_sharing_affected(meta))
+        {
+            self.archived_revision += 1;
+        }
+        self.sessions
+            .retain(|meta| !deleted.contains(meta.id.as_str()));
+        let mut kept_worktrees = Vec::new();
+        let mut worktree_removals = Vec::new();
+        let sharing = self.worktree_sharing();
+        for meta in &metas {
+            let Some(worktree) = &meta.worktree else {
+                continue;
+            };
+            if !remove_worktree {
+                kept_worktrees.push(meta.cwd.clone());
+            } else if sharing.is_shared(meta) {
                 log::info!(
                     "keeping worktree {} in use by another thread",
                     meta.cwd.display()
                 );
-                return None;
+            } else {
+                worktree_removals.push((
+                    meta.id.clone(),
+                    worktree.root_project_path.clone(),
+                    meta.cwd.clone(),
+                ));
             }
-            Some((worktree.root_project_path.clone(), meta.cwd.clone()))
-        });
-        self.settings.last_visited.remove(session_id);
-        self.settings
-            .collapsed_threads
-            .retain(|id| id != session_id);
-        let kept_worktree = meta
-            .as_ref()
-            .filter(|meta| meta.worktree.is_some() && !remove_worktree)
-            .map(|meta| meta.cwd.clone());
+        }
         self.enqueue_store_write(
-            StoreWrite::RemoveSession {
-                id: session_id.to_string(),
-                kept_worktree,
+            StoreWrite::RemoveSessions {
+                ids: ids.to_vec(),
+                kept_worktrees,
             },
             cx,
         );
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
-        if meta
-            .as_ref()
-            .is_some_and(|meta| meta.archived_at.is_some() || self.archived_sharing_affected(meta))
-        {
-            self.archived_revision += 1;
-        }
-        self.sessions.retain(|meta| meta.id != session_id);
-        if let Some((root, cwd)) = worktree_remove {
-            let deleted_id = session_id.to_string();
+        for (deleted_id, root, cwd) in worktree_removals {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 let result = host_cx
@@ -1107,9 +1137,19 @@ impl AppState {
         {
             self.write_terminal_preferences(cx);
         }
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
         for session_id in session_ids {
-            self.delete_session(&session_id, false, cx);
+            if seen.contains(&session_id) {
+                continue;
+            }
+            for id in descendant_session_ids(&self.sessions, &session_id) {
+                if seen.insert(id.clone()) {
+                    ids.push(id);
+                }
+            }
         }
+        self.delete_session_ids(&ids, false, cx);
         self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
             .collapsed_projects
@@ -1665,33 +1705,4 @@ impl AppState {
         }
         self.refresh_git_status(&session_id, cx);
     }
-}
-
-pub(super) fn descendant_session_ids(sessions: &[SessionMeta], root_id: &str) -> Vec<String> {
-    fn append(
-        sessions: &[SessionMeta],
-        session_id: &str,
-        visited: &mut HashSet<String>,
-        output: &mut Vec<String>,
-    ) {
-        if !visited.insert(session_id.to_string()) {
-            return;
-        }
-        output.push(session_id.to_string());
-        let children: Vec<_> = sessions
-            .iter()
-            .filter(|meta| meta.parent_session_id.as_deref() == Some(session_id))
-            .map(|meta| meta.id.clone())
-            .collect();
-        for child in children {
-            append(sessions, &child, visited, output);
-        }
-    }
-
-    if !sessions.iter().any(|meta| meta.id == root_id) {
-        return Vec::new();
-    }
-    let mut output = Vec::new();
-    append(sessions, root_id, &mut HashSet::new(), &mut output);
-    output
 }

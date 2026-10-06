@@ -2350,33 +2350,14 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let store = self.store.clone();
-        let session_id = session_id.to_string();
-        let title = title.to_string();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let alert = alert.bg(cx.theme().popover);
-            let store = store.clone();
-            let session_id = session_id.clone();
-            alert
-                .title(crate::tr!("sidebar.delete_title", title = title.clone()))
-                .description(crate::tr!("sidebar.delete_description"))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("settings.delete_permanently"))
-                        .cancel_text(crate::tr!("settings.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let store = store.clone();
-                    let session_id = session_id.clone();
-                    // The alert closes after this callback; open the next prompt afterwards.
-                    window.defer(cx, move |window, cx| {
-                        crate::sidebar::proceed_delete(store, session_id, window, cx);
-                    });
-                    true
-                })
-        });
+        crate::sidebar::confirm_delete(
+            self.store.clone(),
+            session_id.to_string(),
+            title.to_string(),
+            crate::tr!("settings.delete_permanently").into(),
+            window,
+            cx,
+        );
     }
 
     /// Bulk permanent delete. Always confirms, whatever
