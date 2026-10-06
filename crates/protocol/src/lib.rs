@@ -40,7 +40,7 @@ pub use wire::{
 // sends index and history changes instead of whole replacements and
 // compresses the native transport; version 7 carries the running turn and
 // the requests it waits on in the session status; version 8 adds provider
-// plugin catalogs, their commands and challenges.
+// plugin catalogs, their commands, challenges and switches.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]

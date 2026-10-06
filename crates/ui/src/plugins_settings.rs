@@ -1,7 +1,8 @@
 //! Settings → Plugins: one section per enabled provider profile, showing the
 //! native plugin catalog the host listed for it. Every action, marketplace
 //! operation and confirmation comes from the host's catalog; a control the
-//! host did not offer is never drawn.
+//! host did not offer is never drawn. A provider whose management is switched
+//! off shows only its switch.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use gpui::{
     Subscription, Window, div, list, point, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Collapsible, Scrollbar, StyledExt as _, h_flex, v_flex};
-use tcode_core::settings::ResolvedProfile;
+use tcode_core::settings::{PluginManagementSettings, ResolvedProfile};
 use tcode_protocol::{
     PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginStaleReason,
     ProviderPluginCatalog, RuntimeOperationId,
@@ -33,6 +34,7 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::Spinner;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
+use crate::widgets::switch::Switch;
 use crate::window_state::WindowState;
 
 const SCOPES: [PluginScope; 5] = [
@@ -63,6 +65,9 @@ pub struct PluginsSettingsPanel {
     /// Challenges this client already answered; the replica keeps showing
     /// them until the host's answer arrives.
     answered: HashSet<RuntimeOperationId>,
+    /// The switches the shown page last listed for; a provider switched on
+    /// since is listed then.
+    switches: PluginManagementSettings,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -81,6 +86,7 @@ impl PluginsSettingsPanel {
                 |this, _, change: &StoreChange, window, cx| match change.topic {
                     TopicKind::Providers | TopicKind::Settings => {
                         if this.shown {
+                            this.list_switched_on(cx);
                             this.sync_challenge(window, cx);
                         }
                         cx.notify();
@@ -101,6 +107,7 @@ impl PluginsSettingsPanel {
             focus: None,
             challenge: None,
             answered: HashSet::new(),
+            switches: PluginManagementSettings::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -116,13 +123,29 @@ impl PluginsSettingsPanel {
         cx.notify();
     }
 
-    fn managed_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
+    /// Profiles Tcode lists plugins for under `switches`.
+    fn managed_profiles(&self, switches: &PluginManagementSettings, cx: &App) -> Vec<String> {
         self.store
             .read(cx)
             .enabled_profiles()
             .into_iter()
-            .filter(|profile| manages(profile.kind.caps().plugin_management))
+            .filter(|profile| {
+                manages(profile.kind.caps().plugin_management)
+                    && switches.provider_enabled(profile.kind)
+            })
+            .map(|profile| profile.id)
             .collect()
+    }
+
+    fn list_switched_on(&mut self, cx: &mut App) {
+        let switches = self.store.read(cx).plugin_management().clone();
+        let before = self.managed_profiles(&self.switches, cx);
+        for profile_id in self.managed_profiles(&switches, cx) {
+            if !before.contains(&profile_id) {
+                self.refresh(&profile_id, cx);
+            }
+        }
+        self.switches = switches;
     }
 
     /// List a profile's catalog from the open thread's directory, or from
@@ -357,8 +380,24 @@ impl PluginsSettingsPanel {
         let name = store.provider_profile_display_name(&profile.id);
         let catalog = store.provider_plugin_catalog(&profile.id).cloned();
         let requested_cwd = store.active_session_cwd();
+        let switches = store.plugin_management();
+        let (master, switch_on) = (switches.enabled, switches.provider_switch(profile.kind));
         let muted = cx.theme().muted_foreground;
         let profile_id = profile.id.clone();
+        let kind = profile.kind;
+        let switch_id = format!("plugins-switch-{profile_id}");
+        let switch = div().debug_selector(move || switch_id.clone()).child(
+            Switch::new(SharedString::from(format!("plugins-switch-{profile_id}")))
+                .checked(switch_on)
+                .disabled(!master)
+                .tooltip(crate::tr!("providers.plugins.provider_switch", name = name).into_owned())
+                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                    let checked = *checked;
+                    this.store.update(cx, |store, _| {
+                        store.set_provider_plugin_management(kind, checked)
+                    });
+                })),
+        );
 
         let mut header = self
             .row(cx)
@@ -388,14 +427,19 @@ impl PluginsSettingsPanel {
             section = section.child(self.scroll_into_view());
         }
 
-        if !manages(management) {
+        let off = if !master {
+            Some(crate::tr!("providers.plugins.management_off"))
+        } else if !switch_on {
+            Some(crate::tr!("providers.plugins.provider_off", name = name))
+        } else if !manages(management) {
+            Some(crate::tr!("providers.plugins.unmanaged"))
+        } else {
+            None
+        };
+        if let Some(note) = off {
             let rows = vec![
-                header.into_any_element(),
-                self.note_row(
-                    crate::tr!("providers.plugins.unmanaged").into_owned(),
-                    muted,
-                    cx,
-                ),
+                header.child(switch).into_any_element(),
+                self.note_row(note.into_owned(), muted, cx),
             ];
             return section
                 .child(material::grouped(rows, cx))
@@ -420,7 +464,8 @@ impl PluginsSettingsPanel {
                         let profile_id = profile_id.clone();
                         move |this, _, _, cx| this.refresh(&profile_id, cx)
                     })),
-            );
+            )
+            .child(switch);
 
         let context_cwd = catalog
             .as_ref()
@@ -963,6 +1008,53 @@ impl PluginsSettingsPanel {
             .into_any_element()
     }
 
+    fn master_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let enabled = self.store.read(cx).plugin_management().enabled;
+        material::group(cx)
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_h(px(56.))
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_medium()
+                                    .child(crate::tr!("providers.plugins.management")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::tr!("providers.plugins.management_description")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "plugins-management-switch".into())
+                            .child(
+                                Switch::new("plugins-management-switch")
+                                    .checked(enabled)
+                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                        let checked = *checked;
+                                        this.store.update(cx, |store, _| {
+                                            store.set_plugin_management_enabled(checked)
+                                        });
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// Scroll the settings page so the element this is placed in starts at
     /// the top of the viewport, once this frame has placed it.
     fn scroll_into_view(&self) -> impl IntoElement {
@@ -1007,8 +1099,9 @@ impl Render for PluginsSettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.shown && self.store.read(cx).settings_hydrated() {
             self.shown = true;
-            for profile in self.managed_profiles(cx) {
-                self.refresh(&profile.id, cx);
+            self.switches = self.store.read(cx).plugin_management().clone();
+            for profile_id in self.managed_profiles(&self.switches, cx) {
+                self.refresh(&profile_id, cx);
             }
             cx.defer_in(window, |this, window, cx| this.sync_challenge(window, cx));
         }
@@ -1025,6 +1118,7 @@ impl Render for PluginsSettingsPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(crate::tr!("settings.plugins_section")),
             )
+            .child(self.master_switch(cx))
             .children(
                 profiles
                     .iter()
@@ -1590,7 +1684,7 @@ mod tests {
     use tcode_core::settings::Settings;
     use tcode_protocol::{
         ClientPayload, Command, CommandResponse, EventEnvelope, HostMessage, ProvidersStatus,
-        ServerEvent, Topic, decode_client_line, encode_line,
+        ServerEvent, SettingsPatch, Topic, decode_client_line, encode_line,
     };
 
     use super::*;
@@ -1607,6 +1701,15 @@ mod tests {
     impl Host {
         fn replicate(&self, catalog: ProviderPluginCatalog, cx: &mut VisualTestContext) {
             send_providers(&self.incoming, catalog);
+            self.settle(cx);
+        }
+
+        fn replicate_settings(&self, settings: Settings, cx: &mut VisualTestContext) {
+            send_settings(&self.incoming, settings);
+            self.settle(cx);
+        }
+
+        fn settle(&self, cx: &mut VisualTestContext) {
             cx.run_until_parked();
             self.store
                 .update(cx, |store, cx| store.drain_host_events_for_test(cx));
@@ -1659,25 +1762,27 @@ mod tests {
         }
     }
 
+    /// Settings with Claude Code's plugin management switched on.
+    fn claude_managed() -> Settings {
+        let mut settings = Settings::default();
+        settings.apply(SettingsPatch::PluginManagementProvider {
+            provider: agent::ProviderKind::ClaudeCode,
+            enabled: true,
+        });
+        settings
+    }
+
     /// Open Settings → Plugins the way navigation does, against a host
-    /// whose replicated state holds `catalog`.
+    /// whose replicated state holds `settings` and `catalog`.
     fn open_plugins(
+        settings: Settings,
         catalog: ProviderPluginCatalog,
         cx: &mut TestAppContext,
     ) -> (Host, &mut VisualTestContext) {
         cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
-        incoming
-            .try_send(
-                encode_line(&HostMessage::Event(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Settings,
-                    event: ServerEvent::SettingsSnapshot(Settings::default()),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+        send_settings(&incoming, settings);
         send_providers(&incoming, catalog);
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
@@ -1715,6 +1820,19 @@ mod tests {
         )
     }
 
+    fn send_settings(incoming: &async_channel::Sender<String>, settings: Settings) {
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::SettingsSnapshot(settings),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
     fn send_providers(incoming: &async_channel::Sender<String>, catalog: ProviderPluginCatalog) {
         incoming
             .try_send(
@@ -1741,11 +1859,8 @@ mod tests {
         }
     }
 
-    /// The host decides which actions an entry offers in its context; the
-    /// page draws exactly those and no control the host did not compute.
-    #[gpui::test]
-    fn only_host_computed_plugin_actions_are_rendered(cx: &mut TestAppContext) {
-        let entry = ProviderPluginEntry {
+    fn alpha() -> ProviderPluginEntry {
+        ProviderPluginEntry {
             id: "alpha@mkt".into(),
             name: "alpha".into(),
             version: Some("1.0.0".into()),
@@ -1772,8 +1887,14 @@ mod tests {
                 },
             ],
             diagnostics: Vec::new(),
-        };
-        let (host, cx) = open_plugins(catalog(vec![entry], Vec::new()), cx);
+        }
+    }
+
+    /// The host decides which actions an entry offers in its context; the
+    /// page draws exactly those and no control the host did not compute.
+    #[gpui::test]
+    fn only_host_computed_plugin_actions_are_rendered(cx: &mut TestAppContext) {
+        let (host, cx) = open_plugins(claude_managed(), catalog(vec![alpha()], Vec::new()), cx);
         assert!(cx.debug_bounds("plugin-row-claude-alpha@mkt").is_some());
 
         let offered = [
@@ -1805,7 +1926,7 @@ mod tests {
             native_text: None,
         };
         let pending = catalog(Vec::new(), vec![challenge]);
-        let (host, cx) = open_plugins(pending.clone(), cx);
+        let (host, cx) = open_plugins(claude_managed(), pending.clone(), cx);
         assert!(
             cx.debug_bounds("plugin-challenge-uninstall-alpha@mkt")
                 .is_some()
@@ -1838,5 +1959,53 @@ mod tests {
         // the answer; the person is not asked again meanwhile.
         host.replicate(pending, cx);
         assert!(cx.debug_bounds("plugin-challenge-accept").is_none());
+    }
+
+    /// Off, a provider's section is its switch: a catalog still in the
+    /// replica draws no controls and nothing is listed until the switch is
+    /// turned on, which lists it.
+    #[gpui::test]
+    fn a_switched_off_provider_shows_only_its_switch_until_switched_on(cx: &mut TestAppContext) {
+        let (host, cx) = open_plugins(Settings::default(), catalog(vec![alpha()], Vec::new()), cx);
+        assert!(cx.debug_bounds("plugins-switch-claude").is_some());
+        for id in [
+            "plugin-row-claude-alpha@mkt",
+            "plugin-install-claude-alpha@mkt-user",
+            "plugin-disable-claude-alpha@mkt-project",
+            "plugins-add-claude",
+            "plugins-refresh-claude",
+        ] {
+            assert!(cx.debug_bounds(id).is_none(), "{id}");
+        }
+        let refreshed = |commands: &[Command]| -> Vec<String> {
+            commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::RefreshProviderPlugins { profile_id, .. } => Some(profile_id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(refreshed(&host.commands(cx)), ["codex"]);
+
+        let switch = cx.debug_bounds("plugins-switch-claude").unwrap();
+        cx.simulate_click(switch.center(), gpui::Modifiers::default());
+        draw(cx);
+        let commands = host.commands(cx);
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                Command::PatchSettings {
+                    patch: SettingsPatch::PluginManagementProvider {
+                        provider: agent::ProviderKind::ClaudeCode,
+                        enabled: true,
+                    }
+                }
+            )),
+            "{commands:?}"
+        );
+        host.replicate_settings(claude_managed(), cx);
+        assert_eq!(refreshed(&host.commands(cx)), ["claude"]);
+        assert!(cx.debug_bounds("plugins-add-claude").is_some());
     }
 }

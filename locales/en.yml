@@ -590,6 +590,11 @@ providers:
     env_hint: "KEY=value KEY2=value2"
   # Native provider plugins (claude plugin …), managed on the host.
   plugins:
+    management: "Plugin management"
+    management_description: "Tcode manages each provider's native plugins through that provider's own CLI or protocol. Off, Tcode never touches them."
+    management_off: "Plugin management is off; Tcode does not touch this provider's plugins."
+    provider_off: "Off: Tcode does not touch %{name} plugins."
+    provider_switch: "Manage %{name} plugins from Tcode"
     unmanaged: "Plugin management for this provider is not available in Tcode yet; use the provider's own interface."
     project_context: "Project: %{path}"
     no_project_context: "No project context: user scope only"

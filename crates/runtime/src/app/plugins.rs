@@ -55,6 +55,13 @@ fn error(code: &str, message: &str) -> ProtocolError {
     }
 }
 
+fn management_disabled() -> ProtocolError {
+    error(
+        "plugin_management_disabled",
+        "Plugin management for this provider is turned off in Settings → Plugins.",
+    )
+}
+
 fn native_message(error: AgentError) -> String {
     match error {
         AgentError::Provider(message) => message,
@@ -78,7 +85,10 @@ impl AppState {
         cwd: Option<PathBuf>,
         cx: &mut HostCx,
     ) {
-        let Some(launch) = self.plugin_launch(profile_id) else {
+        let Some(launch) = self
+            .plugin_launch(profile_id)
+            .filter(|launch| self.settings.plugins.provider_enabled(launch.provider))
+        else {
             return;
         };
         let catalog = self
@@ -138,10 +148,42 @@ impl AppState {
         );
     }
 
+    /// A provider switched off keeps nothing a client could act on: its
+    /// listing is forgotten, a listing in flight is ignored and a pending
+    /// challenge is abandoned. A change already running finishes and
+    /// reports; a command challenge it then raises is no longer asked.
+    pub(super) fn forget_disabled_plugin_catalogs(&mut self, cx: &mut HostCx) {
+        let plugins = &self.settings.plugins;
+        for (profile_id, catalog) in self
+            .plugin_catalogs
+            .iter_mut()
+            .filter(|(_, catalog)| !plugins.provider_enabled(catalog.launch.provider))
+        {
+            if let Some(operation) = catalog
+                .operation
+                .take_if(|operation| operation.challenge.is_some())
+            {
+                Self::abandon_challenge(profile_id, operation, cx);
+            }
+            catalog.listing = PluginListing::default();
+            catalog.state = PluginCatalogState::Stale {
+                reason: PluginStaleReason::NotLoaded,
+            };
+            catalog.loading = false;
+            catalog.list_request += 1;
+            catalog.generation += 1;
+            catalog.notes.clear();
+        }
+    }
+
     fn list_plugins(&mut self, profile_id: &str, cx: &mut HostCx) {
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
-        let Some(catalog) = self.plugin_catalogs.get_mut(profile_id) else {
+        let Some(catalog) = self
+            .plugin_catalogs
+            .get_mut(profile_id)
+            .filter(|catalog| settings.plugins.provider_enabled(catalog.launch.provider))
+        else {
             return;
         };
         catalog.list_request += 1;
@@ -203,19 +245,26 @@ impl AppState {
                 profile_id, cwd, ..
             } => (profile_id, Some(cwd)),
             Command::ResolvePluginChallenge { op_id, .. } => {
-                return if self.plugin_catalogs.values().any(|catalog| {
+                let Some(catalog) = self.plugin_catalogs.values().find(|catalog| {
                     catalog
                         .operation
                         .as_ref()
                         .and_then(|operation| operation.challenge.as_ref())
                         .is_some_and(|challenge| challenge.op_id == *op_id)
-                }) {
-                    Ok(())
-                } else {
-                    Err(error(
+                }) else {
+                    return Err(error(
                         "unknown_plugin_challenge",
                         "This confirmation is no longer pending.",
-                    ))
+                    ));
+                };
+                return if self
+                    .settings
+                    .plugins
+                    .provider_enabled(catalog.launch.provider)
+                {
+                    Ok(())
+                } else {
+                    Err(management_disabled())
                 };
             }
             _ => return Ok(()),
@@ -233,9 +282,13 @@ impl AppState {
                 "This provider's plugins cannot be managed from Tcode.",
             ));
         }
+        // Listing a provider that is switched off does nothing.
         let Some(cwd) = cwd else {
             return Ok(());
         };
+        if !self.settings.plugins.provider_enabled(launch.provider) {
+            return Err(management_disabled());
+        }
         let catalog = self
             .plugin_catalogs
             .get(profile_id)
@@ -596,7 +649,11 @@ impl AppState {
         let mut catalogs: Vec<ProviderPluginCatalog> = self
             .plugin_catalogs
             .iter()
-            .filter(|(profile_id, _)| self.settings.resolved_profile(profile_id).is_some())
+            .filter(|(profile_id, _)| {
+                self.settings
+                    .resolved_profile(profile_id)
+                    .is_some_and(|profile| self.settings.plugins.provider_enabled(profile.kind))
+            })
             .map(|(profile_id, catalog)| ProviderPluginCatalog {
                 profile_id: profile_id.clone(),
                 context_cwd: catalog.context_cwd.clone(),
@@ -706,7 +763,7 @@ async fn plugin_context(
 mod tests {
     use super::*;
     use crate::app::test_support::*;
-    use tcode_protocol::{CommandResponse, HostMessage};
+    use tcode_protocol::{CommandResponse, HostMessage, SettingsPatch};
 
     const GAMMA_SHA: &str = "b9c02c85b17261fa1fce010664bb16cbe866f14c7deeaf6cb6c37c2736bbe269";
 
@@ -779,12 +836,26 @@ mod tests {
         }
     }
 
-    fn host_with(fake: &FakeClaude, store: &TestStore) -> TestClientState {
+    /// A host whose Claude profile runs `fake`, with the default switches.
+    fn unmanaged_host(fake: &FakeClaude, store: &TestStore) -> TestClientState {
         let mut state = TestClientState::new((**store).clone());
         let claude = state.settings.provider_mut(ProviderKind::ClaudeCode);
         claude.binary_path = Some(fake.binary.clone());
         claude.home_path = Some(fake.home.clone());
         state
+    }
+
+    fn host_with(fake: &FakeClaude, store: &TestStore) -> TestClientState {
+        let mut state = unmanaged_host(fake, store);
+        state.settings.apply(claude_switch(true));
+        state
+    }
+
+    fn claude_switch(enabled: bool) -> SettingsPatch {
+        SettingsPatch::PluginManagementProvider {
+            provider: ProviderKind::ClaudeCode,
+            enabled,
+        }
     }
 
     fn catalog(state: &TestClientState) -> Option<ProviderPluginCatalog> {
@@ -891,6 +962,72 @@ mod tests {
             accepted.starts_with(&format!("{} ", project.display())),
             "{accepted}"
         );
+    }
+
+    /// Off, Tcode never runs the provider's CLI and refuses its plugin
+    /// commands; switching it off abandons what was waiting on the person.
+    #[test]
+    fn a_switched_off_provider_is_never_run_and_its_commands_are_refused() {
+        let fake = FakeClaude::new();
+        let store = TestStore::new("tcode-plugin-switch");
+        let cx = &mut TestAppContext::default();
+        let state = cx.new_entity(unmanaged_host(&fake, &store));
+        let project = Some(fake.project.clone());
+        let refresh = Command::RefreshProviderPlugins {
+            profile_id: "claude".into(),
+            cwd: project.clone(),
+        };
+        let install = Command::InstallProviderPlugin {
+            profile_id: "claude".into(),
+            entry_id: "gamma@tcode-probe".into(),
+            scope: PluginScope::User,
+            cwd: project.clone(),
+        };
+
+        state.dispatch_command(cx, 1, refresh.clone());
+        cx.run_until_parked();
+        assert_eq!(ack(cx, 1).unwrap(), CommandResponse::Unit);
+        state.dispatch_command(cx, 2, install.clone());
+        cx.run_until_parked();
+        assert_eq!(ack(cx, 2).unwrap_err().code, "plugin_management_disabled");
+        assert!(state.read(|state| catalog(state).is_none()));
+        assert_eq!(fake.calls(""), Vec::<String>::new());
+
+        state.dispatch_command(
+            cx,
+            3,
+            Command::PatchSettings {
+                patch: claude_switch(true),
+            },
+        );
+        state.dispatch_command(cx, 4, refresh);
+        cx.run_until(settled);
+        assert!(!fake.calls("plugin list").is_empty());
+        state.dispatch_command(cx, 5, install);
+        cx.run_until(challenged);
+        let challenge = state.read(|state| catalog(state).unwrap().challenges.remove(0));
+
+        state.dispatch_command(
+            cx,
+            6,
+            Command::PatchSettings {
+                patch: claude_switch(false),
+            },
+        );
+        cx.run_until_parked();
+        assert!(state.read(|state| catalog(state).is_none()));
+        let calls = fake.calls("");
+        state.dispatch_command(
+            cx,
+            7,
+            Command::ResolvePluginChallenge {
+                op_id: challenge.op_id,
+                accept: true,
+            },
+        );
+        cx.run_until_parked();
+        assert_eq!(ack(cx, 7).unwrap_err().code, "unknown_plugin_challenge");
+        assert_eq!(fake.calls(""), calls);
     }
 
     #[test]
