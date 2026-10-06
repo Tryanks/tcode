@@ -1,106 +1,112 @@
-//! Live dictation in the composer: the mic toggle button plus the transcript
-//! insertion state machine that keeps rewriting the engine's hypothesis in
-//! place. macOS only — see `crates/voice` for the engine side.
+//! System dictation and replacement of the session's whole transcript.
 
 use super::super::*;
-
 use gpui::SharedString;
-use tcode_voice::{DictationEvent, DictationSession};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use gpui_component::speech::SystemRecognizer;
+use gpui_component::speech::{SpeechEvent, SpeechState, SpeechStatus};
 
-/// The composer's dictation state.
 pub(in super::super) struct Voice {
-    /// `tcode_voice::is_supported()`, sampled once per composer: the answer
-    /// cannot change while the app runs, and the mic button is absent when it
-    /// is false.
-    supported: bool,
-    session: Option<Dictation>,
+    state: Entity<SpeechState>,
+    locale: &'static str,
+    insertion: Option<Insertion>,
 }
 
-impl Voice {
-    pub(in super::super) fn new() -> Self {
-        Self {
-            supported: tcode_voice::is_supported(),
-            session: None,
-        }
+struct Insertion {
+    anchor: usize,
+    last_len: usize,
+    expected: String,
+}
+
+fn speech_locale() -> &'static str {
+    if rust_i18n::locale().starts_with("zh") {
+        "zh-CN"
+    } else {
+        "en-US"
     }
 }
 
-/// A running session and the byte bookkeeping for its insertion point. The
-/// transcript occupies `anchor .. anchor + committed_len + volatile_len`; each
-/// `Volatile` rewrites the trailing volatile slice, each `Final` turns it into
-/// committed text.
-struct Dictation {
-    session: DictationSession,
-    /// False between `start` and the engine's `Ready` — the first session may
-    /// still be downloading speech assets, so the button shows a busy state.
-    ready: bool,
-    /// True after a graceful stop: capture is over but the pump stays alive so
-    /// the engine's finalization flush still lands in the editor; the session
-    /// is dropped when the terminal event arrives.
-    stopping: bool,
-    /// Smoothed microphone level (`0.0..=1.0`) shown as a glow behind the mic
-    /// icon so the user can see their speech is being picked up.
-    level: f32,
-    /// Cursor offset (UTF-8 bytes) captured when dictation started.
-    anchor: usize,
-    committed_len: usize,
-    volatile_len: usize,
-    /// The input value we last wrote. Any change away from it is a user edit,
-    /// which ends the session.
-    expected: String,
-    /// Pumps engine events (delivered on the engine's own threads) into the UI
-    /// thread; dropped with the session.
-    _events: Task<()>,
+fn speech_state(cx: &mut Context<SpeechState>) -> SpeechState {
+    let state = SpeechState::new(cx);
+    // On Windows the system recognizer uses Microsoft's online speech service.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let state = state.recognizer(SystemRecognizer::new().locale(speech_locale()));
+    state
 }
 
-/// Where a `len`-byte chunk goes and what the counters become: every chunk
-/// replaces the volatile tail, and a final one turns it into committed text.
-/// Offsets are UTF-8 bytes, as `TextareaState` selections are.
-fn transcript_edit(
-    anchor: usize,
-    committed_len: usize,
-    volatile_len: usize,
-    len: usize,
-    commit: bool,
-) -> (std::ops::Range<usize>, usize, usize) {
-    let start = anchor + committed_len;
-    let replaced = start..start + volatile_len;
-    if commit {
-        (replaced, committed_len + len, 0)
-    } else {
-        (replaced, committed_len, len)
+impl Voice {
+    pub(in super::super) fn new(
+        window: &mut Window,
+        cx: &mut Context<Composer>,
+        subscriptions: &mut Vec<Subscription>,
+    ) -> Self {
+        let state = cx.new(speech_state);
+        subscriptions.push(
+            cx.subscribe_in(&state, window, |this, _, event, window, cx| {
+                this.on_dictation_event(event, window, cx);
+            }),
+        );
+        subscriptions.push(cx.observe(&state, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.on_release(|this, cx| {
+            this.voice.insertion = None;
+            this.voice.state.update(cx, |state, cx| state.cancel(cx));
+        }));
+        Self {
+            state,
+            locale: speech_locale(),
+            insertion: None,
+        }
     }
 }
 
 impl Composer {
-    /// The mic toggle, or `None` when this machine has no dictation engine.
-    pub(in super::super) fn render_mic_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.voice.supported {
+    pub(in super::super) fn render_mic_button(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let locale = speech_locale();
+        if locale != self.voice.locale {
+            self.abort_dictation(cx);
+            self.voice.state.update(cx, |state, cx| {
+                // Preserve session ids so a previous sink cannot address a new session.
+                let previous = std::mem::replace(state, SpeechState::new(cx));
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                let previous = previous.recognizer(SystemRecognizer::new().locale(locale));
+                *state = previous;
+            });
+            self.voice.locale = locale;
+        }
+        let state = self.voice.state.read(cx);
+        if !state.has_recognizer() {
             return None;
         }
-        let dictation = self.voice.session.as_ref();
-        let preparing = dictation.is_some_and(|d| !d.ready || d.stopping);
-        let tooltip: SharedString = match dictation {
-            None => crate::tr!("composer.voice_start"),
-            Some(_) if preparing => crate::tr!("composer.voice_preparing"),
-            Some(_) => crate::tr!("composer.voice_stop"),
+        let status = state.status();
+        let preparing = matches!(status, SpeechStatus::Connecting | SpeechStatus::Stopping);
+        let available = state.is_available(cx);
+        let tooltip: SharedString = if !available {
+            crate::tr!("composer.voice_unavailable")
+        } else if preparing {
+            crate::tr!("composer.voice_preparing")
+        } else if status.is_active() {
+            crate::tr!("composer.voice_stop")
+        } else {
+            crate::tr!("composer.voice_start")
         }
         .into_owned()
         .into();
-        // Recording tints the glyph with the danger accent, matching the stop
-        // button's "something is live" idiom; preparing stays muted.
-        let color = if dictation.is_some() && !preparing {
+        let color = if status == SpeechStatus::Recording {
             cx.theme().danger
         } else {
             cx.theme().muted_foreground
         };
-
+        // Kit SpeechButton/SpeechWaveform require gpui-component's theme global, which Tcode does not initialise.
         Some(
             Button::new("voice-mic")
                 .ghost()
                 .compact()
                 .h(px(28.))
                 .rounded(crate::material::radius_chip(cx))
+                .disabled(!available)
                 .tooltip(tooltip)
                 .child(if preparing {
                     Spinner::new().small().color(color).into_any_element()
@@ -109,118 +115,47 @@ impl Composer {
                         .path("icons/mic.svg")
                         .small()
                         .text_color(color);
-                    match dictation {
-                        Some(d) => div()
+                    if status == SpeechStatus::Recording {
+                        div()
                             .rounded_full()
                             .p(px(2.))
-                            .bg(cx.theme().danger.opacity(0.08 + d.level * 0.42))
+                            .bg(cx
+                                .theme()
+                                .danger
+                                .opacity(0.08 + state.levels().last().unwrap_or(0.) * 0.42))
                             .child(icon)
-                            .into_any_element(),
-                        None => icon.into_any_element(),
+                            .into_any_element()
+                    } else {
+                        icon.into_any_element()
                     }
                 })
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.voice.state.update(cx, |state, cx| state.toggle(cx));
+                }))
                 .into_any_element(),
         )
     }
 
-    /// Click handler: a second click stops (and finalizes) the running session.
-    pub(in super::super) fn toggle_dictation(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.stop_dictation(cx) {
-            return;
-        }
-        let locale = rust_i18n::locale();
-        let (events_tx, events_rx) = async_channel::unbounded();
-        let session = match tcode_voice::start(
-            tcode_voice::preferred_locale(locale.as_ref()),
-            Box::new(move |event| {
-                let _ = events_tx.try_send(event);
-            }),
-        ) {
-            Ok(session) => session,
-            Err(error) => {
-                window.push_notification(
-                    Notification::error(
-                        crate::tr!("composer.voice_error", error = error).into_owned(),
-                    ),
-                    cx,
-                );
-                return;
-            }
-        };
-
-        let (anchor, expected) = self.input.update(cx, |state, cx| {
-            // Focus keeps Escape (handled on the card) reachable and leaves the
-            // caret where the transcript is about to appear.
-            state.focus(window, cx);
-            (state.cursor(), state.value().to_string())
-        });
-        let events = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(event) = events_rx.recv().await {
-                if this
-                    .update_in(cx, |this, window, cx| {
-                        this.on_dictation_event(event, window, cx)
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        self.voice.session = Some(Dictation {
-            session,
-            ready: false,
-            stopping: false,
-            level: 0.0,
-            anchor,
-            committed_len: 0,
-            volatile_len: 0,
-            expected,
-            _events: events,
-        });
-        cx.notify();
-    }
-
-    /// Gracefully stop the running session: capture ends now, but the pump
-    /// stays alive so the engine's finalization flush still reaches the editor
-    /// before `Ended` clears the state. Returns whether a session existed
-    /// (Escape uses this to claim the keystroke).
     pub(in super::super) fn stop_dictation(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(dictation) = self.voice.session.as_mut() else {
-            return false;
-        };
-        if !dictation.stopping {
-            dictation.stopping = true;
-            dictation.session.stop();
-            cx.notify();
+        let active = self.voice.state.read(cx).status().is_active();
+        if active {
+            self.voice.state.update(cx, |state, cx| state.stop(cx));
         }
-        true
+        active
     }
 
-    /// Drop the session immediately, discarding any pending finalization. For
-    /// paths where a late flush would land in the wrong place: submit clears
-    /// the editor, destination switches change it, and user edits invalidate
-    /// the anchor.
     pub(in super::super) fn abort_dictation(&mut self, cx: &mut Context<Self>) {
-        if self.voice.session.take().is_some() {
-            cx.notify();
-        }
+        self.voice.insertion = None;
+        self.voice.state.update(cx, |state, cx| state.cancel(cx));
     }
 
-    /// Typing, pasting or undoing while dictating ends the session in place:
-    /// the anchor no longer describes the text, and merging a live hypothesis
-    /// with concurrent edits is not worth the ambiguity.
     pub(in super::super) fn stop_dictation_on_user_edit(&mut self, cx: &mut Context<Self>) {
-        let value = self.input.read(cx).value();
-        if self
-            .voice
-            .session
-            .as_ref()
-            .is_some_and(|dictation| dictation.expected != value.as_ref())
+        if self.voice.state.read(cx).status().is_active()
+            && self
+                .voice
+                .insertion
+                .as_ref()
+                .is_none_or(|insertion| insertion.expected != self.input.read(cx).value().as_ref())
         {
             self.abort_dictation(cx);
         }
@@ -228,103 +163,232 @@ impl Composer {
 
     fn on_dictation_event(
         &mut self,
-        event: DictationEvent,
+        event: &SpeechEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match &event {
-            DictationEvent::Level(_) => {}
-            other => log::info!("dictation event: {other:?}"),
-        }
         match event {
-            DictationEvent::Ready => {
-                if let Some(dictation) = self.voice.session.as_mut() {
-                    dictation.ready = true;
-                    cx.notify();
+            SpeechEvent::Started => {
+                // A cancelled session can have a Started event already queued.
+                if self.voice.state.read(cx).status().is_active() {
+                    let (anchor, expected) = self.input.update(cx, |input, cx| {
+                        input.focus(window, cx);
+                        (input.cursor(), input.value().to_string())
+                    });
+                    self.voice.insertion = Some(Insertion {
+                        anchor,
+                        last_len: 0,
+                        expected,
+                    });
                 }
             }
-            DictationEvent::Level(level) => {
-                if let Some(dictation) = self.voice.session.as_mut() {
-                    // Fast attack, slow decay: peaks register instantly and
-                    // fade out instead of flickering at the callback rate.
-                    dictation.level = level.max(dictation.level * 0.8);
-                    cx.notify();
+            SpeechEvent::Partial(text) | SpeechEvent::Final(text) => {
+                self.insert_transcript(text.clone(), window, cx);
+                if matches!(event, SpeechEvent::Final(_)) {
+                    self.voice.insertion = None;
                 }
             }
-            DictationEvent::Volatile(text) => self.insert_transcript(text, false, window, cx),
-            DictationEvent::Final(text) => self.insert_transcript(text, true, window, cx),
-            DictationEvent::Error(message) => {
-                self.stop_dictation(cx);
+            SpeechEvent::Error(error) => {
+                self.voice.insertion = None;
                 window.push_notification(
                     Notification::error(
-                        crate::tr!("composer.voice_error", error = message).into_owned(),
+                        crate::tr!("composer.voice_error", error = error).into_owned(),
                     ),
                     cx,
                 );
             }
-            DictationEvent::Ended => {
-                self.voice.session = None;
-                cx.notify();
-            }
+            SpeechEvent::Cancelled => self.voice.insertion = None,
         }
+        cx.notify();
     }
 
-    /// Replace the current volatile range with `text`, committing it when the
-    /// engine says it is final.
     fn insert_transcript(
         &mut self,
-        text: String,
-        commit: bool,
+        text: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = self.input.clone();
-        let Some(dictation) = self.voice.session.as_mut() else {
+        let Some(insertion) = self.voice.insertion.as_mut() else {
             return;
         };
-        let (range, committed_len, volatile_len) = transcript_edit(
-            dictation.anchor,
-            dictation.committed_len,
-            dictation.volatile_len,
-            text.len(),
-            commit,
-        );
-        input.update(cx, |state, cx| {
-            state.set_selected_range(range, cx);
-            state.replace(text, window, cx);
+        if self.input.read(cx).value().as_ref() != insertion.expected {
+            self.abort_dictation(cx);
+            return;
+        }
+        let range = insertion.anchor..insertion.anchor + insertion.last_len;
+        self.input.update(cx, |input, cx| {
+            input.set_selected_range(range, cx);
+            input.replace(text.clone(), window, cx);
         });
-        dictation.committed_len = committed_len;
-        dictation.volatile_len = volatile_len;
-        // The replacement emits `Change` like any edit; record the result so
-        // the edit guard can tell our own writes from the user's.
-        dictation.expected = input.read(cx).value().to_string();
+        insertion.last_len = text.len();
+        // Change events run after the update; our writes must match before delivery.
+        insertion.expected = self.input.read(cx).value().to_string();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::transcript_edit;
+    use super::*;
+    use gpui::{TestAppContext, size};
+    use gpui_component::speech::{
+        AudioFormat, AudioInput, AudioSink, RecognitionSession, SpeechError, SpeechRecognizer,
+        SpeechSink,
+    };
+    use std::cell::RefCell;
 
-    /// A hypothesis is rewritten in place until it is finalized, after which
-    /// the next one starts where the committed text ends.
-    #[test]
-    fn each_chunk_replaces_only_the_volatile_tail() {
-        let (anchor, mut committed, mut volatile) = (5, 0, 0);
+    struct Recognizer(Rc<RefCell<Option<SpeechSink>>>);
+    struct Recognition;
 
-        let (range, c, v) = transcript_edit(anchor, committed, volatile, 2, false);
-        assert_eq!(range, 5..5);
-        (committed, volatile) = (c, v);
+    impl SpeechRecognizer for Recognizer {
+        fn start(
+            &self,
+            sink: SpeechSink,
+            cx: &mut App,
+        ) -> Result<Box<dyn RecognitionSession>, SpeechError> {
+            sink.ready(cx);
+            *self.0.borrow_mut() = Some(sink);
+            Ok(Box::new(Recognition))
+        }
+    }
 
-        let (range, c, v) = transcript_edit(anchor, committed, volatile, 6, false);
-        assert_eq!(range, 5..7);
-        (committed, volatile) = (c, v);
+    impl RecognitionSession for Recognition {
+        fn push_audio(&mut self, _: &[i16], _: &mut App) {}
+        fn finish(&mut self, _: &mut App) {}
+    }
 
-        let (range, c, v) = transcript_edit(anchor, committed, volatile, 6, true);
-        assert_eq!(range, 5..11);
-        assert_eq!((c, v), (6, 0));
-        (committed, volatile) = (c, v);
+    struct SilentInput;
+    impl AudioInput for SilentInput {
+        fn start(
+            &self,
+            _: AudioFormat,
+            _: AudioSink,
+            _: &mut App,
+        ) -> Result<Subscription, SpeechError> {
+            Ok(Subscription::new(|| {}))
+        }
+    }
 
-        let (range, ..) = transcript_edit(anchor, committed, volatile, 3, false);
-        assert_eq!(range, 11..11);
+    #[gpui::test]
+    fn dictation_revises_the_draft_and_cannot_overwrite_edits_or_submission(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
+                "tcode-dictation-test-{}-{}",
+                std::process::id(),
+                tcode_services::store::now_millis()
+            )))
+            .unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("dictation".into(), std::env::temp_dir(), cx);
+            let timeline = state.residents.live[&id].timeline.clone();
+            (id, timeline)
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
+        });
+        let sink = Rc::new(RefCell::new(None::<SpeechSink>));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            let composer = Composer::new(store.clone(), window, cx);
+            composer.voice.state.update(cx, |state, cx| {
+                *state = SpeechState::new(cx)
+                    .recognizer(Recognizer(sink.clone()))
+                    .input(SilentInput);
+            });
+            composer
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        composer.update_in(cx, |composer, window, cx| {
+            composer.set_draft("前后", window, cx);
+            composer.input.update(cx, |input, cx| {
+                input.set_selected_range(3..3, cx);
+            });
+        });
+        composer.update_in(cx, |composer, _, cx| {
+            composer
+                .voice
+                .state
+                .update(cx, |state, cx| state.toggle(cx));
+        });
+        let first = sink.borrow().clone().unwrap();
+        for (text, expected) in [
+            ("hello brave world", "前hello brave world后"),
+            ("hi", "前hi后"),
+            ("", "前后"),
+            ("你好", "前你好后"),
+        ] {
+            cx.update(|_, cx| first.hypothesis(text, cx));
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                expected
+            );
+        }
+        cx.update(|_, cx| first.finish(cx));
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "前你好后"
+        );
+
+        composer.update_in(cx, |composer, _, cx| {
+            composer
+                .voice
+                .state
+                .update(cx, |state, cx| state.toggle(cx));
+        });
+        let edited = sink.borrow().clone().unwrap();
+        cx.update(|_, cx| edited.hypothesis(" text", cx));
+        cx.simulate_input("!");
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.voice.state.read(cx).status()),
+            SpeechStatus::Idle,
+        );
+        let draft = composer.read_with(cx, |composer, cx| composer.draft(cx));
+        assert_eq!(draft, "前你好 text!后");
+        cx.update(|_, cx| {
+            edited.hypothesis("late overwrite", cx);
+            edited.finish(cx);
+        });
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            draft
+        );
+
+        composer.update_in(cx, |composer, window, cx| {
+            composer.set_draft("", window, cx);
+        });
+        composer.update_in(cx, |composer, _, cx| {
+            composer
+                .voice
+                .state
+                .update(cx, |state, cx| state.toggle(cx));
+        });
+        let submitted = sink.borrow().clone().unwrap();
+        cx.update(|_, cx| submitted.hypothesis("/plan", cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.voice.state.read(cx).status()),
+            SpeechStatus::Stopping,
+        );
+        composer.update_in(cx, |composer, window, cx| {
+            let input = composer.input.clone();
+            composer.submit(&input, false, window, cx);
+        });
+        cx.update(|_, cx| {
+            submitted.hypothesis("late text", cx);
+            submitted.finish(cx);
+        });
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            ""
+        );
     }
 }

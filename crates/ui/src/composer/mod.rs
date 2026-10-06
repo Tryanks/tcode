@@ -6,7 +6,7 @@ mod components;
 pub(crate) mod model;
 
 use components::images::PendingImage;
-#[cfg(all(feature = "voice", target_os = "macos"))]
+#[cfg(feature = "voice")]
 use components::voice::Voice;
 use model::*;
 
@@ -203,7 +203,7 @@ pub struct Composer {
     /// strip contains at least one scheduled row.
     scheduled_countdown_tick: Option<Task<()>>,
     /// Mic button + live dictation session (see `components::voice`).
-    #[cfg(all(feature = "voice", target_os = "macos"))]
+    #[cfg(feature = "voice")]
     voice: Voice,
     _subscriptions: Vec<Subscription>,
 }
@@ -348,7 +348,7 @@ impl Composer {
                     InputEvent::Change => {
                         // An edit that did not come from the transcript writer
                         // ends dictation (see `components::voice`).
-                        #[cfg(all(feature = "voice", target_os = "macos"))]
+                        #[cfg(feature = "voice")]
                         this.stop_dictation_on_user_edit(cx);
                         this.recompute_trigger(cx);
                         cx.notify();
@@ -411,6 +411,13 @@ impl Composer {
             ),
         ];
 
+        #[cfg(feature = "voice")]
+        let (voice, subscriptions) = {
+            let mut subscriptions = subscriptions;
+            let voice = Voice::new(window, cx, &mut subscriptions);
+            (voice, subscriptions)
+        };
+
         Self {
             compact,
             workspace_store,
@@ -446,8 +453,8 @@ impl Composer {
             image_load_generation: 0,
             pending_image_loads: 0,
             scheduled_countdown_tick: None,
-            #[cfg(all(feature = "voice", target_os = "macos"))]
-            voice: Voice::new(),
+            #[cfg(feature = "voice")]
+            voice,
             _subscriptions: subscriptions,
         }
     }
@@ -467,7 +474,7 @@ impl Composer {
             return;
         };
         // The dictation anchor belongs to the text we are about to swap out.
-        #[cfg(all(feature = "voice", target_os = "macos"))]
+        #[cfg(feature = "voice")]
         self.abort_dictation(cx);
         let cursor = incoming_text.len();
         self.input.update(cx, |state, cx| {
@@ -587,6 +594,8 @@ impl Composer {
         {
             return;
         }
+        #[cfg(feature = "voice")]
+        self.abort_dictation(cx);
         // A blocking question uses this text as the current custom answer,
         // advancing through the same path as an option click. A non-blocking
         // one leaves the composer to ordinary sends and steers.
@@ -729,7 +738,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(all(feature = "voice", target_os = "macos"))]
+        #[cfg(feature = "voice")]
         self.abort_dictation(cx);
         self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -1075,13 +1084,13 @@ impl Render for Composer {
             .gap_1()
             .items_center();
 
-        #[cfg(all(feature = "voice", target_os = "macos"))]
+        #[cfg(feature = "voice")]
         let mic = if self.compact || readonly {
             None
         } else {
             self.render_mic_button(cx)
         };
-        #[cfg(not(all(feature = "voice", target_os = "macos")))]
+        #[cfg(not(feature = "voice"))]
         let mic: Option<AnyElement> = None;
 
         // The platform picker is the phone's only way in; desktops paste and
@@ -1301,7 +1310,7 @@ impl Render for Composer {
                 }
                 // Escape ends dictation (keeping the transcript) before it can
                 // mean anything else.
-                #[cfg(all(feature = "voice", target_os = "macos"))]
+                #[cfg(feature = "voice")]
                 if key == "escape" && this.stop_dictation(cx) {
                     cx.stop_propagation();
                     return;
