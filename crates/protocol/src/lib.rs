@@ -17,10 +17,11 @@ pub use event::{
     AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, GitActionRequest,
     GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure, NoticeSeverity,
     PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
-    PluginStaleReason, ProviderPluginCatalog, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
+    PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent,
+    SessionEventRecord, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
@@ -49,7 +50,9 @@ pub use wire::{
 // `ProviderKind` has no unknown fallback; version 9 sends Orchestrate rows that
 // leave bundled guidance out, which an older peer would read as no guidance.
 //
-// Unreleased: provider plugin catalogs, their commands, challenges and switches.
+// Unreleased: provider plugin catalogs, their commands, challenges and switches;
+// provider update availability merged per check round, UpdateProvider replaced
+// by UpdateProviders, and sequential update run status with toast progress.
 pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]

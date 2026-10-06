@@ -38,6 +38,7 @@ pub fn notification(
     title: impl Into<SharedString>,
     detail: Option<SharedString>,
     action: Option<ToastAction>,
+    progress: Option<f32>,
 ) -> Notification {
     let title: SharedString = title.into();
     let loading_title = (kind == ToastKind::Loading).then(|| title.clone());
@@ -56,7 +57,7 @@ pub fn notification(
         ToastKind::Loading => notification,
     };
 
-    if loading_title.is_some() || detail.is_some() {
+    if loading_title.is_some() || detail.is_some() || progress.is_some() {
         notification = notification.content(move |_, window, cx| {
             let has_loading_title = loading_title.is_some();
             let mut content = v_flex()
@@ -71,6 +72,12 @@ pub fn notification(
                             .child(div().text_size(px(14.)).child(title)),
                     )
                 });
+            if let Some(value) = progress {
+                content = content.child(
+                    crate::widgets::progress::Progress::new(("toast-progress", id as usize))
+                        .value(value),
+                );
+            }
             if let Some(detail) = detail.clone() {
                 let expanded =
                     window

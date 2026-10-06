@@ -48,8 +48,8 @@ use crate::preview_panel::PreviewPanel;
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::remote::{AttachmentTarget, RemotePanel};
 use crate::runtime_event::{
-    RuntimeEventSeverity, RuntimeToastDisposition, apply_runtime_effect, present_runtime_event,
-    present_runtime_toast,
+    RuntimeEventSeverity, RuntimeToastAction, RuntimeToastDisposition, apply_runtime_effect,
+    present_runtime_event, present_runtime_toast,
 };
 use crate::settings_page::SettingsPage;
 use crate::sidebar::SessionsSidebar;
@@ -1146,21 +1146,35 @@ impl AppShell {
                 self.operation_toasts.insert(operation, toast_id);
                 toast_id
             }
+            RuntimeToastDisposition::Update(operation) => {
+                let Some(id) = self.operation_toasts.get(&operation) else {
+                    return;
+                };
+                *id
+            }
             RuntimeToastDisposition::Finish(operation) => self
                 .operation_toasts
                 .remove(&operation)
                 .unwrap_or_else(|| self.take_toast_id()),
         };
 
-        let action = presented.retry.and_then(|request| {
+        let action = presented.action.and_then(|action| {
             let store = self.store()?;
+            let label = match &action {
+                RuntimeToastAction::RetryGit(_) => crate::tr!("git.toast.retry"),
+                RuntimeToastAction::UpdateProviders(_) => crate::tr!("providers.update_all"),
+            }
+            .into_owned()
+            .into();
             Some(ToastAction {
-                label: crate::tr!("git.toast.retry").into_owned().into(),
+                label,
                 handler: Rc::new(move |window, cx| {
                     window.remove_notification1::<RuntimeToastNotification>(toast_id as usize, cx);
-                    let request = request.clone();
-                    store.update(cx, |store, _cx| {
-                        store.retry_git_action(request);
+                    store.update(cx, |store, _cx| match action.clone() {
+                        RuntimeToastAction::RetryGit(request) => store.retry_git_action(request),
+                        RuntimeToastAction::UpdateProviders(providers) => {
+                            store.update_providers(providers)
+                        }
                     });
                 }),
             })
@@ -1168,7 +1182,7 @@ impl AppShell {
         self.show_toast(
             toast_id,
             presented.kind,
-            (presented.title, presented.detail),
+            (presented.title, presented.detail, presented.progress),
             action,
             window,
             cx,
@@ -1185,14 +1199,15 @@ impl AppShell {
         &mut self,
         id: ToastId,
         kind: ToastKind,
-        content: (String, Option<String>),
+        content: (String, Option<String>, Option<f32>),
         action: Option<ToastAction>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (title, detail) = content;
+        let (title, detail, progress) = content;
+        let has_action = action.is_some();
         window.push_notification(
-            crate::toast::notification(id, kind, title, detail.map(Into::into), action),
+            crate::toast::notification(id, kind, title, detail.map(Into::into), action, progress),
             cx,
         );
 
@@ -1201,7 +1216,7 @@ impl AppShell {
             ToastKind::Warning => Some(Duration::from_secs(6)),
             ToastKind::Error | ToastKind::Loading => None,
         };
-        if let Some(delay) = delay {
+        if let Some(delay) = delay.filter(|_| !has_action) {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 _ = this.update_in(cx, |_, window, cx| {
