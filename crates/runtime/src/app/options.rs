@@ -134,7 +134,7 @@ impl AppState {
         self.preview_draft_or_persist_active(target_id, cx);
     }
 
-    /// Arm an Ultrathink turn: the next send is prefixed with `Ultrathink:\n`.
+    /// Arm an Ultrathink turn: the next send carries the `ultrathink` keyword.
     /// This is a transient per-send flag, not a persisted option.
     pub fn select_ultrathink(&mut self, target_id: &str, _cx: &mut HostCx) {
         if let Some(active) = self.resident_mut(target_id) {

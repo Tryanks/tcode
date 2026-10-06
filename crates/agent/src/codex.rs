@@ -924,11 +924,12 @@ async fn initialize_and_open_thread(
         .or_else(|| opts.model.clone());
 
     // Discover the session's skills for the composer's `$` menu. Supported since
-    // codex 0.144.1 (verified live). That protocol version has no request for
-    // custom prompts/commands, so those come from CODEX_HOME/prompts/*.md below.
-    // Either source failing is non-fatal so older builds still start.
+    // codex 0.144.1 (verified live); a failure is non-fatal so older builds
+    // still start. The app-server expands a `$name` mention in plain turn text
+    // itself; it has no request to list or run `~/.codex/prompts` files, so
+    // those are not offered.
     let mut next_id = 3;
-    let mut provider_commands = match request_codex_skills(&opts.cwd, stdin, lines, next_id).await {
+    let provider_commands = match request_codex_skills(&opts.cwd, stdin, lines, next_id).await {
         Ok(commands) => commands,
         Err(err) => {
             log::debug!("codex skills/list unavailable: {err}");
@@ -936,7 +937,6 @@ async fn initialize_and_open_thread(
         }
     };
     next_id += 1;
-    provider_commands.extend(load_codex_prompts(&opts.launch_env));
     Ok((thread_id, model, next_id, provider_commands))
 }
 
@@ -1016,68 +1016,6 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
         }
     }
     out
-}
-
-/// Resolve the Codex data home exactly as the spawned provider sees it: the
-/// dedicated home override wins, then the inherited process variables, finally
-/// `$HOME/.codex`.
-fn codex_home(launch_env: &LaunchEnv) -> Option<PathBuf> {
-    launch_env
-        .home
-        .clone()
-        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-}
-
-/// Map custom prompt files into slash commands. The app-server schema in Codex
-/// 0.144.1 exposes no custom-prompt listing request, so the CLI's documented
-/// on-disk prompt directory is the compatibility source.
-fn load_codex_prompts(launch_env: &LaunchEnv) -> Vec<ProviderCommand> {
-    let Some(home) = codex_home(launch_env) else {
-        return Vec::new();
-    };
-    let prompts_dir = home.join("prompts");
-    let Ok(entries) = std::fs::read_dir(&prompts_dir) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        })
-        .collect();
-    paths.sort();
-
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let name = path.file_stem()?.to_str()?.trim();
-            if name.is_empty() {
-                return None;
-            }
-            let description = match std::fs::read_to_string(&path) {
-                Ok(contents) => contents
-                    .lines()
-                    .next()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_owned),
-                Err(err) => {
-                    log::debug!("could not read Codex prompt {}: {err}", path.display());
-                    None
-                }
-            };
-            Some(ProviderCommand {
-                name: name.to_owned(),
-                description,
-                kind: ProviderCommandKind::Command,
-            })
-        })
-        .collect()
 }
 
 /// Render a JSON-RPC error object with everything the server sent — message,
@@ -3569,49 +3507,6 @@ mod tests {
         // Falls back to interface.shortDescription when `description` is absent.
         assert_eq!(commands[1].name, "dataviz");
         assert_eq!(commands[1].description.as_deref(), Some("charts"));
-    }
-
-    #[test]
-    fn codex_prompt_files_become_slash_commands_from_home_override() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!("agent-codex-prompts-{nonce}"));
-        let prompts = home.join("prompts");
-        std::fs::create_dir_all(&prompts).unwrap();
-        std::fs::write(
-            prompts.join("review.md"),
-            "Review the current diff\n\nDo a careful review.",
-        )
-        .unwrap();
-        std::fs::write(prompts.join("ship.MD"), "Ship it safely\n").unwrap();
-        std::fs::write(prompts.join("empty.md"), "").unwrap();
-        std::fs::write(prompts.join("ignored.txt"), "not a prompt").unwrap();
-
-        let commands = load_codex_prompts(&LaunchEnv {
-            env: vec![("CODEX_HOME".into(), "/wrong/home".into())],
-            home: Some(home.clone()),
-        });
-        assert_eq!(
-            commands
-                .iter()
-                .map(|command| command.name.as_str())
-                .collect::<Vec<_>>(),
-            ["empty", "review", "ship"]
-        );
-        assert!(
-            commands
-                .iter()
-                .all(|command| command.kind == ProviderCommandKind::Command)
-        );
-        assert_eq!(commands[0].description, None);
-        assert_eq!(
-            commands[1].description.as_deref(),
-            Some("Review the current diff")
-        );
-        assert_eq!(commands[2].description.as_deref(), Some("Ship it safely"));
-        let _ = std::fs::remove_dir_all(home);
     }
 
     /// A codex binary that dies at startup (the npm-packaging failure mode:
