@@ -4,10 +4,10 @@ use android_activity::{
     input::{KeyAction, Keycode, MotionAction},
 };
 use gpui::{
-    Bounds, Capslock, DevicePixels, DispatchEventResult, Edges, GpuSpecs, KeyUpEvent, Keystroke,
-    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size,
-    TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
+    Bounds, Capslock, DevicePixels, DispatchEventResult, Edges, FrameRequestSource, GpuSpecs,
+    KeyUpEvent, Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    Scene, Size, TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowInsets, WindowVisibility,
     point, px, size,
 };
@@ -636,6 +636,11 @@ impl AndroidWindow {
     }
 
     pub(crate) fn pump_frame(&self, force: bool) {
+        let signal_source = if force {
+            FrameRequestSource::NativeCallback
+        } else {
+            FrameRequestSource::LocalSchedule
+        };
         let force = force || self.0.forced_frame_requested.replace(false);
         if !force && !self.0.frame_requested.replace(false) {
             return;
@@ -646,6 +651,8 @@ impl AndroidWindow {
             callback(RequestFrameOptions {
                 require_presentation: true,
                 force_render: force,
+                signal_source,
+                ..Default::default()
             });
             self.0.callbacks.borrow_mut().request_frame = Some(callback);
         }
@@ -1007,7 +1014,7 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        Some(self.0.state.borrow().renderer.gpu_specs())
+        self.0.state.borrow().renderer.gpu_specs()
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
