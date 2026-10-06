@@ -583,6 +583,11 @@ providers:
     env: "环境变量"
     env_hint: "KEY=value KEY2=value2"
   plugins:
+    management: "插件管理"
+    management_description: "Tcode 通过各提供商自己的 CLI 或协议管理其原生插件。关闭后，Tcode 不会触碰这些插件。"
+    management_off: "插件管理已关闭；Tcode 不会触碰此提供商的插件。"
+    provider_off: "已关闭：Tcode 不会触碰 %{name} 的插件。"
+    provider_switch: "在 Tcode 中管理 %{name} 插件"
     unmanaged: "Tcode 暂不支持管理此提供商的插件，请使用提供商自己的界面。"
     project_context: "项目：%{path}"
     no_project_context: "无项目上下文：仅用户作用域"

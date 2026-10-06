@@ -614,6 +614,7 @@ impl AppState {
             self.providers.invalidate_usage(&id);
         }
         self.settings = settings;
+        self.forget_disabled_plugin_catalogs(cx);
         self.providers.provider_secret_names =
             provider_secret_names(&self.settings, &self.settings_store);
         // Keep the live computer-use MCP config in step with the persisted

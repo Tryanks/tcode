@@ -2023,6 +2023,10 @@ impl WorkspaceStore {
         self.settings_replica.browser.clone()
     }
 
+    pub fn plugin_management(&self) -> &tcode_core::settings::PluginManagementSettings {
+        &self.settings_replica.plugins
+    }
+
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
         self.settings_replica
             .resolved_profile(profile_id)

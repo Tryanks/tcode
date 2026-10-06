@@ -855,6 +855,52 @@ pub struct BrowserSettings {
     pub allow_evaluate: bool,
 }
 
+/// Which providers' native plugins Settings → Plugins manages. Off, Tcode
+/// never runs that CLI's plugin commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginManagementSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-provider switches keyed by [`provider_key`]; an absent key takes
+    /// [`Self::provider_default`]. Keyed by string rather than
+    /// [`ProviderKind`] so a provider this build does not know survives a
+    /// load and save instead of failing the whole file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, bool>,
+}
+
+impl Default for PluginManagementSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            providers: BTreeMap::new(),
+        }
+    }
+}
+
+impl PluginManagementSettings {
+    pub fn provider_default(kind: ProviderKind) -> bool {
+        kind == ProviderKind::Codex
+    }
+
+    /// The provider's own switch, regardless of the master switch.
+    pub fn provider_switch(&self, kind: ProviderKind) -> bool {
+        self.providers
+            .get(provider_key(kind))
+            .copied()
+            .unwrap_or_else(|| Self::provider_default(kind))
+    }
+
+    /// Whether Tcode may touch this provider's plugin state at all.
+    pub fn provider_enabled(&self, kind: ProviderKind) -> bool {
+        self.enabled && self.provider_switch(kind)
+    }
+
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// A field-scoped mutation of persisted application settings.
 ///
 /// Keeping nested settings mutations field-scoped prevents a writer holding a
@@ -891,6 +937,11 @@ pub enum SettingsPatch {
     BrowserEnabled(bool),
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
+    PluginManagementEnabled(bool),
+    PluginManagementProvider {
+        provider: ProviderKind,
+        enabled: bool,
+    },
     TitleGenerationProvider(ProviderKind),
     TitleGenerationModel(String),
     TitleGenerationProfileId(Option<String>),
@@ -1030,6 +1081,8 @@ pub struct Settings {
     /// `orchestrate`), so legacy files stay clean and load with the defaults.
     #[serde(default, skip_serializing_if = "BrowserSettings::is_default")]
     pub browser: BrowserSettings,
+    #[serde(default, skip_serializing_if = "PluginManagementSettings::is_default")]
+    pub plugins: PluginManagementSettings,
     /// Provider/model used to generate a concise title for new threads.
     #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
     pub title_generation: TitleGenerationSettings,
@@ -1131,6 +1184,7 @@ impl Default for Settings {
             orchestrate: OrchestrateSettings::default(),
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
+            plugins: PluginManagementSettings::default(),
             title_generation: TitleGenerationSettings::default(),
             fallback_review: FallbackReviewSettings::default(),
             collapsed_projects: Vec::new(),
@@ -1220,6 +1274,12 @@ impl Settings {
             SettingsPatch::BrowserEnabled(value) => self.browser.enabled = value,
             SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
+            SettingsPatch::PluginManagementEnabled(value) => self.plugins.enabled = value,
+            SettingsPatch::PluginManagementProvider { provider, enabled } => {
+                self.plugins
+                    .providers
+                    .insert(provider_key(provider).to_string(), enabled);
+            }
             SettingsPatch::TitleGenerationProvider(value) => {
                 self.title_generation.provider = value;
             }
@@ -1449,12 +1509,24 @@ mod tests {
         assert!(legacy.browser.enabled);
         assert!(legacy.browser.allow_evaluate);
         assert_eq!(legacy.browser.home_url, None);
+        for settings in [&legacy, &Settings::default()] {
+            assert!(settings.plugins.provider_enabled(ProviderKind::Codex));
+            for kind in [
+                ProviderKind::ClaudeCode,
+                ProviderKind::Pi,
+                ProviderKind::OpenCode,
+                ProviderKind::Acp,
+            ] {
+                assert!(!settings.plugins.provider_enabled(kind), "{kind:?}");
+            }
+        }
 
         let partial: Settings = serde_json::from_str(
             r#"{
             "computer_use":{"enabled":true},
             "browser":{"enabled":false},
             "orchestrate":{},
+            "plugins":{"providers":{"claude":true,"cursor":true}},
             "title_generation":{"provider":"codex","model":"m"}
         }"#,
         )
@@ -1472,6 +1544,17 @@ mod tests {
         );
         assert!(!partial.orchestrate.child_worktrees);
         assert_eq!(partial.title_generation.profile_id, None);
+        assert!(partial.plugins.provider_enabled(ProviderKind::ClaudeCode));
+        assert!(partial.plugins.provider_enabled(ProviderKind::Codex));
+        let master_off: Settings =
+            serde_json::from_str(r#"{"plugins":{"enabled":false,"providers":{"claude":true}}}"#)
+                .unwrap();
+        assert!(!master_off.plugins.provider_enabled(ProviderKind::Codex));
+        assert!(
+            !master_off
+                .plugins
+                .provider_enabled(ProviderKind::ClaudeCode)
+        );
 
         let child: OrchestrateChildModel =
             serde_json::from_str(r#"{"provider":"codex","model":"m","enabled":true}"#).unwrap();
