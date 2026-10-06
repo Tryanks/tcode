@@ -1,5 +1,6 @@
-//! Settings → Plugins: one section per enabled provider profile, showing the
-//! native plugin catalog the host listed for it. Every action, marketplace
+//! Settings → Plugins: a tab per enabled provider profile whose native
+//! plugins Tcode can manage, each with Installed, Available and Marketplaces
+//! views of the catalog the host listed for it. Every action, marketplace
 //! operation and confirmation comes from the host's catalog; a control the
 //! host did not offer is never drawn. A provider whose management is switched
 //! off shows only its switch.
@@ -13,11 +14,12 @@ use agent::{
     PluginManagement, PluginScope, PluginSourceKind, ProviderPluginEntry, Tri,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ListAlignment, ListState, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _,
-    Subscription, Window, div, list, point, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Axis, Context, Entity, Hsla, InteractiveElement as _,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, point,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_base::{Collapsible, Scrollbar, StyledExt as _, h_flex, v_flex};
+use gpui_base::{Collapsible, ScrollableMask, Scrollbar, StyledExt as _, h_flex, v_flex};
 use tcode_core::settings::{PluginManagementSettings, ResolvedProfile};
 use tcode_protocol::{
     PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginStaleReason,
@@ -29,7 +31,7 @@ use crate::material;
 use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
-use crate::store::{StoreChange, TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::Spinner;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -45,21 +47,42 @@ const SCOPES: [PluginScope; 5] = [
     PluginScope::Session,
 ];
 
+/// The views of one provider's catalog.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Installed,
+    Available,
+    Marketplaces,
+}
+
+impl View {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Available => "available",
+            Self::Marketplaces => "marketplaces",
+        }
+    }
+}
+
 pub struct PluginsSettingsPanel {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
-    /// The settings page's content scroll, which a focused section is
-    /// brought into view in.
+    /// The settings page's content scroll, returned to the top when a
+    /// provider's tab is opened from elsewhere.
     page_scroll: ScrollHandle,
     /// Whether the page is on screen. Entering it lists every managed
     /// profile again, and challenges are only presented while it shows.
     shown: bool,
-    /// `(profile id, entry id)` rows whose details disclosure is open.
-    expanded: HashSet<(String, String)>,
-    /// Profiles whose marketplace disclosure is open.
-    marketplaces_open: HashSet<String>,
-    /// A profile section to bring into view once it is laid out.
-    focus: Option<String>,
+    /// The provider tab picked last; the first tab while it is not shown.
+    selected: Option<String>,
+    view: View,
+    /// Filters the Available view.
+    search: Entity<InputState>,
+    list: ListState,
+    listed: Option<(String, Vec<(usize, String)>)>,
+    /// `(profile id, entry id, catalog index)` rows whose details disclosure is open.
+    expanded: HashSet<(String, String, usize)>,
     /// The challenge whose dialog is open.
     challenge: Option<RuntimeOperationId>,
     /// Challenges this client already answered; the replica keeps showing
@@ -79,6 +102,9 @@ impl PluginsSettingsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(crate::tr!("providers.plugins.search"))
+        });
         let subscriptions = vec![
             cx.subscribe_in(
                 &store,
@@ -96,15 +122,19 @@ impl PluginsSettingsPanel {
                 },
             ),
             cx.observe(&window_state, |_, _, cx| cx.notify()),
+            cx.observe(&search, |_, _, cx| cx.notify()),
         ];
         Self {
             store,
             window_state,
             page_scroll,
             shown: false,
+            selected: None,
+            view: View::Installed,
+            search,
+            list: ListState::new(0, ListAlignment::Top, px(120.)),
+            listed: None,
             expanded: HashSet::new(),
-            marketplaces_open: HashSet::new(),
-            focus: None,
             challenge: None,
             answered: HashSet::new(),
             switches: PluginManagementSettings::default(),
@@ -117,22 +147,29 @@ impl PluginsSettingsPanel {
         self.shown = false;
     }
 
-    /// Bring `profile_id`'s section into view once it is laid out.
+    /// Open `profile_id`'s installed plugins.
     pub fn focus_profile(&mut self, profile_id: String, cx: &mut Context<Self>) {
-        self.focus = Some(profile_id);
+        self.selected = Some(profile_id);
+        self.view = View::Installed;
+        self.page_scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
 
-    /// Profiles Tcode lists plugins for under `switches`.
-    fn managed_profiles(&self, switches: &PluginManagementSettings, cx: &App) -> Vec<String> {
+    /// Enabled profiles whose provider can have its plugins managed.
+    fn tab_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
         self.store
             .read(cx)
             .enabled_profiles()
             .into_iter()
-            .filter(|profile| {
-                manages(profile.kind.caps().plugin_management)
-                    && switches.provider_enabled(profile.kind)
-            })
+            .filter(|profile| manages(profile.kind.caps().plugin_management))
+            .collect()
+    }
+
+    /// Profiles Tcode lists plugins for under `switches`.
+    fn managed_profiles(&self, switches: &PluginManagementSettings, cx: &App) -> Vec<String> {
+        self.tab_profiles(cx)
+            .into_iter()
+            .filter(|profile| switches.provider_enabled(profile.kind))
             .map(|profile| profile.id)
             .collect()
     }
@@ -271,36 +308,6 @@ impl PluginsSettingsPanel {
         });
     }
 
-    fn open_add_plugin(&self, profile_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let title = crate::tr!(
-            "providers.plugins.add_plugin_title",
-            name = self
-                .store
-                .read(cx)
-                .provider_profile_display_name(&profile_id)
-        )
-        .into_owned();
-        let store = self.store.clone();
-        let picker = cx.new(|cx| AddPluginPicker::new(store, profile_id, window, cx));
-        window.open_dialog(cx, move |dialog, window, cx| {
-            let picker = picker.clone();
-            let height = crate::sizing::fit_viewport(456., window.viewport_size().height * 0.7);
-            dialog
-                .w(px(620.))
-                .bg(cx.theme().popover)
-                .shadow_xl()
-                .title(title.clone())
-                .content(move |content, _, _| {
-                    content.h(height).child(
-                        div()
-                            .debug_selector(|| "add-plugin-body".into())
-                            .size_full()
-                            .child(picker.clone()),
-                    )
-                })
-        });
-    }
-
     fn open_add_marketplace(
         &self,
         profile_id: String,
@@ -374,7 +381,77 @@ impl PluginsSettingsPanel {
         });
     }
 
-    fn render_profile(&self, profile: &ResolvedProfile, cx: &mut Context<Self>) -> AnyElement {
+    fn provider_tabs(
+        &self,
+        profiles: &[ResolvedProfile],
+        selected: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (muted, foreground) = (cx.theme().muted_foreground, cx.theme().foreground);
+        let count = profiles.len();
+        let tabs: Vec<AnyElement> = profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| {
+                let name = SharedString::from(
+                    self.store
+                        .read(cx)
+                        .provider_profile_display_name(&profile.id),
+                );
+                let active = profile.id == selected;
+                let id = format!("plugins-tab-{}", profile.id);
+                let profile_id = profile.id.clone();
+                material::tab(SharedString::from(id.clone()), name.clone(), active, cx)
+                    .debug_selector(move || id.clone())
+                    .set_position(index + 1, count)
+                    .h(px(36.))
+                    .px_3()
+                    .gap_2()
+                    .border_b_2()
+                    .border_color(if active {
+                        foreground
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .text_size(px(13.))
+                    .when(active, |tab| tab.font_medium())
+                    .when(!active, |tab| {
+                        tab.text_color(muted)
+                            .hover(move |tab| tab.text_color(foreground))
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(16.))
+                            .child(crate::provider_card::provider_glyph(profile.kind).small()),
+                    )
+                    .child(name)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected = Some(profile_id.clone());
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        gpui_base::Tabs::new("plugins-provider-tabs")
+            .flex()
+            .flex_wrap()
+            .items_end()
+            .aria_label(crate::tr!("settings.plugins"))
+            .w_full()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .children(tabs)
+            .into_any_element()
+    }
+
+    fn render_profile(
+        &mut self,
+        profile: &ResolvedProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let management = profile.kind.caps().plugin_management;
         let store = self.store.read(cx);
         let name = store.provider_profile_display_name(&profile.id);
@@ -399,139 +476,198 @@ impl PluginsSettingsPanel {
                 })),
         );
 
-        let mut header = self
-            .row(cx)
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(16.))
-                    .child(crate::provider_card::provider_glyph(profile.kind).small()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(name.clone()),
-            );
-        let section_id = SharedString::from(format!("plugins-section-{profile_id}"));
-        let mut section = div().id(section_id.clone()).w_full().debug_selector({
-            let section_id = section_id.clone();
-            move || section_id.to_string()
-        });
-        if self.focus.as_ref() == Some(&profile_id) {
-            section = section.child(self.scroll_into_view());
-        }
-
         let off = if !master {
             Some(crate::tr!("providers.plugins.management_off"))
         } else if !switch_on {
             Some(crate::tr!("providers.plugins.provider_off", name = name))
-        } else if !manages(management) {
-            Some(crate::tr!("providers.plugins.unmanaged"))
         } else {
             None
         };
-        if let Some(note) = off {
-            let rows = vec![
-                header.child(switch).into_any_element(),
-                self.note_row(note.into_owned(), muted, cx),
-            ];
+        let subtitle = match &off {
+            Some(note) => note.clone(),
+            None => match catalog
+                .as_ref()
+                .map_or(requested_cwd, |catalog| catalog.context_cwd.clone())
+            {
+                Some(path) => {
+                    crate::tr!("providers.plugins.project_context", path = path.display())
+                }
+                None => crate::tr!("providers.plugins.no_project_context"),
+            },
+        };
+        let loading = catalog.as_ref().is_none_or(|catalog| catalog.loading);
+        let refresh_id = format!("plugins-refresh-{profile_id}");
+        let header = h_flex()
+            .w_full()
+            .min_h(px(56.))
+            .px_3()
+            .py_2()
+            .gap_3()
+            .items_center()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_medium()
+                            .child(crate::tr!("providers.plugins.provider_switch", name = name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(subtitle.into_owned()),
+                    ),
+            )
+            .when(off.is_none(), |row| {
+                row.when(loading, |row| {
+                    row.child(Spinner::new().xsmall().color(muted))
+                })
+                .child(
+                    Button::new(SharedString::from(refresh_id.clone()))
+                        .debug_selector(move || refresh_id.clone())
+                        .ghost()
+                        .small()
+                        .text_size(px(12.))
+                        .icon(Icon::empty().path("icons/rotate-ccw.svg"))
+                        .tooltip(crate::tr!("providers.plugins.refresh", name = name))
+                        .on_click(cx.listener({
+                            let profile_id = profile_id.clone();
+                            move |this, _, _, cx| this.refresh(&profile_id, cx)
+                        })),
+                )
+            })
+            .child(switch);
+        let section_id = format!("plugins-section-{profile_id}");
+        let section = v_flex()
+            .id(SharedString::from(section_id.clone()))
+            .debug_selector(move || section_id.clone())
+            .w_full()
+            .gap_3();
+        if off.is_some() {
             return section
-                .child(material::grouped(rows, cx))
+                .child(material::group(cx).child(header))
                 .into_any_element();
         }
 
-        let loading = catalog.as_ref().is_none_or(|catalog| catalog.loading);
-        let refresh_id = format!("plugins-refresh-{profile_id}");
-        header = header
-            .when(loading, |row| {
-                row.child(Spinner::new().xsmall().color(muted))
-            })
-            .child(
-                Button::new(SharedString::from(refresh_id.clone()))
-                    .debug_selector(move || refresh_id.clone())
-                    .ghost()
-                    .small()
-                    .text_size(px(12.))
-                    .icon(Icon::empty().path("icons/rotate-ccw.svg"))
-                    .tooltip(crate::tr!("providers.plugins.refresh", name = name))
-                    .on_click(cx.listener({
-                        let profile_id = profile_id.clone();
-                        move |this, _, _, cx| this.refresh(&profile_id, cx)
-                    })),
-            )
-            .child(switch);
-
-        let context_cwd = catalog
-            .as_ref()
-            .map_or(requested_cwd, |catalog| catalog.context_cwd.clone());
-        let context = match &context_cwd {
-            Some(path) => crate::tr!("providers.plugins.project_context", path = path.display()),
-            None => crate::tr!("providers.plugins.no_project_context"),
+        let mut card = vec![header.into_any_element()];
+        card.extend(self.status_rows(catalog.as_ref(), cx));
+        let section = section.child(material::grouped(card, cx));
+        let Some(catalog) = catalog else {
+            return section
+                .child(self.note_card(crate::tr!("providers.plugins.listing"), cx))
+                .into_any_element();
         };
-        let mut rows = vec![
-            header.into_any_element(),
-            self.row(cx)
-                .text_size(px(12.))
-                .text_color(muted)
-                .child(context.into_owned())
-                .into_any_element(),
-        ];
-        rows.extend(self.status_rows(catalog.as_ref(), cx));
 
-        let mut after_card: Vec<AnyElement> = Vec::new();
-        if let Some(catalog) = &catalog {
-            let busy = !catalog.pending.is_empty();
-            let installed: Vec<&ProviderPluginEntry> = catalog
-                .entries
-                .iter()
-                .filter(|entry| !entry.installations.is_empty())
-                .collect();
-            if installed.is_empty() {
-                if !matches!(
-                    catalog.state,
-                    PluginCatalogState::Error { .. }
-                        | PluginCatalogState::Stale {
-                            reason: PluginStaleReason::NotLoaded
-                        }
-                ) {
-                    rows.push(self.note_row(
-                        crate::tr!("providers.plugins.no_installed").into_owned(),
-                        muted,
-                        cx,
-                    ));
-                }
-            } else {
-                for entry in installed {
-                    rows.push(self.installed_row(&profile_id, catalog, entry, busy, cx));
-                }
-            }
-            after_card.push(self.section_actions(&profile_id, catalog, management, cx));
-            if management.marketplaces {
-                after_card.push(self.marketplaces(&profile_id, catalog, busy, cx));
-            }
+        let installed: Vec<(usize, &ProviderPluginEntry)> = catalog
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.installations.is_empty())
+            .collect();
+        let available = catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.installations.is_empty())
+            .count();
+        let mut views = vec![(
+            View::Installed,
+            crate::tr!("providers.plugins.installed", count = installed.len()),
+        )];
+        if management.supports(PluginActionKind::Install) {
+            views.push((
+                View::Available,
+                crate::tr!("providers.plugins.available", count = available),
+            ));
         }
-        after_card.push(
+        if management.marketplaces {
+            views.push((
+                View::Marketplaces,
+                crate::tr!(
+                    "providers.plugins.marketplaces",
+                    count = catalog.marketplaces.len()
+                ),
+            ));
+        }
+        let view = if views.iter().any(|(view, _)| *view == self.view) {
+            self.view
+        } else {
+            View::Installed
+        };
+        let track = (views.len() > 1).then(|| {
+            let panel = cx.entity().downgrade();
+            let segments = views.into_iter().map(|(option, label)| {
+                let panel = panel.clone();
+                material::segment(
+                    SharedString::from(format!("plugins-view-{}-{profile_id}", option.key())),
+                    label.into_owned(),
+                    option == view,
+                    cx,
+                )
+                .on_change(move |_, _, _, cx| {
+                    _ = panel.update(cx, |this, cx| {
+                        this.view = option;
+                        cx.notify();
+                    });
+                })
+            });
+            let track_id = format!("plugins-views-{profile_id}");
             div()
-                .pl_3()
-                .text_size(px(12.))
-                .text_color(muted)
-                .child(apply_note(management.apply))
-                .into_any_element(),
-        );
+                .debug_selector({
+                    let track_id = track_id.clone();
+                    move || track_id.clone()
+                })
+                .w(px(440.))
+                .max_w_full()
+                .child(material::segmented_track(
+                    SharedString::from(track_id),
+                    segments,
+                    cx,
+                ))
+        });
+
+        let busy = !catalog.pending.is_empty();
+        let content = match view {
+            View::Installed => {
+                if installed.is_empty() {
+                    let unlisted = matches!(
+                        catalog.state,
+                        PluginCatalogState::Error { .. }
+                            | PluginCatalogState::Stale {
+                                reason: PluginStaleReason::NotLoaded
+                            }
+                    );
+                    if unlisted {
+                        div().into_any_element()
+                    } else {
+                        self.note_card(crate::tr!("providers.plugins.no_installed"), cx)
+                    }
+                } else {
+                    let rows = installed
+                        .into_iter()
+                        .map(|(index, entry)| {
+                            self.installed_row(&profile_id, &catalog, index, entry, cx)
+                        })
+                        .collect();
+                    material::grouped(rows, cx).into_any_element()
+                }
+            }
+            View::Available => self.available(&profile_id, catalog, window, cx),
+            View::Marketplaces => self.marketplaces(&profile_id, &catalog, busy, cx),
+        };
 
         section
+            .children(track)
+            .child(content)
             .child(
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(material::grouped(rows, cx))
-                    .children(after_card),
+                div()
+                    .px_3()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child(apply_note(management.apply)),
             )
             .into_any_element()
     }
@@ -545,20 +681,9 @@ impl PluginsSettingsPanel {
         let danger = cx.theme().danger;
         let warning = cx.theme().warning;
         let Some(catalog) = catalog else {
-            return vec![self.note_row(
-                crate::tr!("providers.plugins.listing").into_owned(),
-                muted,
-                cx,
-            )];
+            return Vec::new();
         };
         let mut rows = Vec::new();
-        if catalog.loading {
-            rows.push(self.note_row(
-                crate::tr!("providers.plugins.listing").into_owned(),
-                muted,
-                cx,
-            ));
-        }
         match &catalog.state {
             PluginCatalogState::Fresh => {}
             PluginCatalogState::Stale { reason } => {
@@ -569,9 +694,12 @@ impl PluginsSettingsPanel {
                     }
                     PluginStaleReason::Changed => crate::tr!("providers.plugins.stale_changed"),
                 };
-                if !catalog.loading {
-                    rows.push(self.note_row(text.into_owned(), muted, cx));
-                }
+                let text = if catalog.loading {
+                    crate::tr!("providers.plugins.listing")
+                } else {
+                    text
+                };
+                rows.push(self.note_row(text.into_owned(), muted, cx));
             }
             PluginCatalogState::Error { message } => rows.push(
                 self.row(cx)
@@ -600,15 +728,21 @@ impl PluginsSettingsPanel {
         &self,
         profile_id: &str,
         catalog: &ProviderPluginCatalog,
+        index: usize,
         entry: &ProviderPluginEntry,
-        busy: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let busy = !catalog.pending.is_empty();
         let pending = catalog.pending.contains(&entry.id);
-        let key = (profile_id.to_string(), entry.id.clone());
+        let key = (profile_id.to_string(), entry.id.clone(), index);
         let expanded = self.expanded.contains(&key);
-        let has_details = entry.declared.is_some() || !entry.diagnostics.is_empty();
+        let has_details = entry.declared.is_some()
+            || !entry.diagnostics.is_empty()
+            || entry
+                .installations
+                .iter()
+                .any(|installation| installation.location.is_some());
         let (enabled_label, enabled_bg, enabled_fg) = match entry.enabled {
             Tri::Yes => (
                 crate::tr!("providers.plugins.effective_enabled"),
@@ -630,34 +764,40 @@ impl PluginsSettingsPanel {
         let toggle_id = format!("plugin-details-{profile_id}-{}", entry.id);
         let title = h_flex()
             .w_full()
-            .flex_wrap()
             .items_center()
             .gap_2()
             .child(
-                div()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(entry.name.clone()),
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_medium()
+                            .child(entry.name.clone()),
+                    )
+                    .when_some(entry.version.clone(), |row, version| {
+                        row.child(
+                            div()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(version),
+                        )
+                    })
+                    .child(material::semantic_chip(
+                        enabled_label.into_owned(),
+                        enabled_bg,
+                        enabled_fg,
+                        cx,
+                    ))
+                    .when(pending, |row| {
+                        row.child(Spinner::new().xsmall().color(muted))
+                    }),
             )
-            .when_some(entry.version.clone(), |row, version| {
-                row.child(
-                    div()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_size(px(12.))
-                        .text_color(muted)
-                        .child(version),
-                )
-            })
-            .child(material::semantic_chip(
-                enabled_label.into_owned(),
-                enabled_bg,
-                enabled_fg,
-                cx,
-            ))
-            .when(pending, |row| {
-                row.child(Spinner::new().xsmall().color(muted))
-            })
-            .child(div().flex_1())
             .when(has_details, |row| {
                 row.child(
                     Button::new(SharedString::from(toggle_id.clone()))
@@ -684,58 +824,42 @@ impl PluginsSettingsPanel {
                 )
             });
 
-        let scopes = SCOPES.into_iter().filter(|scope| {
-            entry
-                .installations
-                .iter()
-                .any(|installation| installation.scope == *scope)
-                || entry.actions.iter().any(|action| action.scope() == *scope)
-        });
-        let scope_rows: Vec<AnyElement> = scopes
+        let scope_lines: Vec<AnyElement> = SCOPES
+            .into_iter()
+            .filter(|scope| {
+                entry
+                    .installations
+                    .iter()
+                    .any(|installation| installation.scope == *scope)
+                    || entry.actions.iter().any(|action| action.scope() == *scope)
+            })
             .map(|scope| {
                 let installation = entry
                     .installations
                     .iter()
                     .find(|installation| installation.scope == scope);
                 let facts = h_flex()
-                    .w_full()
-                    .flex_wrap()
+                    .flex_none()
                     .items_center()
                     .gap_x_2()
-                    .text_size(px(12.))
-                    .child(div().font_medium().child(scope_label(scope)))
+                    .text_color(muted)
                     .map(|row| match installation {
-                        None => row.child(
-                            div()
-                                .text_color(muted)
-                                .child(crate::tr!("providers.plugins.not_installed_in_scope")),
-                        ),
+                        None => row.child(crate::tr!("providers.plugins.not_installed_in_scope")),
                         Some(installation) => row
                             .when_some(installation.version.clone(), |row, version| {
                                 row.child(
                                     div()
                                         .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(muted)
                                         .child(version),
                                 )
                             })
                             .when_some(installation.scope_enabled, |row, enabled| {
-                                row.child(div().text_color(muted).child(if enabled {
+                                row.child(if enabled {
                                     crate::tr!("providers.plugins.scope_enabled")
                                 } else {
                                     crate::tr!("providers.plugins.scope_disabled")
-                                }))
+                                })
                             }),
-                    });
-                let location = installation
-                    .and_then(|installation| installation.location.as_ref())
-                    .map(|path| {
-                        div()
-                            .w_full()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(path.display().to_string())
                     });
                 let actions: Vec<PluginAction> = entry
                     .actions
@@ -743,18 +867,27 @@ impl PluginsSettingsPanel {
                     .copied()
                     .filter(|action| action.scope() == scope)
                     .collect();
-                v_flex()
+                h_flex()
                     .w_full()
-                    .pl_3()
-                    .py_1()
-                    .gap_1()
-                    .border_l_1()
-                    .border_color(cx.theme().border)
+                    .min_h(px(28.))
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x_3()
+                    .gap_y_1()
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(72.))
+                            .font_medium()
+                            .child(scope_label(scope)),
+                    )
                     .child(facts)
-                    .children(location)
-                    .when(!actions.is_empty(), |col| {
-                        col.child(h_flex().w_full().flex_wrap().gap_1().children(
-                            ordered(actions).into_iter().map(|action| {
+                    .child(
+                        h_flex()
+                            .ml_auto()
+                            .gap_1()
+                            .children(ordered(actions).into_iter().map(|action| {
                                 action_button(
                                     &self.store,
                                     profile_id,
@@ -763,17 +896,14 @@ impl PluginsSettingsPanel {
                                     catalog.context_cwd.clone(),
                                     busy,
                                 )
-                                .into_any_element()
-                            }),
-                        ))
-                    })
+                            })),
+                    )
                     .into_any_element()
             })
             .collect();
 
-        let source = source_line(entry, cx);
         self.row(cx)
-            .id(SharedString::from(row_id.clone()))
+            .id((SharedString::from(row_id.clone()), index))
             .debug_selector(move || row_id.clone())
             .gap_1p5()
             .child(title)
@@ -785,8 +915,18 @@ impl PluginsSettingsPanel {
                         .child(description),
                 )
             })
-            .child(source)
-            .children(scope_rows)
+            .child(source_line(entry, cx))
+            .when(!scope_lines.is_empty(), |col| {
+                col.child(
+                    v_flex()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded(material::radius_input(cx))
+                        .bg(cx.theme().muted.opacity(0.5))
+                        .children(scope_lines),
+                )
+            })
             .children(entry.errors.iter().map(|error| {
                 div()
                     .text_size(px(12.))
@@ -802,67 +942,238 @@ impl PluginsSettingsPanel {
             .into_any_element()
     }
 
-    fn section_actions(
+    /// The plugins the catalog offers but has not installed, filtered by the
+    /// search field.
+    fn available(
+        &mut self,
+        profile_id: &str,
+        catalog: ProviderPluginCatalog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let none_available = !catalog
+            .entries
+            .iter()
+            .any(|entry| entry.installations.is_empty());
+        let matches: Vec<usize> = catalog
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.installations.is_empty()
+                    && (query.is_empty()
+                        || entry.name.to_lowercase().contains(&query)
+                        || entry
+                            .description
+                            .as_deref()
+                            .is_some_and(|text| text.to_lowercase().contains(&query)))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let listed = matches
+            .iter()
+            .map(|&index| (index, catalog.entries[index].id.clone()))
+            .collect::<Vec<_>>();
+        if self
+            .listed
+            .as_ref()
+            .is_none_or(|(profile, indices)| profile != profile_id || *indices != listed)
+        {
+            self.list.reset(matches.len());
+            self.listed = Some((profile_id.to_string(), listed));
+        }
+        let body = if !matches.is_empty() {
+            let catalog = Rc::new(catalog);
+            let profile_id = profile_id.to_string();
+            crate::scroll::page_viewport(
+                "plugins-available-bounce",
+                crate::wheel_easing::Handle::List(self.list.clone()),
+                list(
+                    self.list.clone(),
+                    cx.processor(move |this, ix: usize, _, cx| {
+                        let index = matches[ix];
+                        let row = this.available_row(
+                            &profile_id,
+                            &catalog,
+                            index,
+                            &catalog.entries[index],
+                            cx,
+                        );
+                        v_flex()
+                            .w_full()
+                            .child(row)
+                            .when(ix + 1 != matches.len(), |col| {
+                                col.child(div().w_full().pl_3().child(
+                                    div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6)),
+                                ))
+                            })
+                            .into_any_element()
+                    }),
+                )
+                .size_full(),
+            )
+            .into_any_element()
+        } else if catalog.loading && none_available {
+            self.note_row(
+                crate::tr!("providers.plugins.listing").into_owned(),
+                cx.theme().muted_foreground,
+                cx,
+            )
+        } else if none_available {
+            self.note_row(
+                crate::tr!("providers.plugins.no_available").into_owned(),
+                cx.theme().muted_foreground,
+                cx,
+            )
+        } else {
+            self.note_row(
+                crate::tr!("providers.plugins.no_matches").into_owned(),
+                cx.theme().muted_foreground,
+                cx,
+            )
+        };
+        v_flex()
+            .w_full()
+            .gap_2()
+            .when(!none_available, |col| {
+                col.child(Input::new(&self.search).small())
+            })
+            .child(
+                material::group(cx)
+                    .h(crate::sizing::fit_viewport(
+                        456.,
+                        window.viewport_size().height * 0.55,
+                    ))
+                    .relative()
+                    .child(body)
+                    .child(crate::scroll::list_height_hint(&self.list, px(100.)))
+                    .child(
+                        ScrollableMask::new(Axis::Vertical, &self.list)
+                            .id("plugins-available-mask"),
+                    )
+                    .when(!none_available && !window.is_inspector_picking(cx), |col| {
+                        col.child(Scrollbar::vertical(&self.list).id("plugins-available-scrollbar"))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn available_row(
         &self,
         profile_id: &str,
         catalog: &ProviderPluginCatalog,
-        management: PluginManagement,
+        index: usize,
+        entry: &ProviderPluginEntry,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let add_id = format!("plugins-add-{profile_id}");
-        let marketplaces_id = format!("plugins-marketplaces-{profile_id}");
-        let open = self.marketplaces_open.contains(profile_id);
-        h_flex()
-            .w_full()
-            .flex_wrap()
-            .gap_2()
-            .when(management.supports(PluginActionKind::Install), |row| {
-                row.child(
-                    Button::new(SharedString::from(add_id.clone()))
-                        .debug_selector(move || add_id.clone())
-                        .outline()
-                        .small()
-                        .text_size(px(12.))
-                        .icon(IconName::Plus)
-                        .label(crate::tr!("providers.plugins.add_plugin").into_owned())
-                        .on_click(cx.listener({
-                            let profile_id = profile_id.to_string();
-                            move |this, _, window, cx| {
-                                this.open_add_plugin(profile_id.clone(), window, cx)
-                            }
-                        })),
-                )
-            })
-            .when(management.marketplaces, |row| {
-                row.child(
-                    Button::new(SharedString::from(marketplaces_id.clone()))
-                        .debug_selector(move || marketplaces_id.clone())
-                        .ghost()
-                        .small()
-                        .text_size(px(12.))
-                        .icon(if open {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .label(
-                            crate::tr!(
-                                "providers.plugins.marketplaces",
-                                count = catalog.marketplaces.len()
+        let muted = cx.theme().muted_foreground;
+        let busy = !catalog.pending.is_empty();
+        let pending = catalog.pending.contains(&entry.id);
+        let installs: Vec<PluginAction> = entry
+            .actions
+            .iter()
+            .copied()
+            .filter(|action| action.kind() == PluginActionKind::Install)
+            .collect();
+        let button = |action: PluginAction| {
+            action_button(
+                &self.store,
+                profile_id,
+                &entry.id,
+                action,
+                catalog.context_cwd.clone(),
+                busy,
+            )
+        };
+        let install = match installs.as_slice() {
+            [] => None,
+            [only] => Some(button(*only).into_any_element()),
+            several => Some(
+                h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .child(crate::tr!("providers.plugins.install_to")),
+                    )
+                    .children(
+                        several
+                            .iter()
+                            .map(|action| button(*action).label(scope_label(action.scope()))),
+                    )
+                    .into_any_element(),
+            ),
+        };
+        let row_id = format!("plugin-available-{profile_id}-{}", entry.id);
+        self.row(cx)
+            .id((SharedString::from(row_id.clone()), index))
+            .debug_selector(move || row_id.clone())
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_medium()
+                                    .child(entry.name.clone()),
                             )
-                            .into_owned(),
+                            .when_some(entry.version.clone(), |row, version| {
+                                row.child(
+                                    div()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_size(px(12.))
+                                        .text_color(muted)
+                                        .child(version),
+                                )
+                            })
+                            .when(pending, |row| {
+                                row.child(Spinner::new().xsmall().color(muted))
+                            }),
+                    )
+                    .when_some(entry.description.clone(), |col, description| {
+                        col.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(description),
                         )
-                        .on_click(cx.listener({
-                            let profile_id = profile_id.to_string();
-                            move |this, _, _, cx| {
-                                if !this.marketplaces_open.remove(&profile_id) {
-                                    this.marketplaces_open.insert(profile_id.clone());
-                                }
-                                cx.notify();
-                            }
-                        })),
-                )
-            })
+                    })
+                    .child(source_line(entry, cx))
+                    .when(entry.source.kind == PluginSourceKind::Command, |col| {
+                        col.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().warning)
+                                .child(crate::tr!("providers.plugins.command_source")),
+                        )
+                    })
+                    .when_some(entry.declared.as_ref(), |col, declared| {
+                        col.child(declared_chips(declared, cx))
+                    })
+                    .children(entry.errors.iter().map(|error| {
+                        div()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().danger)
+                            .child(verbatim(error.clone(), cx))
+                    })),
+            )
+            .children(install.map(|install| div().flex_none().max_w(px(240.)).child(install)))
             .into_any_element()
     }
 
@@ -874,7 +1185,7 @@ impl PluginsSettingsPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut rows: Vec<AnyElement> = catalog
+        let rows: Vec<AnyElement> = catalog
             .marketplaces
             .iter()
             .map(|marketplace| {
@@ -882,10 +1193,16 @@ impl PluginsSettingsPanel {
                     matches!(action, MarketplaceAction::Remove { marketplace: name, .. } if *name == marketplace.name)
                 });
                 let pending = catalog.pending.contains(&marketplace.name);
-                let remove_id = format!("plugin-marketplace-remove-{profile_id}-{}", marketplace.name);
+                let remove_id =
+                    format!("plugin-marketplace-remove-{profile_id}-{}", marketplace.name);
+                let location = marketplace
+                    .location
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .filter(|location| *location != marketplace.source);
                 self.row(cx)
                     .flex_row()
-                    .items_start()
+                    .items_center()
                     .gap_3()
                     .child(
                         v_flex()
@@ -920,13 +1237,13 @@ impl PluginsSettingsPanel {
                                     .text_color(muted)
                                     .child(marketplace.source.clone()),
                             )
-                            .when_some(marketplace.location.as_ref(), |col, location| {
+                            .when_some(location, |col, location| {
                                 col.child(
                                     div()
                                         .font_family(cx.theme().mono_font_family.clone())
                                         .text_size(px(11.))
                                         .text_color(muted)
-                                        .child(location.display().to_string()),
+                                        .child(location),
                                 )
                             }),
                     )
@@ -941,7 +1258,7 @@ impl PluginsSettingsPanel {
                                 .outline()
                                 .danger()
                                 .small()
-        .text_size(px(12.))
+                                .text_size(px(12.))
                                 .disabled(busy)
                                 .label(crate::tr!("providers.plugins.remove").into_owned())
                                 .on_click(move |_, _, cx| {
@@ -956,55 +1273,45 @@ impl PluginsSettingsPanel {
                     .into_any_element()
             })
             .collect();
-        if rows.is_empty() {
-            rows.push(self.note_row(
-                crate::tr!("providers.plugins.no_marketplaces").into_owned(),
-                muted,
-                cx,
-            ));
-        }
+        let list = if rows.is_empty() {
+            self.note_card(crate::tr!("providers.plugins.no_marketplaces"), cx)
+        } else {
+            material::grouped(rows, cx).into_any_element()
+        };
         let can_add = catalog
             .marketplace_actions
             .contains(&MarketplaceAction::Add);
         let add_id = format!("plugin-marketplace-add-{profile_id}");
-        Collapsible::new()
+        v_flex()
             .w_full()
-            .open(self.marketplaces_open.contains(profile_id))
-            .content(
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(material::grouped(rows, cx))
-                    .when(can_add, |col| {
-                        col.child(
-                            h_flex().child(
-                                Button::new(SharedString::from(add_id.clone()))
-                                    .debug_selector(move || add_id.clone())
-                                    .outline()
-                                    .small()
-                                    .text_size(px(12.))
-                                    .icon(IconName::Plus)
-                                    .disabled(busy)
-                                    .label(
-                                        crate::tr!("providers.plugins.add_marketplace")
-                                            .into_owned(),
+            .gap_2()
+            .when(can_add, |col| {
+                col.child(
+                    h_flex().w_full().justify_end().child(
+                        Button::new(SharedString::from(add_id.clone()))
+                            .debug_selector(move || add_id.clone())
+                            .outline()
+                            .small()
+                            .text_size(px(12.))
+                            .icon(IconName::Plus)
+                            .disabled(busy)
+                            .label(crate::tr!("providers.plugins.add_marketplace").into_owned())
+                            .on_click(cx.listener({
+                                let profile_id = profile_id.to_string();
+                                let cwd = catalog.context_cwd.clone();
+                                move |this, _, window, cx| {
+                                    this.open_add_marketplace(
+                                        profile_id.clone(),
+                                        cwd.clone(),
+                                        window,
+                                        cx,
                                     )
-                                    .on_click(cx.listener({
-                                        let profile_id = profile_id.to_string();
-                                        let cwd = catalog.context_cwd.clone();
-                                        move |this, _, window, cx| {
-                                            this.open_add_marketplace(
-                                                profile_id.clone(),
-                                                cwd.clone(),
-                                                window,
-                                                cx,
-                                            )
-                                        }
-                                    })),
-                            ),
-                        )
-                    }),
-            )
+                                }
+                            })),
+                    ),
+                )
+            })
+            .child(list)
             .into_any_element()
     }
 
@@ -1055,27 +1362,6 @@ impl PluginsSettingsPanel {
             .into_any_element()
     }
 
-    /// Scroll the settings page so the element this is placed in starts at
-    /// the top of the viewport, once this frame has placed it.
-    fn scroll_into_view(&self) -> impl IntoElement {
-        let handle = self.page_scroll.clone();
-        gpui::canvas(
-            move |bounds, window, _| {
-                window.on_next_frame(move |window, _| {
-                    let viewport = handle.bounds();
-                    let offset = handle.offset();
-                    let top = (offset.y + viewport.origin.y - bounds.origin.y)
-                        .clamp(-handle.max_offset().y, px(0.));
-                    handle.set_offset(point(offset.x, top));
-                    window.refresh();
-                });
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_0()
-    }
-
     /// One row of a grouped card.
     fn row(&self, _cx: &Context<Self>) -> gpui::Div {
         v_flex()
@@ -1093,6 +1379,15 @@ impl PluginsSettingsPanel {
             .child(text)
             .into_any_element()
     }
+
+    /// A card holding one muted line, for a view with nothing to list.
+    fn note_card(&self, text: std::borrow::Cow<'static, str>, cx: &Context<Self>) -> AnyElement {
+        material::grouped(
+            vec![self.note_row(text.into_owned(), cx.theme().muted_foreground, cx)],
+            cx,
+        )
+        .into_any_element()
+    }
 }
 
 impl Render for PluginsSettingsPanel {
@@ -1105,9 +1400,14 @@ impl Render for PluginsSettingsPanel {
             }
             cx.defer_in(window, |this, window, cx| this.sync_challenge(window, cx));
         }
-        let profiles = self.store.read(cx).enabled_profiles();
+        let profiles = self.tab_profiles(cx);
+        let selected = profiles
+            .iter()
+            .find(|profile| self.selected.as_ref() == Some(&profile.id))
+            .or(profiles.first())
+            .cloned();
         let compact = self.window_state.read(cx).compact;
-        let page = v_flex()
+        v_flex()
             .w_full()
             .gap(if compact { px(16.) } else { px(24.) })
             .child(
@@ -1119,249 +1419,18 @@ impl Render for PluginsSettingsPanel {
                     .child(crate::tr!("settings.plugins_section")),
             )
             .child(self.master_switch(cx))
-            .children(
-                profiles
-                    .iter()
-                    .map(|profile| self.render_profile(profile, cx)),
-            );
-        self.focus = None;
-        page
-    }
-}
-
-/// The searchable list of plugins the catalog offers but has not installed.
-struct AddPluginPicker {
-    store: Entity<WorkspaceStore>,
-    profile_id: String,
-    search: Entity<InputState>,
-    list: ListState,
-    ids: Vec<String>,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl AddPluginPicker {
-    fn new(
-        store: Entity<WorkspaceStore>,
-        profile_id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!("providers.plugins.search"))
-        });
-        let subscriptions = vec![
-            observe_store_topics(&store, &[TopicKind::Providers], cx),
-            cx.observe(&search, |_, _, cx| cx.notify()),
-        ];
-        Self {
-            store,
-            profile_id,
-            search,
-            list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
-            ids: Vec::new(),
-            _subscriptions: subscriptions,
-        }
-    }
-
-    fn render_row(
-        &self,
-        catalog: &ProviderPluginCatalog,
-        entry: &ProviderPluginEntry,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let busy = !catalog.pending.is_empty();
-        let pending = catalog.pending.contains(&entry.id);
-        let installs: Vec<PluginAction> = entry
-            .actions
-            .iter()
-            .copied()
-            .filter(|action| action.kind() == PluginActionKind::Install)
-            .collect();
-        let row_id = format!("plugin-available-{}-{}", self.profile_id, entry.id);
-        let install = match installs.as_slice() {
-            [] => None,
-            [only] => Some(
-                h_flex()
-                    .child(action_button(
-                        &self.store,
-                        &self.profile_id,
-                        &entry.id,
-                        *only,
-                        catalog.context_cwd.clone(),
-                        busy,
-                    ))
-                    .into_any_element(),
-            ),
-            several => Some(
-                h_flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(muted)
-                            .child(crate::tr!("providers.plugins.install_to")),
-                    )
-                    .children(several.iter().map(|action| {
-                        action_button(
-                            &self.store,
-                            &self.profile_id,
-                            &entry.id,
-                            *action,
-                            catalog.context_cwd.clone(),
-                            busy,
-                        )
-                        .label(scope_label(action.scope()))
-                    }))
-                    .into_any_element(),
-            ),
-        };
-        v_flex()
-            .id(SharedString::from(row_id.clone()))
-            .debug_selector(move || row_id.clone())
-            .w_full()
-            .p_3()
-            .gap_1()
-            .hover(|row| row.bg(cx.theme().list_hover))
-            .child(
-                h_flex()
-                    .w_full()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_medium()
-                            .child(entry.name.clone()),
-                    )
-                    .when_some(entry.version.clone(), |row, version| {
-                        row.child(
-                            div()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(12.))
-                                .text_color(muted)
-                                .child(version),
-                        )
-                    })
-                    .when(pending, |row| {
-                        row.child(Spinner::new().xsmall().color(muted))
-                    }),
-            )
-            .when_some(entry.description.clone(), |col, description| {
-                col.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(muted)
-                        .child(description),
-                )
+            .map(|page| match selected {
+                None => {
+                    page.child(self.note_card(crate::tr!("providers.plugins.no_providers"), cx))
+                }
+                Some(profile) => page.child(
+                    v_flex()
+                        .w_full()
+                        .gap_3()
+                        .child(self.provider_tabs(&profiles, &profile.id, cx))
+                        .child(self.render_profile(&profile, window, cx)),
+                ),
             })
-            .child(source_line(entry, cx))
-            .when(entry.source.kind == PluginSourceKind::Command, |col| {
-                col.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().warning)
-                        .child(crate::tr!("providers.plugins.command_source")),
-                )
-            })
-            .when_some(entry.declared.as_ref(), |col, declared| {
-                col.child(declared_chips(declared, cx))
-            })
-            .children(entry.errors.iter().map(|error| {
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().danger)
-                    .child(verbatim(error.clone(), cx))
-            }))
-            .children(install)
-            .into_any_element()
-    }
-}
-
-impl Render for AddPluginPicker {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self.search.read(cx).value().trim().to_lowercase();
-        let catalog = self
-            .store
-            .read(cx)
-            .provider_plugin_catalog(&self.profile_id)
-            .cloned();
-        let available: Vec<ProviderPluginEntry> = catalog
-            .iter()
-            .flat_map(|catalog| catalog.entries.iter())
-            .filter(|entry| entry.installations.is_empty())
-            .cloned()
-            .collect();
-        let none_available = available.is_empty();
-        let matches: Rc<Vec<ProviderPluginEntry>> = Rc::new(
-            available
-                .into_iter()
-                .filter(|entry| {
-                    query.is_empty()
-                        || entry.name.to_lowercase().contains(&query)
-                        || entry
-                            .description
-                            .as_deref()
-                            .is_some_and(|text| text.to_lowercase().contains(&query))
-                })
-                .collect(),
-        );
-        if !matches.iter().map(|entry| &entry.id).eq(&self.ids) {
-            self.ids = matches.iter().map(|entry| entry.id.clone()).collect();
-            self.list.reset(matches.len());
-        }
-        let muted = cx.theme().muted_foreground;
-        let body = match catalog {
-            Some(catalog) if !matches.is_empty() => {
-                let catalog = Rc::new(catalog);
-                crate::scroll::page_viewport(
-                    "add-plugin-bounce",
-                    crate::wheel_easing::Handle::List(self.list.clone()),
-                    list(
-                        self.list.clone(),
-                        cx.processor(move |this, ix: usize, _, cx| {
-                            this.render_row(&catalog, &matches[ix], cx)
-                        }),
-                    )
-                    .size_full(),
-                )
-                .into_any_element()
-            }
-            catalog => div()
-                .p_3()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(
-                    if catalog.is_none_or(|catalog| catalog.loading) && none_available {
-                        crate::tr!("providers.plugins.listing")
-                    } else if none_available {
-                        crate::tr!("providers.plugins.no_available")
-                    } else {
-                        crate::tr!("providers.plugins.no_matches")
-                    },
-                )
-                .into_any_element(),
-        };
-        v_flex()
-            .size_full()
-            .gap_3()
-            .child(Input::new(&self.search).small())
-            .child(
-                v_flex()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .rounded(material::radius_card(cx))
-                    .bg(cx.theme().muted)
-                    .child(body)
-                    .when(!window.is_inspector_picking(cx), |col| {
-                        col.child(Scrollbar::vertical(&self.list).id("add-plugin-scrollbar"))
-                    }),
-            )
     }
 }
 
@@ -1452,13 +1521,38 @@ fn source_line(entry: &ProviderPluginEntry, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The declared components and the host's read-only facts for an entry.
+/// Where each installation lives, the declared components and the host's
+/// read-only facts for an entry.
 fn details(entry: &ProviderPluginEntry, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     v_flex()
         .w_full()
         .pt_1()
         .gap_2()
+        .children(entry.installations.iter().filter_map(|installation| {
+            let location = installation.location.as_ref()?;
+            Some(
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_2()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_medium()
+                            .child(scope_label(installation.scope)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(location.display().to_string()),
+                    ),
+            )
+        }))
         .when_some(entry.declared.as_ref(), |col, declared| {
             col.child(declared_chips(declared, cx))
         })
@@ -1975,7 +2069,7 @@ mod tests {
             "plugin-row-claude-alpha@mkt",
             "plugin-install-claude-alpha@mkt-user",
             "plugin-disable-claude-alpha@mkt-project",
-            "plugins-add-claude",
+            "plugins-views-claude",
             "plugins-refresh-claude",
         ] {
             assert!(cx.debug_bounds(id).is_none(), "{id}");
@@ -2009,6 +2103,6 @@ mod tests {
         );
         host.replicate_settings(claude_managed(), cx);
         assert_eq!(refreshed(&host.commands(cx)), ["claude"]);
-        assert!(cx.debug_bounds("plugins-add-claude").is_some());
+        assert!(cx.debug_bounds("plugins-views-claude").is_some());
     }
 }
