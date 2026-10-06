@@ -95,7 +95,7 @@ impl AppState {
 
             // Provider commands/skills are session metadata for the composer menus —
             // stored on the live session and in a per-provider cache, never folded
-            // into the timeline or the persisted JSONL log. Parked sessions still
+            // into the timeline or the persisted event log. Parked sessions still
             // receive provider updates, so update/cache those too.
             AgentEvent::ProviderCommands { commands } => {
                 let cache_key = self.resident_mut(session_id).map(|resident| {
@@ -499,7 +499,7 @@ impl AppState {
         }
     }
 
-    /// Append to JSONL + fold into the matching active or background timeline.
+    /// Append to the event log + fold into the matching active or background timeline.
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     pub(super) fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut HostCx) {
@@ -519,10 +519,17 @@ impl AppState {
             ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
             cx,
         );
-        self.event_records
-            .entry(session_id.to_string())
-            .or_insert_with(|| SessionLog::load(&self.store, session_id))
-            .push(record);
+        // A log that cannot be read is not cached: an empty stand-in would
+        // replace the conversation. The append is still queued.
+        match self.event_records.entry(session_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut log) => log.get_mut().push(record),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                match SessionLog::load(&self.store, session_id) {
+                    Ok(log) => slot.insert(log).push(record),
+                    Err(error) => log::error!("cannot load the event log of {session_id}: {error}"),
+                }
+            }
+        }
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
@@ -645,9 +652,13 @@ impl AppState {
                             attachments,
                         ));
                     }
-                    let timeline = Timeline::fold_events(
-                        records.unwrap_or_else(|| store.read_events(&read_id)),
-                    );
+                    let records = match records {
+                        Some(records) => records,
+                        None => store
+                            .read_events(&read_id)
+                            .map_err(|error| RuntimeError::External(error.to_string()))?,
+                    };
+                    let timeline = Timeline::fold_events(records);
                     let (source, paths) = title_regeneration_context(&timeline);
                     if source.is_empty() {
                         return Err(RuntimeError::TitleGenerationEmpty);

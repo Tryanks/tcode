@@ -11,7 +11,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Entity, KeyBinding, SharedString, WindowOptions,
+    AnyWindowHandle, App, AppContext as _, Entity, KeyBinding, Render, SharedString, Window,
+    WindowOptions,
 };
 use tcode_client::host::ClientHost;
 
@@ -99,15 +100,17 @@ impl ShellOptions {
     }
 }
 
-/// Open this client's window on the shared shell.
-///
-/// Returns the window and its shell, so bootstrap can keep doing whatever is
-/// genuinely its own (a smoke run, a launch flag, a platform Back callback).
-pub fn run_shell(
-    cx: &mut App,
-    host: Rc<dyn ClientHost>,
-    options: ShellOptions,
-) -> (AnyWindowHandle, Entity<AppShell>) {
+/// Process-wide setup every window of this client needs: locale, fonts,
+/// theme, markdown and keybindings. [`run_shell`] runs it; a bootstrap that
+/// opens a window of its own before the shell runs it first, and the second
+/// call does nothing.
+pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) {
+    struct Initialized;
+    impl gpui::Global for Initialized {}
+    if cx.has_global::<Initialized>() {
+        return;
+    }
+    cx.set_global(Initialized);
     // Browser bootstrap supplies its Fetch client; native image URLs need an HTTP client too.
     #[cfg(not(target_family = "wasm"))]
     {
@@ -127,7 +130,7 @@ pub fn run_shell(
         override_locale => override_locale,
     });
     cx.text_system()
-        .add_fonts(options.fonts)
+        .add_fonts(options.fonts.clone())
         .expect("failed to register bundled application fonts");
     theme::init_with_json(&options.theme_json, cx);
     crate::markdown::init(cx);
@@ -140,6 +143,50 @@ pub fn run_shell(
     cx.bind_keys([KeyBinding::new("secondary-k", TogglePalette, None)]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new("cmd-q", crate::shell::Quit, None)]);
+}
+
+/// Open a window of this client around the view `build` returns: titled, in
+/// the system appearance, on the platform material its options ask for, and
+/// with the overlay host every dialog and toast needs.
+pub fn open_client_window<V: Render>(
+    cx: &mut App,
+    options: WindowOptions,
+    title: SharedString,
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<V> + 'static,
+) -> AnyWindowHandle {
+    #[cfg(target_os = "macos")]
+    let window_background = options.window_background;
+    let window = cx
+        .open_window(options, move |window, cx| {
+            window.set_window_title(&title);
+            theme::sync_system_appearance(Some(window), cx);
+            let view = build(window, cx);
+            cx.new(|cx| gpui_base::Root::new(view, window, cx))
+        })
+        .expect("failed to open the tcode window");
+    // A transparent macOS window gets its blur from a stock semantic material
+    // rather than GPUI's `Blurred` path; see `macos_backdrop`.
+    #[cfg(target_os = "macos")]
+    if window_background == gpui::WindowBackgroundAppearance::Transparent {
+        use crate::theme::ActiveTheme as _;
+        let _ = window.update(cx, |_, window, cx| {
+            crate::macos_backdrop::install(window, cx);
+            theme::change_mode(cx.theme().mode, Some(window), cx);
+        });
+    }
+    window.into()
+}
+
+/// Open this client's window on the shared shell.
+///
+/// Returns the window and its shell, so bootstrap can keep doing whatever is
+/// genuinely its own (a smoke run, a launch flag, a platform Back callback).
+pub fn run_shell(
+    cx: &mut App,
+    host: Rc<dyn ClientHost>,
+    options: ShellOptions,
+) -> (AnyWindowHandle, Entity<AppShell>) {
+    init_client(cx, host.as_ref(), &options);
     if options.activate {
         cx.activate(true);
     }
@@ -164,36 +211,19 @@ pub fn run_shell(
         },
     ));
     let captured = mounted.clone();
-    #[cfg(target_os = "macos")]
-    let window_background = options.window.window_background;
-    let window: AnyWindowHandle = cx
-        .open_window(options.window, move |window, cx| {
-            window.set_window_title(&title);
-            theme::sync_system_appearance(Some(window), cx);
-            let window_state = cx.new(|_| WindowState::new(false));
-            let shell = cx.new(|cx| {
-                AppShell::new(
-                    window_state,
-                    setup.borrow_mut().take().unwrap_or_default(),
-                    window,
-                    cx,
-                )
-            });
-            *captured.borrow_mut() = Some(shell.clone());
-            cx.new(|cx| gpui_base::Root::new(shell, window, cx))
-        })
-        .expect("failed to open the tcode window")
-        .into();
-    // A transparent macOS window gets its blur from a stock semantic material
-    // rather than GPUI's `Blurred` path; see `macos_backdrop`.
-    #[cfg(target_os = "macos")]
-    if window_background == gpui::WindowBackgroundAppearance::Transparent {
-        use crate::theme::ActiveTheme as _;
-        let _ = window.update(cx, |_, window, cx| {
-            crate::macos_backdrop::install(window, cx);
-            theme::change_mode(cx.theme().mode, Some(window), cx);
+    let window = open_client_window(cx, options.window, title, move |window, cx| {
+        let window_state = cx.new(|_| WindowState::new(false));
+        let shell = cx.new(|cx| {
+            AppShell::new(
+                window_state,
+                setup.borrow_mut().take().unwrap_or_default(),
+                window,
+                cx,
+            )
         });
-    }
+        *captured.borrow_mut() = Some(shell.clone());
+        shell
+    });
     let shell = mounted
         .borrow_mut()
         .take()

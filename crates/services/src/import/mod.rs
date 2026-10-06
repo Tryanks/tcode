@@ -11,7 +11,7 @@ use agent::{AgentEvent, ProviderKind, ResumeCursor, ThreadItem, TurnStatus};
 use serde_json::json;
 
 use crate::export::{ReadExportError, TcodeThreadExport, read_tcode_export};
-use crate::store::SessionStore;
+use crate::store::{Mutation, SessionStore};
 use tcode_core::project::{Project, SessionMeta};
 pub use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
 
@@ -233,12 +233,19 @@ pub fn import_thread(
         ));
     }
 
+    // The transcript and its meta commit together, so a failure never leaves
+    // an orphan log behind.
+    let mut mutations = Vec::with_capacity(events.len() + 1);
     for (ts, event) in &events {
-        if let Err(err) = store.append_event(&meta.id, *ts, event) {
-            return ImportOutcome::Failed(format!("failed to write imported events: {err}"));
+        match Mutation::append_event(&meta.id, *ts, event) {
+            Ok(mutation) => mutations.push(mutation),
+            Err(err) => {
+                return ImportOutcome::Failed(format!("failed to encode imported events: {err}"));
+            }
         }
     }
-    if let Err(err) = store.upsert_meta(&meta) {
+    mutations.push(Mutation::upsert_meta(meta));
+    if let Err(err) = store.apply(&mutations) {
         return ImportOutcome::Failed(format!("failed to write imported session: {err}"));
     }
     existing.insert(converted.external_id);
@@ -269,10 +276,11 @@ fn import_tcode_thread(
     meta.parent_session_id = None;
     meta.imported_from = Some(external_id.clone());
 
-    if let Err(error) = store.write_event_log(&meta.id, &export.event_log) {
-        return ImportOutcome::Failed(format!("failed to write imported events: {error}"));
-    }
-    if let Err(error) = store.upsert_meta(&meta) {
+    let mutations = [
+        Mutation::replace_event_log(&meta.id, export.event_log),
+        Mutation::upsert_meta(meta),
+    ];
+    if let Err(error) = store.apply(&mutations) {
         return ImportOutcome::Failed(format!("failed to write imported session: {error}"));
     }
     existing.insert(external_id);
