@@ -1055,3 +1055,160 @@ fn migration_survives_sigkill() {
     }
     println!("{runs} kills over a {window} ms migration: {outcomes:?}");
 }
+
+/// A Codex log as stored: every turn-changes snapshot carries the turn's whole
+/// diff so far, so each one supersedes the one before it on its turn. One
+/// legacy bare snapshot and a blank row are among them.
+const SNAPSHOT_LOG: &[u8] = b"{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"t1\"}}\n\
+{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":\"-a\\n+b\\n\"}],\"completeness\":\"exact\"}\n\
+\n\
+{\"ts\":3,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":\"-a\\n+c\\n\"}],\"completeness\":\"exact\"}}\n\
+{\"ts\":4,\"event\":{\"type\":\"turn_completed\",\"turn_id\":\"t1\",\"status\":\"completed\",\"usage\":null}}\n\
+{\"ts\":5,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"t2\"}}\n\
+{\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+d\\n\"}],\"completeness\":\"exact\"}}\n\
+{\"ts\":7,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+e\\n\"}],\"completeness\":\"exact\"}}\n";
+
+fn rows(store: &SessionStore, id: &str) -> Vec<Vec<u8>> {
+    store
+        .read_event_log(id)
+        .unwrap()
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// The pass drops the diffs of exactly the snapshots a later one supersedes,
+/// in the form each was stored in, without moving a row; the thread folds as
+/// before, and it is not passed again until its rows are replaced or an
+/// append leaves a superseded diff it could not name. Rows without a session
+/// are never listed.
+#[test]
+fn superseded_snapshots_lose_their_diffs_in_place_once() {
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "codex".into();
+    store
+        .apply(&[
+            Mutation::upsert_meta(meta),
+            Mutation::replace_event_log("codex", SNAPSHOT_LOG.to_vec()),
+            Mutation::replace_event_log("orphan", SNAPSHOT_LOG.to_vec()),
+        ])
+        .unwrap();
+    let before = rows(&store, "codex");
+    let folded = tcode_core::session::Timeline::fold_events(store.read_events("codex").unwrap());
+    assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
+
+    let DiffPass::Dropped { rows: dropped, .. } = store.drop_superseded_diffs("codex").unwrap()
+    else {
+        panic!("superseded snapshots lose their diffs")
+    };
+    assert_eq!(dropped, 2);
+    let after = rows(&store, "codex");
+    let mut expected = before.clone();
+    expected[1] = b"{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":null}],\"completeness\":\"exact\"}\n".to_vec();
+    expected[6] = b"{\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":null}],\"completeness\":\"exact\"}}\n".to_vec();
+    assert_eq!(after, expected);
+    assert_eq!(
+        tcode_core::session::Timeline::fold_events(store.read_events("codex").unwrap()),
+        folded
+    );
+    assert!(store.threads_without_diff_pass().unwrap().is_empty());
+    assert_eq!(
+        store.drop_superseded_diffs("codex").unwrap(),
+        DiffPass::Unchanged
+    );
+
+    store
+        .apply(&[Mutation::replace_event_log("codex", SNAPSHOT_LOG.to_vec())])
+        .unwrap();
+    assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
+    store.drop_superseded_diffs("codex").unwrap();
+    store.apply(&[Mutation::forget_diff_pass("codex")]).unwrap();
+    assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
+}
+
+/// A tolerant read folds without a row it cannot decode, so it could name
+/// the wrong snapshots: such a thread keeps every row as it is.
+#[test]
+fn a_thread_with_an_undecodable_row_keeps_every_row() {
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "codex".into();
+    store.upsert_meta(&meta).unwrap();
+    for (label, bad) in [
+        ("unparseable", &b"{not valid json}\n"[..]),
+        ("not UTF-8", &b"\xff\xfe{}\n"[..]),
+    ] {
+        let mut log = SNAPSHOT_LOG.to_vec();
+        let at: usize = SNAPSHOT_LOG
+            .split_inclusive(|byte| *byte == b'\n')
+            .take(5)
+            .map(<[u8]>::len)
+            .sum();
+        log.splice(at..at, bad.iter().copied());
+        store
+            .apply(&[Mutation::replace_event_log("codex", log.clone())])
+            .unwrap();
+        assert_eq!(store.threads_without_diff_pass().unwrap(), ["codex"]);
+        assert_eq!(
+            store.drop_superseded_diffs("codex").unwrap(),
+            DiffPass::Undecodable { position: 5 },
+            "{label}"
+        );
+        assert_eq!(store.read_event_log("codex").unwrap(), log, "{label}");
+        assert!(
+            store.threads_without_diff_pass().unwrap().is_empty(),
+            "{label}"
+        );
+    }
+}
+
+/// A turn index stands for rows the host folded: an append keeps it, since
+/// the host writes the index that follows it in the same transaction, while
+/// a write that replaces the rows, copies another thread's over them or
+/// removes the thread forgets it.
+#[test]
+fn writes_the_host_did_not_fold_forget_the_turn_index() {
+    let dir = DataDir::new();
+    let store = dir.store();
+    let index = TurnIndex {
+        turns: 2,
+        starts: vec![0, 5],
+    };
+    let event = agent::AgentEvent::TurnStarted {
+        turn_id: "next".into(),
+    };
+    for (label, write, kept) in [
+        (
+            "appended",
+            Mutation::append_event("thread", 9, &event).unwrap(),
+            true,
+        ),
+        (
+            "replaced",
+            Mutation::replace_event_log("thread", SNAPSHOT_LOG.to_vec()),
+            false,
+        ),
+        (
+            "cloned over",
+            Mutation::clone_events("other", "thread"),
+            false,
+        ),
+        ("removed", Mutation::remove_session("thread"), false),
+    ] {
+        store
+            .apply(&[
+                Mutation::replace_event_log("thread", SNAPSHOT_LOG.to_vec()),
+                Mutation::set_turn_index("thread", index.clone()),
+            ])
+            .unwrap();
+        store.apply(&[write]).unwrap();
+        assert_eq!(
+            store.turn_index("thread").unwrap(),
+            kept.then(|| index.clone()),
+            "{label}"
+        );
+    }
+}

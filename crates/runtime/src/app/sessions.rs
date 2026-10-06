@@ -980,16 +980,16 @@ impl AppState {
                 Ok(()) => {
                     state.upsert_session_in_memory(fork.clone());
                     state.select_session(&fork.id, cx);
-                    if let Some(snapshot) =
-                        state.subscription_snapshot(&tcode_protocol::Subscription {
+                    state.reply_to_subscription(
+                        None,
+                        tcode_protocol::Subscription {
                             topic: Topic::SessionEvents {
                                 session_id: fork.id.clone(),
                             },
                             after: None,
-                        })
-                    {
-                        cx.emit(HostEvent::Domain(snapshot));
-                    }
+                        },
+                        cx,
+                    );
                 }
                 Err(error) => {
                     state.report_error(RuntimeError::PersistSession { error }, cx);
@@ -1540,63 +1540,51 @@ impl AppState {
         let Some(cwd) = intended.map(|session| session.meta.cwd.clone()) else {
             return;
         };
+        if matches!(target, TimelineLoadTarget::Active { .. }) {
+            self.refresh_session_git_branch(session_id.clone(), cwd, cx);
+        }
+        let load = TimelineLoad { generation, target };
         // A cached log is the whole conversation, including appends whose
-        // disk writes are still queued, so the timeline derives from it and
-        // never from the store, which lags the writes still queued. A session opened
-        // for a client loads its log here, on the mailbox, because the
-        // snapshot that answers the subscription needs it in the same turn;
-        // a background session parses off the mailbox and caches on completion.
-        if matches!(target, TimelineLoadTarget::Active { .. })
-            && !self.event_records.contains_key(&session_id)
-        {
-            match SessionLog::load(&self.store, &session_id) {
-                Ok(log) => {
-                    self.event_records.insert(session_id.clone(), log);
-                }
-                Err(error) => {
-                    self.report_error(
-                        RuntimeError::External(format!(
-                            "could not load thread {session_id}: {error}"
-                        )),
-                        cx,
-                    );
-                    return;
-                }
+        // writes are still queued, so the timeline derives from it and never
+        // from the store, which lags the writes still queued.
+        match self.event_records.get(&session_id) {
+            Some(log) => {
+                let cursor = log.end();
+                let fold = log.fold().clone();
+                self.fold_timeline(session_id, load, cursor, fold, cx);
+            }
+            None => {
+                self.hydrate_log(&session_id, Some(load), cx);
             }
         }
-        let cached = self
-            .event_records
-            .get(&session_id)
-            .map(|log| (log.records().len(), log.fold().clone()));
-        let store = self.store.clone();
+    }
+
+    /// Mark `fold`, the cached log's fold up to row `cursor`, idle as `load`
+    /// asks, then make it the session's unless a later load superseded `load`
+    /// or the session left the residency it was loaded for.
+    pub(super) fn fold_timeline(
+        &mut self,
+        session_id: String,
+        load: TimelineLoad,
+        cursor: u64,
+        mut fold: Timeline,
+        cx: &mut HostCx,
+    ) {
+        let mark_idle = load.mark_idle();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let read_id = session_id.clone();
-            let (timeline, folded, loaded, git_branch) = {
-                let (mut timeline, folded, loaded) = match cached {
-                    Some((folded, fold)) => (fold, folded, None),
-                    None => match SessionLog::load(&store, &read_id) {
-                        Ok(log) => (log.fold().clone(), log.records().len(), Some(log)),
-                        Err(error) => {
-                            log::error!("could not load thread {read_id}: {error}");
-                            return;
-                        }
-                    },
-                };
-                let (mark_idle, load_branch) = match target {
-                    TimelineLoadTarget::Active { mark_idle } => (mark_idle, true),
-                    TimelineLoadTarget::Background => (true, false),
-                };
-                if mark_idle {
-                    timeline.mark_idle();
-                }
-                let git_branch = load_branch.then(|| read_git_branch(&cwd));
-                (timeline, folded, loaded, git_branch)
-            };
+            let timeline = host_cx
+                .unblock(move || {
+                    if mark_idle {
+                        fold.mark_idle();
+                    }
+                    fold
+                })
+                .await;
             host_cx.enqueue(move |state, cx| {
-                let generation_matches =
-                    state.timeline_load_generations.get(&session_id).copied() == Some(generation);
-                let target_matches = match target {
+                let generation_matches = state.timeline_load_generations.get(&session_id).copied()
+                    == Some(load.generation);
+                let target_matches = match load.target {
                     TimelineLoadTarget::Active { .. } => {
                         state.residents.live.contains_key(&session_id)
                     }
@@ -1607,26 +1595,16 @@ impl AppState {
                 if !generation_matches || !target_matches {
                     return;
                 }
-                // An append during the parse already loaded and extended its
-                // own copy; that one carries the newer records.
-                if let Some(loaded) = loaded {
-                    state
-                        .event_records
-                        .entry(session_id.clone())
-                        .or_insert(loaded);
-                }
                 let mut timeline = timeline;
-                // Records appended while the fold ran continue the same log.
+                // A resident session's log stays cached; records it accepted
+                // after `cursor` continue it.
                 if let Some(log) = state.event_records.get(&session_id) {
-                    for record in log.records().iter().skip(folded) {
+                    for record in log.records_from(cursor) {
                         timeline.apply_at(record.ts, &record.event);
                     }
                 }
                 if let Some(session) = state.resident_mut(&session_id) {
                     session.timeline = timeline;
-                    if let Some(git_branch) = git_branch {
-                        session.git_branch = git_branch;
-                    }
                 }
                 state.repair_orphaned_mirror_turn(&session_id, cx);
             });
