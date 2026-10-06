@@ -1029,6 +1029,8 @@ mod tests {
             .expect("append event");
         store.upsert_meta(&meta).expect("write meta");
         let event_log = store.read_event_log(&meta.id).expect("read event log");
+        let index = store.load_index().expect("read index");
+        let reader = store.clone();
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let before = tree_snapshot(&data_root);
@@ -1071,6 +1073,8 @@ mod tests {
             before,
             "rendering an export must not write anything on the host"
         );
+        assert_eq!(reader.read_event_log(&meta.id).unwrap(), event_log);
+        assert_eq!(reader.load_index().unwrap(), index);
 
         let missing = smol::block_on(link.query(Query::RenderThreadExport {
             session_id: "nope".into(),
@@ -1232,6 +1236,15 @@ mod tests {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
+                // The live store's own files are checked through the store
+                // above; Windows locks them while the host runs, so they
+                // cannot be read here.
+                if matches!(
+                    entry.file_name().to_str(),
+                    Some("tcode.db" | "tcode.db-wal" | "tcode.db-shm" | "tcode.lock")
+                ) {
+                    continue;
+                }
                 match entry.metadata() {
                     Ok(metadata) if metadata.is_dir() => walk(&path, out),
                     Ok(_) => {
