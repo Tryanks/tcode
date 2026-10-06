@@ -15,7 +15,7 @@ use tcode_core::{
 };
 use tcode_protocol::{Command, CommandResponse, ProtocolError, RuntimeOperationId, SettingsPatch};
 
-use super::{StoreChange, TopicKind, WorkspaceStore};
+use super::{ArchivedDeletion, StoreChange, TopicKind, WorkspaceStore};
 
 impl WorkspaceStore {
     pub(super) fn dispatch(&mut self, command: Command) {
@@ -218,6 +218,13 @@ impl WorkspaceStore {
             session_id,
             remove_worktree,
         });
+    }
+    /// Deletes what [`WorkspaceStore::archived_deletion`] counted.
+    pub fn delete_archived(&mut self, deletion: ArchivedDeletion) {
+        // ponytail: one DeleteSession command per tree; add a bulk command if thousands feel slow.
+        for session_id in deletion.roots {
+            self.delete_session(session_id, false);
+        }
     }
     pub fn mark_session_unread(&mut self, session_id: String) {
         self.dispatch(Command::MarkSessionUnread { session_id });
