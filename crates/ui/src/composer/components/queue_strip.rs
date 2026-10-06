@@ -34,11 +34,10 @@ impl Composer {
             .messages
             .into_iter()
             .filter(|message| {
-                !deliveries.iter().any(|(key, text, failure, acknowledged)| {
+                !deliveries.iter().any(|(key, _, failure, acknowledged)| {
                     !acknowledged
                         && failure.is_none()
-                        && (message.delivery_key.as_deref() == Some(key.as_str())
-                            || (message.delivery_key.is_none() && message.text == *text))
+                        && message.delivery_key.as_deref() == Some(key.as_str())
                 })
             })
             .collect();

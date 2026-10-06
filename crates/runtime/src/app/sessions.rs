@@ -39,6 +39,7 @@ impl AppState {
         if self.subscriptions.insert(subscription.topic.clone()) {
             match &subscription.topic {
                 Topic::SessionStatus { session_id }
+                | Topic::SessionPlan { session_id }
                 | Topic::SessionEvents { session_id }
                 | Topic::GitStatus { session_id } => self.select_session(session_id, cx),
                 // No projection ran while nobody was attached, so the first
@@ -60,12 +61,14 @@ impl AppState {
         self.subscriptions.remove(&subscription.topic);
         let session_id = match &subscription.topic {
             Topic::SessionStatus { session_id }
+            | Topic::SessionPlan { session_id }
             | Topic::SessionEvents { session_id }
             | Topic::GitStatus { session_id } => session_id,
             _ => return,
         };
         if !self.subscriptions.iter().any(|topic| match topic {
             Topic::SessionStatus { session_id: id }
+            | Topic::SessionPlan { session_id: id }
             | Topic::SessionEvents { session_id: id }
             | Topic::GitStatus { session_id: id } => id == session_id,
             _ => false,
@@ -403,7 +406,13 @@ impl AppState {
     /// project group.
     fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
         match self.store.load_index() {
-            Ok(sessions) => self.sessions = sessions,
+            Ok(sessions) => {
+                let archived = self.archived_sessions();
+                self.sessions = sessions;
+                if self.archived_sessions() != archived {
+                    self.archived_revision += 1;
+                }
+            }
             Err(error) => self.report_error(
                 RuntimeError::External(format!("could not reload the imported threads: {error}")),
                 cx,
@@ -779,10 +788,11 @@ impl AppState {
         };
         let ids = descendant_session_ids(&self.sessions, session_id);
         for id in ids {
-            let Some(meta) = self
+            let Some(mut meta) = self
                 .sessions
-                .iter_mut()
+                .iter()
                 .find(|meta| meta.id == id && meta.archived_at == Some(archived_at))
+                .cloned()
             else {
                 continue;
             };
@@ -814,7 +824,7 @@ impl AppState {
                 .collect(),
             unread: sessions
                 .iter()
-                .filter(|meta| self.session_unread(&meta.id))
+                .filter(|meta| self.session_unread(meta))
                 .map(|meta| meta.id.clone())
                 .collect(),
             active: self.residents.live.keys().cloned().collect(),
@@ -852,13 +862,16 @@ impl AppState {
         for id in orchestrators {
             self.close_orchestrator_children(&id, cx);
         }
-        let mut changed = Vec::new();
-        for meta in &mut self.sessions {
-            if ids.contains(meta.id.as_str()) {
+        let changed: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| ids.contains(meta.id.as_str()))
+            .map(|meta| {
+                let mut meta = meta.clone();
                 meta.archived_at = Some(archived_at);
-                changed.push(meta.clone());
-            }
-        }
+                meta
+            })
+            .collect();
         for meta in changed {
             self.persist_meta(&meta, cx);
         }
@@ -873,7 +886,7 @@ impl AppState {
         if let Some(session) = self.resident_mut(session_id) {
             session.meta.title = title.to_string();
         }
-        if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
+        if let Some(mut meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() {
             meta.title = title.to_string();
             meta.updated_at = now_secs();
             let meta = meta.clone();
@@ -881,44 +894,44 @@ impl AppState {
         }
     }
 
+    pub(super) fn session_fork_availability(
+        meta: &SessionMeta,
+        resident: Option<&ActiveSession>,
+    ) -> ForkAvailability {
+        if !meta.provider.caps().supports_fork {
+            ForkAvailability::Unsupported
+        } else if meta.resume_cursor.is_none() {
+            ForkAvailability::Empty
+        } else if resident.is_some_and(|session| session.turn_in_flight) {
+            ForkAvailability::Running
+        } else {
+            ForkAvailability::Available
+        }
+    }
+
     /// Duplicate a stored transcript and arrange for its next provider start to
     /// fork the source's native session. The fork stays idle until its first
     /// user turn, exactly like a cold-opened stored thread.
     pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) -> Option<String> {
-        let source = self
-            .resident(id)
-            .map(|session| (session.meta.clone(), session.turn_in_flight))
-            .or_else(|| {
-                self.sessions
-                    .iter()
-                    .find(|meta| meta.id == id)
-                    .cloned()
-                    .map(|meta| (meta, false))
-            });
-        let (source, turn_in_flight) = source?;
-        if !source.provider.caps().supports_fork {
-            self.report_error(
-                RuntimeError::External("This provider does not support conversation forks.".into()),
-                cx,
-            );
+        let resident = self.resident(id);
+        let source = resident
+            .map(|session| &session.meta)
+            .or_else(|| self.sessions.iter().find(|meta| meta.id == id))?;
+        let error = match Self::session_fork_availability(source, resident) {
+            ForkAvailability::Unsupported => {
+                Some("This provider does not support conversation forks.")
+            }
+            ForkAvailability::Empty => Some("This conversation is empty and cannot be forked."),
+            ForkAvailability::Running => {
+                Some("Wait for the running turn to finish before forking this conversation.")
+            }
+            ForkAvailability::Available => None,
+        };
+        if let Some(error) = error {
+            self.report_error(RuntimeError::External(error.into()), cx);
             return None;
         }
-        if source.resume_cursor.is_none() {
-            self.report_error(
-                RuntimeError::External("This conversation is empty and cannot be forked.".into()),
-                cx,
-            );
-            return None;
-        }
-        if turn_in_flight {
-            self.report_error(
-                RuntimeError::External(
-                    "Wait for the running turn to finish before forking this conversation.".into(),
-                ),
-                cx,
-            );
-            return None;
-        }
+        let source = source.clone();
 
         let mut fork = SessionMeta::new(source.provider, source.cwd.clone(), source.model.clone());
         fork.title = format!("{} (fork)", source.title);
@@ -993,11 +1006,7 @@ impl AppState {
         self.close_orchestrator_children(session_id, cx);
         let worktree_remove = meta.as_ref().and_then(|meta| {
             let worktree = meta.worktree.as_ref().filter(|_| remove_worktree)?;
-            let shared = self
-                .sessions
-                .iter()
-                .chain(self.residents.live.values().map(|session| &session.meta))
-                .any(|other| meta.shares_worktree_with(other));
+            let shared = self.worktree_sharing().is_shared(meta);
             if shared {
                 log::info!(
                     "keeping worktree {} in use by another thread",
@@ -1014,6 +1023,12 @@ impl AppState {
         self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
+        if meta
+            .as_ref()
+            .is_some_and(|meta| meta.archived_at.is_some() || self.archived_sharing_affected(meta))
+        {
+            self.archived_revision += 1;
+        }
         self.sessions.retain(|meta| meta.id != session_id);
         if let Some((root, cwd)) = worktree_remove {
             let deleted_id = session_id.to_string();
@@ -1111,17 +1126,13 @@ impl AppState {
 
     /// Whether a thread shows an unread dot: it has been visited before, its
     /// update time is newer than that visit, and it is not the active thread.
-    pub(crate) fn session_unread(&self, session_id: &str) -> bool {
-        if self.residents.live.contains_key(session_id) {
-            return false;
-        }
-        let Some(meta) = self.sessions.iter().find(|m| m.id == session_id) else {
-            return false;
-        };
-        self.settings
-            .last_visited
-            .get(session_id)
-            .is_some_and(|&visited| meta.updated_at > visited)
+    pub(crate) fn session_unread(&self, meta: &SessionMeta) -> bool {
+        !self.residents.live.contains_key(&meta.id)
+            && self
+                .settings
+                .last_visited
+                .get(&meta.id)
+                .is_some_and(|&visited| meta.updated_at > visited)
     }
 
     /// Remove app-owned worktrees that no session in the loaded store owns or
@@ -1187,6 +1198,12 @@ impl AppState {
                 .unblock(move || provision(&root_for_task, &session_id_for_task))
                 .await;
             host_cx.enqueue(move |state, cx| {
+                if state
+                    .resident(&target_id)
+                    .is_some_and(|active| state.archived_sharing_affected(&active.meta))
+                {
+                    state.archived_revision += 1;
+                }
                 let Some(active) = state
                     .resident_mut(&target_id)
                     .filter(|a| a.meta.id == session_id && a.draft)
@@ -1353,6 +1370,9 @@ impl AppState {
             if let Some(mut parked) = self.residents.adopt(&session_id) {
                 parked.idle_since = None;
                 self.restore_terminal_workspace(&mut parked);
+                if self.archived_sharing_affected(&parked.meta) {
+                    self.archived_revision += 1;
+                }
                 self.residents.live.insert(session_id.clone(), parked);
             }
             self.refresh_git_status(&session_id, cx);
@@ -1375,6 +1395,9 @@ impl AppState {
         let terminal_preferences = self.terminal_preferences_for(&draft);
         let restored_terminal = self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();
+        if self.archived_sharing_affected(&draft.meta) {
+            self.archived_revision += 1;
+        }
         self.residents.live.insert(session_id.clone(), draft);
         if let Some(active) = self.resident(&session_id) {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
@@ -1573,6 +1596,9 @@ impl AppState {
             let terminal_preferences = self.terminal_preferences_for(&parked);
             let restored_terminal = self.restore_terminal_workspace(&mut parked);
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
+            if parked.draft && self.archived_sharing_affected(&parked.meta) {
+                self.archived_revision += 1;
+            }
             self.residents.live.insert(session_id.to_string(), parked);
             self.schedule_timeline_load(
                 session_id.to_string(),

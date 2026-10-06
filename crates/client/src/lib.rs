@@ -83,6 +83,7 @@ struct Write {
     id: u64,
     entry: outbox::Entry,
     sent: Option<web_time::Instant>,
+    adopted: bool,
 }
 
 #[derive(Default)]
@@ -214,6 +215,7 @@ impl HostLink {
                                 }
                             }
                             if let HostMessage::Ack { result: Ok(_), .. } = &message
+                                && !write.adopted
                                 && matches!(
                                     write.entry.command,
                                     Command::SendTurn { .. }
@@ -270,6 +272,7 @@ impl HostLink {
                 id: self.next_id(),
                 entry,
                 sent: None,
+                adopted: false,
             });
         }
         Ok(())
@@ -302,12 +305,15 @@ impl HostLink {
     }
 
     pub fn retire_acknowledged_message(&self, key: &str) {
-        self.inner
-            .delivery
-            .lock()
-            .unwrap()
-            .acknowledged
-            .retain(|entry| entry.key != key);
+        let mut delivery = self.inner.delivery.lock().unwrap();
+        delivery.acknowledged.retain(|entry| entry.key != key);
+        // A replica can arrive before its command receipt. Remember adoption
+        // on the pending write so its later receipt cannot revive a placeholder.
+        for write in &mut delivery.writes {
+            if write.entry.key == key {
+                write.adopted = true;
+            }
+        }
     }
 
     pub fn failed_commands(&self) -> Vec<(outbox::Entry, ProtocolError)> {
@@ -364,6 +370,7 @@ impl HostLink {
             id,
             entry,
             sent: None,
+            adopted: false,
         });
         let mut evicted = Vec::new();
         while delivery.writes.len() > outbox::MAX_ITEMS

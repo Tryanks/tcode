@@ -14,14 +14,15 @@ mod wire;
 
 pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
 pub use event::{
-    AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, GitActionRequest,
-    GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure, NoticeSeverity,
-    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
-    PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
-    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionEventRecord, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, Topic,
+    AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
+    ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot, IndexSummary,
+    MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
+    PluginOperationTarget, PluginStaleReason, ProposedPlanStatus, ProviderPluginCatalog,
+    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, ServerEvent, SessionActivity, SessionEventRecord,
+    SessionPlan, SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus,
+    TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
@@ -53,6 +54,9 @@ pub use wire::{
 // Unreleased: provider plugin catalogs, their commands, challenges and switches;
 // provider update availability merged per check round, UpdateProvider replaced
 // by UpdateProviders, and sequential update run status with toast progress.
+// Unreleased: host-authored session activity, action availability, full usage and
+// meter capacity; a separate session plan topic; shared worktree facts and
+// archived-list revisions. SessionStatus working/turn_running move into activity.
 pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]

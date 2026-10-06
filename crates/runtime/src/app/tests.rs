@@ -3,7 +3,7 @@ use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
 use tcode_core::settings::{SettingsPatch, ThemeMode};
-use tcode_protocol::{Command, CommandResponse, HostMessage};
+use tcode_protocol::{Command, CommandResponse, HostMessage, Subscription};
 #[test]
 fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
     for screen_recording in [false, true] {
@@ -362,7 +362,13 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
         assert_eq!(turn.status, Some(expected_status));
         assert!(!mirror.turn_in_flight);
         assert!(!mirror.has_work());
-        assert!(!state.session_status_snapshot(&mirror_id).unwrap().working);
+        assert!(
+            !state
+                .session_status_snapshot(&mirror_id)
+                .unwrap()
+                .activity
+                .working
+        );
         assert_eq!(
             mirror
                 .timeline
@@ -2761,11 +2767,28 @@ fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
     let state = cx.new_entity(TestClientState::new(store));
 
     state.update(cx, |state, cx| {
-        assert!(!state.session_unread(&first_id), "never visited");
+        assert!(
+            !state.index_snapshot().summary.activity[&first_id].unread,
+            "never visited"
+        );
         state.settings.last_visited.insert(first_id.clone(), 50);
-        assert!(state.session_unread(&first_id), "newer than the last visit");
+        let activity = &state.index_snapshot().summary.activity[&first_id];
+        assert!(
+            !activity.working
+                && !activity.turn_running
+                && !activity.background_only
+                && !activity.waiting_for_approval
+                && !activity.waiting_for_input
+        );
+        assert!(
+            state.index_snapshot().summary.activity[&first_id].unread,
+            "newer than the last visit"
+        );
         state.settings.last_visited.insert(first_id.clone(), 100);
-        assert!(!state.session_unread(&first_id), "equal to the last visit");
+        assert!(
+            !state.index_snapshot().summary.activity[&first_id].unread,
+            "equal to the last visit"
+        );
         state.select_session(&first_id, cx);
 
         // A turn finishes while the user is watching: updated_at moves past
@@ -2778,7 +2801,7 @@ fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
         // Switching away must not surface an unread dot for what the user
         // already saw happen on screen.
         state.select_session(&second_id, cx);
-        assert!(!state.session_unread(&first_id));
+        assert!(!state.index_snapshot().summary.activity[&first_id].unread);
 
         // But an update landing on a thread the user is NOT viewing still
         // marks it unread.
@@ -2790,7 +2813,7 @@ fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
             .unwrap();
         parked.updated_at = now_secs() + 20;
         state.persist_meta(&parked, cx);
-        assert!(state.session_unread(&first_id));
+        assert!(state.index_snapshot().summary.activity[&first_id].unread);
     });
 }
 
@@ -4201,10 +4224,12 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
         let sentinel = active.push_queued("queued sentinel".into(), Vec::new());
         state.install_selected(active);
 
+        cx.delivery_key = Some("steer-send".into());
         state.steer("active", "redirect".into(), Vec::new(), cx);
         let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
             panic!("user steer command missing")
         };
+        assert_eq!(request_id, "local-steer-steer-send");
         let active = state.selected_session().unwrap();
         assert!(active.turn_in_flight);
         assert_eq!(active.queue.len(), 1);
@@ -4224,10 +4249,19 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
         let first = active.push_queued("first".into(), Vec::new());
         let queued_id = active.push_queued("queued redirect".into(), Vec::new());
         let third = active.push_queued("third".into(), Vec::new());
+        active
+            .queue
+            .iter_mut()
+            .find(|message| message.id == queued_id)
+            .unwrap()
+            .delivery_key = Some("queue-send".into());
+        cx.delivery_key = Some("queue-steer-click".into());
         state.steer_queued("active", queued_id, cx);
         let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
             panic!("queue-to-steer command missing")
         };
+        assert_eq!(request_id, "local-steer-queue-send");
+        assert_eq!(cx.delivery_key.as_deref(), Some("queue-steer-click"));
         let active = state.selected_session().unwrap();
         assert_eq!(
             active
@@ -4405,12 +4439,18 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
         let status = state.session_status_snapshot("scheduled-active").unwrap();
         assert_eq!(status.queued_messages.len(), 1);
         assert_eq!(status.queued_messages[0].fire_at_unix_secs, Some(fire_at));
+        assert!(status.queued_messages[0].editable);
         let scheduled_id = status.queued_messages[0].id;
 
         state.steer_queued("scheduled-active", scheduled_id, cx);
         let status = state.session_status_snapshot("scheduled-active").unwrap();
         assert_eq!(status.queued_messages.len(), 1);
         assert_eq!(status.queued_messages[0].fire_at_unix_secs, None);
+        assert!(!status.queued_messages[0].editable);
+        assert_eq!(
+            status.delivery_in_flight,
+            Some(status.queued_messages[0].id)
+        );
         assert!(matches!(
             receiver.try_recv(),
             Ok(SessionCommand::SendTurn { .. })
@@ -5687,6 +5727,26 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
     assert!(store.read_event_log(&empty_source.id).unwrap().is_empty());
     let state = cx.new_entity(TestClientState::new(store));
 
+    state.update(cx, |state, cx| {
+        assert_eq!(
+            state.index_snapshot().summary.activity[&source.id].fork,
+            ForkAvailability::Available
+        );
+        let mut resident = ActiveSession::new(source.clone(), false, Vec::new());
+        resident.turn_in_flight = true;
+        state.install_selected(resident);
+        assert_eq!(
+            state.index_snapshot().summary.activity[&source.id].fork,
+            ForkAvailability::Running
+        );
+        assert!(state.host.fork_thread(&source.id, cx).is_none());
+        state.selected_session_mut().unwrap().turn_in_flight = false;
+        state.selected_session_mut().unwrap().background_task_count = 1;
+        assert_eq!(
+            state.index_snapshot().summary.activity[&source.id].fork,
+            ForkAvailability::Available
+        );
+    });
     state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
     cx.run_until(|state| {
         state
@@ -5705,6 +5765,13 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         );
         assert_eq!(fork.cwd, source.cwd);
         assert_eq!(fork.worktree, None);
+        assert!(
+            state
+                .index_snapshot()
+                .summary
+                .worktree_shared
+                .contains(&source.id)
+        );
         assert!(!active.timeline.turn_running);
         assert_eq!(state.store.read_events(&fork.id).unwrap().len(), 1);
         assert_eq!(
@@ -6457,6 +6524,7 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
     let mut delivery = live_session(ProviderKind::ClaudeCode, commands.clone());
     delivery.meta.id = "delivery".into();
     delivery.delivery_in_flight = Some(7);
+    delivery.background_task_count = 1;
 
     let mut queued = live_session(ProviderKind::ClaudeCode, commands.clone());
     queued.meta.id = "queued".into();
@@ -6485,10 +6553,17 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             ("stale timeline", stale_timeline, false),
         ] {
             let id = session.meta.id.clone();
+            let expected_background = label == "background";
+            state.sessions.push(session.meta.clone());
             state.install_selected(session);
+            let index = state.index_snapshot();
+            assert_eq!(
+                index.summary.activity[&id].background_only, expected_background,
+                "{label}"
+            );
             let active_answer = state.turn_running_for(&id);
             assert_eq!(
-                state.session_status_snapshot(&id).unwrap().working,
+                state.session_status_snapshot(&id).unwrap().activity.working,
                 expected,
                 "{label}"
             );
@@ -6497,7 +6572,7 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             state.residents.parked.insert(id.clone(), parked);
             let parked_answer = state.turn_running_for(&id);
             assert_eq!(
-                state.session_status_snapshot(&id).unwrap().working,
+                state.session_status_snapshot(&id).unwrap().activity.working,
                 expected,
                 "{label}"
             );
@@ -7295,6 +7370,188 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
 }
 
 #[test]
+fn archived_revision_invalidates_sharing_facts_when_another_thread_or_draft_leaves() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("archived-worktree-sharing");
+    let project = Project::from_root(store.root().join("project"));
+    store.upsert_project(&project).unwrap();
+    let mut owner = SessionMeta::new(ProviderKind::Codex, store.root().join("owner"), None);
+    owner.id = "owner".into();
+    owner.archived_at = Some(1);
+    owner.worktree = Some(WorktreeInfo {
+        root_project_path: project.root.clone(),
+        base: "main".into(),
+        branch: "tcode/owner".into(),
+    });
+    store.upsert_meta(&owner).unwrap();
+    let mut fork = SessionMeta::new(ProviderKind::Codex, owner.cwd.join("nested"), None);
+    fork.id = "fork".into();
+    store.upsert_meta(&fork).unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        let before = state.archived_sessions();
+        assert!(before.worktree_shared.contains("owner"));
+        state.delete_session("fork", false, cx);
+        let after = state.archived_sessions();
+        assert!(after.revision > before.revision);
+        assert!(!after.worktree_shared.contains("owner"));
+        let draft = state
+            .host
+            .start_draft(project.id.clone(), owner.cwd.clone(), cx);
+        let shared = state.archived_sessions();
+        assert!(shared.revision > after.revision);
+        assert!(shared.worktree_shared.contains("owner"));
+        state.shutdown_active(&draft, cx);
+        let unshared = state.archived_sessions();
+        assert!(unshared.revision > shared.revision);
+        assert!(!unshared.worktree_shared.contains("owner"));
+    });
+}
+
+#[test]
+fn plan_and_usage_projections_survive_a_partial_history_window_and_emit_only_changes() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("session-plan-usage-window");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let id = "plan-usage";
+    state.update(cx, |state, cx| {
+        let mut meta = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            store.root().clone(),
+            Some("claude-sonnet-4-6".into()),
+        );
+        meta.id = id.into();
+        meta.option_selections = vec![OptionSelection {
+            id: "contextWindow".into(),
+            value: serde_json::json!(500_000),
+        }];
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+        state.on_event(
+            id,
+            AgentEvent::TurnStarted {
+                turn_id: "first".into(),
+            },
+            cx,
+        );
+        state.on_event(
+            id,
+            AgentEvent::TokenUsage(agent::TokenUsage {
+                context_window: Some(1_000_000),
+                used_tokens: Some(1234),
+                total_processed_tokens: Some(9876),
+                freshness: agent::ContextFreshness::Current,
+                ..Default::default()
+            }),
+            cx,
+        );
+        state.on_event(
+            id,
+            AgentEvent::ProposedPlan {
+                item_id: "plan-item".into(),
+                markdown: "# Keep the plan".into(),
+            },
+            cx,
+        );
+        state.on_event(
+            id,
+            AgentEvent::TurnCompleted {
+                turn_id: "first".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        state.on_event(
+            id,
+            AgentEvent::TurnStarted {
+                turn_id: "second".into(),
+            },
+            cx,
+        );
+        for index in 0..401 {
+            state.on_event(
+                id,
+                AgentEvent::Warning {
+                    message: format!("later record {index}"),
+                },
+                cx,
+            );
+        }
+        let snapshot = state
+            .subscription_snapshot(&Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: id.into(),
+                },
+                after: None,
+            })
+            .unwrap();
+        let ServerEvent::SessionSnapshot { from, records, .. } = snapshot.event else {
+            panic!("history snapshot")
+        };
+        assert!(from > 0);
+        let partial = Timeline::fold_events(records);
+        assert!(partial.usage.is_none());
+        assert!(partial.proposed_plan.is_none());
+        let status = state.session_status_snapshot(id).unwrap();
+        let usage = status.usage.unwrap();
+        assert_eq!(usage.used_tokens, Some(1234));
+        assert_eq!(usage.total_processed_tokens, Some(9876));
+        assert_eq!(usage.context_window, Some(1_000_000));
+        assert_eq!(status.context_window, Some(500_000));
+        let plan = state
+            .subscription_snapshot(&Subscription {
+                topic: Topic::SessionPlan {
+                    session_id: id.into(),
+                },
+                after: None,
+            })
+            .unwrap();
+        let ServerEvent::SessionPlanReplaced(plan) = plan.event else {
+            panic!("plan baseline")
+        };
+        let proposed = plan.proposed.unwrap();
+        assert_eq!(proposed.markdown, "# Keep the plan");
+        assert_eq!(proposed.turn, 0);
+        assert!(proposed.ready && !proposed.resolved);
+    });
+    cx.run_until_parked();
+    let plans = |messages: Vec<HostMessage>| {
+        messages
+            .into_iter()
+            .filter_map(|message| match message {
+                HostMessage::Event(EventEnvelope {
+                    event: ServerEvent::SessionPlanReplaced(plan),
+                    ..
+                }) => Some(plan),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(plans(cx.drain_outgoing()).len(), 1);
+    state.dispatch_command(
+        cx,
+        88,
+        Command::RenameSession {
+            session_id: id.into(),
+            title: "Unrelated metadata".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(plans(cx.drain_outgoing()).is_empty());
+    state.dispatch_command(
+        cx,
+        89,
+        Command::DismissPlan {
+            session_id: id.into(),
+        },
+    );
+    cx.run_until_parked();
+    let changed = plans(cx.drain_outgoing());
+    assert_eq!(changed.len(), 1);
+    assert!(changed[0].proposed.as_ref().unwrap().resolved);
+}
+
+#[test]
 fn session_history_snapshot_pages_and_absolute_tail_cursors() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("history-pages");
@@ -8062,7 +8319,7 @@ fn interrupt_reports_stopping_until_the_turn_completes() {
     );
     let status = state.session_status_snapshot(&id).unwrap();
     assert!(!status.stopping);
-    assert!(!status.turn_running);
+    assert!(!status.activity.turn_running);
 }
 
 #[test]
@@ -8265,12 +8522,63 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
         assert_eq!(
             state
                 .archived_sessions()
+                .sessions
                 .iter()
                 .map(|m| m.id.as_str())
                 .collect::<Vec<_>>(),
             ["archived"]
         );
     });
+
+    let revision = state.read(|state| state.index_snapshot().summary.archived_revision);
+    state.dispatch_command(
+        cx,
+        2,
+        Command::RenameSession {
+            session_id: "archived".into(),
+            title: "Archived rename".into(),
+        },
+    );
+    cx.run_until_parked();
+    let summary_revision = cx
+        .drain_outgoing()
+        .into_iter()
+        .find_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::IndexSummaryReplaced(summary),
+                ..
+            }) => Some(summary.archived_revision),
+            _ => None,
+        })
+        .expect("archived rename must invalidate the held list");
+    assert!(summary_revision > revision);
+    state.update(cx, |state, cx| {
+        crate::pipe::handle_client_message(
+            state,
+            cx,
+            tcode_protocol::ClientMessage {
+                id: 3,
+                key: None,
+                payload: tcode_protocol::ClientPayload::Query(
+                    tcode_protocol::Query::ArchivedSessions,
+                ),
+            },
+        )
+    });
+    cx.run_until_parked();
+    let archived = cx
+        .drain_outgoing()
+        .into_iter()
+        .find_map(|message| match message {
+            HostMessage::QueryResult {
+                id: 3,
+                result: Ok(QueryResponse::ArchivedSessions(archived)),
+            } => Some(archived),
+            _ => None,
+        })
+        .expect("archived list reply");
+    assert_eq!(archived.revision, summary_revision);
+    assert_eq!(archived.sessions[0].title, "Archived rename");
 
     state.update(cx, |state, cx| state.mark_visited("kept", cx));
     cx.run_until_parked();

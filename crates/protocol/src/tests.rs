@@ -221,7 +221,7 @@ fn binary_payloads_use_base64_and_reject_corrupt_input() {
 }
 
 #[test]
-fn older_messages_default_new_optional_fields() {
+fn omitted_optional_subscription_index_and_queue_fields_default() {
     let subscription: Subscription =
         serde_json::from_value(json!({"topic": {"type": "index"}})).unwrap();
     assert_eq!(
@@ -231,11 +231,13 @@ fn older_messages_default_new_optional_fields() {
             after: None
         }
     );
-    let index: IndexSnapshot =
-        serde_json::from_value(json!({"sessions": [], "projects": []})).unwrap();
+    let index: IndexSnapshot = serde_json::from_value(
+        json!({"sessions": [], "projects": [], "worktree_shared": [], "archived_revision": 0}),
+    )
+    .unwrap();
     assert_eq!(index.summary, IndexSummary::default());
     let queued: QueuedMessageStatus =
-        serde_json::from_value(json!({"id": 1, "text": "next"})).unwrap();
+        serde_json::from_value(json!({"id": 1, "text": "next", "editable": true})).unwrap();
     assert_eq!(queued.fire_at_unix_secs, None);
     let command = decode_client_line(r#"{"id":1,"payload":{"type":"command","content":{"type":"capture_terminal_selection","content":{"session_id":"s","terminal_id":9}}}}"#).unwrap();
     assert!(matches!(
@@ -919,6 +921,20 @@ fn version_six_index_visits_output_and_elision_literal_json() {
     let index = IndexSnapshot {
         summary: IndexSummary {
             archived_counts: [("p".to_string(), 2)].into(),
+            activity: [(
+                "cold".into(),
+                SessionActivity {
+                    working: false,
+                    turn_running: false,
+                    background_only: false,
+                    waiting_for_approval: false,
+                    waiting_for_input: false,
+                    unread: true,
+                    fork: ForkAvailability::Available,
+                },
+            )]
+            .into(),
+            archived_revision: 7,
             ..IndexSummary::default()
         },
         sessions: vec![],
@@ -926,8 +942,10 @@ fn version_six_index_visits_output_and_elision_literal_json() {
     };
     assert_eq!(
         serde_json::to_value(&index).unwrap(),
-        json!({"activity": {}, "title_generating": [], "archived_counts": {"p": 2},
-            "archived_worktree_branches": [], "sessions": [], "projects": []})
+        json!({"activity": {"cold": {"working":false,"turn_running":false,"background_only":false,
+            "waiting_for_approval":false,"waiting_for_input":false,"unread":true,"fork":"available"}},
+            "title_generating": [], "archived_counts": {"p": 2},
+            "worktree_shared": [], "archived_revision": 7, "sessions": [], "projects": []})
     );
     assert_eq!(
         serde_json::to_value(ServerEvent::LastVisitedChanged(
@@ -949,6 +967,64 @@ fn version_six_index_visits_output_and_elision_literal_json() {
     assert_eq!(
         serde_json::from_str::<Query>(r#"{"type":"archived_sessions"}"#).unwrap(),
         Query::ArchivedSessions
+    );
+    let status_wire: serde_json::Value = serde_json::from_str(r#"{"type":"session_status_replaced", "content": {
+        "session_id":"s", "title":"Thread", "cwd":"/workspace", "attachments_dir":"/attachments",
+        "provider":"codex", "requested_model":null, "requested_profile_id":null,
+        "acp_agent_id":null, "project_id":null, "approval_mode":"supervised",
+        "effective_approval_mode":"supervised", "native_approval_modes_enabled":true, "interaction_mode":"build",
+        "queued_messages":[{"id":3,"delivery_key":"send-key","text":"Next","fire_at_unix_secs":null,"editable":false}],
+        "review_comment_drafts":[], "terminals":[], "active_terminal_id":null, "terminal_splits":[],
+        "terminal_contexts":[], "terminal_open":false, "terminal_height":240.0, "delivery_in_flight":3,
+        "activity":{"working":true,"turn_running":false,"background_only":false,"waiting_for_approval":false,
+            "waiting_for_input":false,"unread":false,"fork":"available"},
+        "stopping":false,"native_rewind_blocked":true,"checkout_blocked":false,"conversation_read_only":false,
+        "terminal_limit_reached":false,"terminal_split_available":false,"usage":null,"context_window":200000,
+        "running_turn":null,"pending_approvals":[],"pending_user_input":null,"supports_steering":true,
+        "provider_option_descriptors":[],"provider_option_selections":[],"provider_commands":[],
+        "git_branch":null,"branches":[],"draft":false,"draft_workspace":{"kind":"local_checkout"},"worktree":null,
+        "preparing_worktree":false,"relay_confirmation":null,"native_rewind_pending":false,
+        "native_rewind_prefill_available":false,"model_pending_restart":false,"options_pending_restart":false,
+        "approval_pending_restart":false,"ultrathink_armed":false
+    }}"#).unwrap();
+    let status = serde_json::from_value::<ServerEvent>(status_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(status).unwrap(), status_wire);
+    let archive_wire = json!({"type":"archived_sessions", "content": {"sessions":[], "worktree_shared":["owner"], "revision":7}});
+    let archived = QueryResponse::ArchivedSessions(ArchivedSessions {
+        sessions: Vec::new(),
+        worktree_shared: ["owner".into()].into(),
+        revision: 7,
+    });
+    assert_eq!(serde_json::to_value(&archived).unwrap(), archive_wire);
+    assert_eq!(
+        serde_json::from_value::<QueryResponse>(archive_wire).unwrap(),
+        archived
+    );
+    let plan_wire = json!({"type":"session_plan_replaced", "content": {"session_id":"s", "proposed": {
+        "item_id":"plan", "turn":42, "markdown":"# Plan", "ready":true, "resolved":false
+    }, "steps":[]}});
+    let plan = ServerEvent::SessionPlanReplaced(SessionPlan {
+        session_id: "s".into(),
+        proposed: Some(ProposedPlanStatus {
+            item_id: "plan".into(),
+            turn: 42,
+            markdown: "# Plan".into(),
+            ready: true,
+            resolved: false,
+        }),
+        steps: Vec::new(),
+    });
+    assert_eq!(serde_json::to_value(&plan).unwrap(), plan_wire);
+    assert_eq!(
+        serde_json::from_value::<ServerEvent>(plan_wire).unwrap(),
+        plan
+    );
+    assert_eq!(
+        serde_json::to_value(Topic::SessionPlan {
+            session_id: "s".into()
+        })
+        .unwrap(),
+        json!({"type":"session_plan", "content":{"session_id":"s"}})
     );
     let turn_started = AgentEvent::TurnStarted {
         turn_id: "t".into(),

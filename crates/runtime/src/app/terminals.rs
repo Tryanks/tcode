@@ -508,15 +508,31 @@ impl AppState {
         );
     }
 
-    pub fn new_terminal(&mut self, target_id: &str, cx: &mut HostCx) {
-        let Some(active) = self.resident(target_id) else {
-            return;
-        };
+    pub(super) fn terminal_limit_reached(&self, active: &ActiveSession) -> bool {
         let pending = self
             .pending_terminal_spawns
             .get(&active.meta.id)
             .map_or(0, HashMap::len);
-        if active.terminal_workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION {
+        active.terminal_workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION
+    }
+
+    pub(super) fn terminal_split_available(&self, active: &ActiveSession) -> bool {
+        !self.terminal_limit_reached(active)
+            && active.terminal_workspace.active_id.is_some_and(|first| {
+                active.terminal_workspace.split_for(first).is_none()
+                    && !self.pending_terminal_spawns.get(&active.meta.id).is_some_and(|spawns| {
+                        spawns.values().any(|action| {
+                            matches!(action, TerminalSpawnAction::Split { first: pending, .. } if *pending == first)
+                        })
+                    })
+            })
+    }
+
+    pub fn new_terminal(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(active) = self.resident(target_id) else {
+            return;
+        };
+        if self.terminal_limit_reached(active) {
             return;
         }
         let cwd = self.spawn_cwd(target_id);
@@ -592,27 +608,7 @@ impl AppState {
         let Some(first) = workspace.active_id else {
             return;
         };
-        let pending = self
-            .pending_terminal_spawns
-            .get(&active.meta.id)
-            .map_or(0, HashMap::len);
-        if workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION
-            || workspace.split_for(first).is_some()
-            || self
-                .pending_terminal_spawns
-                .get(&active.meta.id)
-                .is_some_and(|spawns| {
-                    spawns.values().any(|action| {
-                        matches!(
-                            action,
-                            TerminalSpawnAction::Split {
-                                first: pending_first,
-                                ..
-                            } if *pending_first == first
-                        )
-                    })
-                })
-        {
+        if !self.terminal_split_available(active) {
             return;
         }
         let session_id = active.meta.id.clone();
