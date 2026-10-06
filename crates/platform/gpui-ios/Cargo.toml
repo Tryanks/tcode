@@ -7,7 +7,7 @@ publish = false
 description = "iOS platform backend for gpui-fast (Metal via gpui_wgpu)"
 
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.7", default-features = false }
+gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false }
 gpui_wgpu = { git = "https://github.com/longbridge/gpui-fast" }
 anyhow = "1"
 log = "0.4"
