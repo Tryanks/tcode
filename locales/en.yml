@@ -934,6 +934,13 @@ attach:
   tunnel_title: "Large attachment"
   tunnel_body: "'%{name}' is %{size} and this device reaches the machine across the internet, so sending it may take a while."
   tunnel_confirm: "Send anyway"
+image_viewer:
+  zoom_in: "Zoom in"
+  zoom_out: "Zoom out"
+  fit: "Fit to window"
+  actual_size: "Actual size"
+  close: "Close"
+  load_failed: "This image could not be loaded."
 preview:
   external_unavailable: "Open the remote page in Preview first. Its forwarded browser link works only while this preview stays open."
   remote_forwarding: "Remote loopback URLs are forwarded. Other addresses open from this Mac."

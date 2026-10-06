@@ -24,8 +24,8 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    App, InteractiveElement, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
-    Styled as _, Window, WindowControlArea, div, px,
+    App, InteractiveElement, IntoElement, ParentElement as _, Pixels,
+    StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, div, px,
 };
 use tcode_core::ui::RightTab;
 
@@ -42,6 +42,16 @@ const CAPTION_BUTTON_WIDTH: f32 = 46.;
 pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");
+
+/// Left inset a top strip keeps clear of the native macOS traffic lights,
+/// which the system draws over the window's top-left outside full screen.
+pub(crate) fn traffic_light_inset(window: &Window) -> Pixels {
+    if cfg!(target_os = "macos") && !window.is_fullscreen() {
+        px(80.)
+    } else {
+        Pixels::ZERO
+    }
+}
 
 /// A top strip that can host the caption cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
