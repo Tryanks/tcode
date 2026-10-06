@@ -1,3 +1,4 @@
+use super::active_session::{native_skill_invocation, ultrathink_text};
 use super::*;
 
 impl AppState {
@@ -601,8 +602,9 @@ impl AppState {
             SendRouting::Steer => {
                 let session_id = active.meta.id.clone();
                 let wire_text = wire_text_with_placeholder(text.clone(), &attachments);
+                let wire_text = native_skill_invocation(wire_text, &active.provider_commands);
                 let wire_text = if active.pending_ultrathink {
-                    format!("Ultrathink:\n{wire_text}")
+                    ultrathink_text(wire_text)
                 } else {
                     wire_text
                 };

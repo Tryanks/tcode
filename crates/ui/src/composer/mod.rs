@@ -335,7 +335,7 @@ impl Composer {
                         // injected into the turn that is already running rather
                         // than held until it finishes. With no turn running the
                         // two are equivalent (there is nothing to steer into).
-                        if this.menu_visible() {
+                        if this.menu_visible(cx) {
                             this.accept_menu(this.menu_highlight, window, cx);
                         } else {
                             let input = input.clone();
@@ -1305,7 +1305,7 @@ impl Render for Composer {
                     cx.stop_propagation();
                     return;
                 }
-                if key == "escape" && this.menu_visible() {
+                if key == "escape" && this.menu_visible(cx) {
                     this.menu_dismissed = true;
                     cx.notify();
                 }
@@ -1313,14 +1313,14 @@ impl Render for Composer {
             // The editor binds Up and Down to cursor moves, which consume the
             // keystroke before any key-down listener runs.
             .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-                if this.menu_visible() {
+                if this.menu_visible(cx) {
                     this.menu_highlight = this.menu_highlight.saturating_sub(1);
                     cx.stop_propagation();
                     cx.notify();
                 }
             }))
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
-                if this.menu_visible() {
+                if this.menu_visible(cx) {
                     let (rows, _, _) = this.menu_rows(cx);
                     this.menu_highlight =
                         (this.menu_highlight + 1).min(rows.len().saturating_sub(1));
