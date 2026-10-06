@@ -1,5 +1,5 @@
 use super::*;
-use tcode_services::store::Mutation;
+use tcode_services::store::{DiffPass, Mutation, TurnIndex};
 
 /// A drain of the queue is committed in transactions of at most this many
 /// writes and about this many bytes; streamed deltas then share a commit
@@ -8,10 +8,19 @@ const MAX_BATCH_WRITES: usize = 256;
 const MAX_BATCH_BYTES: usize = 4 << 20;
 
 pub(super) enum StoreWrite {
+    /// One appended record, committed together with what it changes in the
+    /// session's other rows: the diffs of the snapshot it supersedes and the
+    /// turn index, or, when no fold tells, forgetting both.
     AppendEvent {
         id: String,
         ts: u64,
         event: Box<AgentEvent>,
+        joined: Joined,
+    },
+    /// The turn index of a log the host just read and folded whole.
+    SetTurnIndex {
+        id: String,
+        index: TurnIndex,
     },
     UpsertMeta {
         meta: Box<SessionMeta>,
@@ -45,6 +54,19 @@ pub(super) enum StoreWrite {
         value: Option<String>,
     },
     ClearProfileSecrets(String),
+    /// [`SessionStore::drop_superseded_diffs`] for one thread, answered with
+    /// what it did and how long it held the writer.
+    DropSupersededDiffs {
+        id: String,
+        completion: smol::channel::Sender<Result<(DiffPass, Duration), String>>,
+    },
+    /// Answered with the row the session's next append takes, once every
+    /// write queued before it has committed: the rows before it are the log
+    /// as those writes left it.
+    SnapshotLog {
+        id: String,
+        end: smol::channel::Sender<Result<u64, String>>,
+    },
     /// Answered once every write queued before it has committed, or with the
     /// first store failure since the writer started: a write that failed is
     /// never certified by a later flush.
@@ -79,11 +101,43 @@ impl StoreWrite {
     /// database change.
     fn mutations(&self) -> Option<Result<Vec<Mutation>, String>> {
         Some(Ok(match self {
-            StoreWrite::AppendEvent { id, ts, event } => {
-                match Mutation::append_event(id, *ts, event) {
+            StoreWrite::AppendEvent {
+                id,
+                ts,
+                event,
+                joined,
+            } => {
+                let mut mutations = match Mutation::append_event(id, *ts, event) {
                     Ok(mutation) => vec![mutation],
                     Err(error) => return Some(Err(error.to_string())),
+                };
+                match joined {
+                    Joined::Folded {
+                        superseded,
+                        turn_index,
+                    } => {
+                        if let Some(superseded) = superseded {
+                            mutations.push(Mutation::drop_turn_diffs(
+                                id,
+                                superseded.position,
+                                &superseded.turn_id,
+                            ));
+                        }
+                        if let Some(index) = turn_index {
+                            mutations.push(Mutation::set_turn_index(id, index.clone()));
+                        }
+                    }
+                    Joined::Unfolded => {
+                        mutations.push(Mutation::forget_turn_index(id));
+                        if matches!(**event, AgentEvent::TurnChangesUpdated { .. }) {
+                            mutations.push(Mutation::forget_diff_pass(id));
+                        }
+                    }
                 }
+                mutations
+            }
+            StoreWrite::SetTurnIndex { id, index } => {
+                vec![Mutation::set_turn_index(id, index.clone())]
             }
             StoreWrite::UpsertMeta { meta, .. } => vec![Mutation::upsert_meta((**meta).clone())],
             StoreWrite::UpsertProject(project) => vec![Mutation::upsert_project(project.clone())],
@@ -110,7 +164,9 @@ impl StoreWrite {
 
     fn member(self) -> Member {
         let (failure, completion): (fn(String) -> RuntimeError, _) = match self {
-            StoreWrite::AppendEvent { .. } => (|error| RuntimeError::PersistEvent { error }, None),
+            StoreWrite::AppendEvent { .. } | StoreWrite::SetTurnIndex { .. } => {
+                (|error| RuntimeError::PersistEvent { error }, None)
+            }
             StoreWrite::UpsertMeta { initial: true, .. } => {
                 (|error| RuntimeError::PersistSession { error }, None)
             }
@@ -130,6 +186,9 @@ impl StoreWrite {
                 |error| RuntimeError::PersistEvent { error },
                 Some(completion),
             ),
+            StoreWrite::DropSupersededDiffs { .. } | StoreWrite::SnapshotLog { .. } => {
+                (|error| RuntimeError::PersistEvent { error }, None)
+            }
             StoreWrite::SaveCommands { .. }
             | StoreWrite::InvalidateCommands(_)
             | StoreWrite::WriteTerminalUi(_)
@@ -148,6 +207,17 @@ impl StoreWrite {
     /// Fail a write the writer never accepted: its waiter hears why, and
     /// anything else is reported like a failed write.
     pub(super) fn reject(self, reason: &str) -> Option<StoreWriteFailure> {
+        match self {
+            StoreWrite::DropSupersededDiffs { completion, .. } => {
+                let _ = completion.try_send(Err(reason.to_owned()));
+                return None;
+            }
+            StoreWrite::SnapshotLog { end, .. } => {
+                let _ = end.try_send(Err(reason.to_owned()));
+                return None;
+            }
+            _ => {}
+        }
         let reports = !matches!(self, StoreWrite::Flush(_) | StoreWrite::Fork { .. });
         let member = self.member();
         if let Some(completion) = member.completion {
@@ -322,6 +392,24 @@ impl StoreWriter {
                 .clear_profile_secrets(&profile_id)
                 .err()
                 .map(settings_failure),
+            StoreWrite::DropSupersededDiffs { id, completion } => {
+                let started = Instant::now();
+                let outcome = self.store.drop_superseded_diffs(&id);
+                let held = started.elapsed();
+                let failed = outcome.is_err() && self.store.is_failed();
+                let outcome = outcome.map_err(|error| error.to_string());
+                let failure = failed.then(|| {
+                    StoreWriteFailure::StoreFailed(
+                        outcome.as_ref().err().cloned().unwrap_or_default(),
+                    )
+                });
+                let _ = completion.try_send(outcome.map(|outcome| (outcome, held)));
+                failure
+            }
+            StoreWrite::SnapshotLog { id, end } => {
+                let _ = end.try_send(self.store.next_row(&id).map_err(|error| error.to_string()));
+                None
+            }
             StoreWrite::Flush(completion) => {
                 let _ = completion.try_send(match &self.unresolved {
                     None => Ok(()),
@@ -330,6 +418,7 @@ impl StoreWriter {
                 None
             }
             StoreWrite::AppendEvent { .. }
+            | StoreWrite::SetTurnIndex { .. }
             | StoreWrite::UpsertMeta { .. }
             | StoreWrite::UpsertProject(_)
             | StoreWrite::RemoveSessions { .. }

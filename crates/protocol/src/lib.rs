@@ -59,6 +59,10 @@ pub use wire::{
 // Unreleased: host-authored session activity, action availability, full usage and
 // meter capacity; a separate session plan topic; shared worktree facts and
 // archived-list revisions. SessionStatus working/turn_running move into activity.
+// Unreleased: session log cursors (window from/end/total, page before/from/end,
+// Subscription.after) are stored row positions, so in a log holding blank or
+// undecodable rows they run ahead of the records; a subscription to a thread
+// whose log is not loaded is acknowledged after its window.
 pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]

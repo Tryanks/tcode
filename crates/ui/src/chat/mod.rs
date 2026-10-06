@@ -3132,8 +3132,9 @@ impl Render for ChatView {
                     && let Some(screens) =
                         history_screens_covered(&chat.list_state, chat.leading_space())
                 {
+                    let following_tail = chat.list_state.is_following_tail();
                     chat.workspace_store.update(cx, |store, cx| {
-                        store.update_history_window(screens, cx);
+                        store.update_history_window(screens, following_tail, cx);
                     });
                 }
             });
@@ -5561,6 +5562,307 @@ mod tests {
         );
     }
 
+    /// A reader who scrolls far up a long thread and comes back sees rows at
+    /// every step. Once they have stayed at the tail, the pages fetched above
+    /// it are released without moving the tail: the conversation is again the
+    /// one the tail needed, nothing is fetched back while they stay, and the
+    /// next scroll up asks for the page above that window.
+    #[gpui::test]
+    fn pages_read_far_up_are_released_once_the_reader_stays_at_the_tail(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, point, px};
+        use tcode_core::session::StoredEvent;
+        use tcode_protocol::{
+            ClientPayload, EventEnvelope, HostMessage, Query, QueryResponse, ServerEvent, Topic,
+        };
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+        use tcode_services::store::SessionStore;
+
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let data_root = std::env::temp_dir().join(format!(
+            "tcode-chat-release-test-{}-{}",
+            std::process::id(),
+            NEXT_RESIDENCY_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(data_root.clone()).expect("test session store"),
+            HostServices::default(),
+        )
+        .expect("spawn test host");
+        let mut status = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("long".into(), std::env::temp_dir(), cx);
+            state.session_status_snapshot(&id).unwrap()
+        }))
+        .unwrap();
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(data_root);
+        status.session_id = "long".into();
+        status.draft = false;
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            std::env::temp_dir(),
+            None,
+        );
+        meta.id = "long".into();
+
+        // Turn `t` is the four records at `4 * t` of a 400-turn log.
+        let turns = |range: std::ops::Range<u64>| -> Vec<StoredEvent> {
+            range
+                .flat_map(|turn| {
+                    [
+                        agent::AgentEvent::TurnStarted {
+                            turn_id: turn.to_string(),
+                        },
+                        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                            id: format!("user-{turn}"),
+                            parent_item_id: None,
+                            content: ItemContent::UserMessage {
+                                text: format!("Question {turn}"),
+                                context_len: None,
+                                attachments: vec![],
+                            },
+                        }),
+                        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                            id: format!("answer-{turn}"),
+                            parent_item_id: None,
+                            content: ItemContent::AssistantMessage {
+                                text: format!("Answer {turn}.\n\n").repeat(3),
+                            },
+                        }),
+                        agent::AgentEvent::TurnCompleted {
+                            turn_id: turn.to_string(),
+                            status: agent::TurnStatus::Completed,
+                            usage: None,
+                        },
+                    ]
+                    .map(StoredEvent::from)
+                })
+                .collect()
+        };
+
+        let (to_host, outgoing) = async_channel::unbounded::<String>();
+        let (incoming, from_host) = async_channel::unbounded::<String>();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn({
+            let link = link.clone();
+            async move {
+                link.pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                    .await;
+            }
+        });
+        let send = |message: HostMessage| {
+            incoming
+                .try_send(tcode_protocol::encode_line(&message).unwrap())
+                .unwrap();
+        };
+        let event = |topic: Topic, event: ServerEvent| {
+            send(HostMessage::Event(EventEnvelope {
+                request_id: None,
+                topic,
+                event,
+            }));
+        };
+        let store = cx.new(|cx| WorkspaceStore::new(link, cx));
+        store.update(cx, |store, _| store.select_session("long".into()));
+        event(
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(Default::default()),
+        );
+        event(
+            Topic::Index,
+            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                summary: Default::default(),
+                sessions: vec![meta],
+                projects: vec![],
+            }),
+        );
+        event(
+            Topic::SessionStatus {
+                session_id: "long".into(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        event(
+            Topic::SessionEvents {
+                session_id: "long".into(),
+            },
+            ServerEvent::SessionSnapshot {
+                from: 4 * 390,
+                end: 4 * 400,
+                records: turns(390..400),
+                total: 4 * 400,
+                total_turns: 400,
+                truncated: false,
+            },
+        );
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+
+        // Present a frame, as the display link does, and answer the page it
+        // asked for, ten turns above `before`; then let the store's single
+        // request gate reopen.
+        let frame = |cx: &mut VisualTestContext| -> Option<u64> {
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+            let pages: Vec<(u64, u64)> = std::iter::from_fn(|| outgoing.try_recv().ok())
+                .map(|line| tcode_protocol::decode_client_line(&line).unwrap())
+                .filter_map(|message| match message.payload {
+                    ClientPayload::Query(Query::SessionHistoryPage { before, .. }) => {
+                        Some((message.id, before))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(pages.len() <= 1, "one page in flight: {pages:?}");
+            let (id, before) = *pages.first()?;
+            send(HostMessage::QueryResult {
+                id,
+                result: Ok(QueryResponse::SessionHistoryPage {
+                    records: turns(before / 4 - 10..before / 4),
+                    from: before - 40,
+                    end: before,
+                    truncated: false,
+                }),
+            });
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(250));
+            Some(before)
+        };
+        let settle = |cx: &mut VisualTestContext| -> Vec<u64> {
+            let pages: Vec<u64> = std::iter::from_fn(|| frame(cx)).take(40).collect();
+            assert!(frame(cx).is_none(), "the prefetch settles");
+            pages
+        };
+        let replica = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| store.with_active_timeline(Timeline::clone))
+        };
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        // One trackpad gesture.
+        let scroll = |distance: gpui::Pixels, cx: &mut VisualTestContext| {
+            let position = list.viewport_bounds().center();
+            for (touch_phase, distance) in [
+                (gpui::TouchPhase::Started, px(0.)),
+                (gpui::TouchPhase::Moved, distance),
+                (gpui::TouchPhase::Ended, px(0.)),
+            ] {
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position,
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.), distance)),
+                    touch_phase,
+                    ..Default::default()
+                });
+            }
+        };
+
+        let tail_pages = settle(cx);
+        assert!(list.is_following_tail());
+        assert!(!tail_pages.is_empty(), "ten turns do not fill six screens");
+        let tail = replica(cx).expect("the tail window");
+        let tail_from = tail_pages.last().unwrap() - 40;
+
+        let height = list.viewport_bounds().size.height;
+        let mut pages_away = 0;
+        while pages_away < 6 {
+            scroll(height * 3., cx);
+            while frame(cx).is_some() {
+                pages_away += 1;
+                view.read_with(cx, |chat, cx| {
+                    assert!(!chat.workspace_store.read(cx).chat_loading());
+                    assert!(!chat.rows.is_empty(), "the conversation stays on screen");
+                });
+            }
+            assert!(!list.is_following_tail());
+        }
+        let read = replica(cx).unwrap();
+        assert!(read.turns.len() > tail.turns.len());
+
+        let back = |cx: &mut VisualTestContext| {
+            // The pill shows once a frame has seen the reader away.
+            draw(cx);
+            let pill = cx.debug_bounds("scroll-to-end").expect("jump to latest");
+            cx.simulate_click(pill.center(), gpui::Modifiers::none());
+            assert!(frame(cx).is_none());
+            assert!(list.is_following_tail());
+        };
+        back(cx);
+        cx.executor().advance_clock(Duration::from_secs(20));
+        assert!(frame(cx).is_none());
+        assert_eq!(
+            replica(cx).unwrap(),
+            read,
+            "a glance at the tail keeps them"
+        );
+        scroll(height * 1.5, cx);
+        assert!(frame(cx).is_none());
+        assert!(!list.is_following_tail());
+        cx.executor().advance_clock(Duration::from_secs(20));
+        assert!(frame(cx).is_none());
+        assert_eq!(replica(cx).unwrap(), read, "reading above keeps them");
+
+        back(cx);
+        let last_row = |cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("timeline-row-{}", list.item_count() - 1).leak())
+                .expect("the last row is on screen")
+        };
+        let rows = list.item_count();
+        let bottom = last_row(cx).bottom();
+        cx.executor().advance_clock(Duration::from_secs(30));
+        assert!(frame(cx).is_none(), "the tail's own pages are still held");
+        assert_eq!(replica(cx).unwrap(), tail);
+        assert!(list.is_following_tail());
+        assert!(list.item_count() < rows);
+        assert_eq!(last_row(cx).bottom(), bottom, "the tail stays where it was");
+        assert!(settle(cx).is_empty());
+
+        scroll(height * 3., cx);
+        assert_eq!(frame(cx), Some(tail_from), "the page above the tail window");
+
+        // Left with that page held, the thread reopens from its cursor with
+        // the window its tail needed.
+        while outgoing.try_recv().is_ok() {}
+        store.update(cx, |store, _| {
+            store.select_session("other".into());
+            store.select_session("long".into());
+        });
+        let events_topic = Topic::SessionEvents {
+            session_id: "long".into(),
+        };
+        let resumed: Vec<_> = std::iter::from_fn(|| outgoing.try_recv().ok())
+            .filter_map(
+                |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                    ClientPayload::Subscribe(subscription)
+                        if subscription.topic == events_topic =>
+                    {
+                        Some(subscription.after)
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+        assert_eq!(resumed, [Some(4 * 400)]);
+        event(
+            events_topic,
+            ServerEvent::SessionSnapshot {
+                from: 4 * 400,
+                end: 4 * 400,
+                records: vec![],
+                total: 4 * 400,
+                total_turns: 400,
+                truncated: false,
+            },
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        assert_eq!(replica(cx).unwrap(), tail);
+    }
+
     #[gpui::test]
     fn pan_packet_after_a_page_lands_keeps_the_walk_back_into_it(cx: &mut TestAppContext) {
         use gpui::{FollowMode, ListOffset, point, px};
@@ -6232,6 +6534,19 @@ This begins after the hard break."#;
                 (active.meta.id.clone(), active.timeline.clone())
             }))
             .expect("seed markdown host");
+        if paged {
+            // The history is the thread's before a client opens it: the host
+            // answers a page only once it has read the log the records joined.
+            smol::block_on(
+                host.link()
+                    .query(tcode_protocol::Query::SessionHistoryPage {
+                        session_id: session_id.clone(),
+                        before: u64::MAX,
+                        limit: 1,
+                    }),
+            )
+            .expect("the seeded history is read");
+        }
         let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);

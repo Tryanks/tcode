@@ -297,6 +297,7 @@ impl AppState {
                 }
             }
             AgentEvent::Warning { message } => {
+                log::warn!("provider warning in {session_id}: {message}");
                 // Provider warnings (config problems, deprecations, failed
                 // mode switches) explain later misbehavior: a log line alone
                 // hides them from the person who needs to act on them.
@@ -522,29 +523,37 @@ impl AppState {
             event: event.clone(),
             elided: None,
         };
-        self.emit_domain(
-            Topic::SessionEvents {
-                session_id: session_id.to_string(),
-            },
-            ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
-            cx,
-        );
-        // A log that cannot be read is not cached: an empty stand-in would
-        // replace the conversation. The append is still queued.
-        match self.event_records.entry(session_id.to_string()) {
-            std::collections::hash_map::Entry::Occupied(mut log) => log.get_mut().push(record),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                match SessionLog::load(&self.store, session_id) {
-                    Ok(log) => slot.insert(log).push(record),
-                    Err(error) => log::error!("cannot load the event log of {session_id}: {error}"),
-                }
+        let topic = Topic::SessionEvents {
+            session_id: session_id.to_string(),
+        };
+        let joined = if self.event_records.contains_key(session_id) {
+            self.emit_domain(
+                topic,
+                ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
+                cx,
+            );
+            self.event_records
+                .get_mut(session_id)
+                .expect("checked above")
+                .push(record)
+        } else {
+            // A session nobody holds needs no row named: the append alone
+            // keeps the record, and any later read of the log is queued
+            // behind it.
+            if self.log_hydrations.contains_key(session_id)
+                || self.resident(session_id).is_some()
+                || self.subscriptions.contains(&topic)
+            {
+                self.hold_record(session_id, record, cx);
             }
-        }
+            Joined::Unfolded
+        };
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
                 ts,
                 event: Box::new(event.clone()),
+                joined,
             },
             cx,
         );
@@ -639,11 +648,13 @@ impl AppState {
         let previous_title = meta.title;
         let title_meta = title_session_meta(&self.settings, meta.cwd);
         let regenerate = first_message.is_none();
-        // The cache includes accepted messages whose disk writes are still queued.
+        // The cache includes accepted messages whose writes are still queued;
+        // without it the store is read once they are written.
         let records = regenerate
             .then(|| self.event_records.get(&session_id))
             .flatten()
             .map(|log| log.records().to_vec());
+        let written = (regenerate && records.is_none()).then(|| self.store_write_barrier(cx));
         let store = self.store.clone();
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
@@ -652,6 +663,9 @@ impl AppState {
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
+            if let Some(written) = written {
+                let _ = written.recv().await;
+            }
             let read_id = session_id.clone();
             let old_title = previous_title.clone();
             let input = host_cx

@@ -154,6 +154,33 @@ impl TestAppContext {
         }
     }
 
+    /// Wait for background work to queue a message on the mailbox and run
+    /// that one message alone, keeping what it emitted for
+    /// [`TestAppContext::drain_outgoing`].
+    pub(super) fn run_next(&mut self) {
+        let state = self
+            .state
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .expect("test state must outlive its context");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let message = loop {
+            if let Ok(message) = self.mailbox_rx.try_recv() {
+                break message;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "nothing reached the mailbox within five seconds"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let mut host_cx = self.host_cx();
+        message(&mut state.borrow_mut(), &mut host_cx);
+        while let Ok(line) = self.outgoing_rx.try_recv() {
+            self.outgoing.push(line);
+        }
+    }
+
     /// Drain and decode every NDJSON line emitted by the host so tests assert
     /// on the same serialized traffic consumed by production clients.
     pub(super) fn drain_outgoing(&mut self) -> Vec<HostMessage> {
