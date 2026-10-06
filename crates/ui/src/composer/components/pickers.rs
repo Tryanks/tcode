@@ -1196,8 +1196,8 @@ fn render_model_row(
                     muted
                 }),
             )
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
+            .on_click(move |_, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
                 let fav_id = fav_id.clone();
                 store_fav.update(cx, |store, _cx| store.toggle_favorite_model(fav_id));
                 // Refresh the open popover so the star + ordering update.
@@ -1681,8 +1681,8 @@ fn render_fast_mode_bolt(
                 compact,
             )
             .debug_selector(|| "traits-fast-mode".into())
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
+            .on_click(move |_, window, cx| {
+                crate::widgets::stop_click_propagation(window, cx);
                 let value = fast.value(on != Some(true));
                 store.update(cx, |store, _cx| {
                     store.set_active_option(fast.option_id.clone(), Some(value));

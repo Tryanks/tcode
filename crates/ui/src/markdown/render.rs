@@ -644,8 +644,7 @@ fn render_paragraph(
                         });
                     })
                     .on_click(move |_, window, cx| {
-                        gpui_base::TextSelection::end(window, cx);
-                        cx.stop_propagation();
+                        crate::widgets::stop_click_propagation(window, cx);
                         if let Some(link) = &link {
                             match view.read(cx).resolve_link(&link.url) {
                                 LinkTarget::Web(url) => cx.open_url(&url),
