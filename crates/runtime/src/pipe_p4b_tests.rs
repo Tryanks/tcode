@@ -402,7 +402,33 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
 
 #[test]
 fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnects() {
-    let (_host, mux, watcher, root, project_id) = project_fixture();
+    let (host, mux, watcher, root, project_id) = project_fixture();
+    let mut owner = tcode_core::project::SessionMeta::new(
+        agent::ProviderKind::ClaudeCode,
+        root.join("project"),
+        None,
+    );
+    owner.id = "archived-owner".into();
+    owner.archived_at = Some(1);
+    owner.worktree = Some(tcode_core::project::WorktreeInfo {
+        root_project_path: root.join("repo"),
+        base: "main".into(),
+        branch: "tcode/owner".into(),
+    });
+    SessionStore::open_at(root.clone())
+        .unwrap()
+        .upsert_meta(&owner)
+        .unwrap();
+    smol::block_on(host.update_state_for_test(move |state, _cx| {
+        state.sessions.push(owner);
+    }))
+    .unwrap();
+    let QueryResponse::ArchivedSessions(before) =
+        smol::block_on(watcher.query(Query::ArchivedSessions)).unwrap()
+    else {
+        panic!("expected archived sessions");
+    };
+    assert!(!before.worktree_shared.contains("archived-owner"));
     let history = root.join("history");
     let threads = vec![
         claude_thread(&history, "thread-a", "first imported conversation"),
@@ -486,6 +512,13 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
             _ => {}
         }
     }
+    let QueryResponse::ArchivedSessions(after) =
+        smol::block_on(watcher.query(Query::ArchivedSessions)).unwrap()
+    else {
+        panic!("expected archived sessions");
+    };
+    assert!(after.revision > before.revision);
+    assert!(after.worktree_shared.contains("archived-owner"));
     watcher
         .command_blocking(Command::ShutdownAllAndFlush)
         .unwrap();

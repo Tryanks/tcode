@@ -9,13 +9,7 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return;
         };
-        if !active.meta.provider.caps().native_rewind
-            || active.turn_in_flight
-            || active.delivery_in_flight.is_some()
-            || active.background_task_count > 0
-            || active.timeline.turn_running
-            || !active.queue.is_empty()
-        {
+        if self.native_rewind_blocked(active) {
             self.report_error(RuntimeError::NativeRewindBlocked, cx);
             return;
         }
@@ -35,10 +29,6 @@ impl AppState {
             return;
         }
         let session_id = active.meta.id.clone();
-        if self.pending_native_rewinds.contains_key(&session_id) {
-            self.report_error(RuntimeError::NativeRewindBlocked, cx);
-            return;
-        }
         let live_commands = match &active.runtime {
             Runtime::Live(commands) => Some(commands.clone()),
             Runtime::Idle | Runtime::Starting { .. } => None,
@@ -332,10 +322,13 @@ impl AppState {
             self.clear_approvals(&session_id);
             self.pending_native_rewinds.remove(&session_id);
         }
-        if let Some(active) = self.residents.live.remove(target_id)
-            && let Runtime::Live(commands) = active.runtime
-        {
-            let _ = commands.try_send(SessionCommand::Shutdown);
+        if let Some(active) = self.residents.live.remove(target_id) {
+            if active.draft && self.archived_sharing_affected(&active.meta) {
+                self.archived_revision += 1;
+            }
+            if let Runtime::Live(commands) = active.runtime {
+                let _ = commands.try_send(SessionCommand::Shutdown);
+            }
         }
         self.release_stale_session_logs(cx);
     }
@@ -372,6 +365,9 @@ impl AppState {
         let Some(mut active) = self.residents.live.remove(target_id) else {
             return;
         };
+        if active.draft && self.archived_sharing_affected(&active.meta) {
+            self.archived_revision += 1;
+        }
         self.park_terminal_workspace(&mut active);
         let native_rewind_pending = self.pending_native_rewinds.contains_key(&active.meta.id);
         let has_work = active.turn_in_flight

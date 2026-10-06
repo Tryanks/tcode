@@ -404,7 +404,7 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return;
         };
-        if active.timeline.turn_running {
+        if Self::checkout_blocked(active) {
             return;
         }
         let cwd = active.meta.cwd.clone();

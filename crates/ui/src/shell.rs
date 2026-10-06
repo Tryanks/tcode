@@ -2752,10 +2752,10 @@ mod tests {
                     topic: Topic::SessionStatus {
                         session_id: "thread-a".into(),
                     },
-                    event: ServerEvent::SessionStatusReplaced(session_status(
+                    event: ServerEvent::SessionStatusReplaced(Box::new(session_status(
                         "thread-a",
                         std::path::Path::new("/project"),
-                    )),
+                    ))),
                 }))
                 .unwrap(),
             )
@@ -2778,6 +2778,16 @@ mod tests {
         };
         for (topic, event) in [
             (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
+            (
+                Topic::SessionPlan {
+                    session_id: "thread-a".into(),
+                },
+                ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                    session_id: "thread-a".into(),
+                    proposed: None,
+                    steps: Vec::new(),
+                }),
+            ),
             (
                 Topic::SessionEvents {
                     session_id: "thread-a".into(),
@@ -3544,7 +3554,8 @@ mod tests {
             let mut status = session_status(session, std::path::Path::new("/project"));
             status.requested_model = meta.model.clone();
             status.interaction_mode = agent::InteractionMode::Plan;
-            status.turn_running = readonly;
+            status.activity.turn_running = readonly;
+            status.conversation_read_only = readonly;
             status.provider_option_selections = vec![agent::OptionSelection {
                 id: "reasoningEffort".into(),
                 value: serde_json::json!("high"),
@@ -3560,7 +3571,17 @@ mod tests {
                     Topic::SessionStatus {
                         session_id: session.into(),
                     },
-                    ServerEvent::SessionStatusReplaced(status),
+                    ServerEvent::SessionStatusReplaced(Box::new(status)),
+                ),
+                (
+                    Topic::SessionPlan {
+                        session_id: session.into(),
+                    },
+                    ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                        session_id: session.into(),
+                        proposed: None,
+                        steps: Vec::new(),
+                    }),
                 ),
                 (
                     Topic::SessionEvents {
@@ -3680,7 +3701,7 @@ mod tests {
                     topic: Topic::SessionStatus {
                         session_id: "thread-a".into(),
                     },
-                    event: ServerEvent::SessionStatusReplaced(status),
+                    event: ServerEvent::SessionStatusReplaced(Box::new(status)),
                 }))
                 .unwrap(),
             )
@@ -4957,6 +4978,8 @@ mod tests {
             acp_agent_id: None,
             project_id: None,
             approval_mode: Default::default(),
+            effective_approval_mode: Default::default(),
+            native_approval_modes_enabled: true,
             interaction_mode: Default::default(),
             queued_messages: Vec::new(),
             review_comment_drafts: Vec::new(),
@@ -4967,9 +4990,23 @@ mod tests {
             terminal_open: false,
             terminal_height: 240.,
             delivery_in_flight: None,
-            turn_running: false,
+            activity: tcode_protocol::SessionActivity {
+                working: false,
+                turn_running: false,
+                background_only: false,
+                waiting_for_approval: false,
+                waiting_for_input: false,
+                unread: false,
+                fork: tcode_protocol::ForkAvailability::Available,
+            },
             stopping: false,
-            working: false,
+            native_rewind_blocked: false,
+            checkout_blocked: false,
+            conversation_read_only: false,
+            terminal_limit_reached: false,
+            terminal_split_available: false,
+            usage: None,
+            context_window: None,
             running_turn: None,
             pending_approvals: Vec::new(),
             pending_user_input: None,
@@ -5010,7 +5047,7 @@ mod tests {
                 Topic::SessionStatus {
                     session_id: session.into(),
                 },
-                ServerEvent::SessionStatusReplaced(session_status(session, cwd)),
+                ServerEvent::SessionStatusReplaced(Box::new(session_status(session, cwd))),
             ),
             (
                 Topic::SessionEvents {

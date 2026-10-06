@@ -605,7 +605,7 @@ mod tests {
         for (topic, event) in [
             (
                 Topic::SessionStatus { session_id },
-                ServerEvent::SessionStatusReplaced(status),
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
             ),
             (
                 Topic::Terminal { terminal_id: 7 },

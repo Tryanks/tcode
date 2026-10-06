@@ -608,9 +608,14 @@ impl Timeline {
     /// cannot tell a live turn from one whose provider stopped without a
     /// record, and a window cut inside the turn misses its start. Nothing the
     /// records built is discarded, so a later settle can revive the turn.
-    pub fn settle_running_turn(&mut self, running: Option<usize>, started_at: Option<u64>) {
-        let running = running.filter(|turn| *turn < self.turns.len());
-        self.turn_running = running.is_some();
+    pub fn settle_running_turn(
+        &mut self,
+        turn_running: bool,
+        running: Option<usize>,
+        started_at: Option<u64>,
+    ) {
+        let running = running.filter(|turn| turn_running && *turn < self.turns.len());
+        self.turn_running = turn_running;
         for (index, turn) in self.turns.iter_mut().enumerate() {
             turn.running = running == Some(index);
         }
@@ -633,6 +638,10 @@ impl Timeline {
         self.proposed_plan
             .as_ref()
             .filter(|plan| plan.ready && !self.plan_resolutions.contains_key(plan.item_id.as_str()))
+    }
+
+    pub fn plan_resolved(&self, item_id: &str) -> bool {
+        self.plan_resolutions.contains_key(item_id)
     }
 
     /// First user message in the timeline, if any (used for session titles).
@@ -2559,9 +2568,9 @@ mod tests {
         assert!(interrupted.proposed_plan.is_none());
         // A client settled idle hides the streamed plan but can revive it.
         let mut settled = timeline.clone();
-        settled.settle_running_turn(None, None);
+        settled.settle_running_turn(false, None, None);
         assert!(settled.shown_proposed_plan().is_none());
-        settled.settle_running_turn(Some(0), None);
+        settled.settle_running_turn(true, Some(0), None);
         assert_eq!(
             settled.shown_proposed_plan().unwrap().markdown,
             "# Plan\nstep one"

@@ -34,11 +34,10 @@ impl Composer {
             .messages
             .into_iter()
             .filter(|message| {
-                !deliveries.iter().any(|(key, text, failure, acknowledged)| {
+                !deliveries.iter().any(|(key, _, failure, acknowledged)| {
                     !acknowledged
                         && failure.is_none()
-                        && (message.delivery_key.as_deref() == Some(key.as_str())
-                            || (message.delivery_key.is_none() && message.text == *text))
+                        && message.delivery_key.as_deref() == Some(key.as_str())
                 })
             })
             .collect();
@@ -77,6 +76,7 @@ impl Composer {
 
         for (index, message) in queued.into_iter().enumerate() {
             let id = message.id;
+            let editable = message.editable;
             let text = message.text.clone();
             let scheduled = message.fire_at_unix_secs.is_some();
             let steer_tooltip = if scheduled {
@@ -123,6 +123,7 @@ impl Composer {
                     })
                     .child(
                         Button::new(("queue-steer", id as usize))
+                            .debug_selector(move || format!("queue-steer-{id}"))
                             .ghost()
                             .xsmall()
                             .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
@@ -130,7 +131,9 @@ impl Composer {
                             // Scheduled rows always support send-now: the
                             // runtime removes the deadline and uses the normal
                             // send/queue path even when native steering is absent.
-                            .disabled(!self.interactive(cx) || (!scheduled && !can_steer))
+                            .disabled(
+                                !editable || !self.interactive(cx) || (!scheduled && !can_steer),
+                            )
                             .tooltip(steer_tooltip)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.workspace_store
@@ -139,11 +142,12 @@ impl Composer {
                     )
                     .child(
                         Button::new(("queue-drop", id as usize))
+                            .debug_selector(move || format!("queue-drop-{id}"))
                             .ghost()
                             .xsmall()
                             .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
                             .icon(IconName::Close)
-                            .disabled(!self.interactive(cx))
+                            .disabled(!editable || !self.interactive(cx))
                             .tooltip(crate::tr!("composer.drop_queued"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.drop_queued_and_refill(id, text.clone(), window, cx);
@@ -151,7 +155,7 @@ impl Composer {
                     )
                     .context_menu({
                         let text = message.text.clone();
-                        let interactive = self.interactive(cx);
+                        let interactive = editable && self.interactive(cx);
                         move |menu, _, _| {
                             menu.menu(
                                 crate::tr!("chat.copy_text").into_owned(),

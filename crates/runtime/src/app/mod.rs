@@ -26,7 +26,7 @@ use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
 use tcode_core::project::{
-    AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo,
+    AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo, WorktreeSharing,
     auto_archive_candidates,
 };
 use tcode_core::provider_status::ProviderSnapshot;
@@ -46,13 +46,14 @@ use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
 use tcode_protocol::{
-    AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, ExternalThread,
-    GitActionRequest, GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure,
-    PathEntry, ProtocolError, ProviderVersionStatus as ProtocolProviderVersionStatus,
-    ProvidersStatus, QueryResponse, QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast,
-    ServerEvent, SessionEventRecord, SessionSearchHit, SessionStatus, TcodeUpdateStatus,
-    TerminalStatus, ThreadExportFormat, Topic,
+    AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
+    ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
+    IndexSummary, MergeWorktreeFailure, PathEntry, ProposedPlanStatus, ProtocolError,
+    ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
+    QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
+    SessionActivity, SessionEventRecord, SessionPlan, SessionSearchHit, SessionStatus,
+    TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -257,7 +258,8 @@ use orchestrate::McpWiring;
 pub use providers::ProviderCatalog;
 use providers::{
     computer_use_attaches, effort_selection, launch_env_for_profile, normalized_selections,
-    provider_secret_names, session_launch_env, session_options,
+    provider_secret_names, session_approval_policy, session_launch_env, session_options,
+    session_provider_settings,
 };
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
@@ -318,6 +320,7 @@ pub struct AppState {
     /// Set once the store failed and every thread was stopped.
     store_failed: bool,
     pub sessions: Vec<SessionMeta>,
+    archived_revision: u64,
     pub projects: Vec<Project>,
     pub residents: ResidentSessions,
     /// Terminal resources parked by conversation destination. Drawer chrome is
@@ -508,6 +511,7 @@ impl AppState {
             store_failed: false,
             sessions,
             projects,
+            archived_revision: 0,
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
             terminal_registry: TerminalRegistry::default(),

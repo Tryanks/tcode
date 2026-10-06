@@ -231,25 +231,15 @@ impl WorkspaceStore {
         self.session_turn_offset = 0;
         self.session_catching_up = false;
         self.clear_terminal_topics();
-        if let Some(status) = &self.session_status_replica
-            && !status.draft
-        {
-            self.background_session_flags.insert(
-                status.session_id.clone(),
-                (
-                    status.working,
-                    !status.pending_approvals.is_empty(),
-                    status.pending_user_input.is_some(),
-                    Self::status_background_only(status),
-                ),
-            );
-        }
         if let Some(session_id) = self.selected_session_id.take() {
             for topic in [
                 tcode_protocol::Topic::SessionEvents {
                     session_id: session_id.clone(),
                 },
                 tcode_protocol::Topic::SessionStatus {
+                    session_id: session_id.clone(),
+                },
+                tcode_protocol::Topic::SessionPlan {
                     session_id: session_id.clone(),
                 },
                 tcode_protocol::Topic::Preview {
@@ -287,6 +277,10 @@ impl WorkspaceStore {
                 session_id: session_id.clone(),
             });
         self.baseline_topics
+            .remove(&tcode_protocol::Topic::SessionPlan {
+                session_id: session_id.clone(),
+            });
+        self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionEvents {
                 session_id: session_id.clone(),
             });
@@ -301,6 +295,9 @@ impl WorkspaceStore {
         let after = self.session_end.get(&session_id).copied();
         for topic in [
             tcode_protocol::Topic::SessionStatus {
+                session_id: session_id.clone(),
+            },
+            tcode_protocol::Topic::SessionPlan {
                 session_id: session_id.clone(),
             },
             tcode_protocol::Topic::GitStatus {
@@ -418,7 +415,7 @@ impl WorkspaceStore {
     pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode) {
         self.dispatch(Command::RewindTurn {
             session_id: self.active_session_id().unwrap_or_default(),
-            turn: turn + self.session_turn_offset,
+            turn: self.absolute_turn(turn),
             mode,
         });
     }

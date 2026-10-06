@@ -10,6 +10,7 @@ pub(crate) struct DomainDiff {
     providers: ProvidersStatus,
     git_status: HashMap<String, GitStatusStatus>,
     session_statuses: HashMap<String, SessionStatus>,
+    session_plans: HashMap<String, SessionPlan>,
 }
 
 impl DomainDiff {
@@ -20,6 +21,7 @@ impl DomainDiff {
             providers: state.providers_status_snapshot(),
             git_status: HashMap::new(),
             session_statuses: state.resident_session_status_snapshots(),
+            session_plans: state.resident_session_plan_snapshots(),
         }
     }
 
@@ -84,11 +86,29 @@ impl DomainDiff {
                 Topic::SessionStatus {
                     session_id: id.to_string(),
                 },
-                ServerEvent::SessionStatusReplaced(status),
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
                 cx,
             );
         }
         self.session_statuses = session_statuses;
+        let session_plans = state.resident_session_plan_snapshots();
+        let mut changed_ids: Vec<_> = session_plans
+            .iter()
+            .filter_map(|(id, plan)| {
+                (self.session_plans.get(id) != Some(plan)).then_some(id.as_str())
+            })
+            .collect();
+        changed_ids.sort_unstable();
+        for id in changed_ids {
+            emit_replacement(
+                Topic::SessionPlan {
+                    session_id: id.to_string(),
+                },
+                ServerEvent::SessionPlanReplaced(session_plans[id].clone()),
+                cx,
+            );
+        }
+        self.session_plans = session_plans;
     }
 }
 
@@ -165,31 +185,22 @@ impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
         let mut summary = IndexSummary {
             title_generating: self.title_generating.clone(),
-            activity: self
-                .residents
-                .ids()
-                .filter_map(|id| {
-                    let session = self.resident(id)?;
-                    let (approvals, user_input) = self.open_requests(id, session);
-                    Some((
-                        id.to_string(),
-                        (
-                            session.has_work(),
-                            !approvals.is_empty(),
-                            user_input.is_some(),
-                            session.background_task_count > 0
-                                && !session.turn_in_flight
-                                && session.queue.is_empty(),
-                        ),
-                    ))
-                })
-                .collect(),
+            archived_revision: self.archived_revision,
             ..IndexSummary::default()
         };
+        let sharing = self.worktree_sharing();
         let mut sessions = Vec::new();
         for meta in &self.sessions {
             if meta.archived_at.is_none() {
                 sessions.push(meta.clone());
+                let resident = self.resident(&meta.id);
+                summary.activity.insert(
+                    meta.id.clone(),
+                    self.session_activity(resident.map_or(meta, |session| &session.meta), resident),
+                );
+                if sharing.is_shared(meta) {
+                    summary.worktree_shared.insert(meta.id.clone());
+                }
                 continue;
             }
             if let Some(project_id) = &meta.project_id {
@@ -198,10 +209,19 @@ impl AppState {
                     .entry(project_id.clone())
                     .or_default() += 1;
             }
-            if let Some(worktree) = &meta.worktree {
-                summary
-                    .archived_worktree_branches
-                    .insert(worktree.branch.clone());
+        }
+        for id in self.residents.ids() {
+            let Some(session) = self.resident(id) else {
+                continue;
+            };
+            if session.meta.archived_at.is_none() && !summary.activity.contains_key(id) {
+                summary.activity.insert(
+                    id.to_string(),
+                    self.session_activity(&session.meta, Some(session)),
+                );
+                if sharing.is_shared(&session.meta) {
+                    summary.worktree_shared.insert(id.to_string());
+                }
             }
         }
         IndexSnapshot {
@@ -211,15 +231,39 @@ impl AppState {
         }
     }
 
-    pub fn archived_sessions(&self) -> Vec<SessionMeta> {
-        let mut archived: Vec<_> = self
+    pub fn archived_sessions(&self) -> ArchivedSessions {
+        let sharing = self.worktree_sharing();
+        let mut sessions: Vec<_> = self
             .sessions
             .iter()
             .filter(|meta| meta.archived_at.is_some())
             .cloned()
             .collect();
-        archived.sort_by_key(|meta| std::cmp::Reverse(meta.archived_at));
-        archived
+        sessions.sort_by_key(|meta| std::cmp::Reverse(meta.archived_at));
+        let worktree_shared = sessions
+            .iter()
+            .filter(|meta| sharing.is_shared(meta))
+            .map(|meta| meta.id.clone())
+            .collect();
+        ArchivedSessions {
+            sessions,
+            worktree_shared,
+            revision: self.archived_revision,
+        }
+    }
+
+    pub(super) fn archived_sharing_affected(&self, other: &SessionMeta) -> bool {
+        self.sessions
+            .iter()
+            .any(|meta| meta.archived_at.is_some() && meta.shares_worktree_with(other))
+    }
+
+    pub(super) fn worktree_sharing(&self) -> WorktreeSharing<'_> {
+        WorktreeSharing::new(
+            self.sessions
+                .iter()
+                .chain(self.residents.live.values().map(|session| &session.meta)),
+        )
     }
 
     pub fn settings_snapshot(&self) -> Settings {
@@ -278,8 +322,11 @@ impl AppState {
             Topic::GitStatus { session_id } => {
                 ServerEvent::GitStatusReplaced(self.git_status_snapshot(session_id))
             }
-            Topic::SessionStatus { session_id } => {
-                ServerEvent::SessionStatusReplaced(self.session_status_snapshot(session_id)?)
+            Topic::SessionStatus { session_id } => ServerEvent::SessionStatusReplaced(Box::new(
+                self.session_status_snapshot(session_id)?,
+            )),
+            Topic::SessionPlan { session_id } => {
+                ServerEvent::SessionPlanReplaced(self.session_plan_snapshot(session_id)?)
             }
             Topic::SessionEvents { .. } => self.session_events_snapshot(subscription),
             Topic::RuntimeEvents => return None,
@@ -322,8 +369,54 @@ impl AppState {
         )
     }
 
-    /// Build the complete non-event-stream status projection for one resident
-    /// session. This is the sole constructor for the replicated status domain.
+    pub(super) fn session_activity(
+        &self,
+        meta: &SessionMeta,
+        resident: Option<&ActiveSession>,
+    ) -> SessionActivity {
+        let (approvals, input) = resident.map_or((&[][..], None), |session| {
+            self.open_requests(&meta.id, session)
+        });
+        SessionActivity {
+            working: resident.is_some_and(ActiveSession::has_work),
+            turn_running: resident.is_some_and(|session| session.turn_in_flight),
+            background_only: resident.is_some_and(|session| {
+                session.background_task_count > 0
+                    && !session.turn_in_flight
+                    && session.delivery_in_flight.is_none()
+                    && session.queue.is_empty()
+            }),
+            waiting_for_approval: !approvals.is_empty(),
+            waiting_for_input: input.is_some(),
+            unread: self.session_unread(meta),
+            fork: Self::session_fork_availability(meta, resident),
+        }
+    }
+
+    pub fn session_plan_snapshot(&self, session_id: &str) -> Option<SessionPlan> {
+        let timeline = &self.resident(session_id)?.timeline;
+        Some(SessionPlan {
+            session_id: session_id.to_string(),
+            proposed: timeline
+                .shown_proposed_plan()
+                .map(|plan| ProposedPlanStatus {
+                    item_id: plan.item_id.clone(),
+                    turn: plan.turn,
+                    markdown: plan.markdown.clone(),
+                    ready: plan.ready,
+                    resolved: timeline.plan_resolved(&plan.item_id),
+                }),
+            steps: timeline.plan_steps.clone(),
+        })
+    }
+
+    fn resident_session_plan_snapshots(&self) -> HashMap<String, SessionPlan> {
+        self.residents
+            .ids()
+            .filter_map(|id| Some((id.to_string(), self.session_plan_snapshot(id)?)))
+            .collect()
+    }
+
     pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
         let session = self.resident(session_id)?;
         let meta = &session.meta;
@@ -353,6 +446,24 @@ impl AppState {
         });
         let terminal_preferences = self.terminal_preferences_for(session);
         let (approvals, user_input) = self.open_requests(session_id, session);
+        let (effective_approval_mode, native_approval_modes_enabled) =
+            session_approval_policy(meta, &session_provider_settings(meta, &self.settings));
+        let context_window = session
+            .timeline
+            .usage
+            .and_then(|usage| usage.context_window)
+            .map(|reported| {
+                if meta.provider == ProviderKind::ClaudeCode
+                    && let Some(model) = meta.model.as_deref()
+                {
+                    reported.min(agent::claude::resolved_context_window(
+                        model,
+                        &meta.option_selections,
+                    ))
+                } else {
+                    reported
+                }
+            });
         Some(SessionStatus {
             session_id: session_id.to_string(),
             title: meta.title.clone(),
@@ -364,6 +475,8 @@ impl AppState {
             acp_agent_id: meta.acp_agent_id.clone(),
             project_id: meta.project_id.clone(),
             approval_mode: meta.approval_mode,
+            effective_approval_mode,
+            native_approval_modes_enabled,
             interaction_mode: meta.interaction_mode,
             queued_messages: session
                 .queue
@@ -371,6 +484,7 @@ impl AppState {
                 .map(|message| QueuedMessageStatus {
                     delivery_key: message.delivery_key.clone(),
                     id: message.id,
+                    editable: Self::queued_message_editable(session, message.id),
                     text: message.text.clone(),
                     fire_at_unix_secs: message.not_before.and_then(|time| {
                         time.duration_since(UNIX_EPOCH)
@@ -402,9 +516,15 @@ impl AppState {
                 .map(|preferences| preferences.height.clamp(120., 600.))
                 .unwrap_or(240.),
             delivery_in_flight: session.delivery_in_flight,
-            turn_running: session.turn_in_flight,
+            activity: self.session_activity(meta, Some(session)),
             stopping: session.interrupt_requested,
-            working: session.has_work(),
+            native_rewind_blocked: self.native_rewind_blocked(session),
+            checkout_blocked: Self::checkout_blocked(session),
+            conversation_read_only: Self::conversation_read_only(meta),
+            terminal_limit_reached: self.terminal_limit_reached(session),
+            terminal_split_available: self.terminal_split_available(session),
+            usage: session.timeline.usage,
+            context_window,
             // A provider shut down without a closing record leaves its turn
             // running in the timeline; only an in-flight turn is live.
             running_turn: session
@@ -447,6 +567,17 @@ impl AppState {
     }
 
     pub(super) fn upsert_session_in_memory(&mut self, meta: SessionMeta) {
+        let existing = self.sessions.iter().find(|existing| existing.id == meta.id);
+        let archived_metadata_changed = existing != Some(&meta)
+            && (meta.archived_at.is_some()
+                || existing.is_some_and(|old| old.archived_at.is_some()));
+        let sharing_may_change = existing
+            .is_none_or(|old| old.cwd != meta.cwd || old.worktree != meta.worktree)
+            && (self.archived_sharing_affected(&meta)
+                || existing.is_some_and(|old| self.archived_sharing_affected(old)));
+        if archived_metadata_changed || sharing_may_change {
+            self.archived_revision += 1;
+        }
         match self
             .sessions
             .iter_mut()
