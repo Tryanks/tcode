@@ -7,6 +7,8 @@
 //!   * `events` holds each thread's log as raw byte segments, one per line
 //!     including its `\n`, densely numbered from 0: the bytes of a `{ ts, event }`
 //!     record, or whatever a migrated or imported log contained.
+//!   * `kept_worktrees` holds the path of every worktree whose thread was
+//!     deleted with the worktree kept.
 //!
 //! Model and command caches stay as JSON files beside it.
 //!
@@ -36,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use tcode_core::project::{IndexFile, Project, SessionMeta};
 use tcode_core::session::StoredEvent;
 
-use db::{Broken, Db, SCHEMA_VERSION, blob, integer, is_broken};
+use db::{Broken, Db, KEPT_WORKTREES, SCHEMA_VERSION, blob, integer, is_broken};
 
 const DATA_DIR_ENV: &str = "TCODE_DATA_DIR";
 const DB_FILE: &str = "tcode.db";
@@ -202,6 +204,7 @@ enum Op {
     UpsertProject(Box<Project>),
     RemoveSession(String),
     RemoveProject(String),
+    KeepWorktree(PathBuf),
 }
 
 impl Mutation {
@@ -255,6 +258,11 @@ impl Mutation {
         Self(Op::RemoveProject(id.to_owned()))
     }
 
+    /// Record that the worktree at `path` outlives its deleted thread.
+    pub fn keep_worktree(path: &Path) -> Self {
+        Self(Op::KeepWorktree(path.to_owned()))
+    }
+
     /// Approximate bytes this change writes, for bounding a batch.
     pub fn payload_len(&self) -> usize {
         match &self.0 {
@@ -272,7 +280,10 @@ impl Mutation {
             }
             Op::CloneEvents { dst, .. } => Some(dst),
             Op::RemoveSession(id) => Some(id),
-            Op::UpsertMeta(_) | Op::UpsertProject(_) | Op::RemoveProject(_) => None,
+            Op::UpsertMeta(_)
+            | Op::UpsertProject(_)
+            | Op::RemoveProject(_)
+            | Op::KeepWorktree(_) => None,
         }
     }
 }
@@ -838,6 +849,20 @@ impl SessionStore {
     pub fn remove_session(&self, id: &str) -> io::Result<()> {
         self.apply(&[Mutation::remove_session(id)])
     }
+
+    /// Every worktree recorded by [`Mutation::keep_worktree`].
+    pub fn kept_worktrees(&self) -> io::Result<Vec<PathBuf>> {
+        self.run("read kept worktrees", |db| {
+            db.read(|db, connection| {
+                let mut paths = Vec::new();
+                db.query(connection, "SELECT path FROM kept_worktrees", (), |row| {
+                    paths.push(PathBuf::from(db::text(row, 0)?));
+                    Ok(())
+                })?;
+                Ok(paths)
+            })
+        })
+    }
 }
 
 impl Shared {
@@ -961,6 +986,7 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
             ));
         }
     }
+    db.write(|db, connection| db.execute(connection, KEPT_WORKTREES, ()))?;
     migrate::warn_about_stray_sources(root);
     migrate::remove_legacy(root);
     Ok(Live {
@@ -1178,6 +1204,13 @@ fn apply_op(
                 connection,
                 "DELETE FROM projects WHERE id = ?1",
                 (id.as_str(),),
+            )?;
+        }
+        Op::KeepWorktree(path) => {
+            db.execute(
+                connection,
+                "INSERT INTO kept_worktrees (path) VALUES (?1) ON CONFLICT (path) DO NOTHING",
+                (path.to_string_lossy().as_ref(),),
             )?;
         }
     }

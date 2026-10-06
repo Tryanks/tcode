@@ -561,6 +561,7 @@ impl AppState {
                 );
                 meta.title = title;
                 let child_id = meta.id.clone();
+                let data_dir = self.store.root().clone();
                 let host_cx = cx.clone();
                 HostCx::spawn_detached(cx, async move {
                     let resolved_cwd = host_cx
@@ -572,7 +573,7 @@ impl AppState {
                                 return Err(format!("invalid cwd: {}", canonical.display()));
                             }
                             if isolate {
-                                Ok(resolve_child_worktree(canonical, &child_id))
+                                Ok(resolve_child_worktree(canonical, &child_id, &data_dir))
                             } else {
                                 Ok((canonical, None, None))
                             }
@@ -1641,8 +1642,9 @@ pub(super) fn provider_name(provider: ProviderKind) -> &'static str {
 fn resolve_child_worktree(
     cwd: PathBuf,
     child_id: &str,
+    data_dir: &Path,
 ) -> (PathBuf, Option<WorktreeInfo>, Option<String>) {
-    match provision(&cwd, child_id) {
+    match provision(&cwd, child_id, data_dir) {
         Ok(created) => {
             let info = WorktreeInfo {
                 root_project_path: cwd,

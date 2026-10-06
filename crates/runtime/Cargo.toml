@@ -25,6 +25,7 @@ term = { path = "../term" }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+filetime = "0.2"
 mcp-host = { path = "../mcp-host" }
 tcode-services = { path = "../services", features = ["test-support"] }
 tcode-traverse = { path = "../traverse", default-features = false }
