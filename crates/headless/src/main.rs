@@ -126,6 +126,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     let mut services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
+        drop_superseded_diffs: true,
         ..HostServices::default()
     };
     if let Ok(mut mcp_host) = mcp_host::Host::bind() {

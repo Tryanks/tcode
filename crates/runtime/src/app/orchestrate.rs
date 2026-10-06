@@ -867,22 +867,26 @@ impl AppState {
             let _ = reply.try_send(Ok(result));
             return;
         }
-        let store = self.store.clone();
+        let folds: Vec<_> = unloaded
+            .into_iter()
+            .map(|id| {
+                let fold = self.folded_log(&id, cx);
+                (id, fold)
+            })
+            .collect();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let timelines = host_cx
-                .unblock(move || {
-                    unloaded
-                        .into_iter()
-                        .map(|id| {
-                            let events = store
-                                .read_events(&id)
-                                .map_err(|error| format!("could not read thread {id}: {error}"))?;
-                            Ok((id, Timeline::fold_events(events)))
-                        })
-                        .collect::<Result<HashMap<_, _>, String>>()
-                })
-                .await;
+            let mut timelines = Ok(HashMap::new());
+            for (id, fold) in folds {
+                match fold.await {
+                    Ok(timeline) => {
+                        if let Ok(timelines) = &mut timelines {
+                            timelines.insert(id, timeline);
+                        }
+                    }
+                    Err(error) => timelines = Err(format!("could not read thread {id}: {error}")),
+                }
+            }
             let result = match timelines {
                 Ok(timelines) => host_cx
                     .enqueue_and_wait(move |state, _| {
@@ -915,14 +919,10 @@ impl AppState {
             let _ = reply.try_send(result);
             return;
         }
-        let store = self.store.clone();
+        let fold = self.folded_log(&thread_id, cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let read_id = thread_id.clone();
-            let timeline = host_cx
-                .unblock(move || store.read_events(&read_id).map(Timeline::fold_events))
-                .await;
-            let result = match timeline {
+            let result = match fold.await {
                 Ok(timeline) => host_cx
                     .enqueue_and_wait(move |state, _| {
                         let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
@@ -934,6 +934,35 @@ impl AppState {
             };
             let _ = reply.send(result).await;
         });
+    }
+
+    /// The pure fold of a session's whole log. A cached log already holds
+    /// every record accepted for it, appends still queued for the store
+    /// included; otherwise the store is read once everything queued before now
+    /// has committed.
+    pub(super) fn folded_log(
+        &mut self,
+        session_id: &str,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<Timeline, String>> {
+        if let Some(log) = self.event_records.get(session_id) {
+            let fold = log.fold().clone();
+            return cx.spawn_background(async move { Ok(fold) });
+        }
+        let barrier = self.store_write_barrier(cx);
+        let store = self.store.clone();
+        let read_id = session_id.to_string();
+        let host_cx = cx.clone();
+        cx.spawn_background(async move {
+            match barrier.recv().await {
+                Ok(Ok(())) => host_cx
+                    .unblock(move || store.read_events(&read_id).map(Timeline::fold_events))
+                    .await
+                    .map_err(|error| error.to_string()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("the session store writer has stopped".to_string()),
+            }
+        })
     }
 
     pub(super) fn loaded_child_timeline(&self, session_id: &str) -> Option<&Timeline> {
@@ -1060,30 +1089,10 @@ impl AppState {
         // attention.
         let auto_archive = child.archive_on_complete && matches!(status, TurnStatus::Completed);
         let result_max_chars = child.result_max_chars;
-        // The cached log holds appends the store writer may not have committed
-        // yet; without one, the store is read only after a barrier.
-        let source = match self.event_records.get(&child_id) {
-            Some(log) => Ok(log.fold().clone()),
-            None => Err(self.store_write_barrier(cx)),
-        };
-        let store = self.store.clone();
+        let fold = self.folded_log(&child_id, cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let read_id = child_id.clone();
-            let timeline = match source {
-                Ok(timeline) => Ok(timeline),
-                Err(barrier) => match barrier.recv().await {
-                    Ok(Ok(())) => {
-                        host_cx
-                            .unblock(move || store.read_events(&read_id).map(Timeline::fold_events))
-                            .await
-                    }
-                    Ok(Err(error)) => Err(std::io::Error::other(error)),
-                    Err(_) => Err(std::io::Error::other(
-                        "the session store writer has stopped",
-                    )),
-                },
-            };
+            let timeline = fold.await;
             host_cx.enqueue(move |state, cx| {
                 let timeline = match timeline {
                     Ok(timeline) => timeline,

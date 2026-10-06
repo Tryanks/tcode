@@ -328,7 +328,8 @@ impl AppState {
             Topic::SessionPlan { session_id } => {
                 ServerEvent::SessionPlanReplaced(self.session_plan_snapshot(session_id)?)
             }
-            Topic::SessionEvents { .. } => self.session_events_snapshot(subscription),
+            // Answered from the session's log by `reply_to_subscription`.
+            Topic::SessionEvents { .. } => return None,
             Topic::RuntimeEvents => return None,
             Topic::Preview { .. } => return None,
             // Retained latest-run status, so a client that subscribes after a

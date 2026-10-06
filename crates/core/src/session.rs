@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::merge_file_changes_by_path;
 
+mod superseded;
+
+pub use superseded::{TurnSnapshots, drop_turn_diffs};
+
 /// Claude Code's own prompt for resuming work after a usage-window reset.
 pub const RESUME_PROMPT: &str = "Continue from where you left off.";
 
@@ -169,7 +173,7 @@ impl From<AgentEvent> for StoredEvent {
 }
 
 /// One renderable row in the chat timeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimelineEntry {
     /// Provider item id (or a synthetic id for errors).
     pub id: String,
@@ -181,7 +185,7 @@ pub struct TimelineEntry {
 }
 
 /// Per-turn ("Work Log" section) metadata folded from turn lifecycle events.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TurnMeta {
     /// Provider-native id for this turn, used to attach replacement turn-diff
     /// snapshots without relying on ambient "current turn" state during replay.
@@ -243,7 +247,7 @@ impl TurnTiming {
 /// turn, intersected with the turn's own `TurnStarted`..`TurnCompleted` bounds.
 /// Only the current turn can have items in flight, so one accumulator is
 /// enough; it resets whenever a turn opens.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct ToolClock {
     /// Item ids currently known to be in progress.
     open: HashSet<String>,
@@ -408,13 +412,13 @@ fn tool_is_active(lifecycle: ToolLifecycle, state: ToolState) -> bool {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TurnChangeSet {
     pub changes: Vec<FileChange>,
     pub completeness: ChangeCompleteness,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EntryContent {
     Item(ItemContent),
     /// A user message injected into an already-open turn. Provider-originated
@@ -472,7 +476,7 @@ pub enum SteeringStatus {
 /// A proposed plan captured this session (Codex plan item / Claude
 /// `ExitPlanMode`). Streaming deltas accumulate into `markdown`; a `ProposedPlan`
 /// event replaces it with the final text.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProposedPlan {
     pub item_id: String,
     pub markdown: String,
@@ -502,8 +506,10 @@ pub struct RunningTurn {
     pub started_at: Option<u64>,
 }
 
-/// Folded view of a session's event history.
-#[derive(Debug, Clone, Default)]
+/// Folded view of a session's event history. Two timelines are equal only
+/// when every later event folds the same onto both, so equality covers the
+/// private state the fold continues from, not just what renders.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Timeline {
     /// Top-level entries are shared so virtualized UI snapshots can retain a
     /// turn without cloning its potentially large message, command-output, and
@@ -763,10 +769,7 @@ impl Timeline {
                 completeness,
             } => {
                 let turn = self
-                    .turns
-                    .iter()
-                    .position(|turn| turn.provider_turn_id.as_deref() == Some(turn_id.as_str()))
-                    .or(self.current_turn)
+                    .provider_turn(turn_id)
                     .unwrap_or_else(|| self.push_turn(ts));
                 if !turn_id.is_empty() {
                     self.turns[turn].provider_turn_id = Some(turn_id.clone());
@@ -781,10 +784,7 @@ impl Timeline {
                 checkpoint_id,
             } => {
                 let turn = self
-                    .turns
-                    .iter()
-                    .position(|turn| turn.provider_turn_id.as_deref() == Some(turn_id.as_str()))
-                    .or(self.current_turn)
+                    .provider_turn(turn_id)
                     .unwrap_or_else(|| self.push_turn(ts));
                 self.turns[turn].provider_turn_id = Some(turn_id.clone());
                 self.turns[turn].provider_checkpoint_id = Some(checkpoint_id.clone());
@@ -924,7 +924,9 @@ impl Timeline {
                 }
                 self.usage = Some(usage);
             }
-            AgentEvent::Warning { message } => log::warn!("provider warning: {message}"),
+            // Logged once where the live provider event arrives; a fold also
+            // replays stored records, which would log every old warning again.
+            AgentEvent::Warning { .. } => {}
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn(ts);
                 let id = self.synthetic_id("error", ts);
@@ -1076,6 +1078,15 @@ impl Timeline {
             // Composer metadata belongs to the runtime, not the timeline.
             AgentEvent::ProviderCommands { .. } | AgentEvent::ProviderOptions { .. } => {}
         }
+    }
+
+    /// The turn a provider-addressed record lands on: the first turn carrying
+    /// `turn_id`, else the current one. `None` means the record opens a turn.
+    fn provider_turn(&self, turn_id: &str) -> Option<usize> {
+        self.turns
+            .iter()
+            .position(|turn| turn.provider_turn_id.as_deref() == Some(turn_id))
+            .or(self.current_turn)
     }
 
     /// Whether the current turn is still accumulating. A turn is finished once
