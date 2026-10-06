@@ -20,14 +20,14 @@ use gpui::{
     GlobalElementId, HighlightStyle, Image, ImageSource, InspectorElementId,
     InteractiveElement as _, IntoElement, LayoutId, ListState, MouseButton, ObjectFit,
     ParentElement as _, Pixels, Rems, Role, SharedString, StatefulInteractiveElement as _, Style,
-    Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px, relative,
-    rems, size,
+    Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
 use crate::{diff::model::sub_runs, highlight};
 
 use super::{
+    fitted_image::FittedImage,
     inline::{Inline, InlineState},
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
     link_target::LinkTarget,
@@ -604,6 +604,7 @@ fn render_paragraph(
                 let tooltip_title = title.clone();
                 let view = view.clone();
                 let source = view.read(cx).image_source(&image.url);
+                let image_source = source.clone();
                 let link = image.link.clone();
                 let context_view = view.clone();
                 let context_url = image.url.clone();
@@ -620,40 +621,43 @@ fn render_paragraph(
                 } else {
                     Role::Button
                 };
-                crate::material::accessible_clickable(img(source.clone()), ix, role, label, cx)
-                    .object_fit(ObjectFit::Contain)
-                    .max_w(relative(1.))
-                    .max_h(px(720.))
-                    .min_w(px(15.))
-                    .min_h(px(15.))
-                    .cursor_pointer()
-                    .when(link.is_some(), |image| {
-                        image.tooltip(move |window, cx| {
-                            Tooltip::new(tooltip_title.clone()).build(window, cx)
+                let image =
+                    crate::material::accessible_clickable(img(source.clone()), ix, role, label, cx)
+                        .object_fit(ObjectFit::Contain)
+                        .cursor_pointer()
+                        .when(link.is_some(), |image| {
+                            image.tooltip(move |window, cx| {
+                                Tooltip::new(tooltip_title.clone()).build(window, cx)
+                            })
                         })
-                    })
-                    .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-                        context_view.update(cx, |state, cx| {
-                            state.set_pending_context(
-                                Some(PendingContextTarget::Image {
-                                    url: context_url.clone(),
-                                    title: context_title.clone(),
-                                }),
-                                cx,
-                            )
-                        });
-                    })
-                    .on_click(move |_, window, cx| {
-                        crate::widgets::stop_click_propagation(window, cx);
-                        if let Some(link) = &link {
-                            match view.read(cx).resolve_link(&link.url) {
-                                LinkTarget::Web(url) => cx.open_url(&url),
-                                LinkTarget::Local(path) => cx.open_with_system(&path),
+                        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                            context_view.update(cx, |state, cx| {
+                                state.set_pending_context(
+                                    Some(PendingContextTarget::Image {
+                                        url: context_url.clone(),
+                                        title: context_title.clone(),
+                                    }),
+                                    cx,
+                                )
+                            });
+                        })
+                        .on_click(move |_, window, cx| {
+                            crate::widgets::stop_click_propagation(window, cx);
+                            if let Some(link) = &link {
+                                match view.read(cx).resolve_link(&link.url) {
+                                    LinkTarget::Web(url) => cx.open_url(&url),
+                                    LinkTarget::Local(path) => cx.open_with_system(&path),
+                                }
+                            } else {
+                                crate::image_viewer::open(
+                                    source.clone(),
+                                    title.clone(),
+                                    window,
+                                    cx,
+                                );
                             }
-                        } else {
-                            crate::image_viewer::open(source.clone(), title.clone(), window, cx);
-                        }
-                    })
+                        });
+                FittedImage::new(image_source, image)
             }))
             .into_any_element();
     }
@@ -1160,15 +1164,13 @@ fn render_diagram(
     let source = ImageSource::Image(image);
     let lightbox_source = source.clone();
     let diagram = crate::material::accessible_clickable(
-        img(source),
+        img(source.clone()),
         SharedString::from(format!("markdown-mermaid-{}", options.path)),
         Role::Button,
         label,
         cx,
     )
     .object_fit(ObjectFit::Contain)
-    .max_w(relative(1.))
-    .max_h(px(720.))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         gpui_base::TextSelection::end(window, cx);
@@ -1196,7 +1198,7 @@ fn render_diagram(
                 .p_3()
                 .rounded(cx.theme().tokens.radius.md)
                 .bg(cx.theme().tokens.colors.muted)
-                .child(diagram),
+                .child(FittedImage::new(source, diagram)),
         );
     #[cfg(test)]
     let block = {
