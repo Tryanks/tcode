@@ -777,6 +777,8 @@ impl AppState {
     }
 
     /// Restore an archived thread (Settings → Archived Threads → Unarchive).
+    /// Restoring is activity: without it the auto-archive sweep would take an
+    /// idle thread straight back. A thread that was read stays read.
     pub fn unarchive_session(&mut self, session_id: &str, cx: &mut HostCx) {
         let Some(archived_at) = self
             .sessions
@@ -786,6 +788,8 @@ impl AppState {
         else {
             return;
         };
+        let now = now_secs();
+        let mut visited_changed = false;
         let ids = descendant_session_ids(&self.sessions, session_id);
         for id in ids {
             let Some(mut meta) = self
@@ -796,9 +800,18 @@ impl AppState {
             else {
                 continue;
             };
+            if let Some(visited) = self.settings.last_visited.get_mut(&id)
+                && *visited >= meta.updated_at
+            {
+                *visited = now;
+                visited_changed = true;
+            }
             meta.archived_at = None;
-            let meta = meta.clone();
+            meta.updated_at = now;
             self.persist_meta(&meta, cx);
+        }
+        if visited_changed {
+            self.persist_settings(cx);
         }
     }
 

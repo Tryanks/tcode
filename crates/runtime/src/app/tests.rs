@@ -1347,6 +1347,73 @@ fn archive_and_unarchive_apply_exact_timestamp_cascades() {
 }
 
 #[test]
+fn unarchived_thread_survives_the_next_auto_archive_sweep() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-unarchive-sweep-test");
+    let root = test_store.root().clone();
+    let store = (*test_store).clone();
+    let idle_since = now_secs() - 30 * 86_400;
+    for (id, updated_at, archived_at) in [
+        ("recent", now_secs(), None),
+        ("restored", idle_since, Some(idle_since + 1)),
+    ] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        meta.id = id.into();
+        meta.project_id = Some("project".into());
+        meta.updated_at = updated_at;
+        meta.archived_at = archived_at;
+        store.upsert_meta(&meta).unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new(store.clone()));
+    state.update(cx, |state, _| {
+        state.settings.auto_archive_keep_count = 1;
+        state.settings.auto_archive_max_idle_days = 1;
+        state
+            .settings
+            .last_visited
+            .insert("restored".into(), idle_since);
+    });
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::UnarchiveSession {
+            session_id: "restored".into(),
+        },
+    );
+    state.dispatch_command(
+        cx,
+        2,
+        Command::AutoArchiveSweep {
+            project_id: "project".into(),
+        },
+    );
+    cx.run_until_parked();
+
+    assert!(cx.drain_outgoing().iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 2,
+            result: Ok(CommandResponse::ArchivedCount(0))
+        }
+    )));
+    let restored = store
+        .load_index()
+        .unwrap()
+        .into_iter()
+        .find(|meta| meta.id == "restored")
+        .unwrap();
+    assert_eq!(restored.archived_at, None);
+    assert!(restored.updated_at > idle_since);
+    state.read(|state| {
+        assert!(
+            !state.session_unread(&restored),
+            "a thread read before it was archived is still read"
+        );
+    });
+}
+
+#[test]
 fn title_session_uses_configured_model_with_low_effort() {
     let defaults = title_session_meta(&Settings::default(), PathBuf::from("/tmp/project"));
     assert_eq!(defaults.provider, ProviderKind::Codex);
