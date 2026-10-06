@@ -144,7 +144,7 @@ pub enum QueryResponse {
     /// screen, not a session.
     TerminalFrame(Box<crate::terminal::TerminalFrame>),
     ItemOutput(String),
-    ArchivedSessions(Vec<tcode_core::project::SessionMeta>),
+    ArchivedSessions(crate::ArchivedSessions),
 }
 
 /// One content match in a stored session, addressed by the folded timeline

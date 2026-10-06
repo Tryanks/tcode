@@ -83,6 +83,7 @@ impl PlanPanel {
             &[
                 TopicKind::ActiveSession,
                 TopicKind::SessionStatus,
+                TopicKind::SessionPlan,
                 TopicKind::SessionEvents,
             ],
             cx,

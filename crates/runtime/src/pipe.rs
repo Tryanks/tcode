@@ -829,8 +829,8 @@ fn dispatch_query(
             cx.spawn_background(async move { result })
         }
         Query::ArchivedSessions => {
-            let sessions = app.archived_sessions();
-            cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(sessions)) })
+            let archived = app.archived_sessions();
+            cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
         }
         Query::RenderStoredOutput {
             session_id,

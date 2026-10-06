@@ -316,6 +316,7 @@ impl Composer {
                     TopicKind::ActiveSession,
                     TopicKind::Index,
                     TopicKind::SessionStatus,
+                    TopicKind::SessionPlan,
                     TopicKind::SessionEvents,
                     TopicKind::Settings,
                     TopicKind::Providers,

@@ -1,6 +1,30 @@
 use super::*;
 
 impl AppState {
+    pub(super) fn native_rewind_blocked(&self, active: &ActiveSession) -> bool {
+        !active.meta.provider.caps().native_rewind
+            || active.turn_in_flight
+            || active.delivery_in_flight.is_some()
+            || active.background_task_count > 0
+            || active.timeline.turn_running
+            || !active.queue.is_empty()
+            || self.pending_native_rewinds.contains_key(&active.meta.id)
+    }
+
+    pub(super) fn checkout_blocked(active: &ActiveSession) -> bool {
+        // A provider that dies without closing its timeline turn must not block
+        // checkout forever: the promise is no foreground turn.
+        active.turn_in_flight
+    }
+
+    pub(super) fn conversation_read_only(meta: &SessionMeta) -> bool {
+        meta.native_subagent.is_some()
+    }
+
+    pub(super) fn queued_message_editable(active: &ActiveSession, id: u64) -> bool {
+        active.delivery_in_flight != Some(id)
+    }
+
     /// Validate retained conversation writes before the pipe acknowledges ownership.
     pub(crate) fn validate_command_target(
         &self,
@@ -154,14 +178,47 @@ impl AppState {
             )
         })?;
         match command {
-            Command::SetDraftWorkspace { .. } if !active.draft => return Err(error("not_a_draft", "Only a draft can change workspace.")),
-            Command::CheckoutBranch { .. } if active.timeline.turn_running => return Err(error("turn_running", "Wait for the running turn before changing branches.")),
-            Command::CaptureTerminalSelection { selection: None, .. } => return Err(error("no_selection", "Select terminal text first.")),
+            Command::SetDraftWorkspace { .. } if !active.draft => {
+                return Err(error("not_a_draft", "Only a draft can change workspace."));
+            }
+            Command::CheckoutBranch { .. } if Self::checkout_blocked(active) => {
+                return Err(error(
+                    "turn_running",
+                    "Wait for the running turn before changing branches.",
+                ));
+            }
+            Command::CaptureTerminalSelection {
+                selection: None, ..
+            } => return Err(error("no_selection", "Select terminal text first.")),
             Command::NewTerminal { .. } | Command::SplitTerminal { .. }
-                if active.terminal_workspace.terminals.len() + self.pending_terminal_spawns.get(session_id).map_or(0, HashMap::len) >= MAX_TERMINALS_PER_SESSION => return Err(error("terminal_limit", "This thread has reached its terminal limit.")),
-            Command::SplitTerminal { .. } if active.terminal_workspace.active_id.is_none_or(|first| active.terminal_workspace.split_for(first).is_some() || self.pending_terminal_spawns.get(session_id).is_some_and(|spawns| spawns.values().any(|action| matches!(action, TerminalSpawnAction::Split { first: pending, .. } if *pending == first)))) => return Err(error("terminal_split_unavailable", "There is no terminal available to split.")),
+                if self.terminal_limit_reached(active) =>
+            {
+                return Err(error(
+                    "terminal_limit",
+                    "This thread has reached its terminal limit.",
+                ));
+            }
+            Command::SplitTerminal { .. } if !self.terminal_split_available(active) => {
+                return Err(error(
+                    "terminal_split_unavailable",
+                    "There is no terminal available to split.",
+                ));
+            }
             Command::RewindTurn { turn, mode, .. }
-                if !active.meta.provider.caps().native_rewind || active.turn_in_flight || active.delivery_in_flight.is_some() || active.background_task_count > 0 || active.timeline.turn_running || !active.queue.is_empty() || active.timeline.turns.get(*turn).and_then(|turn| turn.provider_checkpoint_id.as_ref()).is_none() || (*turn == 0 && mode.includes_conversation()) || self.pending_native_rewinds.contains_key(session_id) => return Err(error("rewind_unavailable", "This turn cannot be rewound now.")),
+                if self.native_rewind_blocked(active)
+                    || active
+                        .timeline
+                        .turns
+                        .get(*turn)
+                        .and_then(|turn| turn.provider_checkpoint_id.as_ref())
+                        .is_none()
+                    || (*turn == 0 && mode.includes_conversation()) =>
+            {
+                return Err(error(
+                    "rewind_unavailable",
+                    "This turn cannot be rewound now.",
+                ));
+            }
             Command::ActivateTerminal { terminal_id, .. }
             | Command::CloseTerminal { terminal_id, .. }
             | Command::CaptureTerminalSelection { terminal_id, .. }
@@ -227,7 +284,7 @@ impl AppState {
             }
             Command::SteerQueued { id, .. } | Command::DropQueued { id, .. }
                 if !active.queue.iter().any(|message| message.id == *id)
-                    || active.delivery_in_flight == Some(*id) =>
+                    || !Self::queued_message_editable(active, *id) =>
             {
                 return Err(error(
                     "unknown_queued_message",
@@ -271,7 +328,7 @@ impl AppState {
                 | Command::Steer { .. }
                 | Command::ImplementPlan { .. }
         ) {
-            if active.meta.native_subagent.is_some() {
+            if Self::conversation_read_only(&active.meta) {
                 return Err(error(
                     "read_only_session",
                     "This thread is a read-only mirror.",
@@ -365,7 +422,7 @@ mod tests {
                     }
                 }
                 4 => {
-                    state.resident_mut(&id).unwrap().timeline.turn_running = true;
+                    state.resident_mut(&id).unwrap().turn_in_flight = true;
                     Command::CheckoutBranch {
                         session_id: id.clone(),
                         branch: "main".into(),
@@ -415,6 +472,45 @@ mod tests {
             assert!(state.resident(&id).unwrap().queue.is_empty());
         }
     }
+    #[test]
+    fn checkout_is_admitted_after_provider_death_with_an_unclosed_timeline_turn() {
+        let store = TestStore::new("checkout-after-death");
+        let mut state = AppState::new((*store).clone()).unwrap();
+        let mut context = TestAppContext::default();
+        let mut cx = context.host_cx();
+        let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+        let active = state.resident_mut(&id).unwrap();
+        active.timeline.apply_at(
+            None,
+            &AgentEvent::TurnStarted {
+                turn_id: "unclosed".into(),
+            },
+        );
+        active.turn_in_flight = true;
+        active.mark_dead();
+        assert!(active.timeline.turn_running);
+        assert!(!state.session_status_snapshot(&id).unwrap().checkout_blocked);
+        crate::pipe::handle_client_message(
+            &mut state,
+            &mut cx,
+            ClientMessage {
+                id: 43,
+                key: Some("checkout".into()),
+                payload: ClientPayload::Command(Command::CheckoutBranch {
+                    session_id: id,
+                    branch: "main".into(),
+                }),
+            },
+        );
+        assert!(context.drain_outgoing().iter().any(|message| matches!(
+            message,
+            HostMessage::Ack {
+                id: 43,
+                result: Ok(_)
+            }
+        )));
+    }
+
     #[test]
     fn provider_channel_rejection_is_not_acknowledged_as_success() {
         let store = TestStore::new("provider-write-rejection");

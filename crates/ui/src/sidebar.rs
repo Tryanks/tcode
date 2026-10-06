@@ -4604,7 +4604,33 @@ mod tests {
                 Topic::Index,
                 ServerEvent::IndexSnapshot(IndexSnapshot {
                     summary: tcode_protocol::IndexSummary {
-                        activity,
+                        activity: activity
+                            .into_iter()
+                            .map(
+                                |(
+                                    id,
+                                    (
+                                        working,
+                                        waiting_for_approval,
+                                        waiting_for_input,
+                                        background_only,
+                                    ),
+                                )| {
+                                    (
+                                        id,
+                                        tcode_protocol::SessionActivity {
+                                            working,
+                                            turn_running: working && !background_only,
+                                            waiting_for_approval,
+                                            waiting_for_input,
+                                            background_only,
+                                            unread: false,
+                                            fork: tcode_protocol::ForkAvailability::Available,
+                                        },
+                                    )
+                                },
+                            )
+                            .collect(),
                         ..Default::default()
                     },
                     sessions,
@@ -6073,7 +6099,15 @@ mod tests {
                 summary: tcode_protocol::IndexSummary {
                     activity: HashMap::from([(
                         "running-child".into(),
-                        (true, false, false, false),
+                        tcode_protocol::SessionActivity {
+                            working: true,
+                            turn_running: true,
+                            background_only: false,
+                            waiting_for_approval: false,
+                            waiting_for_input: false,
+                            unread: false,
+                            fork: tcode_protocol::ForkAvailability::Available,
+                        },
                     )]),
                     ..tcode_protocol::IndexSummary::default()
                 },

@@ -1542,8 +1542,11 @@ impl Render for TerminalDrawer {
                             })),
                     )
                     .context_menu({
-                        let can_split =
-                            tabs.len() < MAX_TERMINALS_PER_SESSION && active_split.is_none();
+                        let can_split = self
+                            .workspace_store
+                            .read(cx)
+                            .session_status()
+                            .is_some_and(|status| status.terminal_split_available);
                         move |menu, _, _| {
                             let item = |kind| Box::new(TerminalTabMenu { id, kind });
                             menu.menu(
@@ -1570,8 +1573,16 @@ impl Render for TerminalDrawer {
             );
         }
 
-        let at_limit = tabs.len() >= MAX_TERMINALS_PER_SESSION;
-        let can_split = !at_limit && active_id.is_some() && active_split.is_none();
+        let at_limit = self
+            .workspace_store
+            .read(cx)
+            .session_status()
+            .is_some_and(|status| status.terminal_limit_reached);
+        let can_split = self
+            .workspace_store
+            .read(cx)
+            .session_status()
+            .is_some_and(|status| status.terminal_split_available);
         let active_exited = tabs
             .iter()
             .any(|(id, _, exited, _)| Some(*id) == active_id && *exited);

@@ -139,6 +139,49 @@ pub struct SessionMeta {
     pub updated_at: u64,
 }
 
+/// An ephemeral index of the stored and live sessions using each path or branch.
+/// Two distinct owners suffice to answer sharing queries excluding the owner itself.
+pub struct WorktreeSharing<'a> {
+    paths: HashMap<PathBuf, Vec<&'a SessionMeta>>,
+    branches: HashMap<&'a str, Vec<&'a SessionMeta>>,
+}
+
+impl<'a> WorktreeSharing<'a> {
+    pub fn new(sessions: impl IntoIterator<Item = &'a SessionMeta>) -> Self {
+        let mut sharing = Self {
+            paths: HashMap::new(),
+            branches: HashMap::new(),
+        };
+        for meta in sessions {
+            for ancestor in meta.cwd.ancestors() {
+                Self::add_owner(sharing.paths.entry(ancestor.to_owned()).or_default(), meta);
+            }
+            if let Some(worktree) = &meta.worktree {
+                Self::add_owner(sharing.branches.entry(&worktree.branch).or_default(), meta);
+            }
+        }
+        sharing
+    }
+
+    fn add_owner(owners: &mut Vec<&'a SessionMeta>, meta: &'a SessionMeta) {
+        if owners.len() < 2 && owners.iter().all(|other| other.id != meta.id) {
+            owners.push(meta);
+        }
+    }
+
+    pub fn is_shared(&self, meta: &SessionMeta) -> bool {
+        let Some(worktree) = &meta.worktree else {
+            return false;
+        };
+        self.paths
+            .get(&meta.cwd)
+            .into_iter()
+            .chain(self.branches.get(worktree.branch.as_str()))
+            .flatten()
+            .any(|other| meta.shares_worktree_with(other))
+    }
+}
+
 impl SessionMeta {
     /// Whether `other` works in the worktree this session owns. A fork keeps
     /// the source's cwd without the `worktree` ownership marker, so the cwd
@@ -569,13 +612,16 @@ mod tests {
         let sibling = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt/source-2"), None);
         let checkout = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/repo"), None);
 
-        assert!(owner.shares_worktree_with(&fork));
-        assert!(owner.shares_worktree_with(&nested));
-        assert!(!owner.shares_worktree_with(&sibling));
-        assert!(!owner.shares_worktree_with(&checkout));
-        assert!(!owner.shares_worktree_with(&owner));
+        assert!(WorktreeSharing::new([&owner, &fork]).is_shared(&owner));
+        assert!(WorktreeSharing::new([&owner, &nested]).is_shared(&owner));
+        assert!(!WorktreeSharing::new([&owner, &sibling]).is_shared(&owner));
+        assert!(!WorktreeSharing::new([&owner, &checkout]).is_shared(&owner));
+        assert!(!WorktreeSharing::new([&owner, &owner]).is_shared(&owner));
+        let mut same_branch = sibling.clone();
+        same_branch.worktree = owner.worktree.clone();
+        assert!(WorktreeSharing::new([&owner, &same_branch]).is_shared(&owner));
         assert!(
-            !fork.shares_worktree_with(&owner),
+            !WorktreeSharing::new([&owner, &fork]).is_shared(&fork),
             "a fork owns no worktree"
         );
     }

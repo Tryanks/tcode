@@ -188,23 +188,6 @@ impl AppState {
         self.reschedule_scheduled_wake(cx);
     }
 
-    /// Deterministic queue mutation for cross-crate replica consistency tests.
-    /// It deliberately skips provider dispatch so GPUI's test scheduler never
-    /// observes a real adapter thread.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn queue_message_for_replica_test(
-        &mut self,
-        target_id: &str,
-        text: String,
-        _cx: &mut HostCx,
-    ) {
-        let Some(active) = self.resident_mut(target_id) else {
-            return;
-        };
-        active.push_queued(text, Vec::new());
-    }
-
     pub(super) fn send_turn_assembled(
         &mut self,
         target_id: &str,
@@ -214,7 +197,7 @@ impl AppState {
     ) {
         if self
             .resident(target_id)
-            .is_some_and(|active| active.meta.native_subagent.is_some())
+            .is_some_and(|active| Self::conversation_read_only(&active.meta))
         {
             log::warn!("refusing to send to a read-only native subagent mirror session");
             return;
@@ -642,7 +625,9 @@ impl AppState {
         // `steer` consumes the session's armed Ultrathink flag, but this
         // message captured its own at queue time — re-arm so it rides along.
         active.pending_ultrathink = message.ultrathink;
+        let command_key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
         self.steer_assembled(target_id, message.text, message.attachments, cx);
+        cx.delivery_key = command_key;
         self.reschedule_scheduled_wake(cx);
     }
 
