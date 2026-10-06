@@ -23,3 +23,13 @@ pub use progress::Progress;
 pub use spinner::Spinner;
 pub use switch::Switch;
 pub use tooltip::Tooltip;
+
+/// Stops a click's propagation after letting the window text selection see
+/// the release. gpui-base ends a selection gesture from a bubble-phase
+/// MouseUp listener on the root, and a MouseDown anywhere begins one, so a
+/// click handler that only stops propagation leaves the selection following
+/// the pointer until the next release.
+pub(crate) fn stop_click_propagation(window: &mut gpui::Window, cx: &mut gpui::App) {
+    gpui_base::TextSelection::end(window, cx);
+    cx.stop_propagation();
+}
