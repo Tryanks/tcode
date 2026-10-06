@@ -2,7 +2,7 @@
 // Debug builds keep the console so `RUST_LOG` output stays visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use std::{borrow::Cow, rc::Rc, time::Duration};
+use std::{borrow::Cow, cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
     App, BorrowAppContext as _, Entity, ParentElement as _, Styled as _, TitlebarOptions,
@@ -20,6 +20,7 @@ use tcode_ui::{assets, settings};
 use tcode_ui::overlay::{DialogActions, OverlayExt as _};
 use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
+mod migration;
 #[cfg(not(target_os = "linux"))]
 mod preview_smoke;
 
@@ -44,6 +45,10 @@ fn main_window_background() -> WindowBackgroundAppearance {
         WindowBackgroundAppearance::Opaque
     }
 }
+
+/// Background redraws of an inactive window are capped to this interval
+/// unless Settings turns the throttle off.
+const INACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 
 const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -183,7 +188,7 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
 
 /// Start the in-process host and put the mux in front of it. This window is
 /// then one ordinary client among every link attached to that mux.
-fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
+fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -203,9 +208,108 @@ fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
         }
         Err(error) => log::warn!("MCP host failed to bind: {error}"),
     }
-    let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
+    let host = spawn_host(store, host_services)?;
     let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
-    (host, mux)
+    Ok((host, mux))
+}
+
+/// The local host did not start — most often because another Tcode already
+/// owns the data directory. Say why on stderr and in a dialog, then exit
+/// non-zero.
+fn exit_with_startup_failure(error: std::io::Error) -> ! {
+    struct StartupFailure;
+    impl gpui::Render for StartupFailure {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    eprintln!("tcode: {error}");
+    let detail = error.to_string();
+    gpui_platform::application().run(move |cx| {
+        // gpui ends a quit with status 0; this observer is the last code that
+        // runs before it.
+        cx.on_app_quit(|_| async { std::process::exit(1) }).detach();
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(420.), px(160.)), cx)),
+            ..Default::default()
+        };
+        let opened = cx.open_window(options, |_, cx| {
+            gpui::AppContext::new(cx, |_| StartupFailure)
+        });
+        let Ok(window) = opened else {
+            cx.quit();
+            return;
+        };
+        cx.activate(true);
+        let _ = window.update(cx, |_, window, cx| {
+            let quit = tcode_ui::tr!("quit.confirm");
+            let answer = window.prompt(
+                gpui::PromptLevel::Critical,
+                &tcode_ui::tr!("quit.startup_failed"),
+                Some(&detail),
+                &[quit.as_ref()],
+                cx,
+            );
+            cx.spawn(async move |_, cx| {
+                let _ = answer.await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    });
+    std::process::exit(1)
+}
+
+/// Every desktop window: the main one and the startup migration's.
+fn window_options(cx: &App, inactive_frame_interval: Option<Duration>) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
+        // Low enough that the window can actually be dragged into the
+        // compact layout; the launch geometry above is unchanged.
+        window_min_size: Some(size(px(360.), px(480.))),
+        // macOS: seamless titlebar — transparent, with the traffic lights
+        // nudged down to sit vertically centered in the 52px top strip.
+        //
+        // Windows: also client-decorated — a transparent titlebar hides
+        // the system one — and `tcode_ui`'s window caption cluster draws
+        // the minimize/maximize/close controls into whichever top strip
+        // is rightmost (`crates/ui/src/window_caption.rs`).
+        //
+        // Linux: we draw no controls of our own there, so a transparent
+        // titlebar would leave the window with no way to be closed from
+        // the chrome. Keep the native system titlebar; our top strip
+        // simply sits below it.
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),
+            traffic_light_position: Some(point(px(12.), px(19.))),
+        }),
+        // macOS: the app owns titlebar dragging. AppKit's native
+        // titlebar-region drag sits on top of whatever gpui draws in the
+        // top strip — dragging the Preview URL bar moved the window
+        // instead of selecting text. Every draggable strip already goes
+        // through `window_drag_area` (`start_window_move`), so hand the
+        // whole content view to the app and let controls own their input.
+        app_owns_titlebar_drag: true,
+        // Spell out that Windows is client-decorated. (This field is
+        // advisory off Wayland; leaving it `None` elsewhere keeps Linux
+        // on whatever its compositor/backend already chose.)
+        window_decorations: cfg!(target_os = "windows").then_some(WindowDecorations::Client),
+        // Persistent windows use the platform's system material:
+        // macOS sidebar vibrancy, Windows Acrylic, or an opaque fallback.
+        window_background: main_window_background(),
+        // Throttle background redraws (spinners, streaming output) to
+        // ~2 FPS while the window is inactive; gpui lifts the cap the
+        // moment the window is active or receiving high-rate input.
+        // This setting is captured at window creation and requires a restart.
+        inactive_frame_interval,
+        ..Default::default()
+    }
 }
 
 struct LocalKernel {
@@ -216,18 +320,18 @@ struct LocalKernel {
 }
 
 impl LocalKernel {
-    fn start(store: SessionStore) -> Self {
-        let (host, mux) = start_local(store);
+    fn start(store: SessionStore) -> std::io::Result<Self> {
+        let (host, mux) = start_local(store)?;
         let connection = mux.attach();
         let control_link = HostLink::new(connection.to_host, connection.from_host);
         let pump_link = control_link.clone();
         let control_pump = smol::spawn(async move { pump_link.pump().await });
-        Self {
+        Ok(Self {
             host,
             mux,
             control_link,
             _control_pump: control_pump,
-        }
+        })
     }
 
     /// A window's link to the local kernel. The mux keeps the kernel alive
@@ -354,10 +458,19 @@ fn main() {
         }
         None => AttachmentTarget::Local,
     };
+    // An older build's threads move into tcode.db before the kernel starts,
+    // behind a window of their own. With nothing to migrate, the kernel
+    // starts before the event loop.
+    let migration_needed = match store.needs_migration() {
+        Ok(needed) => needed,
+        Err(error) => exit_with_startup_failure(error),
+    };
     // Kernel ownership is process composition, not a property of whichever
     // host the window currently views.
-    let kernel = Rc::new(LocalKernel::start(store));
-    let local_settings = kernel.settings();
+    let kernel = (!migration_needed).then(|| match LocalKernel::start(store.clone()) {
+        Ok(kernel) => Rc::new(kernel),
+        Err(error) => exit_with_startup_failure(error),
+    });
 
     gpui_platform::application()
         .with_assets(assets::Assets)
@@ -381,191 +494,182 @@ fn main() {
                 Cow::Owned(tcode_ui::flattened_theme_json())
             };
 
-            // Hosting belongs to the process-owned local kernel; it carries no
-            // current-attachment mode.
-            cx.set_global(RemoteController::new(
-                kernel.mux.clone(),
-                data_dir.clone(),
-                kernel.control_link.clone(),
-                local_settings.clone(),
-            ));
-            if local_settings.remote_hosting_enabled {
-                let name = local_settings
-                    .remote_host_name
-                    .clone()
-                    .unwrap_or_else(machine_name);
-                cx.update_global::<RemoteController, _>(|controller, _| {
-                    if let Err(error) = controller.start_hosting(&local_settings.traverse, name) {
-                        log::error!("remote hosting could not start: {error}");
-                    }
-                });
-            }
+            let shell_options = ShellOptions {
+                title: tcode_ui::tr!("app.name").into(),
+                fonts: application_fonts,
+                theme_json,
+                activate: true,
+                system_locale: None,
+                // A desktop window is never suspended by the OS.
+                lifecycle: None,
+                ..ShellOptions::default()
+            };
+            tcode_ui::init_client(cx, native_client.as_ref(), &shell_options);
             #[cfg(target_os = "macos")]
             cx.set_menus([gpui::Menu::new(tcode_ui::tr!("app.name")).items([
                 gpui::MenuItem::action(tcode_ui::tr!("quit.menu_item"), Quit),
             ])]);
-            // Process ownership, not the window's current attachment, grants
-            // authority to stop the local kernel on application quit.
-            let quit_subscription = cx.on_app_quit({
-                let link = kernel.control_link.clone();
-                let to_host = kernel.host.to_host.clone();
-                let stopped = kernel.host.stopped.clone();
-                move |_cx| {
-                    let link = link.clone();
-                    let to_host = to_host.clone();
-                    let stopped = stopped.clone();
-                    async move {
-                        let _ = link.shutdown().await;
-                        // `shutdown` only closes this client's mux connection;
-                        // the host loop ends when its own inbox closes.
-                        to_host.close();
-                        let _ = stopped.recv().await;
+            let appearance = native_client.load_preferences().appearance;
+            let shell_slot: Rc<RefCell<Option<Entity<AppShell>>>> = Rc::default();
+            cx.on_action::<Quit>({
+                let shell_slot = shell_slot.clone();
+                move |action, cx| {
+                    if migration::quit(cx) {
+                        return;
+                    }
+                    let shell = shell_slot.borrow().clone();
+                    match shell {
+                        Some(shell) => handle_quit(action, &shell, cx),
+                        None => cx.quit(),
                     }
                 }
             });
-            quit_subscription.detach();
 
-            let window_options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
-                // Low enough that the window can actually be dragged into the
-                // compact layout; the launch geometry above is unchanged.
-                window_min_size: Some(size(px(360.), px(480.))),
-                // macOS: seamless titlebar — transparent, with the traffic lights
-                // nudged down to sit vertically centered in the 52px top strip.
-                //
-                // Windows: also client-decorated — a transparent titlebar hides
-                // the system one — and `tcode_ui`'s window caption cluster draws
-                // the minimize/maximize/close controls into whichever top strip
-                // is rightmost (`crates/ui/src/window_caption.rs`).
-                //
-                // Linux: we draw no controls of our own there, so a transparent
-                // titlebar would leave the window with no way to be closed from
-                // the chrome. Keep the native system titlebar; our top strip
-                // simply sits below it.
-                titlebar: Some(TitlebarOptions {
-                    title: None,
-                    appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),
-                    traffic_light_position: Some(point(px(12.), px(19.))),
-                }),
-                // macOS: the app owns titlebar dragging. AppKit's native
-                // titlebar-region drag sits on top of whatever gpui draws in the
-                // top strip — dragging the Preview URL bar moved the window
-                // instead of selecting text. Every draggable strip already goes
-                // through `window_drag_area` (`start_window_move`), so hand the
-                // whole content view to the app and let controls own their input.
-                app_owns_titlebar_drag: true,
-                // Spell out that Windows is client-decorated. (This field is
-                // advisory off Wayland; leaving it `None` elsewhere keeps Linux
-                // on whatever its compositor/backend already chose.)
-                window_decorations: cfg!(target_os = "windows")
-                    .then_some(WindowDecorations::Client),
-                // Persistent windows use the platform's system material:
-                // macOS sidebar vibrancy, Windows Acrylic, or an opaque fallback.
-                window_background: main_window_background(),
-                // Throttle background redraws (spinners, streaming output) to
-                // ~2 FPS while the window is inactive; gpui lifts the cap the
-                // moment the window is active or receiving high-rate input.
-                // This setting is captured at window creation and requires a restart.
-                inactive_frame_interval: (!local_settings.inactive_frame_throttle_disabled)
-                    .then(|| Duration::from_millis(500)),
-                ..Default::default()
-            };
-
-            let local_kernel = kernel.clone();
-            let (window, shell) = tcode_ui::run_shell(
-                cx,
-                native_client.clone(),
-                ShellOptions {
-                    window: window_options,
-                    title: tcode_ui::tr!("app.name").into(),
-                    fonts: application_fonts,
-                    theme_json,
-                    activate: true,
-                    system_locale: None,
-                    // A desktop window is never suspended by the OS.
-                    lifecycle: None,
-                    setup: ShellSetup {
-                        client_host: Some(native_client.clone()),
-                        local: Some(Rc::new(move || local_kernel.transport())),
-                        initial: Some(initial_target.clone()),
-                        initial_pairing_error: None,
-                        // Only here: bootstrap applies locale and theme from the
-                        // host's own settings before the first frame.
-                        seed_blocking: true,
-                        restore_navigation: false,
-                    },
-                },
-            );
-
-            cx.on_action::<Quit>({
-                let shell = shell.clone();
-                move |action, cx| handle_quit(action, &shell, cx)
-            });
-            // Restart continuity: if this launch follows a permission-grant
-            // relaunch, reopen the recorded session and Settings page. Only
-            // meaningful for a host in this process: the marker lives in this
-            // machine's data dir, and a remote host's marker is its own.
-            if shell
-                .read(cx)
-                .store()
-                .is_some_and(|store| !store.read(cx).is_remote())
-                && let Ok(CommandResponse::PendingRelaunchSection {
-                    section: Some(section),
-                    session_id,
-                }) = kernel
-                    .control_link
-                    .command_blocking(Command::ApplyPendingRelaunch)
-            {
-                if let Some(id) = session_id
-                    && let Some(store) = shell.read(cx).store()
-                {
-                    store.update(cx, |store, _| store.select_session(id));
+            let launch = move |cx: &mut App, kernel: Rc<LocalKernel>| {
+                let local_settings = kernel.settings();
+                // Hosting belongs to the process-owned local kernel; it carries no
+                // current-attachment mode.
+                cx.set_global(RemoteController::new(
+                    kernel.mux.clone(),
+                    data_dir.clone(),
+                    kernel.control_link.clone(),
+                    local_settings.clone(),
+                ));
+                if local_settings.remote_hosting_enabled {
+                    let name = local_settings
+                        .remote_host_name
+                        .clone()
+                        .unwrap_or_else(machine_name);
+                    cx.update_global::<RemoteController, _>(|controller, _| {
+                        if let Err(error) = controller.start_hosting(&local_settings.traverse, name)
+                        {
+                            log::error!("remote hosting could not start: {error}");
+                        }
+                    });
                 }
-                let window_state = shell.read(cx).window_state();
-                window_state.update(cx, |state, cx| {
-                    state.pending_settings_section = Some(section);
-                    state.open_settings(cx);
+                // Process ownership, not the window's current attachment, grants
+                // authority to stop the local kernel on application quit.
+                let quit_subscription = cx.on_app_quit({
+                    let link = kernel.control_link.clone();
+                    let to_host = kernel.host.to_host.clone();
+                    let stopped = kernel.host.stopped.clone();
+                    move |_cx| {
+                        let link = link.clone();
+                        let to_host = to_host.clone();
+                        let stopped = stopped.clone();
+                        async move {
+                            let _ = link.shutdown().await;
+                            // `shutdown` only closes this client's mux connection;
+                            // the host loop ends when its own inbox closes.
+                            to_host.close();
+                            let _ = stopped.recv().await;
+                        }
+                    }
                 });
-            }
+                quit_subscription.detach();
 
-            cx.spawn(async move |cx| {
-                #[cfg(not(target_os = "linux"))]
-                if let Some(watchdog) = preview_smoke_watchdog {
-                    preview_smoke::run(watchdog, shell, window, cx).await;
-                    return;
-                }
-                let _ = window;
-
-                if open_latest {
-                    let Some(link) = cx.update(|cx| shell.read(cx).link()) else {
-                        return;
-                    };
-                    if let Ok(CommandResponse::SessionId(Some(id))) =
-                        link.command(Command::OpenLatestSession).await
-                        && let Some(store) = cx.update(|cx| shell.read(cx).store())
+                let local_kernel = kernel.clone();
+                let options = window_options(
+                    cx,
+                    (!local_settings.inactive_frame_throttle_disabled)
+                        .then_some(INACTIVE_FRAME_INTERVAL),
+                );
+                let (window, shell) = tcode_ui::run_shell(
+                    cx,
+                    native_client.clone(),
+                    ShellOptions {
+                        window: options,
+                        setup: ShellSetup {
+                            client_host: Some(native_client.clone()),
+                            local: Some(Rc::new(move || local_kernel.transport())),
+                            initial: Some(initial_target.clone()),
+                            initial_pairing_error: None,
+                            // Only here: bootstrap applies locale and theme from the
+                            // host's own settings before the first frame.
+                            seed_blocking: true,
+                            restore_navigation: false,
+                        },
+                        ..shell_options
+                    },
+                );
+                *shell_slot.borrow_mut() = Some(shell.clone());
+                // Restart continuity: if this launch follows a permission-grant
+                // relaunch, reopen the recorded session and Settings page. Only
+                // meaningful for a host in this process: the marker lives in this
+                // machine's data dir, and a remote host's marker is its own.
+                if shell
+                    .read(cx)
+                    .store()
+                    .is_some_and(|store| !store.read(cx).is_remote())
+                    && let Ok(CommandResponse::PendingRelaunchSection {
+                        section: Some(section),
+                        session_id,
+                    }) = kernel
+                        .control_link
+                        .command_blocking(Command::ApplyPendingRelaunch)
+                {
+                    if let Some(id) = session_id
+                        && let Some(store) = shell.read(cx).store()
                     {
                         store.update(cx, |store, _| store.select_session(id));
                     }
-                    for _ in 0..100 {
-                        if cx.update(|cx| {
-                            shell
-                                .read(cx)
-                                .store()
-                                .is_some_and(|store| store.read(cx).active_session_id().is_some())
-                        }) {
-                            break;
-                        }
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(10))
-                            .await;
-                    }
-                    if let Some(store) = cx.update(|cx| shell.read(cx).store()) {
-                        store.update(cx, |store, _cx| {
-                            store.sync_active_conversation_ui();
-                        });
-                    }
+                    let window_state = shell.read(cx).window_state();
+                    window_state.update(cx, |state, cx| {
+                        state.pending_settings_section = Some(section);
+                        state.open_settings(cx);
+                    });
                 }
-            })
-            .detach();
+
+                cx.spawn(async move |cx| {
+                    #[cfg(not(target_os = "linux"))]
+                    if let Some(watchdog) = preview_smoke_watchdog {
+                        preview_smoke::run(watchdog, shell, window, cx).await;
+                        return;
+                    }
+                    let _ = window;
+
+                    if open_latest {
+                        let Some(link) = cx.update(|cx| shell.read(cx).link()) else {
+                            return;
+                        };
+                        if let Ok(CommandResponse::SessionId(Some(id))) =
+                            link.command(Command::OpenLatestSession).await
+                            && let Some(store) = cx.update(|cx| shell.read(cx).store())
+                        {
+                            store.update(cx, |store, _| store.select_session(id));
+                        }
+                        for _ in 0..100 {
+                            if cx.update(|cx| {
+                                shell.read(cx).store().is_some_and(|store| {
+                                    store.read(cx).active_session_id().is_some()
+                                })
+                            }) {
+                                break;
+                            }
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(10))
+                                .await;
+                        }
+                        if let Some(store) = cx.update(|cx| shell.read(cx).store()) {
+                            store.update(cx, |store, _cx| {
+                                store.sync_active_conversation_ui();
+                            });
+                        }
+                    }
+                })
+                .detach();
+            };
+
+            match kernel {
+                Some(kernel) => launch(cx, kernel),
+                None => {
+                    let options = window_options(cx, Some(INACTIVE_FRAME_INTERVAL));
+                    let kernel_store = store.clone();
+                    migration::run(cx, store, options, appearance, move |cx| {
+                        launch(cx, Rc::new(LocalKernel::start(kernel_store)?));
+                        Ok(())
+                    });
+                }
+            }
         });
 }

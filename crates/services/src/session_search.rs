@@ -1,12 +1,11 @@
 //! Lazy full-text search over persisted session event logs.
 //!
-//! The index is deliberately in-memory: each session is parsed only when its
-//! JSONL file's length or modification time changes. This keeps the append-only
-//! persistence format authoritative and avoids a second on-disk database.
+//! The index is deliberately in-memory: each session is parsed again only after
+//! the store reports a committed change to its event log
+//! ([`SessionStore::event_generation`]). The store stays authoritative and the
+//! cache dies with it.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::time::SystemTime;
 
 use agent::ItemContent;
 use tcode_core::project::SessionMeta;
@@ -23,19 +22,13 @@ pub struct SearchableEntry {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileFingerprint {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
 #[derive(Debug, Clone)]
 struct CachedSession {
-    fingerprint: FileFingerprint,
+    generation: u64,
     entries: Vec<SearchableEntry>,
 }
 
-/// Incremental, file-freshness-based content index for one [`SessionStore`].
+/// Incremental content index for one [`SessionStore`].
 pub struct SessionSearch {
     store: SessionStore,
     cache: HashMap<String, CachedSession>,
@@ -91,34 +84,29 @@ impl SessionSearch {
     }
 
     fn refresh(&mut self, meta: &SessionMeta) {
-        let path = self.store.root().join(format!("{}.jsonl", meta.id));
-        let fingerprint = match fs::metadata(path) {
-            Ok(metadata) => FileFingerprint {
-                len: metadata.len(),
-                modified: metadata.modified().ok(),
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => FileFingerprint {
-                len: 0,
-                modified: None,
-            },
-            Err(error) => {
-                log::warn!("cannot inspect session log {}: {error}", meta.id);
-                return;
-            }
-        };
+        // Read before the events: a write that commits during the read moves
+        // the generation on, so the next search parses again.
+        let generation = self.store.event_generation(&meta.id);
         if self
             .cache
             .get(&meta.id)
-            .is_some_and(|cached| cached.fingerprint == fingerprint)
+            .is_some_and(|cached| cached.generation == generation)
         {
             return;
         }
-        let entries = extract_searchable_entries(&self.store.read_events(&meta.id));
+        let events = match self.store.read_events(&meta.id) {
+            Ok(events) => events,
+            Err(error) => {
+                log::warn!("cannot search session {}: {error}", meta.id);
+                self.cache.remove(&meta.id);
+                return;
+            }
+        };
         self.cache.insert(
             meta.id.clone(),
             CachedSession {
-                fingerprint,
-                entries,
+                generation,
+                entries: extract_searchable_entries(&events),
             },
         );
     }
@@ -248,6 +236,8 @@ mod tests {
     use agent::{AgentEvent, ItemStatus, ProviderKind, ThreadItem};
     use serde_json::json;
     use tcode_core::project::SessionMeta;
+
+    use crate::store::Mutation;
 
     use super::*;
 
@@ -380,8 +370,18 @@ mod tests {
         assert_eq!(updated.len(), 5);
         assert_eq!(updated[4].entry_id, "next");
         assert_eq!(updated[4].turn, 1);
-        fs::remove_file(root.join(format!("{}.jsonl", meta.id))).unwrap();
+        // A replaced log of the same shape (line count, length) is still seen
+        // as changed.
+        let replaced = String::from_utf8(store.read_event_log(&meta.id).unwrap())
+            .unwrap()
+            .replace("auth.rs", "xyzw.rs");
+        store
+            .apply(&[Mutation::replace_event_log(&meta.id, replaced.into_bytes())])
+            .unwrap();
         assert!(search.search(sessions, "auth.rs", 10).is_empty());
+        assert_eq!(search.search(sessions, "xyzw.rs", 10).len(), 5);
+        store.remove_session(&meta.id).unwrap();
+        assert!(search.search(sessions, "xyzw.rs", 10).is_empty());
         for (text, query, expected) in [
             ("  中文\nCAFÉ\t😀 ", " café ", Some("中文 CAFÉ 😀")),
             ("İstanbul", "i\u{307}stan", Some("İstanbul")),
@@ -430,6 +430,6 @@ mod tests {
         assert!(hits[0].snippet.contains("AUTH.rs"));
         assert!(hits[0].snippet.chars().count() <= 142);
         assert!(hits[0].snippet.starts_with('…') && hits[0].snippet.ends_with('…'));
-        fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

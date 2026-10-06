@@ -229,6 +229,7 @@ pub struct Dialog {
     width: Pixels,
     max_width: Option<Pixels>,
     close_button: bool,
+    fill: bool,
     overlay: bool,
     overlay_closable: bool,
     keyboard: bool,
@@ -250,6 +251,7 @@ impl Dialog {
             width: px(448.),
             max_width: None,
             close_button: true,
+            fill: false,
             overlay: true,
             overlay_closable: true,
             keyboard: true,
@@ -287,6 +289,13 @@ impl Dialog {
     }
     pub fn close_button(mut self, value: bool) -> Self {
         self.close_button = value;
+        self
+    }
+
+    /// Span the whole window instead of floating a card: the surface brings
+    /// its own chrome, as the image viewer does.
+    pub fn fill(mut self) -> Self {
+        self.fill = true;
         self
     }
     pub fn w(mut self, width: impl Into<Pixels>) -> Self {
@@ -378,21 +387,26 @@ impl RenderOnce for Dialog {
         let popup = div()
             .id(("tcode-dialog", self.layer))
             .absolute()
-            .left(x)
-            .top(y)
-            .w(width)
-            .when_some(self.max_width, |el, width| el.max_w(width))
-            .max_h(viewport.height - y - px(16.))
-            .min_h_24()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .p(padding.top)
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(crate::material::radius_overlay(cx))
-            .shadow_xl()
+            .map(|el| {
+                if self.fill {
+                    return el.inset_0().overflow_hidden();
+                }
+                el.left(x)
+                    .top(y)
+                    .w(width)
+                    .when_some(self.max_width, |el, width| el.max_w(width))
+                    .max_h(viewport.height - y - px(16.))
+                    .min_h_24()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p(padding.top)
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(crate::material::radius_overlay(cx))
+                    .shadow_xl()
+            })
             .occlude()
             .refine_style(&self.style)
             .when_some(self.title, |el, title| {

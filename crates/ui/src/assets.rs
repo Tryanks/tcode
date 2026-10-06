@@ -70,6 +70,22 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../../../assets/icons/rotate-ccw.svg"),
     ),
     (
+        "icons/zoom-in.svg",
+        include_bytes!("../../../assets/icons/zoom-in.svg"),
+    ),
+    (
+        "icons/zoom-out.svg",
+        include_bytes!("../../../assets/icons/zoom-out.svg"),
+    ),
+    (
+        "icons/maximize-2.svg",
+        include_bytes!("../../../assets/icons/maximize-2.svg"),
+    ),
+    (
+        "icons/minimize-2.svg",
+        include_bytes!("../../../assets/icons/minimize-2.svg"),
+    ),
+    (
         "icons/openai.svg",
         include_bytes!("../../../assets/icons/openai.svg"),
     ),

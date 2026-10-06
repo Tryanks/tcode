@@ -402,7 +402,13 @@ impl AppState {
     /// Reload sessions written by the external-history importer and expand its
     /// project group.
     fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
-        self.sessions = self.store.load_index();
+        match self.store.load_index() {
+            Ok(sessions) => self.sessions = sessions,
+            Err(error) => self.report_error(
+                RuntimeError::External(format!("could not reload the imported threads: {error}")),
+                cx,
+            ),
+        }
         if self
             .settings
             .collapsed_projects
@@ -437,10 +443,17 @@ impl AppState {
         let store = self.store.clone();
         let host_cx = cx.clone();
         cx.spawn_background(async move {
-            barrier.recv().await.map_err(|error| ProtocolError {
-                code: "store_barrier_closed".into(),
-                message: format!("session-store flush failed: {error}"),
-            })?;
+            barrier
+                .recv()
+                .await
+                .map_err(|error| ProtocolError {
+                    code: "store_barrier_closed".into(),
+                    message: format!("session-store flush failed: {error}"),
+                })?
+                .map_err(|message| ProtocolError {
+                    code: "store_flush_failed".into(),
+                    message,
+                })?;
             let suggested_name = export::export_file_name(&meta.title, format);
             let bytes = host_cx
                 .unblock(move || export::render_thread(&store, &meta, format))
@@ -924,9 +937,9 @@ impl AppState {
         let fork_id = fork.id.clone();
         let (completion, completed) = smol::channel::bounded(1);
         self.enqueue_store_write(
-            StoreWrite::CloneEvents {
+            StoreWrite::Fork {
                 src: source.id,
-                dst: fork.id.clone(),
+                meta: Box::new(fork.clone()),
                 completion,
             },
             cx,
@@ -939,13 +952,6 @@ impl AppState {
                 .unwrap_or_else(|_| Err("session store writer stopped".into()));
             host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
-                    state.enqueue_store_write(
-                        StoreWrite::UpsertMeta {
-                            meta: Box::new(fork.clone()),
-                            initial: true,
-                        },
-                        cx,
-                    );
                     state.upsert_session_in_memory(fork.clone());
                     state.select_session(&fork.id, cx);
                     if let Some(snapshot) =
@@ -960,7 +966,7 @@ impl AppState {
                     }
                 }
                 Err(error) => {
-                    state.report_error(RuntimeError::PersistEvent { error }, cx);
+                    state.report_error(RuntimeError::PersistSession { error }, cx);
                 }
             });
         });
@@ -968,7 +974,7 @@ impl AppState {
     }
 
     /// Permanently delete a thread: stop the provider, close its terminal,
-    /// delete meta + JSONL, and (when `remove_worktree`) remove the git worktree
+    /// delete meta + event log, and (when `remove_worktree`) remove the git worktree
     /// it was the last user of.
     pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
         self.clear_approvals(session_id);
@@ -1450,19 +1456,32 @@ impl AppState {
         };
         // A cached log is the whole conversation, including appends whose
         // disk writes are still queued, so the timeline derives from it and
-        // never from a JSONL that can lag the store writer. A session opened
+        // never from the store, which lags the writes still queued. A session opened
         // for a client loads its log here, on the mailbox, because the
         // snapshot that answers the subscription needs it in the same turn;
         // a background session parses off the mailbox and caches on completion.
-        let cached = match target {
-            TimelineLoadTarget::Active { .. } => Some(
-                self.event_records
-                    .entry(session_id.clone())
-                    .or_insert_with(|| SessionLog::load(&self.store, &session_id)),
-            ),
-            TimelineLoadTarget::Background => self.event_records.get_mut(&session_id),
+        if matches!(target, TimelineLoadTarget::Active { .. })
+            && !self.event_records.contains_key(&session_id)
+        {
+            match SessionLog::load(&self.store, &session_id) {
+                Ok(log) => {
+                    self.event_records.insert(session_id.clone(), log);
+                }
+                Err(error) => {
+                    self.report_error(
+                        RuntimeError::External(format!(
+                            "could not load thread {session_id}: {error}"
+                        )),
+                        cx,
+                    );
+                    return;
+                }
+            }
         }
-        .map(|log| (log.records().len(), log.fold().clone()));
+        let cached = self
+            .event_records
+            .get(&session_id)
+            .map(|log| (log.records().len(), log.fold().clone()));
         let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
@@ -1470,10 +1489,13 @@ impl AppState {
             let (timeline, folded, loaded, git_branch) = {
                 let (mut timeline, folded, loaded) = match cached {
                     Some((folded, fold)) => (fold, folded, None),
-                    None => {
-                        let log = SessionLog::load(&store, &read_id);
-                        (log.fold().clone(), log.records().len(), Some(log))
-                    }
+                    None => match SessionLog::load(&store, &read_id) {
+                        Ok(log) => (log.fold().clone(), log.records().len(), Some(log)),
+                        Err(error) => {
+                            log::error!("could not load thread {read_id}: {error}");
+                            return;
+                        }
+                    },
                 };
                 let (mark_idle, load_branch) = match target {
                     TimelineLoadTarget::Active { mark_idle } => (mark_idle, true),
@@ -1526,7 +1548,7 @@ impl AppState {
     }
 
     /// Adopt a subscribed session, including an uncommitted parked draft. Stored
-    /// sessions replay their JSONL; providers start lazily on the next send.
+    /// sessions replay their event log; providers start lazily on the next send.
     pub fn select_session(&mut self, session_id: &str, cx: &mut HostCx) {
         if self.residents.live.contains_key(session_id) {
             return;
