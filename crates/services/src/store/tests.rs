@@ -363,6 +363,8 @@ fn a_start_after_an_interrupted_migration_discards_the_staging_files_and_starts_
 }
 
 /// Every file in `root`, by name, with its bytes; `legacy/` as a marker.
+/// The store's own files are recorded by name only: Windows locks the whole
+/// of a file the store holds, so even the empty `tcode.lock` cannot be read.
 fn snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     fs::read_dir(root)
         .unwrap()
@@ -371,6 +373,8 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
             let name = entry.file_name().into_string().unwrap();
             let bytes = if entry.file_type().unwrap().is_dir() {
                 b"<dir>".to_vec()
+            } else if name == LOCK_FILE || name.starts_with(DB_FILE) {
+                b"<store file>".to_vec()
             } else {
                 fs::read(entry.path()).unwrap()
             };
