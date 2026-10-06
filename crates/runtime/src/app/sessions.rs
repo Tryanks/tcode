@@ -1101,11 +1101,20 @@ impl AppState {
             .is_some_and(ActiveSession::has_work)
     }
 
-    /// Record that a thread has been visited now (clears its unread dot).
-    pub(super) fn mark_visited(&mut self, session_id: &str, cx: &mut HostCx) {
+    /// Advance a thread's last-visited watermark to the `updated_at` a client
+    /// has shown. A late acknowledgement never rewinds a newer one.
+    pub fn mark_session_read(&mut self, session_id: &str, through: u64, cx: &mut HostCx) {
+        if self
+            .settings
+            .last_visited
+            .get(session_id)
+            .is_some_and(|&visited| visited >= through)
+        {
+            return;
+        }
         self.settings
             .last_visited
-            .insert(session_id.to_string(), now_secs());
+            .insert(session_id.to_string(), through);
         self.persist_settings(cx);
     }
 
@@ -1579,7 +1588,6 @@ impl AppState {
         let Some(meta) = self.find_meta(session_id) else {
             return;
         };
-        self.mark_visited(session_id, cx);
 
         // A parked session is re-adopted, not replayed cold: its process, pump
         // and queue come back as they were, and the timeline is rebuilt from the

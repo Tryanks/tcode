@@ -158,6 +158,7 @@ impl AppState {
                 | Command::RegenerateSessionTitle { .. }
                 | Command::DeleteSession { .. }
                 | Command::MarkSessionUnread { .. }
+                | Command::MarkSessionRead { .. }
                 | Command::ForkThread { .. }
         ) {
             return if self.sessions.iter().any(|meta| meta.id == session_id)

@@ -2752,69 +2752,70 @@ fn orchestrate_dispatch_access_maps_known_values() {
     );
 }
 
+/// A remote client on a bad network can queue a thread's subscription and its
+/// unsubscription together and deliver both after it reconnects, although the
+/// conversation never loaded on its screen. Only the client's acknowledgement
+/// that it showed the thread marks it read.
 #[test]
-fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
+fn only_a_loaded_conversation_marks_a_thread_read() {
+    use tcode_protocol::{ClientPayload, Subscription, Topic};
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-viewed-unread-test");
+    let test_store = TestStore::new("tcode-read-on-load-test");
     let store = (*test_store).clone();
-    let mut first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
-    first.updated_at = 100;
-    let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
-    store.upsert_meta(&first).unwrap();
-    store.upsert_meta(&second).unwrap();
-    let first_id = first.id.clone();
-    let second_id = second.id.clone();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
+    meta.updated_at = 100;
+    store.upsert_meta(&meta).unwrap();
+    let id = meta.id.clone();
     let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        assert!(
-            !state.index_snapshot().summary.activity[&first_id].unread,
-            "never visited"
-        );
-        state.settings.last_visited.insert(first_id.clone(), 50);
-        let activity = &state.index_snapshot().summary.activity[&first_id];
+    state.update(cx, |state, _| {
+        state.settings.last_visited.insert(id.clone(), 50);
+    });
+    // Read through the index projection every client shows.
+    let unread = |state: &TestEntity| {
+        state.read(|state| state.index_snapshot().summary.activity[&id].unread)
+    };
+    assert!(unread(&state), "updated after the last visit");
+    state.read(|state| {
+        let activity = &state.index_snapshot().summary.activity[&id];
         assert!(
             !activity.working
                 && !activity.turn_running
                 && !activity.background_only
                 && !activity.waiting_for_approval
-                && !activity.waiting_for_input
+                && !activity.waiting_for_input,
+            "a thread with no live provider has no work"
         );
-        assert!(
-            state.index_snapshot().summary.activity[&first_id].unread,
-            "newer than the last visit"
-        );
-        state.settings.last_visited.insert(first_id.clone(), 100);
-        assert!(
-            !state.index_snapshot().summary.activity[&first_id].unread,
-            "equal to the last visit"
-        );
-        state.select_session(&first_id, cx);
-
-        // A turn finishes while the user is watching: updated_at moves past
-        // the watermark stamped on entry, and the meta is persisted.
-        let active = state.selected_session_mut().unwrap();
-        active.meta.updated_at = now_secs() + 10;
-        let meta = active.meta.clone();
-        state.persist_meta(&meta, cx);
-
-        // Switching away must not surface an unread dot for what the user
-        // already saw happen on screen.
-        state.select_session(&second_id, cx);
-        assert!(!state.index_snapshot().summary.activity[&first_id].unread);
-
-        // But an update landing on a thread the user is NOT viewing still
-        // marks it unread.
-        let mut parked = state
-            .sessions
-            .iter()
-            .find(|m| m.id == first_id)
-            .cloned()
-            .unwrap();
-        parked.updated_at = now_secs() + 20;
-        state.persist_meta(&parked, cx);
-        assert!(state.index_snapshot().summary.activity[&first_id].unread);
     });
+
+    let subscription = Subscription {
+        topic: Topic::SessionEvents {
+            session_id: id.clone(),
+        },
+        after: None,
+    };
+    state.deliver(cx, 1, ClientPayload::Subscribe(subscription.clone()));
+    state.deliver(cx, 2, ClientPayload::Unsubscribe(subscription));
+    cx.run_until_parked();
+    assert!(unread(&state), "a late subscription is not a read");
+
+    let read = |through| Command::MarkSessionRead {
+        session_id: id.clone(),
+        through,
+    };
+    state.dispatch_command(cx, 3, read(100));
+    assert!(!unread(&state), "read through what the client showed");
+    state.dispatch_command(cx, 4, read(80));
+    assert!(
+        !unread(&state),
+        "a delayed older acknowledgement does not rewind"
+    );
+
+    state.update(cx, |state, cx| {
+        let mut parked = state.sessions.iter().find(|m| m.id == id).cloned().unwrap();
+        parked.updated_at = 120;
+        state.persist_meta(&parked, cx);
+    });
+    assert!(unread(&state), "newer than anything the client showed");
 }
 
 #[test]
@@ -3685,6 +3686,105 @@ fn orchestrate_send_reactivates_the_child_and_its_settled_parent() {
         assert!(
             state.find_meta("child").unwrap().archived_at.is_none(),
             "send should revive an archived child"
+        );
+    });
+}
+
+/// An orchestrator returning to a long-idle child whose worktree has since been
+/// removed must hear that the child could not start and why, not nothing (the
+/// failure folds into the already-reported turn) or that turn's old output.
+#[test]
+fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-send-missing-cwd-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(TestClientState::new(store));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+    let (child_commands, _child_receiver) = smol::channel::unbounded();
+    let cwd = std::env::temp_dir().join(format!("tcode-removed-{}", uuid::Uuid::new_v4()));
+
+    state.update(cx, |state, cx| {
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state.sessions.push(parent.meta.clone());
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
+
+        let mut child = live_session(ProviderKind::Codex, child_commands);
+        child.meta.id = "child".into();
+        child.meta.parent_session_id = Some("parent".into());
+        child.meta.archive_on_complete = false;
+        child.meta.cwd = cwd.clone();
+        child.turn_in_flight = true;
+        state.sessions.push(child.meta.clone());
+        state.residents.parked.insert(child.meta.id.clone(), child);
+
+        state.on_event("child", persisted_assistant_event("old report"), cx);
+        state.on_event(
+            "child",
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+    });
+    cx.run_until(|state| state.callback_last_turn.contains_key("child"));
+    assert!(matches!(
+        parent_receiver.try_recv(),
+        Ok(SessionCommand::Steer { text, .. }) if text.ends_with("\nold report")
+    ));
+
+    state.update(cx, |state, cx| {
+        state.resident_mut("child").unwrap().shutdown_to_idle();
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Send {
+                parent_id: "parent".into(),
+                thread_id: "child".into(),
+                message: "continue".into(),
+                fast: None,
+            },
+            reply,
+            cx,
+        );
+        assert!(response.try_recv().unwrap().is_ok());
+    });
+    cx.run_until(|_| !parent_receiver.is_empty());
+
+    let Ok(SessionCommand::Steer { text, .. }) = parent_receiver.try_recv() else {
+        panic!("the parent must be told the child failed to start");
+    };
+    assert_eq!(
+        text,
+        format!(
+            "[orchestrate] thread child (\"{}\") failed to start: failed to spawn provider process: working directory `{}` no longer exists",
+            state.read(|state| state.find_meta("child").unwrap().title.clone()),
+            cwd.display()
+        )
+    );
+
+    state.update(cx, |state, cx| {
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Status {
+                parent_id: "parent".into(),
+                thread_id: Some("child".into()),
+            },
+            reply,
+            cx,
+        );
+        let status = response.try_recv().unwrap().unwrap();
+        assert_eq!(status[0]["state"], "failed");
+        assert!(
+            status[0]["start_error"]
+                .as_str()
+                .unwrap()
+                .contains("no longer exists")
         );
     });
 }
@@ -8580,7 +8680,14 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
     assert_eq!(archived.revision, summary_revision);
     assert_eq!(archived.sessions[0].title, "Archived rename");
 
-    state.update(cx, |state, cx| state.mark_visited("kept", cx));
+    state.dispatch_command(
+        cx,
+        4,
+        Command::MarkSessionRead {
+            session_id: "kept".into(),
+            through: 1,
+        },
+    );
     cx.run_until_parked();
     let settings: Vec<_> = cx
         .drain_outgoing()

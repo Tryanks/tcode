@@ -573,6 +573,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.delete_session(&session_id, remove_worktree, cx),
         Command::DeleteProject { project_id } => app.delete_project(&project_id, cx),
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
+        Command::MarkSessionRead {
+            session_id,
+            through,
+        } => app.mark_session_read(&session_id, through, cx),
         Command::StartDraft { project_id, cwd } => {
             response = CommandResponse::SessionId(Some(app.start_draft(project_id, cwd, cx)));
         }
