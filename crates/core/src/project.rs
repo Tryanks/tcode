@@ -263,6 +263,38 @@ pub struct AutoArchiveExemptions {
     pub active: HashSet<String>,
 }
 
+/// `root_id` and every thread under it, each parent before its children:
+/// the threads archive, unarchive and delete act on together. Empty when
+/// `root_id` is not among `sessions`.
+pub fn descendant_session_ids<'a>(
+    sessions: impl IntoIterator<Item = &'a SessionMeta>,
+    root_id: &str,
+) -> Vec<String> {
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut found = false;
+    for meta in sessions {
+        found |= meta.id == root_id;
+        if let Some(parent) = meta.parent_session_id.as_deref() {
+            children.entry(parent).or_default().push(&meta.id);
+        }
+    }
+    if !found {
+        return Vec::new();
+    }
+    let mut visited = HashSet::from([root_id]);
+    let mut output = vec![root_id.to_owned()];
+    let mut next = 0;
+    while let Some(id) = output.get(next).cloned() {
+        for &child in children.get(id.as_str()).into_iter().flatten() {
+            if visited.insert(child) {
+                output.push(child.to_owned());
+            }
+        }
+        next += 1;
+    }
+    output
+}
+
 /// Return the cascade-closed ids eligible for auto-archive in one project.
 /// `sessions` may contain only non-archived entries; archived entries are also
 /// defensively ignored here so they cannot consume ranking slots.

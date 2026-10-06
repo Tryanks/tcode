@@ -9,9 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::git::run_git;
+use crate::store::SessionStore;
 
 const WORKTREE_SEED_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
-const WORKTREES_DIR_ENV: &str = "TCODE_WORKTREES_DIR";
 
 /// A fresh directory may belong to another running tcode process or store.
 /// One hour is deliberately conservative: startup recovery favors preserving
@@ -114,12 +114,17 @@ impl std::fmt::Display for MergeBackError {
 
 impl std::error::Error for MergeBackError {}
 
-/// Provision `session_id` from the branch currently checked out at `root`.
+/// Provision `session_id` from the branch currently checked out at `root`, in
+/// the worktrees directory of the data dir `data_dir`.
 ///
 /// `root` must itself be the canonical main repository root. The target path,
 /// requested branch, collision suffix, base revision, seeding, and rollback are
 /// all owned by this module.
-pub fn provision(root: &Path, session_id: &str) -> Result<ProvisionedWorktree, ProvisionError> {
+pub fn provision(
+    root: &Path,
+    session_id: &str,
+    data_dir: &Path,
+) -> Result<ProvisionedWorktree, ProvisionError> {
     let canonical_root = root
         .canonicalize()
         .map_err(|error| ProvisionError::Git(error.to_string()))?;
@@ -146,7 +151,7 @@ pub fn provision(root: &Path, session_id: &str) -> Result<ProvisionedWorktree, P
         &canonical_root,
         session_id,
         &base,
-        &worktrees_root(),
+        &worktrees_root(data_dir),
         WORKTREE_SEED_LIMIT_BYTES,
     )
     .map_err(Into::into)
@@ -386,41 +391,54 @@ fn tree_is_clean(cwd: &Path) -> Result<bool, MergeBackError> {
         .map_err(MergeBackError::Git)
 }
 
-fn worktrees_root() -> PathBuf {
-    std::env::var_os(WORKTREES_DIR_ENV)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".tcode")
-                .join("worktrees")
-        })
+/// A data dir's worktrees live inside it: its sweep can only tell which ones
+/// its own threads use or keep.
+fn worktrees_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("worktrees")
 }
 
-/// Remove old, clean app-owned worktrees that no known session owns or works in.
+/// Remove old, clean app-owned worktrees in `store`'s data dir that none of
+/// its threads works in and that were not kept when their thread was deleted.
 ///
-/// Tests and isolated processes may set `TCODE_WORKTREES_DIR`; production falls
-/// back to `~/.tcode/worktrees`. Fresh unknown entries are presumed live and
-/// preserved for at least [`ORPHAN_MIN_AGE`]. Removal is never forced: a
-/// worktree the user kept on delete may hold uncommitted work.
-pub fn cleanup_orphans(
-    known_session_ids: &HashSet<String>,
-    session_cwds: &[PathBuf],
-) -> CleanupSummary {
+/// Fresh unknown entries are presumed live and preserved for at least
+/// [`ORPHAN_MIN_AGE`]. Removal is never forced: a worktree may hold
+/// uncommitted work. Nothing is removed when the store cannot be read.
+pub fn cleanup_orphans(store: &SessionStore) -> CleanupSummary {
+    let sessions = match store.read_file() {
+        Ok(file) => file.sessions,
+        Err(error) => {
+            log::warn!("skipping orphaned worktree recovery: {error}");
+            return CleanupSummary::default();
+        }
+    };
+    let kept = match store.kept_worktrees() {
+        Ok(kept) => kept,
+        Err(error) => {
+            log::warn!("skipping orphaned worktree recovery: {error}");
+            return CleanupSummary::default();
+        }
+    };
+    let known_ids = sessions.iter().map(|meta| meta.id.clone()).collect();
+    let in_use: Vec<_> = sessions
+        .into_iter()
+        .map(|meta| meta.cwd)
+        .chain(kept)
+        .collect();
     cleanup_orphans_at(
-        &worktrees_root(),
-        known_session_ids,
-        session_cwds,
+        &worktrees_root(store.root()),
+        &known_ids,
+        &in_use,
         SystemTime::now(),
         ORPHAN_MIN_AGE,
     )
 }
 
+/// `in_use` holds paths that keep the worktree containing them: thread cwds
+/// and kept worktrees.
 fn cleanup_orphans_at(
     worktrees: &Path,
     known_session_ids: &HashSet<String>,
-    session_cwds: &[PathBuf],
+    in_use: &[PathBuf],
     now: SystemTime,
     minimum_age: Duration,
 ) -> CleanupSummary {
@@ -443,7 +461,7 @@ fn cleanup_orphans_at(
             .file_type()
             .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink());
         if known_session_ids.contains(&session_id)
-            || session_cwds.iter().any(|cwd| cwd.starts_with(&path))
+            || in_use.iter().any(|used| used.starts_with(&path))
             || !is_directory
         {
             continue;
@@ -1000,7 +1018,7 @@ mod tests {
         let kept = provision_for_test(&root, "kept", &worktrees).path;
         // A deleted source whose fork still runs in its worktree.
         let forked = provision_for_test(&root, "deleted-source", &worktrees).path;
-        // Deleted with "Keep worktree" while holding uncommitted work.
+        // Unknown, but holding uncommitted work: removal is never forced.
         let dirty = provision_for_test(&root, "kept-on-delete", &worktrees).path;
         std::fs::write(dirty.join("notes.txt"), "uncommitted\n").unwrap();
         let known = HashSet::from(["kept".to_string()]);

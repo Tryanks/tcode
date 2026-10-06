@@ -28,6 +28,12 @@ CREATE TABLE events (
 );
 ";
 
+/// Worktrees whose thread was deleted with "keep": the orphan sweep leaves
+/// them. Added to version 1 without a version change, since an older build
+/// that ignores the table loses nothing, so every open creates it if missing.
+pub(super) const KEPT_WORKTREES: &str =
+    "CREATE TABLE IF NOT EXISTS kept_worktrees (path TEXT PRIMARY KEY)";
+
 /// A failure after which the connection or database can no longer be
 /// trusted; the store stops serving every handle once it sees one.
 #[derive(Debug)]

@@ -27,7 +27,7 @@ use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
 use tcode_core::project::{
     AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo, WorktreeSharing,
-    auto_archive_candidates,
+    auto_archive_candidates, descendant_session_ids,
 };
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{

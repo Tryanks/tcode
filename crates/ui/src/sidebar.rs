@@ -1559,8 +1559,9 @@ impl SessionsSidebar {
         });
     }
 
-    /// Permanently delete a thread: an optional confirm, then (when it orphans a
-    /// worktree) a second "remove the worktree too?" prompt.
+    /// Permanently delete a thread and every thread under it: an optional
+    /// confirm, then (when it orphans a worktree) a second "remove the worktree
+    /// too?" prompt.
     fn delete_thread(
         &mut self,
         session_id: &str,
@@ -1575,31 +1576,14 @@ impl SessionsSidebar {
             proceed_delete(store, session_id, window, cx);
             return;
         }
-        let title = title.to_string();
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let alert = alert.bg(cx.theme().popover);
-            let store = store.clone();
-            let session_id = session_id.clone();
-            alert
-                .title(crate::tr!("sidebar.delete_title", title = title.clone()))
-                .description(crate::tr!("sidebar.delete_description"))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("sidebar.delete_action"))
-                        .cancel_text(crate::tr!("settings.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let store = store.clone();
-                    let session_id = session_id.clone();
-                    // The alert closes after this callback; open the next prompt afterwards.
-                    window.defer(cx, move |window, cx| {
-                        proceed_delete(store, session_id, window, cx);
-                    });
-                    true
-                })
-        });
+        confirm_delete(
+            store,
+            session_id,
+            title.to_string(),
+            crate::tr!("sidebar.delete_action").into(),
+            window,
+            cx,
+        );
     }
 
     fn render_app_row(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2909,6 +2893,72 @@ impl SessionsSidebar {
             ),
         )
     }
+}
+
+/// Ask before deleting `session_id`, stating how many threads go with it, then
+/// continue with [`proceed_delete`]. The count needs the archived threads, so
+/// the dialog waits for them when they are not held.
+pub(crate) fn confirm_delete(
+    store: Entity<WorkspaceStore>,
+    session_id: String,
+    title: String,
+    ok_text: SharedString,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    if let Some(count) = store.read(cx).held_deletion_count(&session_id) {
+        open_delete_confirmation(store, session_id, title, ok_text, count, window, cx);
+        return;
+    }
+    let count = store.update(cx, |store, cx| store.fetch_deletion_count(&session_id, cx));
+    window
+        .spawn(cx, async move |cx| {
+            let count = count.await;
+            let _ = cx.update(|window, cx| {
+                open_delete_confirmation(store, session_id, title, ok_text, count, window, cx)
+            });
+        })
+        .detach();
+}
+
+fn open_delete_confirmation(
+    store: Entity<WorkspaceStore>,
+    session_id: String,
+    title: String,
+    ok_text: SharedString,
+    count: usize,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let alert = alert.bg(cx.theme().popover);
+        let store = store.clone();
+        let session_id = session_id.clone();
+        let description = if count > 1 {
+            crate::tr!("sidebar.delete_tree_description", count = count)
+        } else {
+            crate::tr!("sidebar.delete_description")
+        };
+        alert
+            .title(crate::tr!("sidebar.delete_title", title = title.clone()))
+            .description(description)
+            .button_props(
+                DialogButtons::default()
+                    .ok_variant(ButtonVariant::Danger)
+                    .ok_text(ok_text.clone())
+                    .cancel_text(crate::tr!("settings.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, window, cx| {
+                let store = store.clone();
+                let session_id = session_id.clone();
+                // The alert closes after this callback; open the next prompt afterwards.
+                window.defer(cx, move |window, cx| {
+                    proceed_delete(store, session_id, window, cx);
+                });
+                true
+            })
+    });
 }
 
 /// Delete `session_id`, first asking whether to also remove an orphaned worktree.
