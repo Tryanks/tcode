@@ -2915,24 +2915,6 @@ impl WorkspaceStore {
         self.session_status_replica.as_ref()
     }
 
-    pub fn plan_panel_state(&self) -> (Option<String>, Vec<agent::PlanStep>) {
-        if let Some(plan) = self.session_plan() {
-            return (
-                plan.proposed.as_ref().map(|plan| plan.markdown.clone()),
-                plan.steps.clone(),
-            );
-        }
-        self.with_active_timeline(|timeline| {
-            (
-                timeline
-                    .shown_proposed_plan()
-                    .map(|plan| plan.markdown.clone()),
-                timeline.plan_steps.clone(),
-            )
-        })
-        .unwrap_or_default()
-    }
-
     pub fn worktree_orphaned_by_delete(&self, session_id: &str) -> Option<WorktreeInfo> {
         let (meta, shared) = if let Some(meta) = self
             .index_replica
