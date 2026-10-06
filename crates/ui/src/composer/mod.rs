@@ -202,6 +202,7 @@ pub struct Composer {
     /// One cancellable one-second repaint loop, present only while the queue
     /// strip contains at least one scheduled row.
     scheduled_countdown_tick: Option<Task<()>>,
+    queued_refill: Option<(String, u64, String)>,
     /// Mic button + live dictation session (see `components::voice`).
     #[cfg(feature = "voice")]
     voice: Voice,
@@ -316,6 +317,7 @@ impl Composer {
                     TopicKind::ActiveSession,
                     TopicKind::Index,
                     TopicKind::SessionStatus,
+                    TopicKind::SessionPlan,
                     TopicKind::SessionEvents,
                     TopicKind::Settings,
                     TopicKind::Providers,
@@ -346,6 +348,7 @@ impl Composer {
                     // Recompute the active `@`/`/`/`$` trigger and re-render (also
                     // refreshes the send button's has-text state).
                     InputEvent::Change => {
+                        this.queued_refill = None;
                         // An edit that did not come from the transcript writer
                         // ends dictation (see `components::voice`).
                         #[cfg(feature = "voice")]
@@ -453,6 +456,7 @@ impl Composer {
             image_load_generation: 0,
             pending_image_loads: 0,
             scheduled_countdown_tick: None,
+            queued_refill: None,
             #[cfg(feature = "voice")]
             voice,
             _subscriptions: subscriptions,
@@ -540,11 +544,48 @@ impl Composer {
         &mut self,
         id: u64,
         text: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let store = self.workspace_store.read(cx);
+        if !self.interactive(cx)
+            || !store.composer_state().queue.is_some_and(|queue| {
+                queue
+                    .messages
+                    .iter()
+                    .any(|message| message.id == id && message.editable)
+            })
+        {
+            return;
+        }
+        let Some(session_id) = store.active_session_id() else {
+            return;
+        };
+        self.queued_refill = Some((session_id, id, text));
         self.workspace_store
             .update(cx, |store, _cx| store.drop_queued(id));
+        cx.notify();
+    }
+
+    fn sync_queued_refill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((session_id, id, _)) = &self.queued_refill else {
+            return;
+        };
+        let store = self.workspace_store.read(cx);
+        if store.active_session_id().as_ref() != Some(session_id) {
+            self.queued_refill = None;
+            return;
+        }
+        let Some(queue) = store.composer_state().queue else {
+            return;
+        };
+        if let Some(message) = queue.messages.iter().find(|message| message.id == *id) {
+            if !message.editable {
+                self.queued_refill = None;
+            }
+            return;
+        }
+        let (_, _, text) = self.queued_refill.take().unwrap();
         let selection = 0..text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
@@ -582,7 +623,12 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.workspace_store.read(cx).native_subagent_readonly() {
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .conversation_read_only
+        {
             return;
         }
         if self.compact
@@ -998,7 +1044,12 @@ impl Composer {
     /// The composer's primary control: the stop button while a turn runs, the
     /// Refine / Implement (split) controls in the plan-ready state, else send.
     fn render_primary_action(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
-        if self.workspace_store.read(cx).native_subagent_readonly() {
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .conversation_read_only
+        {
             return Button::new("send-message")
                 .debug_selector(|| "send-message".into())
                 .ghost()
@@ -1044,10 +1095,11 @@ impl Render for Composer {
         self.sync_user_input_state(window, cx);
         self.sync_images_session(cx);
         self.sync_text_destination(window, cx);
+        self.sync_queued_refill(window, cx);
         self.sync_native_rewind_prefill(window, cx);
         self.sync_fallback_review_draft(window, cx);
         let composer_state = self.workspace_store.read(cx).composer_state();
-        let readonly = self.workspace_store.read(cx).native_subagent_readonly();
+        let readonly = composer_state.conversation_read_only;
         let turn_running = composer_state.turn_running;
         let approval = composer_state.pending_approval;
         let approval_count = composer_state.pending_approval_count;
@@ -1440,5 +1492,301 @@ impl Render for Composer {
                         el.children(self.render_checkout_row(cx))
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod replica_tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext};
+    use tcode_protocol::{
+        EventEnvelope, HostMessage, ServerEvent, SessionStatus, Topic, encode_line,
+    };
+
+    fn attach(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        async_channel::Sender<String>,
+        async_channel::Receiver<String>,
+        SessionStatus,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-composer-replica-{}-{}",
+            std::process::id(),
+            tcode_services::store::now_millis()
+        ));
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let status = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("replica".into(), std::env::temp_dir(), cx);
+            state.session_status_snapshot(&id).unwrap()
+        }))
+        .unwrap();
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump = link.clone();
+        let executor = cx.background_executor.clone();
+        cx.background_executor
+            .spawn(async move {
+                pump.pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                    .await;
+            })
+            .detach();
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| {
+            store.select_session(status.session_id.clone())
+        });
+        (store, incoming, outgoing, status)
+    }
+
+    fn replace(incoming: &async_channel::Sender<String>, topic: Topic, event: ServerEvent) {
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic,
+                    event,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn queue_edit_waits_for_host_removal_and_in_flight_actions_are_disabled(
+        cx: &mut TestAppContext,
+    ) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        status.queued_messages = vec![tcode_protocol::QueuedMessageStatus {
+            id: 7,
+            editable: false,
+            delivery_key: None,
+            text: "Keep this queued until the host accepts the edit".into(),
+            fire_at_unix_secs: Some(u64::MAX),
+        }];
+        let topic = Topic::SessionStatus {
+            session_id: status.session_id.clone(),
+        };
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        cx.update(|window, cx| _ = window.draw(cx));
+        for action in ["queue-drop-7", "queue-steer-7"] {
+            let button = cx.debug_bounds(action).expect("queue action visible");
+            cx.simulate_click(button.center(), Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+            assert!(
+                composer
+                    .read_with(cx, |composer, cx| composer.draft(cx))
+                    .is_empty()
+            );
+        }
+        while let Ok(line) = outgoing.try_recv() {
+            let message = tcode_protocol::decode_client_line(&line).unwrap();
+            assert!(
+                !matches!(
+                    message.payload,
+                    tcode_protocol::ClientPayload::Command(
+                        tcode_protocol::Command::DropQueued { .. }
+                            | tcode_protocol::Command::SteerQueued { .. }
+                    )
+                ),
+                "disabled actions must not send queue commands"
+            );
+        }
+        status.queued_messages[0].editable = true;
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.update(|window, cx| _ = window.draw(cx));
+        let drop_button = cx.debug_bounds("queue-drop-7").unwrap();
+        cx.simulate_click(drop_button.center(), Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(
+            composer
+                .read_with(cx, |composer, cx| composer.draft(cx))
+                .is_empty(),
+            "the pending host drop is still queued"
+        );
+        assert!(
+            std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
+                tcode_protocol::decode_client_line(&line).unwrap().payload,
+                tcode_protocol::ClientPayload::Command(tcode_protocol::Command::DropQueued {
+                    id: 7,
+                    ..
+                })
+            )),
+            "the enabled drop must reach the host"
+        );
+        status.queued_messages.clear();
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("queue-drop-7").is_none());
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "Keep this queued until the host accepts the edit"
+        );
+        cx.update(|window, cx| {
+            composer.update(cx, |composer, cx| composer.set_draft("", window, cx))
+        });
+        status
+            .queued_messages
+            .push(tcode_protocol::QueuedMessageStatus {
+                id: 8,
+                editable: true,
+                delivery_key: None,
+                text: "Queued text".into(),
+                fire_at_unix_secs: None,
+            });
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.update(|window, cx| _ = window.draw(cx));
+        let drop_button = cx.debug_bounds("queue-drop-8").unwrap();
+        cx.simulate_click(drop_button.center(), Modifiers::default());
+        cx.update(|window, cx| composer.update(cx, |composer, cx| composer.focus(window, cx)));
+        cx.simulate_input("New draft while the drop is pending");
+        cx.run_until_parked();
+        status.queued_messages.clear();
+        replace(
+            &incoming,
+            topic,
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "New draft while the drop is pending"
+        );
+    }
+
+    struct PlanAndComposer {
+        plan: Entity<crate::plan_panel::PlanPanel>,
+        composer: Entity<Composer>,
+    }
+
+    impl Render for PlanAndComposer {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            v_flex()
+                .size_full()
+                .child(div().flex_1().child(self.plan.clone()))
+                .child(self.composer.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn ready_plan_replica_renders_without_a_plan_in_the_history_window(cx: &mut TestAppContext) {
+        let (store, incoming, _outgoing, mut status) = attach(cx);
+        status.draft = false;
+        status.interaction_mode = InteractionMode::Plan;
+        let session_id = status.session_id.clone();
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        replace(
+            &incoming,
+            Topic::SessionEvents {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionSnapshot {
+                from: 0,
+                end: 1,
+                total: 1,
+                total_turns: 10,
+                truncated: false,
+                records: vec![tcode_core::session::StoredEvent {
+                    ts: Some(1),
+                    elided: None,
+                    event: agent::AgentEvent::TurnStarted {
+                        turn_id: "recent-turn".into(),
+                    },
+                }],
+            },
+        );
+        replace(
+            &incoming,
+            Topic::SessionPlan {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                session_id,
+                proposed: Some(tcode_protocol::ProposedPlanStatus {
+                    item_id: "older-plan".into(),
+                    turn: 3,
+                    markdown: "# Ready across devices\n\nImplement the shared plan.".into(),
+                    ready: true,
+                    resolved: false,
+                }),
+                steps: vec![agent::PlanStep {
+                    step: "First shared task".into(),
+                    status: agent::PlanStepStatus::Pending,
+                }],
+            }),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.with_active_timeline(|timeline| {
+                timeline.shown_proposed_plan().is_none()
+            })),
+            Some(true)
+        );
+        let (_, cx) = cx.add_window_view(|window, cx| PlanAndComposer {
+            plan: cx.new(|cx| crate::plan_panel::PlanPanel::new(store.clone(), cx)),
+            composer: cx.new(|cx| Composer::new_with_layout(store.clone(), true, window, cx)),
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("panel-proposed-plan").is_some());
+        assert!(cx.debug_bounds("plan-step-0").is_some());
+        assert!(
+            cx.debug_bounds("implement-main").is_some(),
+            "Implement must use the ready replica"
+        );
     }
 }

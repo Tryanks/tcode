@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{
-    ApprovalMode, ApprovalRequest, InteractionMode, OptionDescriptor, OptionSelection,
-    ProviderCommand, ProviderKind, RewindMode,
+    ApprovalMode, ApprovalRequest, InteractionMode, OptionDescriptor, OptionSelection, PlanStep,
+    ProviderCommand, ProviderKind, RewindMode, TokenUsage,
 };
 use serde::{Deserialize, Serialize};
 use tcode_core::{
@@ -24,6 +24,7 @@ pub type SessionEventRecord = StoredEvent;
 pub enum Topic {
     SessionEvents { session_id: String },
     SessionStatus { session_id: String },
+    SessionPlan { session_id: String },
     Index,
     Settings,
     Providers,
@@ -63,7 +64,8 @@ pub enum ServerEvent {
         request: crate::PreviewRequest,
     },
     SessionEvent(StoredEvent),
-    SessionStatusReplaced(SessionStatus),
+    SessionStatusReplaced(Box<SessionStatus>),
+    SessionPlanReplaced(SessionPlan),
     ProvidersReplaced(ProvidersStatus),
     GitStatusReplaced(GitStatusStatus),
     /// An unarchived thread was added or changed. Archiving a thread removes
@@ -350,11 +352,44 @@ pub struct GitStatusStatus {
     pub busy: bool,
 }
 
-/// Full, ephemeral runtime status for one session.
-///
-/// Unlike [`StoredEvent`], these values are not derivable by folding the
-/// persisted agent event stream. Hosts replace the whole value whenever one of
-/// its fields changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkAvailability {
+    Available,
+    Unsupported,
+    Empty,
+    Running,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionActivity {
+    pub working: bool,
+    pub turn_running: bool,
+    pub background_only: bool,
+    pub waiting_for_approval: bool,
+    pub waiting_for_input: bool,
+    pub unread: bool,
+    pub fork: ForkAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionPlan {
+    pub session_id: String,
+    pub proposed: Option<ProposedPlanStatus>,
+    pub steps: Vec<PlanStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedPlanStatus {
+    pub item_id: String,
+    /// Absolute turn index in the full session history.
+    pub turn: usize,
+    pub markdown: String,
+    pub ready: bool,
+    pub resolved: bool,
+}
+
+/// Host-owned runtime and full-history facts for one resident session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStatus {
     pub session_id: String,
@@ -367,6 +402,8 @@ pub struct SessionStatus {
     pub acp_agent_id: Option<String>,
     pub project_id: Option<String>,
     pub approval_mode: ApprovalMode,
+    pub effective_approval_mode: ApprovalMode,
+    pub native_approval_modes_enabled: bool,
     pub interaction_mode: InteractionMode,
     pub queued_messages: Vec<QueuedMessageStatus>,
     /// Backend-owned drafts used by provider-bound send-path assembly.
@@ -378,11 +415,18 @@ pub struct SessionStatus {
     pub terminal_open: bool,
     pub terminal_height: f32,
     pub delivery_in_flight: Option<u64>,
-    pub turn_running: bool,
+    pub activity: SessionActivity,
     /// An interrupt was accepted by the provider and its turn has not ended yet.
     #[serde(default)]
     pub stopping: bool,
-    pub working: bool,
+    pub native_rewind_blocked: bool,
+    pub checkout_blocked: bool,
+    pub conversation_read_only: bool,
+    pub terminal_limit_reached: bool,
+    pub terminal_split_available: bool,
+    pub usage: Option<TokenUsage>,
+    /// Effective capacity the context meter should use, resolved by the host.
+    pub context_window: Option<u64>,
     /// The live turn and the requests it waits on. A client's fold of a
     /// history window can place them but cannot decide them: the window may
     /// begin after they opened, and a provider can stop without a record.
@@ -437,6 +481,7 @@ pub struct TerminalContextStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessageStatus {
     pub id: u64,
+    pub editable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_key: Option<String>,
     pub text: String,
@@ -459,18 +504,24 @@ pub struct IndexSnapshot {
 /// Index facts that are not one thread's metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexSummary {
-    /// Working, approval, user-input and background-only flags for sidebar rows.
+    /// Host-authored activity for every unarchived stored session.
     #[serde(default)]
-    pub activity: HashMap<String, (bool, bool, bool, bool)>,
+    pub activity: HashMap<String, SessionActivity>,
     /// Background title requests, including threads with no live provider.
     #[serde(default)]
     pub title_generating: HashSet<String>,
     /// Archived threads per project id.
     #[serde(default)]
     pub archived_counts: HashMap<String, usize>,
-    /// Worktree branches archived threads still use.
-    #[serde(default)]
-    pub archived_worktree_branches: HashSet<String>,
+    pub worktree_shared: HashSet<String>,
+    pub archived_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArchivedSessions {
+    pub sessions: Vec<SessionMeta>,
+    pub worktree_shared: HashSet<String>,
+    pub revision: u64,
 }
 
 /// A transient runtime notification delivered to clients.

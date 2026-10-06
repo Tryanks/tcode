@@ -8,7 +8,7 @@ impl Composer {
         let checkout = self.workspace_store.read(cx).composer_state().checkout?;
         let branch = checkout.branch;
         let branches: Rc<[String]> = checkout.branches.into();
-        let turn_running = checkout.turn_running;
+        let checkout_blocked = checkout.checkout_blocked;
         let is_draft = checkout.is_draft;
         let worktree_base = checkout.worktree_base;
         let worktree = checkout.worktree;
@@ -18,13 +18,12 @@ impl Composer {
         let picker_current = worktree_base.clone().unwrap_or_else(|| branch.clone());
         let worktree_mode = worktree_base.is_some();
 
-        // The branch chip: a popover listing local branches. While a turn runs
-        // the selector is disabled (it just shows a "wait" tooltip).
-        let right: AnyElement = if turn_running {
+        let right: AnyElement = if checkout_blocked {
             Button::new("branch-picker")
                 .ghost()
                 .outline()
                 .compact()
+                .disabled(true)
                 .tooltip(crate::tr!("composer.wait_turn"))
                 .child(
                     h_flex()

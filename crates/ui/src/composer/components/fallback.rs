@@ -53,10 +53,12 @@ impl Composer {
         // rewind path additionally needs its turn to have a provider checkpoint.
         let refused = self.workspace_store.read(cx).last_user_message();
         let can_rewind = refused.as_ref().is_some_and(|(turn, _)| {
-            self.workspace_store
-                .read(cx)
-                .chat_native_rewind_state(*turn)
-                .is_some_and(|(available, disabled)| available && !disabled)
+            self.workspace_store.read(cx).absolute_turn(*turn) > 0
+                && self
+                    .workspace_store
+                    .read(cx)
+                    .chat_native_rewind_state(*turn)
+                    .is_some_and(|(available, disabled)| available && !disabled)
         });
 
         let header = h_flex()

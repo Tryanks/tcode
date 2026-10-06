@@ -6,12 +6,14 @@ use tcode_core::{
     settings::Settings,
     ui::{RightTab, WorkspaceMode},
 };
-use tcode_protocol::{ProvidersStatus, QueuedMessageStatus, SessionStatus, TerminalContextStatus};
+use tcode_protocol::{
+    ProvidersStatus, QueuedMessageStatus, SessionPlan, SessionStatus, TerminalContextStatus,
+};
 
 use crate::conversation_ui::ConversationUiState;
 
 #[derive(Clone)]
-pub(crate) struct ComposerActiveModel {
+pub struct ComposerActiveModel {
     pub provider: agent::ProviderKind,
     pub model: Option<String>,
     pub acp_agent_id: Option<String>,
@@ -19,17 +21,17 @@ pub(crate) struct ComposerActiveModel {
 }
 
 #[derive(Clone)]
-pub(crate) struct ComposerCheckoutState {
+pub struct ComposerCheckoutState {
     pub branch: String,
     pub branches: Vec<String>,
-    pub turn_running: bool,
+    pub checkout_blocked: bool,
     pub is_draft: bool,
     pub worktree_base: Option<String>,
     pub worktree: Option<WorktreeInfo>,
 }
 
 #[derive(Clone)]
-pub(crate) struct ComposerQueue {
+pub struct ComposerQueue {
     pub messages: Vec<QueuedMessageStatus>,
     pub can_steer: bool,
     pub agent: &'static str,
@@ -37,7 +39,7 @@ pub(crate) struct ComposerQueue {
 
 /// The complete replica-derived state consumed by composer views in one frame.
 #[derive(Clone)]
-pub(crate) struct ComposerState {
+pub struct ComposerState {
     pub has_active_session: bool,
     pub terminal_contexts: Vec<TerminalContextStatus>,
     pub relay_confirmation: Option<(String, String)>,
@@ -57,7 +59,7 @@ pub(crate) struct ComposerState {
     /// Account rate-limit windows for the profile driving this session.
     pub usage: Option<tcode_core::usage::ProviderUsage>,
     pub provider: Option<agent::ProviderKind>,
-    pub approval_mode: agent::ApprovalMode,
+    pub effective_approval_mode: agent::ApprovalMode,
     pub native_approval_modes_enabled: bool,
     pub approval_pending_restart: bool,
     pub queue: Option<ComposerQueue>,
@@ -67,46 +69,29 @@ pub(crate) struct ComposerState {
     pub checkout: Option<ComposerCheckoutState>,
     pub turn_running: bool,
     pub stopping: bool,
+    pub context_window: Option<u64>,
+    pub native_rewind_blocked: bool,
+    pub checkout_blocked: bool,
+    pub conversation_read_only: bool,
+    pub terminal_limit_reached: bool,
+    pub terminal_split_available: bool,
     pub pending_approval: Option<agent::ApprovalRequest>,
     pub pending_approval_count: usize,
 }
 
 pub(crate) fn composer_state(
     status: Option<&SessionStatus>,
-    timeline: Option<&Timeline>,
+    _timeline: Option<&Timeline>,
+    plan: Option<&SessionPlan>,
     settings: &Settings,
     providers: &ProvidersStatus,
 ) -> ComposerState {
     let provider = status.map(|status| status.provider);
-    let native_approval_modes_enabled = status.is_none_or(|status| {
-        !status
-            .provider
-            .caps()
-            .downgrade_approval_without_native_approvals
-            || status
-                .requested_profile_id
-                .as_deref()
-                .and_then(|id| settings.resolved_profile(id))
-                .map(|profile| profile.settings.pi.native_approvals)
-                .unwrap_or_else(|| {
-                    settings
-                        .provider(agent::ProviderKind::Pi)
-                        .pi
-                        .native_approvals
-                })
-    });
-    let raw_approval_mode = status
-        .map(|status| status.approval_mode)
+    let native_approval_modes_enabled =
+        status.is_none_or(|status| status.native_approval_modes_enabled);
+    let approval_mode = status
+        .map(|status| status.effective_approval_mode)
         .unwrap_or_default();
-    let approval_mode = if !native_approval_modes_enabled
-        && matches!(
-            raw_approval_mode,
-            agent::ApprovalMode::Supervised | agent::ApprovalMode::AutoAcceptEdits
-        ) {
-        agent::ApprovalMode::FullAccess
-    } else {
-        raw_approval_mode
-    };
     let active_model_spec = status.and_then(|status| {
         let model = status.requested_model.as_deref()?;
         providers
@@ -126,7 +111,7 @@ pub(crate) fn composer_state(
         Some(ComposerCheckoutState {
             branch,
             branches: status.branches.clone(),
-            turn_running: status.turn_running,
+            checkout_blocked: status.checkout_blocked,
             is_draft: status.draft,
             worktree_base: match &status.draft_workspace {
                 WorkspaceMode::NewWorktree { base } => Some(base.clone()),
@@ -135,22 +120,12 @@ pub(crate) fn composer_state(
             worktree: status.worktree.clone(),
         })
     });
-    let token_usage = timeline
-        .and_then(|timeline| timeline.usage)
-        .map(|mut usage| {
-            if let Some(status) = status
-                && status.provider == agent::ProviderKind::ClaudeCode
-                && let (Some(model), Some(reported)) =
-                    (status.requested_model.as_deref(), usage.context_window)
-            {
-                let resolved = agent::claude::resolved_context_window(
-                    model,
-                    &status.provider_option_selections,
-                );
-                usage.context_window = Some(reported.min(resolved));
-            }
+    let token_usage = status.and_then(|status| {
+        status.usage.map(|mut usage| {
+            usage.context_window = status.context_window;
             usage
-        });
+        })
+    });
 
     // The session names its profile explicitly only when it is not on the
     // provider's built-in one; both resolve into the same usage map.
@@ -199,7 +174,7 @@ pub(crate) fn composer_state(
         token_usage,
         usage,
         provider,
-        approval_mode,
+        effective_approval_mode: approval_mode,
         native_approval_modes_enabled,
         approval_pending_restart: status.is_some_and(|status| status.approval_pending_restart),
         queue: status.map(|status| ComposerQueue {
@@ -209,12 +184,19 @@ pub(crate) fn composer_state(
         }),
         steering_supported: status.is_some_and(|status| status.steering_supported),
         preparing_worktree: status.is_some_and(|status| status.preparing_worktree),
-        plan_ready_markdown: timeline
-            .and_then(Timeline::plan_ready)
+        plan_ready_markdown: plan
+            .and_then(|plan| plan.proposed.as_ref())
+            .filter(|plan| plan.ready && !plan.resolved)
             .map(|plan| plan.markdown.clone()),
         checkout,
-        turn_running: status.is_some_and(|status| status.turn_running),
+        turn_running: status.is_some_and(|status| status.activity.turn_running),
         stopping: status.is_some_and(|status| status.stopping),
+        context_window: status.and_then(|status| status.context_window),
+        native_rewind_blocked: status.is_none_or(|status| status.native_rewind_blocked),
+        checkout_blocked: status.is_none_or(|status| status.checkout_blocked),
+        conversation_read_only: status.is_some_and(|status| status.conversation_read_only),
+        terminal_limit_reached: status.is_some_and(|status| status.terminal_limit_reached),
+        terminal_split_available: status.is_some_and(|status| status.terminal_split_available),
         pending_approval: status.and_then(|status| status.pending_approvals.first().cloned()),
         pending_approval_count: status.map_or(0, |status| status.pending_approvals.len()),
     }
@@ -233,7 +215,8 @@ pub(crate) struct PanelState {
 pub(crate) fn panel_state(
     ui: Option<&ConversationUiState>,
     status: Option<&SessionStatus>,
-    timeline: Option<&Timeline>,
+    _timeline: Option<&Timeline>,
+    plan: Option<&SessionPlan>,
 ) -> PanelState {
     PanelState {
         right_panel_open: ui.is_some_and(|ui| ui.right_panel_open),
@@ -241,7 +224,7 @@ pub(crate) fn panel_state(
         right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
         terminal_open: ui.is_some_and(|ui| ui.terminal_open),
         terminal_height: ui.map_or(240., |ui| ui.terminal_height),
-        plan_tab_active: timeline.is_some_and(|timeline| timeline.shown_proposed_plan().is_some())
+        plan_tab_active: plan.is_some_and(|plan| plan.proposed.is_some())
             || status.is_some_and(|status| status.interaction_mode == agent::InteractionMode::Plan),
     }
 }
@@ -262,6 +245,8 @@ mod tests {
             acp_agent_id: None,
             project_id: Some("project-1".into()),
             approval_mode: agent::ApprovalMode::Supervised,
+            effective_approval_mode: agent::ApprovalMode::Supervised,
+            native_approval_modes_enabled: true,
             interaction_mode: agent::InteractionMode::Build,
             queued_messages: Vec::new(),
             review_comment_drafts: Vec::new(),
@@ -272,9 +257,23 @@ mod tests {
             terminal_open: false,
             terminal_height: 240.,
             delivery_in_flight: None,
-            turn_running: false,
+            activity: tcode_protocol::SessionActivity {
+                working: false,
+                turn_running: false,
+                background_only: false,
+                waiting_for_approval: false,
+                waiting_for_input: false,
+                unread: false,
+                fork: tcode_protocol::ForkAvailability::Available,
+            },
             stopping: false,
-            working: false,
+            native_rewind_blocked: false,
+            checkout_blocked: false,
+            conversation_read_only: false,
+            terminal_limit_reached: false,
+            terminal_split_available: false,
+            usage: None,
+            context_window: None,
             running_turn: None,
             pending_approvals: Vec::new(),
             pending_user_input: None,
@@ -299,33 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn composer_state_clamps_claude_context_window_to_selected_limit() {
-        let mut status = session_status();
-        status.provider = agent::ProviderKind::ClaudeCode;
-        status.requested_model = Some("claude-sonnet-4-6".into());
-        status.provider_option_selections = vec![agent::OptionSelection {
-            id: "contextWindow".into(),
-            value: serde_json::json!(500_000),
-        }];
-        let mut timeline = Timeline::default();
-        timeline.usage = Some(agent::TokenUsage {
-            context_window: Some(1_000_000),
-            ..Default::default()
-        });
-
-        let state = composer_state(
-            Some(&status),
-            Some(&timeline),
-            &Settings::default(),
-            &ProvidersStatus::default(),
-        );
-
-        assert_eq!(
-            state.token_usage.and_then(|usage| usage.context_window),
-            Some(500_000)
-        );
-    }
-    #[test]
     fn account_usage_eligibility_does_not_hide_session_context_or_supported_errors() {
         let mut settings: Settings = serde_json::from_str(r#"{"profiles":{"custom":{"kind":"claude_code","env":[{"name":"ANTHROPIC_BASE_URL","value":"https://api.example.com/anthropic"}]}}}"#).unwrap();
         let mut status = session_status();
@@ -348,7 +320,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let custom = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+        status.usage = timeline.usage;
+        let custom = composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
         assert_eq!(custom.token_usage.unwrap().used_tokens, Some(1234));
         assert!(custom.usage.is_none());
         settings
@@ -358,7 +331,7 @@ mod tests {
             .settings
             .env
             .clear();
-        let native = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+        let native = composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
         assert_eq!(
             native.usage.unwrap().error.as_deref(),
             Some("temporarily unreachable")
@@ -460,8 +433,10 @@ mod tests {
                         })
                         .await;
                     timeline.apply_at(Some(1 + recorded_events.len() as u64), &event);
+                    status.usage = timeline.usage;
+                    status.context_window = timeline.usage.and_then(|usage| usage.context_window);
                     let snapshot =
-                        composer_state(Some(&status), Some(&timeline), &settings, &providers);
+                        composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
                     if let agent::AgentEvent::ContextCompacted(c) = &event {
                         let u = snapshot.token_usage.unwrap();
                         if c.in_progress {
@@ -495,10 +470,12 @@ mod tests {
                     .await
                     .unwrap();
             });
-            let snapshot = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+            status.usage = timeline.usage;
+            status.context_window = timeline.usage.and_then(|usage| usage.context_window);
+            let snapshot =
+                composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
             let usage = snapshot.token_usage.unwrap();
             assert_eq!(usage.used_tokens, Some([500260, 60, 20764][index]));
-            assert_eq!(usage.context_window, Some(300000));
             assert_eq!(
                 usage.total_processed_tokens,
                 Some([4001300, 4001365, 4063449][index])
@@ -524,7 +501,9 @@ mod tests {
         assert_eq!(untimed.usage, timeline.usage);
         let old: agent::AgentEvent = serde_json::from_str(r#"{"type":"token_usage","used_tokens":4100000,"input_tokens":1000000,"context_window":1000000,"total_processed_tokens":4100000}"#).unwrap();
         replay.apply_at(None, &old);
-        let old = composer_state(Some(&status), Some(&replay), &settings, &providers)
+        status.usage = replay.usage;
+        status.context_window = replay.usage.and_then(|usage| usage.context_window);
+        let old = composer_state(Some(&status), Some(&replay), None, &settings, &providers)
             .token_usage
             .unwrap();
         assert_eq!(old.freshness, agent::ContextFreshness::Unknown);

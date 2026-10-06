@@ -24,10 +24,10 @@ use tcode_core::{
 };
 use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
-    Command, CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
-    GitDiffScope, GitStatusStatus, IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus,
-    ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
-    Subscription, TerminalFrame, Topic,
+    ArchivedSessions, Command, CommandResponse, EventEnvelope, ExternalImportStatus,
+    ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus, IndexSummary, PathEntry,
+    ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir,
+    ServerEvent, SessionPlan, SessionSearchHit, SessionStatus, Subscription, TerminalFrame, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -42,7 +42,9 @@ mod intents;
 pub(crate) use images::host_image;
 mod snapshots;
 
-pub(crate) use snapshots::{ComposerState, PanelState};
+pub use snapshots::ComposerState;
+pub(crate) use snapshots::PanelState;
+pub use tcode_protocol::ForkAvailability;
 
 /// Payload-free topic discriminant used by views to subscribe only to the
 /// store projections they render.
@@ -50,6 +52,7 @@ pub(crate) use snapshots::{ComposerState, PanelState};
 pub enum TopicKind {
     SessionEvents,
     SessionStatus,
+    SessionPlan,
     Index,
     Settings,
     Providers,
@@ -66,6 +69,7 @@ impl From<&Topic> for TopicKind {
         match topic {
             Topic::SessionEvents { .. } => Self::SessionEvents,
             Topic::SessionStatus { .. } => Self::SessionStatus,
+            Topic::SessionPlan { .. } => Self::SessionPlan,
             Topic::Index => Self::Index,
             Topic::Settings => Self::Settings,
             Topic::Providers => Self::Providers,
@@ -154,7 +158,8 @@ pub struct WorkspaceStore {
     index_summary: IndexSummary,
     /// Archived threads, which the index leaves out; loaded while a view
     /// asks for them.
-    archived_replica: Option<Vec<SessionMeta>>,
+    archived_replica: Option<ArchivedSessions>,
+    archived_requested: bool,
     archived_task: Option<Task<()>>,
     /// The thread the index event being applied removed, so the destination
     /// can still follow it to its parent.
@@ -188,14 +193,12 @@ pub struct WorkspaceStore {
     history_logged_records: Option<usize>,
     session_catching_up: bool,
     session_statuses: HashMap<String, SessionStatus>,
+    session_plans: HashMap<String, SessionPlan>,
     git_statuses: HashMap<String, GitStatusStatus>,
     session_replica: Option<(String, Timeline)>,
     session_status_replica: Option<SessionStatus>,
     providers_replica: ProvidersStatus,
     git_status_replica: GitStatusStatus,
-    /// (working, pending_approval, pending_user_input, background_only) for
-    /// parked sessions.
-    background_session_flags: HashMap<String, (bool, bool, bool, bool)>,
     active_destination: Option<ConversationDestination>,
     /// One-shot turn navigation requested by a cross-session content search.
     pending_chat_turn: Option<(String, usize)>,
@@ -238,14 +241,6 @@ pub struct ThreadExportArtifact {
     pub bytes: Vec<u8>,
     pub suggested_name: String,
     pub mime: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForkAvailability {
-    Available,
-    Unsupported,
-    Empty,
-    Running,
 }
 
 pub(crate) struct DiffActiveState {
@@ -347,6 +342,7 @@ impl WorkspaceStore {
             index_replica: (Vec::new(), Vec::new()),
             index_summary: IndexSummary::default(),
             archived_replica: None,
+            archived_requested: false,
             archived_task: None,
             removed_session: None,
             settings_replica: Settings::default(),
@@ -368,12 +364,12 @@ impl WorkspaceStore {
             history_logged_records: None,
             session_catching_up: false,
             session_statuses: HashMap::new(),
+            session_plans: HashMap::new(),
             git_statuses: HashMap::new(),
             session_replica: None,
             session_status_replica: None,
             providers_replica: ProvidersStatus::default(),
             git_status_replica: GitStatusStatus::default(),
-            background_session_flags: HashMap::new(),
             active_destination: None,
             pending_chat_turn: None,
             native_rewind_prefills: HashMap::new(),
@@ -614,6 +610,8 @@ impl WorkspaceStore {
         };
         if restarts {
             self.baseline_topics.clear();
+            self.archived_task = None;
+            self.index_summary.archived_revision = 0;
         }
         self.connection_state = state;
         if restarts && matches!(self.connection_state, ConnectionState::Syncing { .. }) {
@@ -678,24 +676,73 @@ impl WorkspaceStore {
                     .failed_commands()
                     .into_iter()
                     .filter_map(|(entry, error)| {
-                        message(&entry.command).map(|text| (entry.key, text, Some(error.message), false))
+                        message(&entry.command)
+                            .map(|text| (entry.key, text, Some(error.message), false))
                     }),
             )
-            .chain(self.host.acknowledged_messages().into_iter().filter_map(|entry| {
-                let text = message(&entry.command)?;
-                let queued = self.session_status_replica.as_ref().is_some_and(|status| status.queued_messages.iter().any(|message| message.delivery_key.as_deref() == Some(entry.key.as_str()) || (message.delivery_key.is_none() && message.text == text)));
-                let recorded = self.with_active_timeline(|timeline| timeline.entries.iter().any(|record| {
-                    record.id == format!("local-user-{}", entry.key) || record.id == format!("local-steer-{}", entry.key)
-                        || matches!(&record.content, EntryContent::Item(agent::ItemContent::UserMessage { text: recorded, .. }) if recorded == &text)
-                })).unwrap_or(false);
-                if queued || recorded {
-                    // Once adopted by the host replica, a later rewind must not
-                    // resurrect the acknowledged placeholder.
-                    self.host.retire_acknowledged_message(&entry.key);
-                    None
-                } else { Some((entry.key, text, None, true)) }
-            }))
+            .chain(
+                self.host
+                    .acknowledged_messages()
+                    .into_iter()
+                    .filter_map(|entry| {
+                        let text = message(&entry.command)?;
+                        let queued = self.session_statuses.get(&active).is_some_and(|status| {
+                            status.queued_messages.iter().any(|message| {
+                                message.delivery_key.as_deref() == Some(entry.key.as_str())
+                            })
+                        });
+                        let recorded = self.session_records.get(&active).is_some_and(|records| {
+                            records.iter().any(|record| {
+                                Self::record_delivery_key(record) == Some(entry.key.as_str())
+                            })
+                        });
+                        if queued || recorded {
+                            // Once adopted by the host replica, a later rewind must not
+                            // resurrect the acknowledged placeholder.
+                            self.host.retire_acknowledged_message(&entry.key);
+                            None
+                        } else {
+                            Some((entry.key, text, None, true))
+                        }
+                    }),
+            )
             .collect()
+    }
+
+    fn record_delivery_key(record: &StoredEvent) -> Option<&str> {
+        let id = match &record.event {
+            agent::AgentEvent::SteerRequested { request_id, .. } => request_id.as_str(),
+            agent::AgentEvent::ItemCompleted(item) | agent::AgentEvent::ItemStarted(item) => {
+                item.id.as_str()
+            }
+            _ => return None,
+        };
+        id.strip_prefix("local-user-")
+            .or_else(|| id.strip_prefix("local-steer-"))
+    }
+
+    fn retire_record_delivery(&self, session_id: &str, record: &StoredEvent) {
+        if let Some(key) = Self::record_delivery_key(record) {
+            self.retire_delivery_for(session_id, key);
+        }
+    }
+
+    fn retire_delivery_for(&self, session_id: &str, key: &str) {
+        let matches_session = self
+            .host
+            .acknowledged_messages()
+            .iter()
+            .any(|entry| entry.key == key && entry.command.session_id() == Some(session_id))
+            || self
+                .host
+                .pending_commands()
+                .iter()
+                .any(|(pending_key, command)| {
+                    pending_key == key && command.session_id() == Some(session_id)
+                });
+        if matches_session {
+            self.host.retire_acknowledged_message(key);
+        }
     }
 
     pub(crate) fn approval_delivery_pending(&self, request: &str) -> bool {
@@ -723,6 +770,8 @@ impl WorkspaceStore {
             && self.baseline_topics.contains(&Topic::Settings)
             && self.selected_session_id.as_ref().is_none_or(|id| {
                 self.baseline_topics.contains(&Topic::SessionStatus {
+                    session_id: id.clone(),
+                }) && self.baseline_topics.contains(&Topic::SessionPlan {
                     session_id: id.clone(),
                 }) && self.baseline_topics.contains(&Topic::SessionEvents {
                     session_id: id.clone(),
@@ -814,6 +863,26 @@ impl WorkspaceStore {
             return;
         }
         match (&envelope.topic, &envelope.event) {
+            (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
+                if status.session_id == *session_id =>
+            {
+                for message in &status.queued_messages {
+                    if let Some(key) = &message.delivery_key {
+                        self.retire_delivery_for(session_id, key);
+                    }
+                }
+            }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
+                self.retire_record_delivery(session_id, record);
+            }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionSnapshot { records, .. }) => {
+                for record in records {
+                    self.retire_record_delivery(session_id, record);
+                }
+            }
+            _ => {}
+        }
+        match (&envelope.topic, &envelope.event) {
             (
                 Topic::Preview { session_id },
                 ServerEvent::PreviewRequest {
@@ -841,7 +910,7 @@ impl WorkspaceStore {
             ) if terminal_id == delta_id => self.apply_terminal_delta(*terminal_id, delta),
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 if let Some(archived) = &mut self.archived_replica {
-                    archived.retain(|archived| archived.id != meta.id);
+                    archived.sessions.retain(|archived| archived.id != meta.id);
                 }
                 match self
                     .index_replica
@@ -876,10 +945,6 @@ impl WorkspaceStore {
                     .position(|meta| meta.id == *session_id)
                 {
                     self.removed_session = Some(self.index_replica.0.remove(position));
-                }
-                // Archived or deleted: only the host can say which.
-                if self.archived_replica.is_some() {
-                    self.load_archived_sessions(cx);
                 }
                 self.native_rewind_prefills.remove(session_id);
                 self.fallback_blocks.remove(session_id);
@@ -933,13 +998,13 @@ impl WorkspaceStore {
                             snapshot.sessions.iter().any(|meta| meta.id == *session_id)
                         }
                     });
-                self.apply_index_summary(&snapshot.summary);
-                if self.archived_replica.is_some() {
+                self.apply_index_summary(&snapshot.summary, cx);
+                if self.archived_requested {
                     self.load_archived_sessions(cx);
                 }
             }
             (Topic::Index, ServerEvent::IndexSummaryReplaced(summary)) => {
-                self.apply_index_summary(summary);
+                self.apply_index_summary(summary, cx);
             }
             (Topic::Settings, ServerEvent::LastVisitedChanged(visits)) => {
                 self.settings_replica
@@ -968,9 +1033,9 @@ impl WorkspaceStore {
             {
                 self.baseline_topics.insert(envelope.topic.clone());
                 self.session_statuses
-                    .insert(session_id.clone(), status.clone());
+                    .insert(session_id.clone(), status.as_ref().clone());
                 if self.selected_session_id.as_ref() == Some(session_id) {
-                    let mut status = status.clone();
+                    let mut status = status.as_ref().clone();
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(session_id);
                     self.session_status_replica = Some(status);
@@ -982,18 +1047,13 @@ impl WorkspaceStore {
                     }
                     self.sync_terminal_topics();
                     self.sync_active_conversation_ui();
-                    self.background_session_flags.remove(session_id);
-                } else {
-                    self.background_session_flags.insert(
-                        session_id.clone(),
-                        (
-                            status.working,
-                            !status.pending_approvals.is_empty(),
-                            status.pending_user_input.is_some(),
-                            Self::status_background_only(status),
-                        ),
-                    );
                 }
+            }
+            (Topic::SessionPlan { session_id }, ServerEvent::SessionPlanReplaced(plan))
+                if plan.session_id == *session_id =>
+            {
+                self.baseline_topics.insert(envelope.topic.clone());
+                self.session_plans.insert(session_id.clone(), plan.clone());
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error))
                 if self.selected_session_id.as_ref() == Some(session_id) =>
@@ -1077,10 +1137,12 @@ impl WorkspaceStore {
                     self.fallback_reviews.remove(session_id);
                 }
                 self.apply_conversation_event(session_id, &record.event);
-                if let Some((replica_id, timeline)) = self.session_replica.as_mut()
-                    && replica_id == session_id
-                {
-                    timeline.apply_stored(record);
+                if let Some((replica_id, mut timeline)) = self.session_replica.take() {
+                    if replica_id == *session_id {
+                        timeline.apply_stored(record);
+                        self.settle_running_turn(&mut timeline);
+                    }
+                    self.session_replica = Some((replica_id, timeline));
                 }
             }
             (
@@ -1358,17 +1420,11 @@ impl WorkspaceStore {
     }
 
     pub fn working_sessions_count(&self) -> usize {
-        let active = usize::from(
-            self.session_status_replica
-                .as_ref()
-                .is_some_and(|status| status.working),
-        );
-        active
-            + self
-                .background_session_flags
-                .values()
-                .filter(|(working, ..)| *working)
-                .count()
+        self.index_summary
+            .activity
+            .values()
+            .filter(|activity| activity.working)
+            .count()
     }
 
     fn active_conversation_ui(&self) -> Option<&crate::conversation_ui::ConversationUiState> {
@@ -1385,7 +1441,7 @@ impl WorkspaceStore {
     fn active_turn_running(&self) -> bool {
         self.session_status_replica
             .as_ref()
-            .is_some_and(|status| status.turn_running)
+            .is_some_and(|status| status.activity.turn_running)
     }
 
     fn fold_held_records(&self, session_id: &str) -> Timeline {
@@ -1402,6 +1458,7 @@ impl WorkspaceStore {
             .as_ref()
             .and_then(|status| status.running_turn);
         timeline.settle_running_turn(
+            self.active_turn_running(),
             running.and_then(|running| {
                 usize::try_from(running.turn)
                     .ok()?
@@ -1644,28 +1701,40 @@ impl WorkspaceStore {
         self.index_summary.title_generating.contains(session_id)
     }
 
-    fn apply_index_summary(&mut self, summary: &IndexSummary) {
+    fn apply_index_summary(&mut self, summary: &IndexSummary, cx: &mut Context<Self>) {
         self.index_summary = summary.clone();
-        self.background_session_flags = summary.activity.clone();
-        if let Some(id) = &self.selected_session_id {
-            self.background_session_flags.remove(id);
+        if self.archived_requested
+            && self
+                .archived_replica
+                .as_ref()
+                .is_none_or(|archived| archived.revision != summary.archived_revision)
+        {
+            self.load_archived_sessions(cx);
         }
     }
 
     /// Fetch the archived threads, and keep them current while they are held.
     pub fn load_archived_sessions(&mut self, cx: &mut Context<Self>) {
+        self.archived_requested = true;
+        if self.archived_task.is_some() {
+            return;
+        }
         let host = self.host.clone();
         self.archived_task = Some(cx.spawn(async move |this, cx| {
             let result = host.query(Query::ArchivedSessions).await;
             let _ = this.update(cx, |store, cx| {
+                store.archived_task = None;
                 match result {
-                    Ok(QueryResponse::ArchivedSessions(sessions)) => {
-                        store.archived_replica = Some(sessions);
+                    Ok(QueryResponse::ArchivedSessions(archived)) => {
+                        if archived.revision < store.index_summary.archived_revision {
+                            store.load_archived_sessions(cx);
+                        } else {
+                            store.archived_replica = Some(archived);
+                        }
                     }
                     Ok(other) => log::warn!("unexpected archived-sessions response: {other:?}"),
                     Err(error) => log::warn!("archived sessions failed: {}", error.message),
                 }
-                store.archived_task = None;
                 cx.notify();
             });
         }));
@@ -1673,6 +1742,7 @@ impl WorkspaceStore {
 
     /// Stop keeping the archived threads current.
     pub fn release_archived_sessions(&mut self) {
+        self.archived_requested = false;
         self.archived_replica = None;
         self.archived_task = None;
     }
@@ -1824,10 +1894,14 @@ impl WorkspaceStore {
     }
 
     pub fn archived_groups(&self) -> Vec<ProjectGroup> {
-        let archived = self.archived_replica.clone().unwrap_or_default();
+        let archived = self
+            .archived_replica
+            .as_ref()
+            .map(|archived| archived.sessions.as_slice())
+            .unwrap_or_default();
         let mut groups = group_sessions(
             &self.index_replica.1,
-            &archived,
+            archived,
             self.settings_replica.project_sort,
         );
         for group in &mut groups {
@@ -1894,106 +1968,45 @@ impl WorkspaceStore {
     }
 
     pub fn turn_running_for(&self, session_id: &str) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .filter(|status| status.session_id == session_id)
-            .map(|status| status.working)
-            .or_else(|| {
-                self.background_session_flags
-                    .get(session_id)
-                    .map(|flags| flags.0)
-            })
-            .unwrap_or(false)
-    }
-
-    /// Working only because provider background tasks are still running: the
-    /// turn itself has finished and nothing is queued or in delivery.
-    fn status_background_only(status: &SessionStatus) -> bool {
-        status.working
-            && !status.turn_running
-            && status.delivery_in_flight.is_none()
-            && status.queued_messages.is_empty()
+        self.index_summary
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.working)
     }
 
     pub fn background_only_for(&self, session_id: &str) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .filter(|status| status.session_id == session_id)
-            .map(Self::status_background_only)
-            .or_else(|| {
-                self.background_session_flags
-                    .get(session_id)
-                    .map(|flags| flags.3)
-            })
-            .unwrap_or(false)
+        self.index_summary
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.background_only)
     }
 
     pub fn session_unread(&self, session_id: &str) -> bool {
-        if self
-            .session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.session_id == session_id)
-        {
-            return false;
-        }
-        let Some(meta) = self
-            .index_replica
-            .0
-            .iter()
-            .find(|meta| meta.id == session_id)
-        else {
-            return false;
-        };
-        self.settings_replica
-            .last_visited
+        self.index_summary
+            .activity
             .get(session_id)
-            .is_some_and(|visited| meta.updated_at > *visited)
+            .is_some_and(|activity| activity.unread)
     }
 
     pub fn pending_approval_for(&self, session_id: &str) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .filter(|status| status.session_id == session_id)
-            .map(|status| !status.pending_approvals.is_empty())
-            .or_else(|| {
-                self.background_session_flags
-                    .get(session_id)
-                    .map(|flags| flags.1)
-            })
-            .unwrap_or(false)
+        self.index_summary
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.waiting_for_approval)
     }
 
     pub fn pending_user_input_for(&self, session_id: &str) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .filter(|status| status.session_id == session_id)
-            .map(|status| status.pending_user_input.is_some())
-            .or_else(|| {
-                self.background_session_flags
-                    .get(session_id)
-                    .map(|flags| flags.2)
-            })
-            .unwrap_or(false)
+        self.index_summary
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.waiting_for_input)
     }
 
     pub fn fork_availability(&self, session_id: &str) -> ForkAvailability {
-        let Some(meta) = self
-            .index_replica
-            .0
-            .iter()
-            .find(|meta| meta.id == session_id)
-        else {
-            return ForkAvailability::Available;
-        };
-        if !meta.provider.caps().supports_fork {
-            ForkAvailability::Unsupported
-        } else if meta.resume_cursor.is_none() {
-            ForkAvailability::Empty
-        } else if self.turn_running_for(session_id) {
-            ForkAvailability::Running
-        } else {
-            ForkAvailability::Available
-        }
+        self.index_summary
+            .activity
+            .get(session_id)
+            .map_or(ForkAvailability::Available, |activity| activity.fork)
     }
 
     pub fn sidebar_sessions(&self) -> Vec<SessionMeta> {
@@ -2201,11 +2214,7 @@ impl WorkspaceStore {
     }
 
     pub fn acp_marketplace_items(&self) -> Vec<AcpMarketplaceItem> {
-        let mut items = self.providers_replica.acp_marketplace_items.clone();
-        for item in &mut items {
-            item.installed = self.settings_replica.acp_agents.contains_key(&item.id);
-        }
-        items
+        self.providers_replica.acp_marketplace_items.clone()
     }
 
     pub fn provider_plugin_catalog(
@@ -2479,6 +2488,7 @@ impl WorkspaceStore {
             self.active_conversation_ui(),
             self.session_status_replica.as_ref(),
             self.session_replica.as_ref().map(|(_, timeline)| timeline),
+            self.session_plan(),
         )
     }
 
@@ -2691,18 +2701,16 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn native_subagent_readonly(&self) -> bool {
-        self.session_status_replica.as_ref().is_some_and(|status| {
-            self.index_replica
-                .0
-                .iter()
-                .any(|meta| meta.id == status.session_id && meta.native_subagent.is_some())
-        })
+        self.session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.conversation_read_only)
     }
 
-    pub(crate) fn composer_state(&self) -> ComposerState {
+    pub fn composer_state(&self) -> ComposerState {
         snapshots::composer_state(
             self.session_status_replica.as_ref(),
             self.session_replica.as_ref().map(|(_, timeline)| timeline),
+            self.session_plan(),
             &self.settings_replica,
             &self.providers_replica,
         )
@@ -2918,12 +2926,7 @@ impl WorkspaceStore {
                     .is_some()
             })
             .unwrap_or(false);
-        Some((
-            status.provider.caps().native_rewind && has_checkpoint,
-            status.turn_running
-                || !status.queued_messages.is_empty()
-                || status.native_rewind_pending,
-        ))
+        Some((has_checkpoint, status.native_rewind_blocked))
     }
 
     pub fn chat_git_controls(&self) -> Option<(QuickAction, Vec<MenuItem>)> {
@@ -2957,35 +2960,39 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn plan_panel_state(&self) -> (Option<String>, Vec<agent::PlanStep>) {
-        self.with_active_timeline(|timeline| {
-            (
-                timeline
-                    .shown_proposed_plan()
-                    .map(|plan| plan.markdown.clone()),
-                timeline.plan_steps.clone(),
-            )
-        })
-        .unwrap_or_default()
+    pub fn absolute_turn(&self, local: usize) -> usize {
+        local + self.session_turn_offset
+    }
+
+    pub fn session_plan(&self) -> Option<&SessionPlan> {
+        self.session_plans.get(self.selected_session_id.as_deref()?)
+    }
+
+    pub fn session_status(&self) -> Option<&SessionStatus> {
+        self.session_status_replica.as_ref()
     }
 
     pub fn worktree_orphaned_by_delete(&self, session_id: &str) -> Option<WorktreeInfo> {
-        let meta = self
+        let (meta, shared) = if let Some(meta) = self
             .index_replica
             .0
             .iter()
-            .find(|meta| meta.id == session_id)?;
-        let worktree = meta.worktree.clone()?;
-        let shared = self
-            .index_replica
-            .0
-            .iter()
-            .any(|other| meta.shares_worktree_with(other))
-            || self
-                .index_summary
-                .archived_worktree_branches
-                .contains(&worktree.branch);
-        (!shared).then_some(worktree)
+            .find(|meta| meta.id == session_id)
+        {
+            (meta, &self.index_summary.worktree_shared)
+        } else {
+            let archived = self.archived_replica.as_ref()?;
+            (
+                archived
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == session_id)?,
+                &archived.worktree_shared,
+            )
+        };
+        (!shared.contains(session_id))
+            .then(|| meta.worktree.clone())
+            .flatten()
     }
 }
 
@@ -3164,7 +3171,94 @@ mod tests {
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         assert_eq!(
             store.read_with(cx, |store, _| store.delivery_messages()),
-            vec![(retry.key.unwrap(), "hello".into(), None, true)]
+            vec![(retry.key.clone().unwrap(), "hello".into(), None, true)]
+        );
+        let accepted_key = retry.key.unwrap();
+        let same_text_record = |id: String| {
+            SessionEventRecord::from(AgentEvent::ItemCompleted(ThreadItem {
+                id,
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "hello".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }))
+        };
+        store.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "scripted".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        from: 0,
+                        end: 1,
+                        total: 1,
+                        total_turns: 1,
+                        records: vec![same_text_record("unrelated".into())],
+                        truncated: false,
+                    },
+                },
+                cx,
+            );
+            assert_eq!(
+                store.delivery_messages(),
+                vec![(accepted_key.clone(), "hello".into(), None, true)]
+            );
+            store.selected_session_id = Some("another".into());
+            // Adoption must survive navigation even when no history is retained.
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "scripted".into(),
+                    },
+                    event: ServerEvent::SessionEvent(same_text_record(format!(
+                        "local-user-{accepted_key}"
+                    ))),
+                },
+                cx,
+            );
+            store.session_records.remove("scripted");
+            store.selected_session_id = Some("scripted".into());
+            assert!(store.delivery_messages().is_empty());
+        });
+        store.update(cx, |store, _| store.send_turn("hello".into(), Vec::new()));
+        let early = tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        let early_key = early.key.unwrap();
+        store.update(cx, |store, cx| {
+            store.selected_session_id = Some("another".into());
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "scripted".into(),
+                    },
+                    event: ServerEvent::SessionEvent(same_text_record(format!(
+                        "local-user-{early_key}"
+                    ))),
+                },
+                cx,
+            );
+        });
+        replies
+            .send_blocking(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                    id: early.id,
+                    result: Ok(tcode_protocol::CommandResponse::Unit),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        store.update(cx, |store, _| {
+            store.selected_session_id = Some("scripted".into());
+        });
+        assert!(
+            store.read_with(cx, |store, _| store.delivery_messages().is_empty()),
+            "a replica received before its Ack must stay adopted"
         );
         store.update(cx, |store, _| {
             store.send_turn("discard me".into(), Vec::new())
@@ -3189,6 +3283,146 @@ mod tests {
         });
         assert!(link.failed_commands().is_empty());
         assert!(link.pending_commands().is_empty());
+        link.close();
+    }
+
+    #[gpui::test]
+    fn archived_list_coalesces_revision_changes_and_reloads_a_stale_reply(cx: &mut TestAppContext) {
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let queries = || {
+            std::iter::from_fn(|| requests.try_recv().ok())
+                .filter_map(|line| {
+                    let message = tcode_protocol::decode_client_line(&line).unwrap();
+                    matches!(
+                        message.payload,
+                        tcode_protocol::ClientPayload::Query(
+                            tcode_protocol::Query::ArchivedSessions
+                        )
+                    )
+                    .then_some(message.id)
+                })
+                .collect::<Vec<_>>()
+        };
+        let revision_event = |revision| EventEnvelope {
+            request_id: None,
+            topic: Topic::Index,
+            event: ServerEvent::IndexSummaryReplaced(tcode_protocol::IndexSummary {
+                archived_revision: revision,
+                ..Default::default()
+            }),
+        };
+        store.update(cx, |store, cx| {
+            store.apply_domain_event(&revision_event(10), cx);
+            store.load_archived_sessions(cx);
+        });
+        cx.run_until_parked();
+        let first = queries();
+        assert_eq!(first.len(), 1);
+        store.update(cx, |store, cx| {
+            store.apply_domain_event(&revision_event(11), cx);
+            store.apply_domain_event(&revision_event(12), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            queries().is_empty(),
+            "one reload may be in flight at a time"
+        );
+        let response = |id, revision, title: &str| {
+            let mut meta = SessionMeta::new(
+                ProviderKind::Codex,
+                std::path::PathBuf::from("/archive"),
+                None,
+            );
+            meta.id = "archived".into();
+            meta.title = title.into();
+            meta.archived_at = Some(1);
+            replies
+                .try_send(
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                        id,
+                        result: Ok(tcode_protocol::QueryResponse::ArchivedSessions(
+                            tcode_protocol::ArchivedSessions {
+                                sessions: vec![meta],
+                                worktree_shared: Default::default(),
+                                revision,
+                            },
+                        )),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        response(first[0], 10, "Stale title");
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+        let second = queries();
+        assert_eq!(second.len(), 1);
+        assert!(store.read_with(cx, |store, _| store.archived_loading()));
+        response(second[0], 12, "Current title");
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            let archived = store.archived_replica.as_ref().unwrap();
+            assert_eq!(archived.revision, 12);
+            assert_eq!(archived.sessions[0].title, "Current title");
+        });
+        store.update(cx, |store, cx| {
+            store.apply_domain_event(&revision_event(13), cx)
+        });
+        cx.run_until_parked();
+        let third = queries();
+        assert_eq!(third.len(), 1, "an archived rename invalidates a held list");
+        response(third[0], 13, "Renamed again");
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            });
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        summary: tcode_protocol::IndexSummary {
+                            archived_revision: 1,
+                            ..Default::default()
+                        },
+                        sessions: Vec::new(),
+                        projects: Vec::new(),
+                    }),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let reconnect = queries();
+        assert_eq!(reconnect.len(), 1);
+        response(reconnect[0], 1, "New host baseline");
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        cx.run_until_parked();
+        store.update(cx, |store, _| {
+            assert_eq!(
+                store.archived_replica.as_ref().unwrap().sessions[0].title,
+                "New host baseline"
+            );
+            store.release_archived_sessions();
+        });
         link.close();
     }
 
@@ -3919,8 +4153,8 @@ mod tests {
         question: Option<tcode_core::session::PendingUserInput>,
     ) -> tcode_protocol::SessionStatus {
         let mut status = status.clone();
-        status.turn_running = running.is_some();
-        status.working = running.is_some();
+        status.activity.turn_running = running.is_some();
+        status.activity.working = running.is_some();
         status.running_turn = running;
         status.pending_user_input = question;
         status
@@ -4006,14 +4240,14 @@ mod tests {
             topic: Topic::SessionStatus {
                 session_id: id.clone(),
             },
-            event: ServerEvent::SessionStatusReplaced(with_running_turn(
+            event: ServerEvent::SessionStatusReplaced(Box::new(with_running_turn(
                 &status,
                 running.map(|turn| tcode_core::session::RunningTurn {
                     turn,
                     started_at: Some(1_000),
                 }),
                 question,
-            )),
+            ))),
         };
         let snapshot = session_snapshot(
             &id,
@@ -4079,6 +4313,11 @@ mod tests {
                 store.apply_domain_event(&status_event(Some(1), None), cx)
             });
             assert_eq!(live_turn(&workspace, cx), None);
+            assert_eq!(
+                workspace.read_with(cx, |store, _| store
+                    .with_active_timeline(|timeline| timeline.turn_running)),
+                Some(true)
+            );
 
             workspace.update(cx, |store, cx| {
                 store.apply_domain_event(&status_event(None, None), cx)
@@ -4196,7 +4435,13 @@ mod tests {
                     Topic::SessionStatus {
                         session_id: "one".into(),
                     },
-                    ServerEvent::SessionStatusReplaced(status),
+                    ServerEvent::SessionStatusReplaced(Box::new(status)),
+                ),
+                (
+                    Topic::SessionPlan {
+                        session_id: "one".into(),
+                    },
+                    ServerEvent::SessionPlanReplaced(store.session_plan().unwrap().clone()),
                 ),
                 (
                     Topic::SessionEvents {
@@ -4868,7 +5113,12 @@ mod tests {
         else {
             panic!("archived threads")
         };
-        assert!(archived.iter().any(|meta| meta.id == seed_session_id));
+        assert!(
+            archived
+                .sessions
+                .iter()
+                .any(|meta| meta.id == seed_session_id)
+        );
 
         workspace.read_with(cx, |store, _| {
             assert!(
@@ -4949,10 +5199,17 @@ mod tests {
                     .is_some_and(|status| status.session_id == session_id)
             })
         });
-        let target_id = session_id.clone();
-        update_host!(&host, move |state, cx| {
-            state.queue_message_for_replica_test(&target_id, "queued for replication".into(), cx);
-        });
+        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::Codex);
+        update_host!(&host, move |state, _| state
+            .set_provider_launcher_for_test(scripted.launcher));
+        command(
+            &host,
+            Command::SendTurn {
+                session_id: session_id.clone(),
+                text: "queued for replication".into(),
+                attachment_paths: Vec::new(),
+            },
+        );
         command(
             &host,
             Command::SetInteractionMode {
@@ -4978,20 +5235,24 @@ mod tests {
                 ),
             },
         );
-        wait_until(cx, &workspace, "queued-message and review replicas", |cx| {
+        // The scripted provider keeps moving the host (delivery, steering
+        // support) after the queue change, so the replica is compared with the
+        // live status of the same moment rather than a later snapshot.
+        wait_until(cx, &workspace, "replica equal to the live status", |cx| {
+            let live_id = session_id.clone();
+            let live = update_host!(&host, move |state, _| {
+                state
+                    .session_status_snapshot(&live_id)
+                    .expect("live session status")
+            });
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
                     status.queued_messages.len() == 1
                         && status.interaction_mode == agent::InteractionMode::Plan
                         && status.review_comment_drafts.len() == 1
+                        && *status == live
                 })
             })
-        });
-
-        let live = update_host!(&host, move |state, _| {
-            state
-                .session_status_snapshot(&session_id)
-                .expect("live session status")
         });
         let replica = workspace.read_with(cx, |store, _| {
             store
@@ -5000,7 +5261,6 @@ mod tests {
                 .expect("session status replica")
         });
 
-        assert_eq!(replica, live);
         assert_eq!(replica.queued_messages.len(), 1);
         assert_eq!(replica.queued_messages[0].text, "queued for replication");
         assert_eq!(replica.interaction_mode, agent::InteractionMode::Plan);
@@ -5009,130 +5269,6 @@ mod tests {
             workspace.read_with(cx, |store, _cx| store.review_comments()),
             replica.review_comment_drafts
         );
-
-        shutdown_test_host(&host);
-        std::fs::remove_dir_all(root).expect("remove test data");
-    }
-
-    #[gpui::test]
-    fn active_session_handoff_preserves_and_reconciles_parked_status(cx: &mut TestAppContext) {
-        let root = scratch_root("tcode-background-working-handoff-test");
-        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let first = SessionMeta::new(ProviderKind::Codex, root.join("first"), None);
-        let second = SessionMeta::new(ProviderKind::Codex, root.join("second"), None);
-        session_store
-            .upsert_meta(&first)
-            .expect("persist first session");
-        session_store
-            .upsert_meta(&second)
-            .expect("persist second session");
-
-        let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        workspace.update(cx, |store, _| store.select_session(first.id.clone()));
-        wait_until(cx, &workspace, "first selected session", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store
-                    .session_status_replica
-                    .as_ref()
-                    .is_some_and(|status| status.session_id == first.id)
-            })
-        });
-
-        workspace.update(cx, |store, cx| {
-            let mut parked = store
-                .session_status_replica
-                .clone()
-                .expect("first session status");
-            parked.turn_running = true;
-            parked.working = true;
-            parked.pending_user_input = Some(tcode_core::session::PendingUserInput {
-                request_id: "ask".into(),
-                questions: Vec::new(),
-                delivery: agent::UserInputDelivery::Blocking,
-            });
-            parked.pending_approvals = vec![agent::ApprovalRequest {
-                id: "approve".into(),
-                turn_id: None,
-                kind: agent::ApprovalKind::FileRead {
-                    detail: "Cargo.toml".into(),
-                },
-                options: Vec::new(),
-            }];
-            store.apply_domain_event(
-                &EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionStatus {
-                        session_id: first.id.clone(),
-                    },
-                    event: ServerEvent::SessionStatusReplaced(parked.clone()),
-                },
-                cx,
-            );
-
-            let mut next = parked;
-            next.session_id = second.id.clone();
-            next.cwd = second.cwd.clone();
-            next.turn_running = false;
-            next.working = false;
-            next.pending_user_input = None;
-            next.pending_approvals.clear();
-            store.apply_domain_event(
-                &EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionStatus {
-                        session_id: second.id.clone(),
-                    },
-                    event: ServerEvent::SessionStatusReplaced(next.clone()),
-                },
-                cx,
-            );
-            store.select_session(next.session_id.clone());
-            store.apply_domain_event(
-                &EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionStatus {
-                        session_id: next.session_id.clone(),
-                    },
-                    event: ServerEvent::SessionStatusReplaced(next),
-                },
-                cx,
-            );
-        });
-
-        assert!(workspace.read_with(cx, |store, _cx| { store.turn_running_for(&first.id) }));
-        assert!(!workspace.read_with(cx, |store, _cx| { store.turn_running_for(&second.id) }));
-        assert_eq!(
-            workspace.read_with(cx, |store, _cx| store.working_sessions_count()),
-            1
-        );
-        assert!(workspace.read_with(cx, |store, _| store.pending_user_input_for(&first.id)));
-        assert!(workspace.read_with(cx, |store, _| store.pending_approval_for(&first.id)));
-        assert!(!workspace.read_with(cx, |store, _| store.pending_user_input_for(&second.id)));
-        workspace.update(cx, |store, cx| {
-            let mut finished = store.session_statuses[&first.id].clone();
-            finished.turn_running = false;
-            finished.working = false;
-            finished.pending_user_input = None;
-            finished.pending_approvals.clear();
-            store.apply_domain_event(
-                &EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionStatus {
-                        session_id: first.id.clone(),
-                    },
-                    event: ServerEvent::SessionStatusReplaced(finished),
-                },
-                cx,
-            );
-        });
-        assert_eq!(
-            workspace.read_with(cx, |store, _| store.working_sessions_count()),
-            0
-        );
-        assert!(!workspace.read_with(cx, |store, _| store.pending_user_input_for(&first.id)));
-        assert!(!workspace.read_with(cx, |store, _| store.pending_approval_for(&first.id)));
-        assert!(selected_status(cx, &workspace, &second.id));
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");

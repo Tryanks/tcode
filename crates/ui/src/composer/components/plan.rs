@@ -82,6 +82,7 @@ impl Composer {
             .child(
                 h_flex()
                     .id("implement-main")
+                    .debug_selector(|| "implement-main".into())
                     .h_full()
                     .px_3()
                     .items_center()

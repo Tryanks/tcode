@@ -2367,9 +2367,12 @@ impl SettingsPage {
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
-                .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, _cx| {
-                        store.delete_session(session_id.clone(), false);
+                .on_ok(move |_, window, cx| {
+                    let store = store.clone();
+                    let session_id = session_id.clone();
+                    // The alert closes after this callback; open the next prompt afterwards.
+                    window.defer(cx, move |window, cx| {
+                        crate::sidebar::proceed_delete(store, session_id, window, cx);
                     });
                     true
                 })
@@ -3140,6 +3143,146 @@ mod tests {
             (2, 100, 120),
             "a page past the end shows the last page instead of an empty one"
         );
+    }
+
+    #[gpui::test]
+    fn archived_delete_uses_response_worktree_sharing_and_preserves_the_cleanup_choice(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_protocol::{
+            ArchivedSessions, ClientPayload, Command, HostMessage, Query, QueryResponse,
+            decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        cx.update(crate::theme::init);
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        store.update(cx, |store, _| store.select_session("live".into()));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        page.update(cx, |page, cx| page.select_section(Section::Archived, cx));
+        cx.run_until_parked();
+        let mut archived_query = None;
+        while let Ok(line) = outgoing.try_recv() {
+            let message = decode_client_line(&line).unwrap();
+            match message.payload {
+                ClientPayload::Query(Query::ArchivedSessions) => archived_query = Some(message.id),
+                ClientPayload::Command(_) => incoming
+                    .try_send(
+                        encode_line(&HostMessage::Ack {
+                            id: message.id,
+                            result: Ok(tcode_protocol::CommandResponse::Unit),
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                _ => {}
+            }
+        }
+        let sessions = ["shared", "remove", "keep"]
+            .into_iter()
+            .map(|id| {
+                let mut meta = tcode_core::project::SessionMeta::new(
+                    agent::ProviderKind::Codex,
+                    std::path::PathBuf::from(format!("/archive/worktree/{id}")),
+                    None,
+                );
+                meta.id = id.into();
+                meta.title = id.into();
+                meta.archived_at = Some(1);
+                meta.worktree = Some(tcode_core::project::WorktreeInfo {
+                    root_project_path: "/archive/project".into(),
+                    base: "main".into(),
+                    branch: format!("tcode/archive/{id}"),
+                });
+                meta
+            })
+            .collect();
+        incoming
+            .try_send(
+                encode_line(&HostMessage::QueryResult {
+                    id: archived_query.expect("opening Archived queries the host"),
+                    result: Ok(QueryResponse::ArchivedSessions(ArchivedSessions {
+                        sessions,
+                        worktree_shared: std::collections::HashSet::from(["shared".into()]),
+                        revision: 0,
+                    })),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        cx.run_until_parked();
+        for (id, cleanup, remove_worktree) in [
+            ("shared", false, false),
+            ("remove", true, true),
+            ("keep", true, false),
+        ] {
+            cx.update(|window, cx| {
+                page.update(cx, |page, cx| {
+                    page.confirm_delete_archived(id, id, window, cx)
+                });
+                _ = window.draw(cx);
+                window.dispatch_action(
+                    Box::new(gpui_base::actions::Confirm { secondary: false }),
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+            if cleanup {
+                assert!(outgoing.is_empty(), "delete waits for the cleanup choice");
+                cx.update(|window, cx| {
+                    if remove_worktree {
+                        window.dispatch_action(
+                            Box::new(gpui_base::actions::Confirm { secondary: false }),
+                            cx,
+                        );
+                    } else {
+                        window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
+                    }
+                });
+                cx.run_until_parked();
+            }
+            let request =
+                decode_client_line(&outgoing.try_recv().expect("delete command")).unwrap();
+            assert_eq!(
+                request.payload,
+                ClientPayload::Command(Command::DeleteSession {
+                    session_id: id.into(),
+                    remove_worktree,
+                })
+            );
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Ack {
+                        id: request.id,
+                        result: Ok(tcode_protocol::CommandResponse::Unit),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            cx.run_until_parked();
+        }
     }
 
     struct CompactSettingsProbe {

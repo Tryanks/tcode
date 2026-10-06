@@ -1009,6 +1009,38 @@ pub(super) fn computer_use_attaches(provider: ProviderKind, settings: &Settings)
     settings.computer_use.enabled && !provider.caps().native_computer_use
 }
 
+pub(super) fn session_provider_settings(
+    meta: &SessionMeta,
+    settings: &Settings,
+) -> tcode_core::settings::ProviderSettings {
+    meta.profile_id
+        .as_deref()
+        .and_then(|id| settings.resolved_profile(id))
+        .map(|profile| profile.settings)
+        .unwrap_or_else(|| settings.provider(meta.provider))
+}
+
+pub(super) fn session_approval_policy(
+    meta: &SessionMeta,
+    provider_settings: &tcode_core::settings::ProviderSettings,
+) -> (ApprovalMode, bool) {
+    let native_enabled = !meta
+        .provider
+        .caps()
+        .downgrade_approval_without_native_approvals
+        || provider_settings.pi.native_approvals;
+    let approval_mode = if !native_enabled {
+        match meta.approval_mode {
+            ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits => ApprovalMode::FullAccess,
+            ApprovalMode::ReadOnly => ApprovalMode::ReadOnly,
+            ApprovalMode::FullAccess => ApprovalMode::FullAccess,
+        }
+    } else {
+        meta.approval_mode
+    };
+    (approval_mode, native_enabled)
+}
+
 pub(super) fn session_options(
     meta: &SessionMeta,
     settings: &Settings,
@@ -1021,12 +1053,7 @@ pub(super) fn session_options(
     // A session's binary / launch-args come from its selected profile (built-in
     // or user-created), so a third-party profile can point at its own CLI while
     // sharing the protocol adapter. Falls back to the kind's built-in card.
-    let provider_settings = meta
-        .profile_id
-        .as_deref()
-        .and_then(|id| settings.resolved_profile(id))
-        .map(|profile| profile.settings)
-        .unwrap_or_else(|| settings.provider(meta.provider));
+    let provider_settings = session_provider_settings(meta, settings);
     // For an ACP session, which agent to launch (and how) comes from the
     // installed-agent list, keyed by the id the session was created with.
     let acp_agent: Option<InstalledAgent> = meta
@@ -1034,20 +1061,7 @@ pub(super) fn session_options(
         .as_deref()
         .and_then(|id| settings.acp_agent(id))
         .cloned();
-    let approval_mode = if meta
-        .provider
-        .caps()
-        .downgrade_approval_without_native_approvals
-        && !provider_settings.pi.native_approvals
-    {
-        match meta.approval_mode {
-            ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits => ApprovalMode::FullAccess,
-            ApprovalMode::ReadOnly => ApprovalMode::ReadOnly,
-            ApprovalMode::FullAccess => ApprovalMode::FullAccess,
-        }
-    } else {
-        meta.approval_mode
-    };
+    let (approval_mode, _) = session_approval_policy(meta, &provider_settings);
     SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
