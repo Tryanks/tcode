@@ -392,7 +392,7 @@ mod tests {
             ImportOutcome::Imported
         );
 
-        let restored = destination.load_index().pop().unwrap();
+        let restored = destination.load_index().unwrap().pop().unwrap();
         assert_ne!(restored.id, meta.id);
         assert_eq!(restored.cwd, project.root);
         assert_eq!(restored.project_id.as_deref(), Some(project.id.as_str()));
@@ -404,8 +404,9 @@ mod tests {
             destination.read_event_log(&restored.id).unwrap(),
             source.read_event_log(&meta.id).unwrap()
         );
-        let source_timeline = Timeline::fold_events(source.read_events(&meta.id));
-        let restored_timeline = Timeline::fold_events(destination.read_events(&restored.id));
+        let source_timeline = Timeline::fold_events(source.read_events(&meta.id).unwrap());
+        let restored_timeline =
+            Timeline::fold_events(destination.read_events(&restored.id).unwrap());
         let summarize = |timeline: &Timeline| {
             timeline
                 .entries

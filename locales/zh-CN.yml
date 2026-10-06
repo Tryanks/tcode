@@ -218,6 +218,7 @@ quit:
   title: "退出 Tcode？"
   description: "仍有 %{count} 个会话正在工作。退出将停止这些会话。"
   confirm: "退出"
+  startup_failed: "Tcode 无法启动"
 settings:
   title: "设置"
   sections: "全部设置"

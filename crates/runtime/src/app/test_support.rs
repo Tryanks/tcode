@@ -241,7 +241,7 @@ impl std::ops::DerefMut for TestClientState {
 impl TestClientState {
     pub(super) fn new(store: SessionStore) -> Self {
         Self {
-            host: AppState::new(store),
+            host: AppState::new(store).unwrap(),
             selected: None,
         }
     }

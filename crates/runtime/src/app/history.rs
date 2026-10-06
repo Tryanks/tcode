@@ -207,8 +207,8 @@ fn wire_window(
 }
 
 /// The complete event log of one session, held in memory while the session
-/// is resident so history windows cost the page rather than a re-parse of the
-/// JSONL, plus the fold that decides where each window may start.
+/// is resident so history windows cost the page rather than a re-read of the
+/// stored log, plus the fold that decides where each window may start.
 ///
 /// Memory policy: [`AppState::event_records`] holds a log for every live or
 /// parked session (bounded by the resident LRU) and for nothing else. A log
@@ -216,7 +216,7 @@ fn wire_window(
 /// appends in this process, and is dropped once the session leaves residency
 /// and the store writer has flushed every append queued from it
 /// ([`AppState::release_stale_session_logs`]): until then the log, not the
-/// JSONL, is the whole conversation.
+/// store, is the whole conversation.
 #[derive(Clone)]
 pub(super) struct SessionLog {
     records: Vec<SessionEventRecord>,
@@ -231,8 +231,8 @@ pub(super) struct SessionLog {
 }
 
 impl SessionLog {
-    pub(super) fn load(store: &SessionStore, session_id: &str) -> Self {
-        Self::from_records(store.read_events(session_id))
+    pub(super) fn load(store: &SessionStore, session_id: &str) -> std::io::Result<Self> {
+        Ok(Self::from_records(store.read_events(session_id)?))
     }
 
     pub(super) fn from_records(records: impl IntoIterator<Item = SessionEventRecord>) -> Self {
@@ -284,21 +284,31 @@ impl AppState {
     /// The session's log, cached for the resident session it belongs to. A
     /// non-resident session is read cold and not retained, so paging it never
     /// grows the cache.
-    fn history_log(&mut self, session_id: &str) -> std::borrow::Cow<'_, SessionLog> {
+    fn history_log(
+        &mut self,
+        session_id: &str,
+    ) -> Result<std::borrow::Cow<'_, SessionLog>, tcode_protocol::ProtocolError> {
         if !self.event_records.contains_key(session_id) {
-            let log = SessionLog::load(&self.store, session_id);
+            let log = SessionLog::load(&self.store, session_id).map_err(|error| {
+                tcode_protocol::ProtocolError {
+                    code: "history_unavailable".into(),
+                    message: format!("could not read the history of {session_id}: {error}"),
+                }
+            })?;
             if self.resident(session_id).is_none() {
-                return std::borrow::Cow::Owned(log);
+                return Ok(std::borrow::Cow::Owned(log));
             }
             self.event_records.insert(session_id.to_string(), log);
         }
-        std::borrow::Cow::Borrowed(&self.event_records[session_id])
+        Ok(std::borrow::Cow::Borrowed(&self.event_records[session_id]))
     }
 
     /// Queue a store-writer barrier for every cached log whose session left
-    /// residency, and drop the log once the barrier echoes: a cold read after
-    /// that sees every append the log had accepted. Appends that race the
-    /// barrier re-arm it.
+    /// residency, and drop the log once the barrier confirms every earlier
+    /// write committed: a cold read after that sees every append the log had
+    /// accepted. Appends that race the barrier re-arm it. A barrier that
+    /// reports a failed write, or a writer that is gone, keeps the log: it is
+    /// then the only complete copy of the conversation.
     pub(super) fn release_stale_session_logs(&mut self, cx: &mut HostCx) {
         let stale: Vec<(String, usize)> = self
             .event_records
@@ -315,13 +325,21 @@ impl AppState {
             self.enqueue_store_write(StoreWrite::Flush(completion), cx);
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                // A stopped writer has dropped its queue as well; nothing
-                // later can still land in the JSONL.
-                let _ = completed.recv().await;
+                let flushed_ok = match completed.recv().await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err("the session store writer has stopped".to_owned()),
+                };
                 host_cx.enqueue(move |state, cx| {
                     let Some(log) = state.event_records.get_mut(&session_id) else {
                         return;
                     };
+                    if let Err(error) = flushed_ok {
+                        // The barrier stays armed, so the log is never offered
+                        // for release again.
+                        log::warn!("keeping the in-memory history of {session_id}: {error}");
+                        return;
+                    }
                     log.release_barrier = None;
                     let appended_since = log.records.len() != flushed;
                     if state.resident(&session_id).is_some() {
@@ -344,7 +362,10 @@ impl AppState {
         let Topic::SessionEvents { session_id } = &subscription.topic else {
             unreachable!()
         };
-        let log = self.history_log(session_id);
+        let log = match self.history_log(session_id) {
+            Ok(log) => log,
+            Err(error) => return ServerEvent::SessionHistoryError(error),
+        };
         let records = log.records();
         let total = records.len();
         let total_turns = log.fold().turns.len() as u64;
@@ -388,7 +409,7 @@ impl AppState {
         before: u64,
         limit: u32,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
-        let log = self.history_log(session_id);
+        let log = self.history_log(session_id)?;
         let records = log.records();
         let end = before.min(records.len() as u64) as usize;
         let count = (limit as usize).clamp(1, SESSION_HISTORY_RECORDS);
@@ -418,7 +439,7 @@ impl AppState {
         session_id: &str,
         item_id: &str,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
-        let log = self.history_log(session_id);
+        let log = self.history_log(session_id)?;
         let output = log
             .fold()
             .entries

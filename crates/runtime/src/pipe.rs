@@ -120,7 +120,13 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
-            let mut state = AppState::with_ai_titles(store, services.ai_title_generation);
+            let mut state = match AppState::with_ai_titles(store, services.ai_title_generation) {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
@@ -143,8 +149,11 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.refresh_provider_status(&mut cx);
             }
             state.sync_terminal_handles();
-            let _ = ready_tx.send(());
-            smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
+            let _ = ready_tx.send(Ok(()));
+            let mut state = smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
+            if let Err(error) = state.close_store() {
+                log::error!("could not close the session store cleanly: {error}");
+            }
             let _ = stopped_tx.send_blocking(());
         })?;
     ready_rx.recv().map_err(|error| {
@@ -152,7 +161,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             std::io::ErrorKind::BrokenPipe,
             format!("host failed during startup: {error}"),
         )
-    })?;
+    })??;
 
     Ok(SpawnedHost {
         to_host: client_tx,
@@ -169,7 +178,7 @@ async fn host_loop(
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostFn>,
-) {
+) -> AppState {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
         enum Input {
@@ -200,6 +209,7 @@ async fn host_loop(
         state.reap_terminal_projections();
         domain_diff.emit_changes(&state, &mut cx);
     }
+    state
 }
 
 fn malformed_message_id(line: &str) -> Option<u64> {
@@ -247,14 +257,17 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
                 CommandOutcome::StoreBarrier(barrier) => {
                     let response_cx = cx.clone();
                     cx.spawn_detached(async move {
-                        let result = barrier
-                            .recv()
-                            .await
-                            .map(|()| CommandResponse::Unit)
-                            .map_err(|error| ProtocolError {
+                        let result = match barrier.recv().await {
+                            Ok(Ok(())) => Ok(CommandResponse::Unit),
+                            Ok(Err(message)) => Err(ProtocolError {
+                                code: "store_flush_failed".into(),
+                                message,
+                            }),
+                            Err(error) => Err(ProtocolError {
                                 code: "store_barrier_closed".into(),
                                 message: error.to_string(),
-                            });
+                            }),
+                        };
                         response_cx.send_message(HostMessage::Ack { id, result });
                     });
                 }
@@ -293,7 +306,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
 
 enum CommandOutcome {
     Immediate(Result<CommandResponse, ProtocolError>),
-    StoreBarrier(smol::channel::Receiver<()>),
+    StoreBarrier(smol::channel::Receiver<Result<(), String>>),
 }
 
 fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
@@ -1316,13 +1329,15 @@ mod tests {
         let first = project.icon_path.clone().unwrap();
         assert!(first.starts_with(root.join("project-icons")));
         host.shutdown_blocking().unwrap();
+        // Each restart opens the data dir afresh, as a new process would.
+        let reopen = || SessionStore::open_at(root.clone()).unwrap();
         assert_eq!(
-            store.read_file().projects[0].icon_path.as_ref(),
+            reopen().read_file().unwrap().projects[0].icon_path.as_ref(),
             Some(&first)
         );
         // Removing the source must not break the saved custom copy.
         std::fs::remove_file(&logo).unwrap();
-        let host = spawn_host(store.clone(), HostServices::default()).unwrap();
+        let host = spawn_host(reopen(), HostServices::default()).unwrap();
         let link = host.link();
         assert!(matches!(
             smol::block_on(link.query(Query::ReadProjectIcon {
@@ -1338,11 +1353,14 @@ mod tests {
         })
         .unwrap();
         host.shutdown_blocking().unwrap();
-        let second = store.read_file().projects[0].icon_path.clone().unwrap();
+        let second = reopen().read_file().unwrap().projects[0]
+            .icon_path
+            .clone()
+            .unwrap();
         assert_ne!(first, second);
         assert!(!first.exists());
         std::fs::write(&logo, include_bytes!("../../../assets/icons/app/tcode.png")).unwrap();
-        let host = spawn_host(store.clone(), HostServices::default()).unwrap();
+        let host = spawn_host(reopen(), HostServices::default()).unwrap();
         let link = host.link();
         link.command_blocking(Command::SetProjectIcon {
             project_id: "p".into(),
@@ -1358,10 +1376,147 @@ mod tests {
             QueryResponse::FileBytes(_)
         ));
         host.shutdown_blocking().unwrap();
-        assert!(store.read_file().projects[0].icon_path.is_none());
+        assert!(
+            reopen().read_file().unwrap().projects[0]
+                .icon_path
+                .is_none()
+        );
         assert!(!second.exists());
         assert!(logo.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A host started on a data dir an older build wrote moves the JSON index
+    /// and the JSONL logs into its database once, and serves every thread's
+    /// timeline exactly as the logs fold, before and after a restart.
+    #[test]
+    fn a_host_on_legacy_files_migrates_once_and_serves_the_same_timelines() {
+        use agent::{AgentEvent, ItemContent, ThreadItem, TurnStatus};
+        use tcode_core::session::{StoredEvent, Timeline};
+
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-host-migration-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_root).unwrap();
+        let item = |id: &str, content| {
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content,
+            })
+        };
+        let events = [
+            (
+                None,
+                AgentEvent::TurnStarted {
+                    turn_id: "t1".into(),
+                },
+            ),
+            (
+                None,
+                item(
+                    "user",
+                    ItemContent::UserMessage {
+                        text: "What changed?".into(),
+                        context_len: None,
+                        attachments: vec![],
+                    },
+                ),
+            ),
+            (
+                Some(1_000),
+                item(
+                    "assistant",
+                    ItemContent::AssistantMessage {
+                        text: "The parser.".into(),
+                    },
+                ),
+            ),
+            (
+                Some(2_000),
+                AgentEvent::TurnCompleted {
+                    turn_id: "t1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            ),
+            (
+                Some(3_000),
+                AgentEvent::TurnStarted {
+                    turn_id: "t2".into(),
+                },
+            ),
+        ];
+        let line = |(ts, event): &(Option<u64>, AgentEvent)| match ts {
+            None => serde_json::to_string(event).unwrap(),
+            Some(ts) => serde_json::json!({"ts": ts, "event": event}).to_string(),
+        };
+        // Legacy bare events, a CRLF line, a blank and an unparseable line,
+        // and a last line without its newline.
+        let log = format!(
+            "{}\n{}\n\n{{torn\n{}\r\n{}\n{}",
+            line(&events[0]),
+            line(&events[1]),
+            line(&events[2]),
+            line(&events[3]),
+            line(&events[4]),
+        );
+        std::fs::write(data_root.join("legacy-thread.jsonl"), &log).unwrap();
+        std::fs::write(
+            data_root.join("sessions.json"),
+            serde_json::json!({
+                "projects": [{"id": "p", "name": "Project", "root": "/work", "created_at": 1}],
+                "sessions": [{
+                    "id": "legacy-thread", "title": "Legacy", "provider": "codex",
+                    "cwd": "/work", "project_id": "p", "created_at": 1, "updated_at": 2
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let expected = format!(
+            "{:?}",
+            Timeline::fold_events(events.iter().map(|(ts, event)| StoredEvent {
+                ts: *ts,
+                event: event.clone(),
+                elided: None,
+            }))
+        );
+
+        for start in ["migrating", "restarted"] {
+            let store = SessionStore::open_at(data_root.clone()).unwrap();
+            let host = spawn_host(store, HostServices::default()).unwrap();
+            let link = host.link();
+            let stream = link.events();
+            let topic = Topic::SessionEvents {
+                session_id: "legacy-thread".into(),
+            };
+            link.subscribe(Subscription {
+                after: None,
+                topic: topic.clone(),
+            })
+            .unwrap();
+            let snapshot = next_event(&stream, |event| {
+                event.topic == topic && matches!(event.event, ServerEvent::SessionSnapshot { .. })
+            });
+            let ServerEvent::SessionSnapshot { records, total, .. } = snapshot.event else {
+                unreachable!("filtered to snapshots")
+            };
+            assert_eq!(total, 5, "{start}");
+            assert_eq!(
+                format!("{:?}", Timeline::fold_events(records)),
+                expected,
+                "{start}"
+            );
+            host.shutdown_blocking().unwrap();
+            assert!(!data_root.join("sessions.json").exists(), "{start}");
+            assert!(!data_root.join("legacy-thread.jsonl").exists(), "{start}");
+            assert_eq!(
+                std::fs::read_to_string(data_root.join("legacy/legacy-thread.jsonl")).unwrap(),
+                log,
+                "{start}"
+            );
+        }
+        std::fs::remove_dir_all(data_root).unwrap();
     }
 
     #[test]
