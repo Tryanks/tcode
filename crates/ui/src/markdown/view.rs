@@ -175,12 +175,7 @@ impl Element for MarkdownView {
                 let state = state.clone();
                 move |action: &OpenImage, window, cx| {
                     let source = state.read(cx).image_source(&action.url.clone().into());
-                    crate::attachments::open_image_lightbox(
-                        source,
-                        action.title.clone(),
-                        window,
-                        cx,
-                    );
+                    crate::image_viewer::open(source, action.title.clone(), window, cx);
                 }
             })
             .child(state.clone())
@@ -349,7 +344,8 @@ mod tests {
 
     use gpui::{
         AppContext as _, Context, Entity, IntoElement, ListAlignment, ListState, Modifiers,
-        MouseButton, Render, TestAppContext, VisualTestContext, Window, div, point, px,
+        MouseButton, Render, StatefulInteractiveElement as _, TestAppContext, VisualTestContext,
+        Window, div, point, px,
     };
 
     use super::*;
@@ -474,6 +470,32 @@ mod tests {
                     window,
                     cx,
                 ))
+                .child(
+                    div()
+                        .h(px(40.))
+                        .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+        }
+    }
+
+    struct SwallowedClickRoot {
+        markdown: Entity<MarkdownState>,
+    }
+
+    impl Render for SwallowedClickRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(TextSelectionLayer)
+                .child(
+                    div()
+                        .id("swallowing-button")
+                        .w_full()
+                        .h(px(52.))
+                        .on_click(|_, window, cx| {
+                            crate::widgets::stop_click_propagation(window, cx)
+                        }),
+                )
                 .child(
                     div()
                         .h(px(40.))
@@ -982,6 +1004,40 @@ mod tests {
             assert!(
                 gpui_base::TextSelection::selected_text(window, cx).is_empty(),
                 "a titlebar press started a text selection"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn click_that_stops_propagation_does_not_leave_selection_following_pointer(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|_, cx| SwallowedClickRoot {
+            markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_mouse_down(
+            point(px(10.), px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(10.), px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(point(px(80.), px(70.)), None, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert!(
+                gpui_base::TextSelection::selected_text(window, cx).is_empty(),
+                "the released pointer kept selecting text"
             );
         });
     }

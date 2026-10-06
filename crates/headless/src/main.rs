@@ -1,13 +1,14 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use tcode_client::pairing::{PairInvite, pair_url, parse_pair_url};
 use tcode_runtime::pipe::{HostServices, spawn_host};
-use tcode_services::store::SessionStore;
+use tcode_services::store::{Migration, MigrationPhase, MigrationProgress, SessionStore};
 use tcode_traverse::browser::{BrowserConfig, StaticBundle, check_bind, serve, set_password};
 use tcode_traverse::identity::write_private;
 use tcode_traverse::lan::DEFAULT_PORT;
@@ -35,6 +36,11 @@ const STATIC_BUNDLE: Option<StaticBundle> = None;
 const DEFAULT_BROWSER_LISTEN: &str = "127.0.0.1:47420";
 /// The current invitation, for `pair` to print; absent while none is valid.
 const INVITATION_FILE: &str = "invitation.json";
+/// How often a running migration prints its progress.
+const MIGRATION_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Set by SIGINT or SIGTERM: cancels a startup migration, then stops `serve`.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     env_logger::init();
@@ -115,6 +121,10 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     }
     // Nothing else starts for a bind the listener would refuse anyway.
     check_bind(browser_listen, &remote_data_dir).map_err(|error| error.to_string())?;
+    install_interrupt_handler();
+    if migrate_store(&store)? == Migration::Cancelled {
+        return Ok(());
+    }
     let mut services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -228,6 +238,59 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     host.to_host.close();
     let _ = host.stopped.recv_blocking();
     Ok(())
+}
+
+/// Move an older build's threads into `tcode.db` before the host starts,
+/// printing progress; an interrupt cancels it and leaves them as they were.
+fn migrate_store(store: &SessionStore) -> Result<Migration, String> {
+    let needed = store
+        .needs_migration()
+        .map_err(|error| format!("could not open session store: {error}"))?;
+    if !needed {
+        return Ok(Migration::Completed);
+    }
+    println!(
+        "Migrating threads into {}; the original files are kept in legacy/. Ctrl-C cancels.",
+        store.root().join("tcode.db").display()
+    );
+    let mut last: Option<(MigrationPhase, Instant)> = None;
+    let outcome = store
+        .migrate(
+            |progress| {
+                let due = last.is_none_or(|(phase, at)| {
+                    phase != progress.phase || at.elapsed() >= MIGRATION_REPORT_INTERVAL
+                });
+                if due {
+                    println!("{}", migration_line(&progress));
+                    last = Some((progress.phase, Instant::now()));
+                }
+            },
+            &INTERRUPTED,
+        )
+        .map_err(|error| format!("migration failed: {error}"))?;
+    match outcome {
+        Migration::Completed => println!("Migration complete"),
+        Migration::Cancelled => println!("Migration cancelled; no file was changed"),
+    }
+    Ok(outcome)
+}
+
+fn migration_line(progress: &MigrationProgress) -> String {
+    let phase = match progress.phase {
+        MigrationPhase::Scanning => "scanning",
+        MigrationPhase::Importing => "importing",
+        MigrationPhase::Verifying => "verifying",
+        MigrationPhase::Publishing => "publishing",
+        MigrationPhase::Archiving => "archiving",
+    };
+    let mib = |bytes: u64| bytes as f64 / (1024. * 1024.);
+    format!(
+        "{phase}: {}/{} threads, {:.1}/{:.1} MiB",
+        progress.threads_done,
+        progress.threads_total,
+        mib(progress.bytes_done),
+        mib(progress.bytes_total)
+    )
 }
 
 fn set_password_command(args: &[String]) -> Result<(), String> {
@@ -351,26 +414,33 @@ fn reject_unknown_options(args: &[String], options_with_values: &[&str]) -> Resu
 }
 
 #[cfg(unix)]
-fn wait_for_interrupt() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
+fn install_interrupt_handler() {
     type SignalHandler = extern "C" fn(i32);
     unsafe extern "C" {
         fn signal(signal: i32, handler: SignalHandler) -> SignalHandler;
     }
     extern "C" fn handle_interrupt(_: i32) {
-        INTERRUPTED.store(true, Ordering::Relaxed);
+        INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     const SIGINT: i32 = 2;
-    // SAFETY: installs a process-global handler with the C ABI expected by
+    const SIGTERM: i32 = 15;
+    // SAFETY: installs process-global handlers with the C ABI expected by
     // signal(3); the handler performs only a lock-free atomic store.
     unsafe {
         signal(SIGINT, handle_interrupt);
+        signal(SIGTERM, handle_interrupt);
     }
-    while !INTERRUPTED.load(Ordering::Relaxed) {
+}
+
+/// Console interrupts keep their default effect: a migration they end is
+/// discarded by the next start, and the sources are untouched until it
+/// publishes.
+#[cfg(not(unix))]
+fn install_interrupt_handler() {}
+
+#[cfg(unix)]
+fn wait_for_interrupt() {
+    while !INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
     }
 }

@@ -218,6 +218,17 @@ quit:
   title: "Quit Tcode?"
   description: "%{count} session(s) are still working. Quitting will stop them."
   confirm: "Quit"
+  startup_failed: "Tcode could not start"
+migration:
+  title: "Upgrading thread storage"
+  description: "Tcode is copying your threads into a new database, tcode.db. The original files are kept in the data folder's legacy/ directory."
+  scanning: "Looking for threads…"
+  importing: "Copying threads: %{done} of %{total} · %{bytes} of %{total_bytes}"
+  verifying: "Checking the copy: %{done} of %{total} · %{bytes} of %{total_bytes}"
+  publishing: "Finishing…"
+  archiving: "Moving the original files into legacy/…"
+  quitting: "Stopping. The original files are unchanged."
+  failed: "The upgrade could not finish: %{reason}"
 settings:
   title: "Settings"
   sections: "All settings"
@@ -935,6 +946,13 @@ attach:
   tunnel_title: "Large attachment"
   tunnel_body: "'%{name}' is %{size} and this device reaches the machine across the internet, so sending it may take a while."
   tunnel_confirm: "Send anyway"
+image_viewer:
+  zoom_in: "Zoom in"
+  zoom_out: "Zoom out"
+  fit: "Fit to window"
+  actual_size: "Actual size"
+  close: "Close"
+  load_failed: "This image could not be loaded."
 preview:
   external_unavailable: "Open the remote page in Preview first. Its forwarded browser link works only while this preview stays open."
   remote_forwarding: "Remote loopback URLs are forwarded. Other addresses open from this Mac."

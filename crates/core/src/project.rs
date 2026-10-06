@@ -470,8 +470,9 @@ pub fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMe
     output
 }
 
-/// On-disk shape of `sessions.json` (current schema). Old files were a bare
-/// `Vec<SessionMeta>`; the store loader tolerates both.
+/// Every project and session in the store. Also the shape of the legacy
+/// `sessions.json` the store migrates from; older files were a bare
+/// `Vec<SessionMeta>`, and the migration tolerates both.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexFile {
     #[serde(default)]

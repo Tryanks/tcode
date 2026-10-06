@@ -1770,7 +1770,7 @@ impl ChatView {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "image".to_string());
                 Box::new(cx.listener(move |_, _, window, cx| {
-                    crate::attachments::open_image_lightbox(
+                    crate::image_viewer::open(
                         crate::store::host_image(path.clone()),
                         title.clone(),
                         window,

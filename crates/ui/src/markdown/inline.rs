@@ -411,8 +411,7 @@ impl Element for Inline {
                     return;
                 }
                 if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
-                    gpui_base::TextSelection::end(window, cx);
-                    cx.stop_propagation();
+                    crate::widgets::stop_click_propagation(window, cx);
                     match view.read(cx).resolve_link(&link.url) {
                         LinkTarget::Web(url) => cx.open_url(&url),
                         LinkTarget::Local(path) => cx.open_with_system(&path),

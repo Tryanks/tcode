@@ -459,8 +459,12 @@ impl AppState {
     }
 
     /// Enqueue a FIFO barrier used by the application quit hook. The returned
-    /// receiver resolves only after every earlier store write has completed.
-    pub fn store_write_barrier(&mut self, cx: &mut HostCx) -> smol::channel::Receiver<()> {
+    /// receiver resolves only after every earlier store write has committed,
+    /// with the store failure that lost one if any did.
+    pub fn store_write_barrier(
+        &mut self,
+        cx: &mut HostCx,
+    ) -> smol::channel::Receiver<Result<(), String>> {
         let (completion, barrier) = smol::channel::bounded(1);
         self.enqueue_store_write(StoreWrite::Flush(completion), cx);
         barrier

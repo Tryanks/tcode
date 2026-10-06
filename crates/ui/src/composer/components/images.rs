@@ -508,8 +508,8 @@ impl Composer {
                                     .xsmall()
                                     .text_color(cx.theme().muted_foreground),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                crate::widgets::stop_click_propagation(window, cx);
                                 this.remove_image(index, cx);
                             })),
                     )
@@ -532,7 +532,7 @@ impl Composer {
     }
 
     /// Open the clicked thumbnail as a window-level lightbox (see
-    /// [`crate::attachments::open_image_lightbox`]).
+    /// [`crate::image_viewer::open`]).
     pub(in super::super) fn open_image_preview(
         &self,
         index: usize,
@@ -542,7 +542,7 @@ impl Composer {
         let Some(image) = self.pending_images.get(index) else {
             return;
         };
-        crate::attachments::open_image_lightbox(
+        crate::image_viewer::open(
             crate::store::host_image(image.path.clone()),
             image.name.clone(),
             window,

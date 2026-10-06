@@ -644,20 +644,14 @@ fn render_paragraph(
                         });
                     })
                     .on_click(move |_, window, cx| {
-                        gpui_base::TextSelection::end(window, cx);
-                        cx.stop_propagation();
+                        crate::widgets::stop_click_propagation(window, cx);
                         if let Some(link) = &link {
                             match view.read(cx).resolve_link(&link.url) {
                                 LinkTarget::Web(url) => cx.open_url(&url),
                                 LinkTarget::Local(path) => cx.open_with_system(&path),
                             }
                         } else {
-                            crate::attachments::open_image_lightbox(
-                                source.clone(),
-                                title.clone(),
-                                window,
-                                cx,
-                            );
+                            crate::image_viewer::open(source.clone(), title.clone(), window, cx);
                         }
                     })
             }))
@@ -1179,7 +1173,7 @@ fn render_diagram(
     .on_click(move |_, window, cx| {
         gpui_base::TextSelection::end(window, cx);
         cx.stop_propagation();
-        crate::attachments::open_image_lightbox(
+        crate::image_viewer::open(
             lightbox_source.clone(),
             lightbox_label.to_string(),
             window,
