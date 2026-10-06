@@ -20,7 +20,8 @@ impl AppState {
     ) {
         let profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
         let remembered_effort = self.remembered_effort(provider, model.as_deref());
-        let store = self.store.clone();
+        let provider_commands =
+            self.cached_provider_commands(provider, profile_id.as_deref(), None);
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -42,7 +43,7 @@ impl AppState {
             // selections, then restore the effort last used with this model.
             active.meta.option_selections.clear();
             active.meta.option_selections.extend(remembered_effort);
-            active.provider_commands = store.load_commands(active.meta.provider, None);
+            active.provider_commands = provider_commands;
             active.pending_ultrathink = false;
             return;
         }
@@ -72,7 +73,7 @@ impl AppState {
             active.meta.model = model;
             active.meta.option_selections.clear();
             active.meta.option_selections.extend(remembered_effort);
-            active.provider_commands = store.load_commands(provider, None);
+            active.provider_commands = provider_commands;
             active.provider_options.clear();
             active.pending_ultrathink = false;
             if active.pending_relay.is_some() {
@@ -283,8 +284,7 @@ impl AppState {
         self.upsert_session_in_memory(meta.clone());
         let session_id = meta.id.clone();
         let cwd = meta.cwd.clone();
-        let provider_commands =
-            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
+        let provider_commands = self.cached_provider_commands_for(&meta);
         self.residents.live.insert(
             session_id.clone(),
             ActiveSession::new(meta, false, provider_commands),

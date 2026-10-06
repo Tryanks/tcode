@@ -2017,6 +2017,10 @@ impl WorkspaceStore {
         self.settings_replica.browser.clone()
     }
 
+    pub fn plugin_management(&self) -> &tcode_core::settings::PluginManagementSettings {
+        &self.settings_replica.plugins
+    }
+
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
         self.settings_replica
             .resolved_profile(profile_id)
@@ -2125,6 +2129,23 @@ impl WorkspaceStore {
             item.installed = self.settings_replica.acp_agents.contains_key(&item.id);
         }
         items
+    }
+
+    pub fn provider_plugin_catalog(
+        &self,
+        profile_id: &str,
+    ) -> Option<&tcode_protocol::ProviderPluginCatalog> {
+        self.providers_replica
+            .plugins
+            .iter()
+            .find(|catalog| catalog.profile_id == profile_id)
+    }
+
+    /// The working directory of the thread or draft the window has open.
+    pub fn active_session_cwd(&self) -> Option<PathBuf> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.cwd.clone())
     }
 
     pub fn acp_registry_loading(&self) -> bool {

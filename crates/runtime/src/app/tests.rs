@@ -3020,11 +3020,17 @@ fn reopened_command_cache_seeds_a_draft_before_provider_start() {
         kind: agent::ProviderCommandKind::Command,
     }];
     store
-        .save_commands(ProviderKind::ClaudeCode, None, &commands)
+        .save_commands(
+            &CommandsCacheKey::Native {
+                provider: ProviderKind::ClaudeCode,
+                home: None,
+            },
+            &commands,
+        )
         .unwrap();
 
     let state = TestClientState::new(SessionStore::open_at(root.clone()).unwrap());
-    let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None);
+    let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None, None);
     let draft = AppState::build_draft_session(
         "project".into(),
         PathBuf::from("/tmp/project"),
@@ -3264,10 +3270,11 @@ fn session_launch_preserves_approval_policy_and_scopes_mcp_registrations() {
     let orchestrate = registration(agent::McpRegistration::SERVER_NAME_ORCHESTRATE, 8);
     let report = registration("child-report", 9);
     let computer = registration(agent::McpRegistration::SERVER_NAME_COMPUTER_USE, 10);
-    for (provider, preview_supported) in [
-        (ProviderKind::ClaudeCode, true),
-        (ProviderKind::Codex, true),
-        (ProviderKind::Pi, false),
+    // Codex ships its own computer use, so tcode's server is withheld from it.
+    for (provider, preview_supported, computer_supported) in [
+        (ProviderKind::ClaudeCode, true, true),
+        (ProviderKind::Codex, true, false),
+        (ProviderKind::Pi, false, true),
     ] {
         for native_approvals in [false, true] {
             let mut settings = Settings::default();
@@ -3320,7 +3327,7 @@ fn session_launch_preserves_approval_policy_and_scopes_mcp_registrations() {
                         (preview_supported, &preview),
                         (lead, &orchestrate),
                         (child, &report),
-                        (computer_enabled, &computer),
+                        (computer_enabled && computer_supported, &computer),
                     ] {
                         if enabled {
                             expected.push((&reg.name, &reg.url, &reg.bearer_token));

@@ -71,7 +71,7 @@ use tcode_services::import::{
 use tcode_services::provider_probe::{default_program, probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
-use tcode_services::store::{SessionStore, now_millis, now_secs};
+use tcode_services::store::{CommandsCacheKey, SessionStore, now_millis, now_secs};
 use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
     self, CheckInput as ProviderCheckInput, Installation,
@@ -234,6 +234,7 @@ use history::SessionLog;
 mod lifecycle;
 mod options;
 mod orchestrate;
+mod plugins;
 mod providers;
 mod send;
 mod sessions;
@@ -255,8 +256,8 @@ use active_session::{
 use orchestrate::McpWiring;
 pub use providers::ProviderCatalog;
 use providers::{
-    effort_selection, normalized_selections, provider_secret_names, session_launch_env,
-    session_options,
+    computer_use_attaches, effort_selection, launch_env_for_profile, normalized_selections,
+    provider_secret_names, session_launch_env, session_options,
 };
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
@@ -364,6 +365,8 @@ pub struct AppState {
     pub acp_registry_error: Option<String>,
     /// Registry ids currently downloading (their marketplace row shows a spinner).
     pub acp_installing: std::collections::HashSet<String>,
+    /// Native plugin catalogs by profile id, listed on demand.
+    plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
     mcp: McpWiring,
     callback_last_turn: HashMap<String, usize>,
     callback_approval_requests: HashSet<(String, String)>,
@@ -531,6 +534,7 @@ impl AppState {
             acp_registry_loading: false,
             acp_registry_error: None,
             acp_installing: std::collections::HashSet::new(),
+            plugin_catalogs: HashMap::new(),
             mcp: McpWiring::default(),
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),

@@ -16,6 +16,8 @@ mod actor;
 pub mod claude;
 mod claude_context;
 mod claude_manifest;
+#[cfg(feature = "process")]
+mod claude_plugins;
 #[cfg(not(feature = "process"))]
 pub mod claude {
     pub use crate::claude_context::*;
@@ -69,11 +71,15 @@ pub struct Caps {
     /// Whether this adapter can attach tcode's HTTP MCP servers to a session.
     /// Preview attachment rides the same capability as every other MCP server.
     pub mcp_servers: bool,
+    /// The harness drives the desktop itself, so tcode's computer-use MCP
+    /// server is not attached to its sessions.
+    pub native_computer_use: bool,
     pub launch_args: bool,
     pub downgrade_approval_without_native_approvals: bool,
     pub option_descriptors: OptionDescriptors,
     pub home_path: bool,
     pub trust_project_extensions: bool,
+    pub plugin_management: PluginManagement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,11 +132,23 @@ impl ProviderKind {
                 live_approval_mode_switch: true,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: false,
+                plugin_management: PluginManagement {
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Enable,
+                        PluginActionKind::Disable,
+                        PluginActionKind::Update,
+                    ],
+                    marketplaces: true,
+                    apply: ApplyNote::ReloadOrRestart,
+                },
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
@@ -141,11 +159,23 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
+                // `codex features list` reports `computer_use stable` (0.159.3).
+                native_computer_use: true,
                 launch_args: false,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: false,
+                plugin_management: PluginManagement {
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Enable,
+                        PluginActionKind::Disable,
+                    ],
+                    marketplaces: true,
+                    apply: ApplyNote::NextSession,
+                },
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
@@ -158,11 +188,13 @@ impl ProviderKind {
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
+                plugin_management: PluginManagement::NONE,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
@@ -173,11 +205,13 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
                 mcp_servers: false,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: true,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: true,
+                plugin_management: PluginManagement::NONE,
             },
             ProviderKind::OpenCode => Caps {
                 supports_steering: false,
@@ -188,11 +222,13 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: false,
                 trust_project_extensions: false,
+                plugin_management: PluginManagement::NONE,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -203,11 +239,13 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::All,
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
+                plugin_management: PluginManagement::NONE,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
@@ -218,11 +256,13 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::All,
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
+                plugin_management: PluginManagement::NONE,
             },
         }
     }
@@ -238,6 +278,349 @@ impl ProviderKind {
             ProviderKind::Acp => "ACP agent",
         }
     }
+}
+
+/// Which native plugin operations an adapter drives. Whether one is offered
+/// for a given entry is computed per catalog ([`ProviderPluginEntry::actions`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginManagement {
+    pub actions: &'static [PluginActionKind],
+    pub marketplaces: bool,
+    pub apply: ApplyNote,
+}
+
+impl PluginManagement {
+    pub const NONE: Self = Self {
+        actions: &[],
+        marketplaces: false,
+        apply: ApplyNote::Unverified,
+    };
+
+    pub fn supports(&self, action: PluginActionKind) -> bool {
+        self.actions.contains(&action)
+    }
+}
+
+/// When a plugin change made through the native CLI reaches the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyNote {
+    /// Skills, commands and hooks apply after `/reload-plugins` in a running
+    /// session or in the next session; MCP servers only in the next session;
+    /// updates need a restart.
+    ReloadOrRestart,
+    /// Sessions started afterwards see the change; what a running session
+    /// picks up is not established.
+    NextSession,
+    /// No evidence yet of what a running session picks up.
+    Unverified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginActionKind {
+    Install,
+    Uninstall,
+    Enable,
+    Disable,
+    Update,
+}
+
+/// A native settings scope a plugin is installed or enabled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginScope {
+    User,
+    Project,
+    Local,
+    Managed,
+    Session,
+}
+
+/// A yes/no fact the native CLI may not report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tri {
+    Yes,
+    No,
+    #[default]
+    Unknown,
+}
+
+impl From<bool> for Tri {
+    fn from(value: bool) -> Self {
+        if value { Tri::Yes } else { Tri::No }
+    }
+}
+
+/// One native operation the host computed as available for an entry in the
+/// catalog's context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PluginAction {
+    Install { scope: PluginScope },
+    Uninstall { scope: PluginScope },
+    Enable { scope: PluginScope },
+    Disable { scope: PluginScope },
+    Update { scope: PluginScope },
+}
+
+impl PluginAction {
+    pub fn kind(self) -> PluginActionKind {
+        match self {
+            Self::Install { .. } => PluginActionKind::Install,
+            Self::Uninstall { .. } => PluginActionKind::Uninstall,
+            Self::Enable { .. } => PluginActionKind::Enable,
+            Self::Disable { .. } => PluginActionKind::Disable,
+            Self::Update { .. } => PluginActionKind::Update,
+        }
+    }
+
+    pub fn scope(self) -> PluginScope {
+        match self {
+            Self::Install { scope }
+            | Self::Uninstall { scope }
+            | Self::Enable { scope }
+            | Self::Disable { scope }
+            | Self::Update { scope } => scope,
+        }
+    }
+}
+
+/// A marketplace-level native operation available in the catalog's context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MarketplaceAction {
+    Add,
+    /// Removing the marketplace also uninstalls these installed plugins in
+    /// every scope, so the host asks before running it.
+    Remove {
+        marketplace: String,
+        uninstalls: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginSourceKind {
+    Official,
+    ThirdParty,
+    LocalPath,
+    Git,
+    Npm,
+    Command,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSource {
+    #[serde(default)]
+    pub marketplace: Option<String>,
+    pub kind: PluginSourceKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInstallation {
+    pub scope: PluginScope,
+    /// Where the installed copy lives on the host.
+    #[serde(default)]
+    pub location: Option<PathBuf>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The scope's own enablement where the native CLI reports it; the
+    /// effective value is [`ProviderPluginEntry::enabled`].
+    #[serde(default)]
+    pub scope_enabled: Option<bool>,
+}
+
+/// Components a plugin declares, by name. A `None` field was not enumerated,
+/// which is not the same as declaring none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredComponents {
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
+    #[serde(default)]
+    pub agents: Option<Vec<String>>,
+    /// Hook event names.
+    #[serde(default)]
+    pub hooks: Option<Vec<String>>,
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
+    /// Hook event names the native CLI reports as not yet trusted (Codex
+    /// skips such hooks until they are reviewed natively). `None` when the
+    /// provider has no hook-trust state.
+    #[serde(default)]
+    pub untrusted_hooks: Option<Vec<String>>,
+    #[serde(default)]
+    pub lsp_servers: Option<Vec<String>>,
+    #[serde(default)]
+    pub apps: Option<Vec<String>>,
+}
+
+/// One plugin in a provider's native catalog: installed in any scope, offered
+/// by a marketplace, or both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderPluginEntry {
+    /// The native id the CLI accepts, `name@marketplace`.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub source: PluginSource,
+    #[serde(default)]
+    pub installations: Vec<PluginInstallation>,
+    /// Effective enablement for the catalog's context directory.
+    #[serde(default)]
+    pub enabled: Tri,
+    #[serde(default)]
+    pub declared: Option<DeclaredComponents>,
+    #[serde(default)]
+    pub errors: Vec<String>,
+    #[serde(default)]
+    pub actions: Vec<PluginAction>,
+    /// Read-only `(key, native text)` facts, keyed by stable identifiers the
+    /// client localizes.
+    #[serde(default)]
+    pub diagnostics: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderPluginMarketplace {
+    pub name: String,
+    /// The repository, URL or path the marketplace was added from.
+    pub source: String,
+    pub kind: PluginSourceKind,
+    #[serde(default)]
+    pub location: Option<PathBuf>,
+}
+
+/// A provider's native plugin catalog as seen from one directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginListing {
+    pub entries: Vec<ProviderPluginEntry>,
+    pub marketplaces: Vec<ProviderPluginMarketplace>,
+    pub marketplace_actions: Vec<MarketplaceAction>,
+    /// Native errors for parts of the catalog that could not be read, such
+    /// as a marketplace that failed to load.
+    pub errors: Vec<String>,
+}
+
+/// Where and as whom a plugin-management command runs: the profile's CLI and
+/// environment, and the directory whose project scopes it addresses.
+#[derive(Debug, Clone)]
+pub struct PluginContext {
+    pub binary_path: Option<PathBuf>,
+    pub launch_env: LaunchEnv,
+    pub cwd: PathBuf,
+    /// False when `cwd` is only a neutral directory, so project and local
+    /// scopes are not offered.
+    pub project: bool,
+}
+
+/// One native plugin mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginOp {
+    Install {
+        id: String,
+        scope: PluginScope,
+        /// The `sha256` of a command the user accepted from an earlier
+        /// [`PluginOpOutcome::AcceptCommand`].
+        accept_command: Option<String>,
+    },
+    Uninstall {
+        id: String,
+        scope: PluginScope,
+    },
+    SetEnabled {
+        id: String,
+        scope: PluginScope,
+        enabled: bool,
+    },
+    Update {
+        id: String,
+        scope: PluginScope,
+        accept_command: Option<String>,
+    },
+    AddMarketplace {
+        source: String,
+    },
+    RemoveMarketplace {
+        name: String,
+    },
+}
+
+/// What a native plugin mutation reported. Native failures are errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginOpOutcome {
+    Done {
+        diagnostics: Vec<(String, String)>,
+    },
+    /// The CLI refused to run a marketplace-declared command until a person
+    /// accepts exactly this command.
+    AcceptCommand(CommandAcceptance),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandAcceptance {
+    pub command: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The CLI's own explanation.
+    pub native_text: String,
+}
+
+/// List a provider's native plugins and marketplaces as seen from `context`.
+#[cfg(feature = "process")]
+pub async fn list_plugins(
+    provider: ProviderKind,
+    context: &PluginContext,
+) -> Result<PluginListing, AgentError> {
+    match provider {
+        ProviderKind::ClaudeCode => claude_plugins::list(context).await,
+        ProviderKind::Codex => codex::plugins::list(context).await,
+        ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => Err(no_plugin_management(provider)),
+    }
+}
+
+/// Run one native plugin mutation in `context`.
+#[cfg(feature = "process")]
+pub async fn run_plugin_op(
+    provider: ProviderKind,
+    context: &PluginContext,
+    op: &PluginOp,
+) -> Result<PluginOpOutcome, AgentError> {
+    match provider {
+        ProviderKind::ClaudeCode => claude_plugins::run(context, op).await,
+        ProviderKind::Codex => codex::plugins::run(context, op).await,
+        ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => Err(no_plugin_management(provider)),
+    }
+}
+
+/// A native failure in the CLI's own words.
+#[cfg(feature = "process")]
+fn native_message(error: &AgentError) -> String {
+    match error {
+        AgentError::Provider(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(feature = "process")]
+fn no_plugin_management(provider: ProviderKind) -> AgentError {
+    AgentError::Provider(format!(
+        "{} has no plugin management",
+        provider.display_name()
+    ))
 }
 
 /// Registry agents never offered for new sessions because they duplicate a

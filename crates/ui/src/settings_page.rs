@@ -21,7 +21,8 @@ use gpui_base::{InteractiveElementExt as _, StyledExt as _, v_flex};
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
-use crate::provider_card::ProviderCard;
+use crate::plugins_settings::PluginsSettingsPanel;
+use crate::provider_card::{ManagePlugins, ProviderCard};
 use crate::provider_model_picker::ProviderModelPicker;
 use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode};
 use crate::store::WorkspaceStore;
@@ -68,6 +69,7 @@ enum Section {
     Browser,
     ComputerUse,
     Orchestrate,
+    Plugins,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Remote,
     Archived,
@@ -79,22 +81,24 @@ enum Section {
 /// headless listener in a browser. Choosing a machine, and the invitation other
 /// devices pair with, live in `crate::remote`.
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-const SECTIONS: [Section; 8] = [
+const SECTIONS: [Section; 9] = [
     Section::General,
     Section::Remote,
     Section::Providers,
     Section::Usage,
     Section::Orchestrate,
+    Section::Plugins,
     Section::ComputerUse,
     Section::Browser,
     Section::Archived,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 7] = [
+const SECTIONS: [Section; 8] = [
     Section::General,
     Section::Providers,
     Section::Usage,
     Section::Orchestrate,
+    Section::Plugins,
     Section::ComputerUse,
     Section::Browser,
     Section::Archived,
@@ -157,6 +161,7 @@ impl Section {
             | Self::Browser
             | Self::ComputerUse
             | Self::Orchestrate
+            | Self::Plugins
             | Self::Archived => SectionGroup::Machine,
         }
     }
@@ -180,6 +185,7 @@ impl Section {
             | Self::Usage
             | Self::ComputerUse
             | Self::Orchestrate
+            | Self::Plugins
             | Self::Archived => true,
         }
     }
@@ -192,6 +198,7 @@ impl Section {
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
             Self::Orchestrate => "settings-nav-orchestrate",
+            Self::Plugins => "settings-nav-plugins",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => "settings-nav-remote",
             Self::Archived => "settings-nav-archived",
@@ -206,6 +213,7 @@ impl Section {
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
             Self::Orchestrate => IconName::Map,
+            Self::Plugins => IconName::Puzzle,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => IconName::Network,
             Self::Archived => IconName::Inbox,
@@ -220,6 +228,7 @@ impl Section {
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
             Self::Orchestrate => crate::tr!("settings.orchestrate"),
+            Self::Plugins => crate::tr!("settings.plugins"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => crate::tr!("settings.remote"),
             Self::Archived => crate::tr!("settings.archived"),
@@ -295,10 +304,13 @@ pub struct SettingsPage {
     window_state: Entity<WindowState>,
     /// One card per native profile, keyed by profile id (built-in + user).
     provider_cards: Vec<(String, Entity<ProviderCard>)>,
+    provider_card_subscriptions: Vec<Subscription>,
     /// Long-lived state for the modal ACP marketplace and custom form.
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
+    /// Each enabled profile's native plugin catalog.
+    plugins_panel: Entity<PluginsSettingsPanel>,
     /// Hosting this machine. Absent where the client cannot listen at all.
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     #[cfg(not(target_family = "wasm"))]
@@ -361,6 +373,7 @@ impl SettingsPage {
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
+                "plugins" => Section::Plugins,
                 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
                 "remote" => Section::Remote,
                 "archived" => Section::Archived,
@@ -480,6 +493,16 @@ impl SettingsPage {
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
+        let content_scroll = ScrollHandle::new();
+        let plugins_panel = cx.new(|cx| {
+            PluginsSettingsPanel::new(
+                store.clone(),
+                window_state.clone(),
+                content_scroll.clone(),
+                window,
+                cx,
+            )
+        });
         #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
         #[cfg(not(target_family = "wasm"))]
         let hosting_panel = cx.new(|cx| crate::remote::HostingPanel::new(window, cx));
@@ -511,8 +534,10 @@ impl SettingsPage {
             store,
             window_state,
             provider_cards: Vec::new(),
+            provider_card_subscriptions: Vec::new(),
             acp_panel,
             orchestrate_panel,
+            plugins_panel,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             hosting_panel,
             title_model_picker,
@@ -542,7 +567,7 @@ impl SettingsPage {
             host_permissions: None,
             toggle_focus: HashMap::new(),
             section_scroll: ScrollHandle::new(),
-            content_scroll: ScrollHandle::new(),
+            content_scroll,
             _subscriptions: subscriptions,
         };
         page._subscriptions
@@ -721,6 +746,18 @@ impl SettingsPage {
                 let id = profile.id.clone();
                 let card = cx.new(|cx| ProviderCard::new(store, kind, id, cx));
                 (profile.id, card)
+            })
+            .collect();
+        self.provider_card_subscriptions = self
+            .provider_cards
+            .iter()
+            .map(|(_, card)| {
+                cx.subscribe(card, |this, _, ManagePlugins(profile_id), cx| {
+                    this.select_section(Section::Plugins, cx);
+                    let profile_id = profile_id.clone();
+                    this.plugins_panel
+                        .update(cx, |panel, cx| panel.focus_profile(profile_id, cx));
+                })
             })
             .collect();
     }
@@ -1247,6 +1284,9 @@ impl SettingsPage {
         if self.section != Section::ComputerUse {
             self.host_permissions = None;
         }
+        if self.section != Section::Plugins {
+            self.plugins_panel.update(cx, |panel, _| panel.hide());
+        }
         let column = match self.section {
             Section::General => self.render_general(cx),
             Section::Providers => self.render_providers(window, cx),
@@ -1254,6 +1294,7 @@ impl SettingsPage {
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
+            Section::Plugins => v_flex().child(self.plugins_panel.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Remote => v_flex().child(self.hosting_panel.clone()),
             Section::Archived => self.render_archived(cx),
@@ -2413,7 +2454,24 @@ impl SettingsPage {
             .child(
                 v_flex()
                     .child(self.section_label(crate::tr!("computer_use.section"), cx))
-                    .child(self.grouped_plain(rows, cx)),
+                    .child(self.grouped_plain(rows, cx))
+                    .children(
+                        agent::ProviderKind::NATIVE
+                            .into_iter()
+                            .chain([agent::ProviderKind::Acp])
+                            .filter(|kind| kind.caps().native_computer_use)
+                            .map(|kind| {
+                                div()
+                                    .pt_2()
+                                    .pl_3()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::tr!(
+                                        "providers.native_computer_use",
+                                        name = kind.display_name()
+                                    ))
+                            }),
+                    ),
             )
             .child(self.permissions_group(cx))
     }

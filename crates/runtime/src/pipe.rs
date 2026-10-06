@@ -395,6 +395,97 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::SetActiveAcpAgent { session_id, id } => {
             app.set_active_acp_agent(&session_id, &id, cx)
         }
+        Command::RefreshProviderPlugins { profile_id, cwd } => {
+            app.refresh_provider_plugins(&profile_id, cwd, cx)
+        }
+        Command::InstallProviderPlugin {
+            profile_id,
+            entry_id,
+            scope,
+            cwd,
+        } => app.start_plugin_operation(
+            &profile_id,
+            cwd,
+            agent::PluginOp::Install {
+                id: entry_id,
+                scope,
+                accept_command: None,
+            },
+            cx,
+        ),
+        Command::UninstallProviderPlugin {
+            profile_id,
+            entry_id,
+            scope,
+            cwd,
+        } => app.start_plugin_operation(
+            &profile_id,
+            cwd,
+            agent::PluginOp::Uninstall {
+                id: entry_id,
+                scope,
+            },
+            cx,
+        ),
+        Command::SetProviderPluginEnabled {
+            profile_id,
+            entry_id,
+            scope,
+            enabled,
+            cwd,
+        } => app.start_plugin_operation(
+            &profile_id,
+            cwd,
+            agent::PluginOp::SetEnabled {
+                id: entry_id,
+                scope,
+                enabled,
+            },
+            cx,
+        ),
+        Command::UpdateProviderPlugin {
+            profile_id,
+            entry_id,
+            scope,
+            cwd,
+        } => app.start_plugin_operation(
+            &profile_id,
+            cwd,
+            agent::PluginOp::Update {
+                id: entry_id,
+                scope,
+                accept_command: None,
+            },
+            cx,
+        ),
+        Command::AddProviderMarketplace {
+            profile_id,
+            source,
+            cwd,
+        } => app.start_plugin_operation(
+            &profile_id,
+            cwd,
+            agent::PluginOp::AddMarketplace {
+                source: source.trim().to_string(),
+            },
+            cx,
+        ),
+        Command::RemoveProviderMarketplace {
+            profile_id,
+            name,
+            cwd,
+        } => app.start_plugin_operation(
+            &profile_id,
+            cwd,
+            agent::PluginOp::RemoveMarketplace { name },
+            cx,
+        ),
+        Command::ResolvePluginChallenge { op_id, accept } => {
+            return CommandOutcome::Immediate(
+                app.resolve_plugin_challenge(op_id, accept, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::ResetSettings => app.reset_settings(cx),
         Command::WriteRelaunchMarker {
             session_id,

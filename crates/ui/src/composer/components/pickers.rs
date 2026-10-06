@@ -1139,6 +1139,12 @@ fn render_model_row(
                             .text_color(muted)
                             .child(crate::tr!("providers.mcp_unavailable")),
                     )
+                })
+                .when(row.provider.caps().native_computer_use, |this| {
+                    this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
+                        "providers.native_computer_use",
+                        name = provider_label(row.provider)
+                    )))
                 }),
         )
         .when(index < 9 && !compact, |this| {

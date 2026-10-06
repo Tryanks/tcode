@@ -28,10 +28,10 @@ pub(super) enum StoreWrite {
         completion: smol::channel::Sender<Result<(), String>>,
     },
     SaveCommands {
-        provider: ProviderKind,
-        acp_agent_id: Option<String>,
+        key: CommandsCacheKey,
         commands: Vec<ProviderCommand>,
     },
+    InvalidateCommands(CommandsCacheKey),
     WriteTerminalUi(Vec<u8>),
     WriteSettings(Vec<u8>),
     SetProfileSecret {
@@ -113,6 +113,7 @@ impl StoreWrite {
                 Some(completion),
             ),
             StoreWrite::SaveCommands { .. }
+            | StoreWrite::InvalidateCommands(_)
             | StoreWrite::WriteTerminalUi(_)
             | StoreWrite::WriteSettings(_)
             | StoreWrite::SetProfileSecret { .. }
@@ -261,19 +262,20 @@ impl StoreWriter {
             })
         };
         match write {
-            StoreWrite::SaveCommands {
-                provider,
-                acp_agent_id,
-                commands,
-            } => self
-                .store
-                .save_commands(provider, acp_agent_id.as_deref(), &commands)
-                .err()
-                .map(|err| {
+            StoreWrite::SaveCommands { key, commands } => {
+                self.store.save_commands(&key, &commands).err().map(|err| {
                     StoreWriteFailure::Warning(format!(
-                        "failed to persist {provider:?} command cache: {err}"
+                        "failed to persist {key:?} command cache: {err}"
                     ))
-                }),
+                })
+            }
+            StoreWrite::InvalidateCommands(key) => {
+                self.store.invalidate_commands(&key).err().map(|err| {
+                    StoreWriteFailure::Warning(format!(
+                        "failed to invalidate {key:?} command cache: {err}"
+                    ))
+                })
+            }
             StoreWrite::WriteTerminalUi(bytes) => {
                 atomic_write(self.terminal_preferences_path.clone(), bytes)
                     .err()

@@ -16,10 +16,11 @@ pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, Th
 pub use event::{
     AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, GitActionRequest,
     GitStatusStatus, IndexSnapshot, IndexSummary, MergeWorktreeFailure, NoticeSeverity,
-    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionEventRecord, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, Topic,
+    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
+    PluginStaleReason, ProviderPluginCatalog, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
@@ -48,7 +49,7 @@ pub use wire::{
 // `ProviderKind` has no unknown fallback; version 9 sends Orchestrate rows that
 // leave bundled guidance out, which an older peer would read as no guidance.
 //
-// Unreleased: (none)
+// Unreleased: provider plugin catalogs, their commands, challenges and switches.
 pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]

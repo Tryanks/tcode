@@ -93,6 +93,7 @@ impl ProviderCatalog {
         acp_registry_loading: bool,
         acp_registry_error: Option<String>,
         acp_installing: HashSet<String>,
+        plugins: Vec<tcode_protocol::ProviderPluginCatalog>,
     ) -> ProvidersStatus {
         ProvidersStatus {
             model_catalogs: self.model_catalogs.clone(),
@@ -150,6 +151,7 @@ impl ProviderCatalog {
                     .any(|status| status.checking)
                 || self.tcode_update.checking,
             secret_names: self.provider_secret_names.clone(),
+            plugins,
         }
     }
 }
@@ -721,12 +723,48 @@ impl AppState {
         });
     }
 
+    /// The installation a session's command menus come from: a native
+    /// profile's home, or one ACP agent.
+    pub(super) fn commands_cache_key(
+        &self,
+        provider: ProviderKind,
+        profile_id: Option<&str>,
+        acp_agent_id: Option<&str>,
+    ) -> Option<CommandsCacheKey> {
+        let home = match provider {
+            ProviderKind::Acp => None,
+            ProviderKind::Codex
+            | ProviderKind::ClaudeCode
+            | ProviderKind::Pi
+            | ProviderKind::OpenCode
+            | ProviderKind::Cursor
+            | ProviderKind::Grok => self
+                .settings
+                .resolved_profile(
+                    profile_id.unwrap_or_else(|| Settings::builtin_profile_id(provider)),
+                )
+                .and_then(|profile| profile.settings.home_path),
+        };
+        CommandsCacheKey::new(provider, home, acp_agent_id)
+    }
+
     pub(super) fn cached_provider_commands(
         &self,
         provider: ProviderKind,
+        profile_id: Option<&str>,
         acp_agent_id: Option<&str>,
     ) -> Vec<ProviderCommand> {
-        self.store.load_commands(provider, acp_agent_id)
+        self.commands_cache_key(provider, profile_id, acp_agent_id)
+            .map(|key| self.store.load_commands(&key))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn cached_provider_commands_for(&self, meta: &SessionMeta) -> Vec<ProviderCommand> {
+        self.cached_provider_commands(
+            meta.provider,
+            meta.profile_id.as_deref(),
+            meta.acp_agent_id.as_deref(),
+        )
     }
 
     /// The cached model catalog for `provider` (empty when never fetched).
@@ -848,6 +886,12 @@ pub(super) fn session_launch_env(
     LaunchEnv { env, home: None }
 }
 
+/// Whether tcode's computer-use server is offered to a session of `provider`.
+/// A harness with its own computer use keeps it; tcode's is not added beside it.
+pub(super) fn computer_use_attaches(provider: ProviderKind, settings: &Settings) -> bool {
+    settings.computer_use.enabled && !provider.caps().native_computer_use
+}
+
 pub(super) fn session_options(
     meta: &SessionMeta,
     settings: &Settings,
@@ -909,9 +953,7 @@ pub(super) fn session_options(
                 .is_some()
                 .then_some(orchestrate_report_server)
                 .flatten(),
-            settings
-                .computer_use
-                .enabled
+            computer_use_attaches(meta.provider, settings)
                 .then_some(computer_use_server)
                 .flatten(),
         ]

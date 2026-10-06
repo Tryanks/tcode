@@ -1,8 +1,9 @@
 use agent::RewindMode;
 use tcode_core::git::GitAction;
 use tcode_protocol::{
-    GitActionRequest, MergeWorktreeFailure, NoticeSeverity, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast,
+    GitActionRequest, MergeWorktreeFailure, NoticeSeverity, PluginOperationTarget, RuntimeEffect,
+    RuntimeError, RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId,
+    RuntimeToast,
 };
 
 use crate::toast::ToastKind;
@@ -251,6 +252,60 @@ fn git_action_toast_titles(action: GitAction) -> (String, String) {
     }
 }
 
+/// Started, succeeded and failed titles for a native plugin operation.
+fn plugin_operation_toast_titles(target: &PluginOperationTarget) -> [String; 3] {
+    use agent::PluginActionKind;
+    let (name, keys) = match target {
+        PluginOperationTarget::Plugin { action, plugin, .. } => (
+            plugin.as_str(),
+            match action {
+                PluginActionKind::Install => [
+                    "providers.plugins.toast.installing",
+                    "providers.plugins.toast.installed",
+                    "providers.plugins.toast.install_failed",
+                ],
+                PluginActionKind::Uninstall => [
+                    "providers.plugins.toast.uninstalling",
+                    "providers.plugins.toast.uninstalled",
+                    "providers.plugins.toast.uninstall_failed",
+                ],
+                PluginActionKind::Enable => [
+                    "providers.plugins.toast.enabling",
+                    "providers.plugins.toast.enabled",
+                    "providers.plugins.toast.enable_failed",
+                ],
+                PluginActionKind::Disable => [
+                    "providers.plugins.toast.disabling",
+                    "providers.plugins.toast.disabled",
+                    "providers.plugins.toast.disable_failed",
+                ],
+                PluginActionKind::Update => [
+                    "providers.plugins.toast.updating",
+                    "providers.plugins.toast.updated",
+                    "providers.plugins.toast.update_failed",
+                ],
+            },
+        ),
+        PluginOperationTarget::AddMarketplace { source } => (
+            source.as_str(),
+            [
+                "providers.plugins.toast.adding_marketplace",
+                "providers.plugins.toast.added_marketplace",
+                "providers.plugins.toast.add_marketplace_failed",
+            ],
+        ),
+        PluginOperationTarget::RemoveMarketplace { name } => (
+            name.as_str(),
+            [
+                "providers.plugins.toast.removing_marketplace",
+                "providers.plugins.toast.removed_marketplace",
+                "providers.plugins.toast.remove_marketplace_failed",
+            ],
+        ),
+    };
+    keys.map(|key| crate::tr!(key, name = name).into_owned())
+}
+
 pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToast {
     let (disposition, kind, title, detail, retry) = match toast {
         RuntimeToast::GitBusy => (
@@ -324,6 +379,45 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
             Some(detail.clone()),
             None,
         ),
+        RuntimeToast::PluginOperationStarted {
+            operation, target, ..
+        } => {
+            let [title, _, _] = plugin_operation_toast_titles(target);
+            (
+                RuntimeToastDisposition::Start(*operation),
+                ToastKind::Loading,
+                title,
+                None,
+                None,
+            )
+        }
+        RuntimeToast::PluginOperationSucceeded {
+            operation, target, ..
+        } => {
+            let [_, title, _] = plugin_operation_toast_titles(target);
+            (
+                RuntimeToastDisposition::Finish(*operation),
+                ToastKind::Success,
+                title,
+                None,
+                None,
+            )
+        }
+        RuntimeToast::PluginOperationFailed {
+            operation,
+            target,
+            detail,
+            ..
+        } => {
+            let [_, _, title] = plugin_operation_toast_titles(target);
+            (
+                RuntimeToastDisposition::Finish(*operation),
+                ToastKind::Error,
+                title,
+                Some(detail.clone()),
+                None,
+            )
+        }
         _ => (
             RuntimeToastDisposition::Push,
             ToastKind::Warning,
@@ -368,6 +462,11 @@ mod tests {
     #[test]
     fn toast_lifecycle_and_raw_diagnostics_survive_localization() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let plugin_target = PluginOperationTarget::Plugin {
+            action: agent::PluginActionKind::Install,
+            scope: agent::PluginScope::User,
+            plugin: "gamma@tcode-probe".into(),
+        };
         let retry = GitActionRequest {
             session_id: "session-1".into(),
             action: GitAction::CommitPush,
@@ -409,6 +508,22 @@ mod tests {
                 name: "Agent".into(),
                 detail: "acp raw\0detail".into(),
             },
+            RuntimeToast::PluginOperationStarted {
+                operation: RuntimeOperationId(3),
+                profile_id: "claude".into(),
+                target: plugin_target.clone(),
+            },
+            RuntimeToast::PluginOperationSucceeded {
+                operation: RuntimeOperationId(3),
+                profile_id: "claude".into(),
+                target: plugin_target.clone(),
+            },
+            RuntimeToast::PluginOperationFailed {
+                operation: RuntimeOperationId(3),
+                profile_id: "claude".into(),
+                target: plugin_target.clone(),
+                detail: "plugin raw\0detail".into(),
+            },
         ];
 
         for locale in [crate::LANGUAGE_ENGLISH, crate::LANGUAGE_SIMPLIFIED_CHINESE] {
@@ -417,7 +532,8 @@ mod tests {
                 let presented = present_runtime_toast(toast);
                 match toast {
                     RuntimeToast::GitStarted { operation, .. }
-                    | RuntimeToast::AcpInstallStarted { operation, .. } => {
+                    | RuntimeToast::AcpInstallStarted { operation, .. }
+                    | RuntimeToast::PluginOperationStarted { operation, .. } => {
                         assert_eq!(
                             presented.disposition,
                             RuntimeToastDisposition::Start(*operation)
@@ -425,7 +541,8 @@ mod tests {
                         assert_eq!(presented.kind, ToastKind::Loading);
                     }
                     RuntimeToast::GitSucceeded { operation, .. }
-                    | RuntimeToast::AcpInstallSucceeded { operation, .. } => {
+                    | RuntimeToast::AcpInstallSucceeded { operation, .. }
+                    | RuntimeToast::PluginOperationSucceeded { operation, .. } => {
                         assert_eq!(
                             presented.disposition,
                             RuntimeToastDisposition::Finish(*operation)
@@ -433,7 +550,8 @@ mod tests {
                         assert_eq!(presented.kind, ToastKind::Success);
                     }
                     RuntimeToast::GitFailed { operation, .. }
-                    | RuntimeToast::AcpInstallFailed { operation, .. } => {
+                    | RuntimeToast::AcpInstallFailed { operation, .. }
+                    | RuntimeToast::PluginOperationFailed { operation, .. } => {
                         assert_eq!(
                             presented.disposition,
                             RuntimeToastDisposition::Finish(*operation)
@@ -535,6 +653,14 @@ mod tests {
                 .as_deref(),
                 Some("acp raw\0detail")
             );
+            let plugin_failed = present_runtime_toast(&RuntimeToast::PluginOperationFailed {
+                operation: RuntimeOperationId(3),
+                profile_id: "claude".into(),
+                target: plugin_target.clone(),
+                detail: "plugin raw\0detail".into(),
+            });
+            assert_eq!(plugin_failed.detail.as_deref(), Some("plugin raw\0detail"));
+            assert!(plugin_failed.title.contains("gamma@tcode-probe"));
 
             for (event, severity, raw_message) in [
                 (

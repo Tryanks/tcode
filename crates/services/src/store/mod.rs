@@ -62,6 +62,44 @@ struct EventEnvelopeRef<'a> {
     event: &'a AgentEvent,
 }
 
+/// Which installation a cached command list belongs to. Native commands
+/// depend on the provider's home (its plugins, skills and settings), so two
+/// profiles with different homes never seed each other's menus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandsCacheKey {
+    /// `home` is the profile's home override; `None` is the CLI's default.
+    Native {
+        provider: ProviderKind,
+        home: Option<PathBuf>,
+    },
+    Acp {
+        agent_id: String,
+    },
+}
+
+impl CommandsCacheKey {
+    /// `None` for an ACP session without an agent id.
+    pub fn new(
+        provider: ProviderKind,
+        home: Option<PathBuf>,
+        acp_agent_id: Option<&str>,
+    ) -> Option<Self> {
+        match provider {
+            ProviderKind::Acp => acp_agent_id.map(|agent_id| Self::Acp {
+                agent_id: agent_id.to_string(),
+            }),
+            provider => Some(Self::Native { provider, home }),
+        }
+    }
+}
+
+/// 64-bit FNV-1a: a short, stable file-name segment for a home path.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// Cheap, cloneable handle to the data directory. Every handle for the same
 /// directory in this process shares one database, writer and lifecycle.
 #[derive(Clone)]
@@ -562,20 +600,29 @@ impl SessionStore {
         self.root.join(format!("models-{name}.json"))
     }
 
-    fn commands_path(&self, provider: ProviderKind, acp_agent_id: Option<&str>) -> Option<PathBuf> {
-        let name = match provider {
-            ProviderKind::Codex => "codex".to_string(),
-            ProviderKind::ClaudeCode => "claude".to_string(),
-            ProviderKind::Pi => "pi".to_string(),
-            ProviderKind::OpenCode => "opencode".to_string(),
-            ProviderKind::Cursor => "cursor".to_string(),
-            ProviderKind::Grok => "grok".to_string(),
-            ProviderKind::Acp => {
-                let id = acp_agent_id?;
+    fn commands_path(&self, key: &CommandsCacheKey) -> PathBuf {
+        let name = match key {
+            CommandsCacheKey::Native { provider, home } => {
+                let provider = match provider {
+                    ProviderKind::Codex => "codex",
+                    ProviderKind::ClaudeCode => "claude",
+                    ProviderKind::Pi => "pi",
+                    ProviderKind::OpenCode => "opencode",
+                    ProviderKind::Cursor => "cursor",
+                    ProviderKind::Grok => "grok",
+                    ProviderKind::Acp => "acp",
+                };
+                let home = home.as_deref().map_or_else(
+                    || "default".to_string(),
+                    |home| format!("{:016x}", fnv1a(home.as_os_str().as_encoded_bytes())),
+                );
+                format!("{provider}-{home}")
+            }
+            CommandsCacheKey::Acp { agent_id } => {
                 // Registry ids are external input and may contain path separators.
                 // Hex keeps the filename reversible and collision-free without
                 // allowing an id to escape the data directory.
-                let encoded = id
+                let encoded = agent_id
                     .as_bytes()
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
@@ -583,7 +630,7 @@ impl SessionStore {
                 format!("acp-{encoded}")
             }
         };
-        Some(self.root.join(format!("commands-{name}.json")))
+        self.root.join(format!("commands-{name}.json"))
     }
 
     /// Load the last-fetched model catalog for `provider` so the picker is
@@ -604,42 +651,36 @@ impl SessionStore {
         fs::rename(&tmp, path)
     }
 
-    /// Load the most recently reported command/skill list for a native provider
-    /// or one specific ACP agent. Empty when missing, unreadable, or when an ACP
-    /// agent id was not supplied.
-    pub fn load_commands(
-        &self,
-        provider: ProviderKind,
-        acp_agent_id: Option<&str>,
-    ) -> Vec<ProviderCommand> {
-        let Some(path) = self.commands_path(provider, acp_agent_id) else {
-            return Vec::new();
-        };
-        let Ok(bytes) = fs::read(path) else {
+    /// Load the most recently reported command/skill list for one native
+    /// installation or ACP agent. Empty when missing or unreadable.
+    pub fn load_commands(&self, key: &CommandsCacheKey) -> Vec<ProviderCommand> {
+        let Ok(bytes) = fs::read(self.commands_path(key)) else {
             return Vec::new();
         };
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
-    /// Atomically persist the complete command/skill list reported by a native
-    /// provider or one specific ACP agent. Empty lists are meaningful: they
+    /// Atomically persist the complete command/skill list reported by one
+    /// native installation or ACP agent. Empty lists are meaningful: they
     /// replace a stale non-empty cache.
     pub fn save_commands(
         &self,
-        provider: ProviderKind,
-        acp_agent_id: Option<&str>,
+        key: &CommandsCacheKey,
         commands: &[ProviderCommand],
     ) -> io::Result<()> {
-        let path = self.commands_path(provider, acp_agent_id).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ACP command cache requires an agent id",
-            )
-        })?;
+        let path = self.commands_path(key);
         let tmp = path.with_extension("json.tmp");
         let data = serde_json::to_vec_pretty(commands).map_err(invalid_data)?;
         fs::write(&tmp, data)?;
         fs::rename(&tmp, path)
+    }
+
+    /// Forget a cached command list after the installation changed under it.
+    pub fn invalidate_commands(&self, key: &CommandsCacheKey) -> io::Result<()> {
+        match fs::remove_file(self.commands_path(key)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Load every project and session, in the order they were first stored.

@@ -234,6 +234,7 @@ impl AppState {
             self.acp_registry_loading,
             self.acp_registry_error.clone(),
             self.acp_installing.clone(),
+            self.provider_plugin_catalogs(),
         )
     }
 
