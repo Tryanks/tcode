@@ -737,7 +737,8 @@ impl ChatView {
         } else {
             TimelineContinuity::Complete
         };
-        let (running, list_sync, activity_snapshot_keys) = self
+        let running = self.workspace_store.read(cx).composer_state().turn_running;
+        let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
             .with_active_timeline(|timeline| {
@@ -753,7 +754,7 @@ impl ChatView {
                 );
                 let activity_snapshot_keys = awaiting_activity_snapshot
                     .then(|| auto_activity_snapshot_keys(&timeline.entries));
-                (timeline.turn_running, list_sync, activity_snapshot_keys)
+                (list_sync, activity_snapshot_keys)
             })
             .unwrap_or_else(|| {
                 let list_sync = self.turn_index_cache.sync(
@@ -764,7 +765,7 @@ impl ChatView {
                     &self.expanded,
                     continuity,
                 );
-                (false, list_sync, None)
+                (list_sync, None)
             });
 
         if let Some(session_key) = session_key.as_deref()
@@ -962,6 +963,7 @@ impl ChatView {
         one_shot_row_target: Option<usize>,
         cx: &mut Context<Self>,
     ) {
+        let running = self.workspace_store.read(cx).composer_state().turn_running;
         let row_count = self.rows.len();
         // Auto-scroll can move many rows during a drag. Do not retire any
         // participant until mouse-up; completed-selection participants remain
@@ -988,7 +990,7 @@ impl ChatView {
                     row_count,
                     self.markdown_visible_rows.clone(),
                     one_shot_row_target,
-                    timeline.turn_running,
+                    running,
                 );
                 let entries = markdown_entries_for_residency(timeline, &self.rows, &scope);
                 let decisions = decide(ResidencyInput {
@@ -996,7 +998,7 @@ impl ChatView {
                     visible_rows: self.markdown_visible_rows.clone(),
                     one_shot_row_target,
                     entries: &entries,
-                    stream_running: timeline.turn_running,
+                    stream_running: running,
                     resident_ids: &resident_ids,
                     selection_participants: &selection_participants,
                     selection_drag_active,
@@ -1731,7 +1733,11 @@ impl ChatView {
             .then(|| self.workspace_store.read(cx).chat_native_rewind_state(turn))
             .flatten()
             .filter(|(available, _)| *available)
-            .map(|(_, disabled)| components::bubble::RewindMenu { turn, disabled });
+            .map(|(_, disabled)| components::bubble::RewindMenu {
+                turn,
+                disabled,
+                conversation_available: self.workspace_store.read(cx).absolute_turn(turn) > 0,
+            });
         let rewind = steering
             .is_none()
             .then(|| {
@@ -1743,6 +1749,7 @@ impl ChatView {
                 };
                 components::bubble::native_rewind_button(
                     turn,
+                    self.workspace_store.read(cx).absolute_turn(turn) > 0,
                     (
                         self.workspace_store.read(cx).chat_native_rewind_state(turn),
                         self.window_state.read(cx).compact,

@@ -57,6 +57,7 @@ pub(crate) struct BubbleData<'a> {
 pub(crate) struct RewindMenu {
     pub(crate) turn: usize,
     pub(crate) disabled: bool,
+    pub(crate) conversation_available: bool,
 }
 
 /// The bubble's context-menu items: copy the message, then the rewind modes
@@ -69,11 +70,16 @@ fn bubble_menu_items(copy_text: Arc<str>, rewind: Option<RewindMenu>) -> MenuExt
         } else {
             assistant::copy_message_items(copy_text.clone())(menu, window, cx)
         };
-        let Some(RewindMenu { turn, disabled }) = rewind else {
+        let Some(RewindMenu {
+            turn,
+            disabled,
+            conversation_available,
+        }) = rewind
+        else {
             return menu;
         };
         let mut modes = Vec::new();
-        if turn > 0 {
+        if conversation_available {
             modes.push((
                 crate::tr!("chat.rewind_all").into_owned(),
                 RewindMode::FilesAndConversation,
@@ -108,6 +114,7 @@ pub(crate) struct RewindHandlers {
 
 pub(crate) fn native_rewind_button(
     turn: usize,
+    conversation_available: bool,
     (state, compact): (Option<(bool, bool)>, bool),
     handlers: RewindHandlers,
     cx: &App,
@@ -146,7 +153,7 @@ pub(crate) fn native_rewind_button(
                     files,
                 } = &handlers;
                 let mut modes = Vec::new();
-                if turn > 0 {
+                if conversation_available {
                     modes.push((
                         crate::tr!("chat.rewind_all").into_owned(),
                         files_and_conversation.clone(),
