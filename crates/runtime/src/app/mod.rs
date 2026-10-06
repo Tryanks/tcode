@@ -262,8 +262,8 @@ use active_session::{
 use orchestrate::McpWiring;
 pub use providers::ProviderCatalog;
 use providers::{
-    effort_selection, launch_env_for_profile, normalized_selections, provider_secret_names,
-    session_launch_env, session_options,
+    computer_use_attaches, effort_selection, launch_env_for_profile, normalized_selections,
+    provider_secret_names, session_launch_env, session_options,
 };
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;

@@ -444,6 +444,7 @@ providers:
   reveal_email: "Click to reveal email"
   hide_email: "Click to hide email"
   mcp_unavailable: "MCP tools (computer use / preview / orchestrate) unavailable"
+  native_computer_use: "%{name} has its own computer use; Tcode's computer-use tools are not attached."
   # Status dot + summary copy (T3 §2)
   status:
     checking: "Checking provider status"

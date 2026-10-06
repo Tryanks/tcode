@@ -115,7 +115,11 @@ impl AppState {
         };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
-        let computer_use_registration = self.computer_use_registration_for(&meta);
+        let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
+            self.computer_use_registration_for(&meta)
+        } else {
+            None
+        };
         let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {

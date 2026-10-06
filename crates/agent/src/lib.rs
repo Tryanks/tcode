@@ -63,6 +63,9 @@ pub struct Caps {
     /// Whether this adapter can attach tcode's HTTP MCP servers to a session.
     /// Preview attachment rides the same capability as every other MCP server.
     pub mcp_servers: bool,
+    /// The harness drives the desktop itself, so tcode's computer-use MCP
+    /// server is not attached to its sessions.
+    pub native_computer_use: bool,
     pub launch_args: bool,
     pub downgrade_approval_without_native_approvals: bool,
     pub option_descriptors: OptionDescriptors,
@@ -110,6 +113,7 @@ impl ProviderKind {
                 live_approval_mode_switch: true,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
@@ -136,6 +140,8 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
+                // `codex features list` reports `computer_use stable` (0.159.3).
+                native_computer_use: true,
                 launch_args: false,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
@@ -163,6 +169,7 @@ impl ProviderKind {
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Wire,
@@ -179,6 +186,7 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
                 mcp_servers: false,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: true,
                 option_descriptors: OptionDescriptors::Catalog,
@@ -195,6 +203,7 @@ impl ProviderKind {
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
+                native_computer_use: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
