@@ -201,9 +201,10 @@ impl Composer {
 
         let trigger = Button::new("model-picker")
             .debug_selector(|| "model-picker".into())
-            .when(self.compact || store.native_subagent_readonly(), |button| {
-                button.w_full().max_w(px(160.)).min_w_0().overflow_hidden()
-            })
+            .when(
+                self.compact || composer_state.conversation_read_only,
+                |button| button.w_full().max_w(px(160.)).min_w_0().overflow_hidden(),
+            )
             .ghost()
             .compact()
             .h(px(28.))
@@ -212,18 +213,20 @@ impl Composer {
             .rounded(crate::material::radius_input(cx))
             .child(
                 h_flex()
-                    .when(self.compact || store.native_subagent_readonly(), |el| {
-                        el.w_full().min_w_0().overflow_hidden()
-                    })
+                    .when(
+                        self.compact || composer_state.conversation_read_only,
+                        |el| el.w_full().min_w_0().overflow_hidden(),
+                    )
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
                     .child(tinted_provider_glyph(provider, store).small())
                     .child(
                         div()
-                            .when(self.compact || store.native_subagent_readonly(), |el| {
-                                el.min_w_0().truncate()
-                            })
+                            .when(
+                                self.compact || composer_state.conversation_read_only,
+                                |el| el.min_w_0().truncate(),
+                            )
                             .font_medium()
                             .child(display),
                     )
@@ -280,11 +283,8 @@ impl Composer {
     pub(in super::super) fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
         let composer = store.composer_state();
-        // Native providers describe their options through the model catalog; ACP
-        // agents push theirs over the wire (`AgentEvent::ProviderOptions`). Both
-        // arrive as `OptionDescriptor`s and render through this one picker.
         let descriptors = composer.active_option_descriptors.clone();
-        if store.native_subagent_readonly() {
+        if composer.conversation_read_only {
             let effort =
                 option_selection_str(&composer.active_option_selections, "reasoningEffort");
             let descriptor = descriptors.iter().find(|option| {
@@ -320,14 +320,14 @@ impl Composer {
         if descriptors.is_empty() {
             return div().into_any_element();
         }
-        let spec = match composer.active_model_spec.clone() {
-            Some(spec) => spec,
-            None => ModelSpec {
+        let spec = ModelSpec {
+            options: descriptors,
+            ..composer.active_model_spec.clone().unwrap_or(ModelSpec {
                 id: String::new(),
                 display_name: String::new(),
                 is_default: false,
-                options: descriptors,
-            },
+                options: Vec::new(),
+            })
         };
         let selections = composer.active_option_selections;
         let ultrathink_armed = composer.ultrathink_armed;
@@ -505,7 +505,7 @@ impl Composer {
     /// description, ✓ on the current one).
     pub(in super::super) fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = self.workspace_store.read(cx).composer_state();
-        let current = composer.approval_mode;
+        let current = composer.effective_approval_mode;
         let native_approval_modes_enabled = composer.native_approval_modes_enabled;
         let (label, icon_path) = approval_mode_meta(current);
         let muted = cx.theme().muted_foreground;
@@ -618,7 +618,7 @@ impl Composer {
         let composer = self.workspace_store.read(cx).composer_state();
         let usage = composer.token_usage;
         let muted = cx.theme().muted_foreground;
-        let mode = composer.approval_mode;
+        let mode = composer.effective_approval_mode;
         let interaction = composer.interaction_mode;
         let store_entity = self.workspace_store.clone();
 
@@ -993,7 +993,7 @@ fn render_compact_model_footer(
         footer = footer.child(group(label.into(), track, cx));
     }
 
-    let current = composer_state.approval_mode;
+    let current = composer_state.effective_approval_mode;
     let enabled = composer_state.native_approval_modes_enabled;
     let segments = APPROVAL_MODES
         .iter()
@@ -1405,7 +1405,6 @@ fn render_traits_pane(
                 }
                 let options = &options;
                 let is_reasoning = id == "reasoningEffort";
-                let is_context_window = id == "contextWindow";
                 pane = pane.child(section_header(label, cx));
                 if is_reasoning && locked {
                     pane = pane.child(
@@ -1419,17 +1418,30 @@ fn render_traits_pane(
                     );
                     continue;
                 }
-                let resolved = (!is_context_window)
-                    .then(|| resolved_select_value(id, options, default_value, selections))
+                let resolved = resolved_select_value(id, options, default_value, selections);
+                let resolved_window = (id == "contextWindow")
+                    .then(|| {
+                        selections
+                            .iter()
+                            .find(|selection| selection.id == *id)
+                            .and_then(|selection| {
+                                agent::claude::parse_context_window_tokens(&selection.value)
+                            })
+                            .or_else(|| {
+                                default_value.as_ref().and_then(|value| {
+                                    agent::claude::parse_context_window_tokens(&serde_json::json!(
+                                        value
+                                    ))
+                                })
+                            })
+                    })
                     .flatten();
-                let resolved_window = is_context_window
-                    .then(|| agent::claude::resolved_context_window(&spec.id, selections));
                 for (index, opt) in options.iter().enumerate() {
                     let is_default = default_value.as_deref() == Some(opt.value.as_str());
                     let is_ultra = is_reasoning && opt.value == "ultrathink";
-                    let is_selected = if let Some(resolved_window) = resolved_window {
+                    let is_selected = if let Some(window) = resolved_window {
                         agent::claude::parse_context_window_tokens(&serde_json::json!(opt.value))
-                            == Some(resolved_window)
+                            == Some(window)
                     } else if is_reasoning && ultrathink_armed {
                         is_ultra
                     } else if is_ultra {
@@ -1480,17 +1492,19 @@ fn render_traits_pane(
                             }),
                     );
                 }
-                if let Some(resolved_window) = resolved_window {
-                    let preset_selected = options.iter().any(|opt| {
-                        agent::claude::parse_context_window_tokens(&serde_json::json!(opt.value))
-                            == Some(resolved_window)
+                if id == "contextWindow" {
+                    let custom_selected = resolved_window.is_some_and(|window| {
+                        !options.iter().any(|opt| {
+                            agent::claude::parse_context_window_tokens(&serde_json::json!(
+                                opt.value
+                            )) == Some(window)
+                        })
                     });
-                    let custom_selected = !preset_selected;
                     let mut label = crate::tr!("composer.context_window_custom").into_owned();
                     if custom_selected {
                         label.push_str(&format!(
                             " ({})",
-                            agent::claude::format_context_window(resolved_window)
+                            agent::claude::format_context_window(resolved_window.unwrap())
                         ));
                     }
                     let input = context_window_custom.clone();

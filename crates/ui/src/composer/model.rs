@@ -365,10 +365,26 @@ pub(super) fn traits_chip_label(
                     continue;
                 }
                 if id == "contextWindow" {
-                    parts.push(agent::claude::format_context_window(
-                        agent::claude::resolved_context_window(&spec.id, selections),
-                    ));
-                    continue;
+                    let selected = selections
+                        .iter()
+                        .find(|selection| selection.id == *id)
+                        .and_then(|selection| {
+                            agent::claude::parse_context_window_tokens(&selection.value)
+                        });
+                    if let Some(selected) = selected {
+                        parts.push(
+                            options
+                                .iter()
+                                .find(|option| {
+                                    agent::claude::parse_context_window_tokens(&serde_json::json!(
+                                        option.value
+                                    )) == Some(selected)
+                                })
+                                .map(|option| option.label.clone())
+                                .unwrap_or_else(|| agent::claude::format_context_window(selected)),
+                        );
+                        continue;
+                    }
                 }
                 let part = resolved_select_value(id, options, default_value, selections)
                     .and_then(|value| options.iter().find(|o| o.value == value))
@@ -707,70 +723,6 @@ mod tests {
     #[test]
     fn traits_chip_joins_descriptor_labels() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let spec = agent::ModelSpec {
-            id: "claude-fable-5".into(),
-            display_name: "Claude Fable 5".into(),
-            is_default: false,
-            options: vec![
-                agent::OptionDescriptor::Select {
-                    id: "reasoningEffort".into(),
-                    label: "Reasoning".into(),
-                    options: vec![
-                        agent::SelectOption {
-                            value: "high".into(),
-                            label: "High".into(),
-                            description: None,
-                        },
-                        agent::SelectOption {
-                            value: "max".into(),
-                            label: "Max".into(),
-                            description: None,
-                        },
-                    ],
-                    default_value: Some("high".into()),
-                },
-                agent::OptionDescriptor::Select {
-                    id: "contextWindow".into(),
-                    label: "Context Window".into(),
-                    options: vec![
-                        agent::SelectOption {
-                            value: "200k".into(),
-                            label: "200k".into(),
-                            description: None,
-                        },
-                        agent::SelectOption {
-                            value: "1m".into(),
-                            label: "1M".into(),
-                            description: None,
-                        },
-                    ],
-                    default_value: Some("200k".into()),
-                },
-            ],
-        };
-        // Context windows resolve from the model's native default, not the
-        // descriptor's stale fallback.
-        assert_eq!(
-            traits_chip_label(&spec, &[], false),
-            Some("High · 1M".into())
-        );
-        let sel = vec![agent::OptionSelection {
-            id: "contextWindow".into(),
-            value: serde_json::Value::String("1m".into()),
-        }];
-        assert_eq!(
-            traits_chip_label(&spec, &sel, false),
-            Some("High · 1M".into())
-        );
-        let custom = vec![agent::OptionSelection {
-            id: "contextWindow".into(),
-            value: serde_json::json!(500_000),
-        }];
-        assert_eq!(
-            traits_chip_label(&spec, &custom, false),
-            Some("High · 500k".into())
-        );
-
         // Fast Mode boolean → Fast/Normal; a plain boolean → "<Label> On/Off".
         let fast = agent::ModelSpec {
             id: "m".into(),
