@@ -5132,20 +5132,24 @@ mod tests {
                 ),
             },
         );
-        wait_until(cx, &workspace, "queued-message and review replicas", |cx| {
+        // The scripted provider keeps moving the host (delivery, steering
+        // support) after the queue change, so the replica is compared with the
+        // live status of the same moment rather than a later snapshot.
+        wait_until(cx, &workspace, "replica equal to the live status", |cx| {
+            let live_id = session_id.clone();
+            let live = update_host!(&host, move |state, _| {
+                state
+                    .session_status_snapshot(&live_id)
+                    .expect("live session status")
+            });
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
                     status.queued_messages.len() == 1
                         && status.interaction_mode == agent::InteractionMode::Plan
                         && status.review_comment_drafts.len() == 1
+                        && *status == live
                 })
             })
-        });
-
-        let live = update_host!(&host, move |state, _| {
-            state
-                .session_status_snapshot(&session_id)
-                .expect("live session status")
         });
         let replica = workspace.read_with(cx, |store, _| {
             store
@@ -5154,7 +5158,6 @@ mod tests {
                 .expect("session status replica")
         });
 
-        assert_eq!(replica, live);
         assert_eq!(replica.queued_messages.len(), 1);
         assert_eq!(replica.queued_messages[0].text, "queued for replication");
         assert_eq!(replica.interaction_mode, agent::InteractionMode::Plan);
