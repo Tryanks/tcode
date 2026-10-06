@@ -167,6 +167,13 @@ pub struct WorkspaceStore {
     baseline_topics: HashSet<Topic>,
     index_hydrated: bool,
     hydrated_sessions: HashSet<String>,
+    /// The `updated_at` this view last reported read, so an acknowledgement
+    /// is sent once per change rather than once per event until the host's
+    /// visit echo arrives.
+    read_acknowledged: Option<(String, u64)>,
+    /// Whether the shell shows the selected thread's conversation. A compact
+    /// window keeps the thread selected on the thread list it returned to.
+    conversation_on_screen: bool,
     selected_session_id: Option<String>,
     session_records: HashMap<String, Vec<StoredEvent>>,
     /// The log cursors `session_records` stands for. The host may merge
@@ -347,6 +354,8 @@ impl WorkspaceStore {
             baseline_topics: HashSet::new(),
             index_hydrated: false,
             hydrated_sessions: HashSet::new(),
+            read_acknowledged: None,
+            conversation_on_screen: false,
             selected_session_id: None,
             session_records: HashMap::new(),
             session_from: HashMap::new(),
@@ -1135,6 +1144,54 @@ impl WorkspaceStore {
             self.reconcile_destination(cx);
             self.removed_session = None;
         }
+        self.acknowledge_read();
+    }
+
+    pub(crate) fn set_conversation_on_screen(&mut self, on_screen: bool) {
+        self.conversation_on_screen = on_screen;
+        self.acknowledge_read();
+    }
+
+    /// Report the thread on screen read through its current `updated_at`
+    /// once its conversation has loaded. Only this marks a thread read: a
+    /// subscription can reach the host long after the user left a view that
+    /// never loaded.
+    fn acknowledge_read(&mut self) {
+        if !self.conversation_on_screen {
+            return;
+        }
+        let Some(session_id) = self
+            .session_replica
+            .as_ref()
+            .map(|(id, _)| id)
+            .filter(|id| self.selected_session_id.as_ref() == Some(id))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(through) = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .map(|meta| meta.updated_at)
+        else {
+            return;
+        };
+        let acknowledged = self
+            .read_acknowledged
+            .as_ref()
+            .filter(|(id, _)| *id == session_id)
+            .map(|(_, at)| *at)
+            .max(self.settings_replica.last_visited.get(&session_id).copied());
+        if acknowledged.is_some_and(|at| at >= through) {
+            return;
+        }
+        self.read_acknowledged = Some((session_id.clone(), through));
+        self.dispatch(Command::MarkSessionRead {
+            session_id,
+            through,
+        });
     }
 
     /// Decide what the workspace shows after the index changed.
@@ -3583,6 +3640,70 @@ mod tests {
                 cx,
             );
             assert!(store.title_generating("named"));
+        });
+    }
+
+    /// A thread is read only once its conversation has loaded and is on
+    /// screen, and stays read through updates that land while it is shown. A
+    /// view left before its conversation arrived reports nothing.
+    #[gpui::test]
+    fn a_thread_is_reported_read_once_its_conversation_loads(cx: &mut TestAppContext) {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        let reads = || {
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                        tcode_protocol::ClientPayload::Command(Command::MarkSessionRead {
+                            session_id,
+                            through,
+                        }) => Some((session_id, through)),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let upsert = |id: &str, updated_at| {
+            let mut meta =
+                SessionMeta::new(ProviderKind::Codex, std::path::PathBuf::from("/tmp"), None);
+            meta.id = id.into();
+            meta.updated_at = updated_at;
+            EventEnvelope {
+                request_id: None,
+                topic: Topic::Index,
+                event: ServerEvent::IndexUpsertSession(meta),
+            }
+        };
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(&upsert("left", 100), cx);
+            store.apply_domain_event(&upsert("shown", 100), cx);
+            store.settings_replica.last_visited =
+                std::collections::HashMap::from([("left".into(), 50), ("shown".into(), 50)]);
+
+            store.set_conversation_on_screen(true);
+            store.select_session("left".into());
+            store.leave_session();
+            store.apply_domain_event(&session_snapshot("left", 0, vec![reply(1)]), cx);
+            assert_eq!(reads(), [], "left before the conversation loaded");
+
+            store.select_session("shown".into());
+            assert_eq!(reads(), [], "nothing has loaded yet");
+            // A compact window went back to the thread list, which keeps the
+            // thread selected, before the conversation arrived.
+            store.set_conversation_on_screen(false);
+            store.apply_domain_event(&session_snapshot("shown", 0, vec![reply(1)]), cx);
+            assert_eq!(reads(), [], "loaded behind the thread list");
+            store.set_conversation_on_screen(true);
+            assert_eq!(reads(), [("shown".to_string(), 100)]);
+            store.apply_domain_event(&upsert("left", 110), cx);
+            assert_eq!(reads(), [], "unchanged for the thread on screen");
+
+            store.apply_domain_event(&upsert("shown", 120), cx);
+            assert_eq!(reads(), [("shown".to_string(), 120)]);
         });
     }
 

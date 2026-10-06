@@ -264,6 +264,7 @@ impl WorkspaceStore {
         }
         self.session_status_replica = None;
         self.session_replica = None;
+        self.read_acknowledged = None;
         self.active_destination = None;
         self.git_status_replica = Default::default();
     }

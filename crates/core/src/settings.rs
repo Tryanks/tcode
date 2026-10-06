@@ -947,7 +947,8 @@ pub struct Settings {
     pub remote_host_name: Option<String>,
     /// Per-session last-visited time (unix secs), keyed by session id. A session
     /// whose `updated_at` exceeds its last-visited time (and isn't active) shows
-    /// an unread dot. Opening a thread refreshes it; "Mark unread" clears it.
+    /// an unread dot. A client that has loaded a thread advances it to the
+    /// `updated_at` it showed; "Mark unread" sets it just below.
     /// UI state; absent in legacy files.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub last_visited: HashMap<String, u64>,
