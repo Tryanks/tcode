@@ -1272,6 +1272,9 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        store
+            .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
         let host = spawn_host(store.clone(), HostServices::default()).unwrap();
         let link = host.link();
         link.subscribe(Subscription {
@@ -1390,7 +1393,7 @@ mod tests {
     /// and the JSONL logs into its database once, and serves every thread's
     /// timeline exactly as the logs fold, before and after a restart.
     #[test]
-    fn a_host_on_legacy_files_migrates_once_and_serves_the_same_timelines() {
+    fn legacy_files_migrated_at_startup_serve_the_same_timelines() {
         use agent::{AgentEvent, ItemContent, ThreadItem, TurnStatus};
         use tcode_core::session::{StoredEvent, Timeline};
 
@@ -1484,6 +1487,12 @@ mod tests {
 
         for start in ["migrating", "restarted"] {
             let store = SessionStore::open_at(data_root.clone()).unwrap();
+            assert_eq!(store.needs_migration().unwrap(), start == "migrating");
+            if start == "migrating" {
+                store
+                    .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
+                    .unwrap();
+            }
             let host = spawn_host(store, HostServices::default()).unwrap();
             let link = host.link();
             let stream = link.events();

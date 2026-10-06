@@ -3,6 +3,8 @@ use std::path::Path;
 
 use agent::{ApprovalMode, ProviderCommand, ProviderCommandKind, TurnStatus};
 
+use std::sync::atomic::AtomicBool;
+
 use super::*;
 
 /// A data dir that is removed when the test ends.
@@ -22,6 +24,17 @@ impl DataDir {
     fn store(&self) -> SessionStore {
         SessionStore::open_at(self.0.clone()).unwrap()
     }
+
+    /// A store over this data dir after the migration a start runs first.
+    fn migrated(&self) -> SessionStore {
+        let store = self.store();
+        assert_eq!(migrate(&store).unwrap(), Migration::Completed);
+        store
+    }
+}
+
+fn migrate(store: &SessionStore) -> io::Result<Migration> {
+    store.migrate(|_| {}, &AtomicBool::new(false))
 }
 
 impl Drop for DataDir {
@@ -169,6 +182,11 @@ fn first_start_migrates_the_json_index_and_every_log_byte_for_byte() {
     let dir = DataDir::new();
     write_legacy_fixture(dir.path());
     let store = dir.store();
+    assert!(store.needs_migration().unwrap());
+    let error = store.open().unwrap_err();
+    assert!(error.to_string().contains("not been migrated"), "{error}");
+    assert_eq!(migrate(&store).unwrap(), Migration::Completed);
+    assert!(!store.needs_migration().unwrap());
     store.open().unwrap();
     assert_fixture_migrated(&store, dir.path());
 
@@ -196,6 +214,7 @@ fn first_start_migrates_the_json_index_and_every_log_byte_for_byte() {
     fs::write(dir.path().join("sessions.json"), b"[]").unwrap();
     fs::write(dir.path().join("mixed.jsonl"), b"").unwrap();
     let reopened = dir.store();
+    assert!(!reopened.needs_migration().unwrap());
     assert_eq!(reopened.read_event_log("mixed").unwrap(), expected);
     assert_eq!(reopened.read_file().unwrap().sessions.len(), 2);
     assert_eq!(fs::read(dir.path().join("sessions.json")).unwrap(), b"[]");
@@ -225,7 +244,7 @@ fn legacy_bare_array_index_migrates_with_one_derived_project_per_root() {
     ]);
     fs::write(dir.path().join("sessions.json"), legacy.to_string()).unwrap();
 
-    let file = dir.store().read_file().unwrap();
+    let file = dir.migrated().read_file().unwrap();
     // Two distinct roots -> two derived projects, deduped by root.
     assert_eq!(file.projects.len(), 2);
     let alpha = file
@@ -258,28 +277,21 @@ fn legacy_bare_array_index_migrates_with_one_derived_project_per_root() {
 }
 
 #[test]
-fn an_unparseable_index_is_preserved_and_the_logs_still_migrate() {
+fn an_unparseable_index_is_archived_unchanged_and_the_logs_still_migrate() {
     let dir = DataDir::new();
     let corrupt = b"not valid session json";
     fs::write(dir.path().join("sessions.json"), corrupt).unwrap();
     fs::write(dir.path().join("orphan.jsonl"), ORPHAN_LOG).unwrap();
-    let store = dir.store();
+    let store = dir.migrated();
 
     let file = store.read_file().unwrap();
     assert!(file.projects.is_empty() && file.sessions.is_empty());
     assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
-    let backups: Vec<_> = fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("sessions.json.corrupt-")
-        })
-        .collect();
-    assert_eq!(backups.len(), 1);
-    assert_eq!(fs::read(backups[0].path()).unwrap(), corrupt);
+    assert!(!dir.path().join("sessions.json").exists());
+    assert_eq!(
+        fs::read(dir.path().join("legacy/sessions.json")).unwrap(),
+        corrupt
+    );
 }
 
 #[test]
@@ -293,7 +305,7 @@ fn duplicate_index_ids_fail_the_migration_and_leave_the_sources_alone() {
     fs::write(dir.path().join("sessions.json"), &index).unwrap();
     fs::write(dir.path().join("twice.jsonl"), ORPHAN_LOG).unwrap();
 
-    let error = dir.store().open().unwrap_err();
+    let error = migrate(&dir.store()).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("twice"), "{error}");
     assert!(!dir.path().join(DB_FILE).exists());
@@ -328,8 +340,7 @@ fn a_start_after_an_interrupted_migration_discards_the_staging_files_and_starts_
     write_legacy_fixture(dir.path());
     fs::write(dir.path().join("tcode.db.migrating"), b"partial").unwrap();
     fs::write(dir.path().join("tcode.db.migrating-wal"), b"torn frames").unwrap();
-    let store = dir.store();
-    store.open().unwrap();
+    let store = dir.migrated();
     assert_fixture_migrated(&store, dir.path());
     store.close().unwrap();
 
@@ -347,8 +358,127 @@ fn a_start_after_an_interrupted_migration_discards_the_staging_files_and_starts_
         archive_list(&LEGACY_FILES),
     )
     .unwrap();
+    let store = dir.migrated();
+    assert_fixture_migrated(&store, dir.path());
+}
+
+/// Every file in `root`, by name, with its bytes; `legacy/` as a marker.
+fn snapshot(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            let bytes = if entry.file_type().unwrap().is_dir() {
+                b"<dir>".to_vec()
+            } else {
+                fs::read(entry.path()).unwrap()
+            };
+            (name, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn a_cancelled_migration_changes_no_source_and_the_next_one_completes() {
+    let dir = DataDir::new();
+    write_legacy_fixture(dir.path());
+    // Longer than one chunk, so a cancel can land inside a log.
+    let bulk_line = format!(
+        "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"{}\"}}}}\n",
+        "x".repeat(4000)
+    );
+    let bulk = bulk_line.repeat(2600);
+    assert!(bulk.len() > migrate::CHUNK_BYTES);
+    fs::write(dir.path().join("bulk.jsonl"), &bulk).unwrap();
     let store = dir.store();
-    store.open().unwrap();
+    assert!(store.needs_migration().unwrap());
+    let mut sources = snapshot(dir.path());
+    // Owned for the whole start, and kept from the first check.
+    sources.remove(LOCK_FILE);
+
+    type Stop = fn(&MigrationProgress) -> bool;
+    let stops: [(&str, Stop); 4] = [
+        ("scanning", |progress| {
+            progress.phase == MigrationPhase::Scanning
+        }),
+        ("inside a log", |progress| {
+            progress.phase == MigrationPhase::Importing
+                && progress.bytes_done > 0
+                && progress.threads_done == 0
+        }),
+        ("between logs", |progress| {
+            progress.phase == MigrationPhase::Importing && progress.threads_done == 2
+        }),
+        ("verifying", |progress| {
+            progress.phase == MigrationPhase::Verifying && progress.threads_done == 1
+        }),
+    ];
+    for (point, stop) in stops {
+        let cancel = AtomicBool::new(false);
+        let mut seen = None;
+        let outcome = store
+            .migrate(
+                |progress| {
+                    if !cancel.load(Ordering::Relaxed) && stop(&progress) {
+                        seen = Some(progress);
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                },
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(outcome, Migration::Cancelled, "{point}");
+        assert!(seen.is_some(), "{point}: never reached");
+        let mut after = snapshot(dir.path());
+        assert!(after.remove(LOCK_FILE).is_some());
+        assert_eq!(after, sources, "{point}");
+        assert!(store.needs_migration().unwrap(), "{point}");
+    }
+
+    let mut reports = Vec::new();
+    let outcome = store
+        .migrate(|progress| reports.push(progress), &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(outcome, Migration::Completed);
+    let mut phases = reports
+        .iter()
+        .map(|progress| progress.phase)
+        .collect::<Vec<_>>();
+    phases.dedup();
+    assert_eq!(
+        phases,
+        [
+            MigrationPhase::Scanning,
+            MigrationPhase::Importing,
+            MigrationPhase::Verifying,
+            MigrationPhase::Publishing,
+            MigrationPhase::Archiving
+        ]
+    );
+    let log_bytes = (MIXED_LOG.len() + ORPHAN_LOG.len() + bulk.len()) as u64;
+    for phase in [MigrationPhase::Importing, MigrationPhase::Verifying] {
+        let last = reports
+            .iter()
+            .rfind(|progress| progress.phase == phase)
+            .unwrap();
+        assert_eq!(
+            (
+                last.threads_done,
+                last.threads_total,
+                last.bytes_done,
+                last.bytes_total
+            ),
+            (4, 4, log_bytes, log_bytes),
+            "{phase:?}"
+        );
+    }
+    let last = reports.last().unwrap();
+    assert_eq!(
+        (last.threads_done, last.bytes_done),
+        (last.threads_total, last.bytes_total)
+    );
+    assert_eq!(store.read_event_log("bulk").unwrap(), bulk.as_bytes());
     assert_fixture_migrated(&store, dir.path());
 }
 
@@ -356,9 +486,7 @@ fn a_start_after_an_interrupted_migration_discards_the_staging_files_and_starts_
 fn a_start_after_an_interrupted_archival_finishes_it_without_overwriting() {
     let dir = DataDir::new();
     write_legacy_fixture(dir.path());
-    let store = dir.store();
-    store.open().unwrap();
-    store.close().unwrap();
+    dir.migrated().close().unwrap();
 
     // Killed after the rename while moving the sources: two are still in the
     // data dir. One of them also has a copy in legacy/ already, which must
@@ -645,7 +773,13 @@ const OWNER_REPORT: &str = "store owner: ";
 fn store_owner_process() {
     let root = PathBuf::from(std::env::var_os("TCODE_STORE_OWNER_DIR").unwrap());
     let store = SessionStore::open_at(root).unwrap();
-    match store.open() {
+    let opened = store.needs_migration().and_then(|needed| {
+        if needed {
+            migrate(&store)?;
+        }
+        store.open()
+    });
+    match opened {
         Ok(()) => println!("{OWNER_REPORT}OPEN"),
         Err(error) => println!("{OWNER_REPORT}ERR {:?} {error}", error.kind()),
     }
@@ -803,8 +937,7 @@ fn migration_survives_sigkill() {
             );
         }
 
-        let store = dir.store();
-        store.open().unwrap();
+        let store = dir.migrated();
         for name in names.iter().filter_map(|name| name.strip_suffix(".jsonl")) {
             assert_eq!(
                 store.read_event_log(name).unwrap(),

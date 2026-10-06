@@ -4,25 +4,31 @@
 //! The database is built and verified under a staging name and published by
 //! a rename, so a file at the final name is always complete:
 //!
-//! 1. `tcode.db.migrating` is created with the schema and `user_version` 0.
-//! 2. The index is imported, then every `*.jsonl` in the data dir (orphans
-//!    included) in bounded transactions; each log is read back and compared
-//!    byte for byte with its file, then the metadata field for field.
-//! 3. `user_version` is set to 1, the WAL is checkpointed and truncated,
-//!    every handle is dropped, and a fresh open re-counts what was committed.
+//! 1. `tcode.db.migrating` is created with the schema and `user_version` 0,
+//!    and the index is imported.
+//! 2. Every `*.jsonl` in the data dir (orphans included) is imported in
+//!    bounded transactions.
+//! 3. Each log is read back and compared byte for byte with its file, then
+//!    the metadata field for field; `user_version` is set to 1, the WAL is
+//!    checkpointed and truncated, every handle is dropped, and a fresh open
+//!    re-counts what was committed.
 //! 4. The staged file is synced, the list of sources to archive is written to
 //!    `tcode.db.archive`, and the staged file is renamed to `tcode.db`; the
 //!    directory is synced around both.
 //! 5. The sources move into `legacy/`, and the archive list is removed.
 //!
-//! An interrupted run before step 4's rename leaves no `tcode.db`, and the
-//! next start discards the staging files and begins again from the untouched
-//! sources. After the rename, the next start finishes step 5 from the list.
+//! Nothing before step 4's rename writes, renames or removes a source: the
+//! steps before it only read them. A migration cancelled or failed before
+//! the rename, or a start after one interrupted there, discards the staging
+//! files and leaves no `tcode.db`, so the next run begins again from the
+//! untouched sources. Cancellation is honoured only up to the rename; after
+//! it the next start finishes step 5 from the list.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tcode_core::project::{IndexFile, SessionMeta, migrate_index};
@@ -37,21 +43,111 @@ const LEGACY_DIR: &str = "legacy";
 /// A thread's log is committed in transactions of about this size; one
 /// transaction for a multi-hundred-megabyte log holds every dirty page in
 /// memory and doubles the WAL.
-const CHUNK_BYTES: usize = 8 << 20;
+pub(super) const CHUNK_BYTES: usize = 8 << 20;
 /// At most this many rows, and about [`CHUNK_BYTES`], are compared per read
 /// when verifying, so a reader never pins the WAL or memory for a whole log.
 const VERIFY_ROWS: i64 = 4096;
 
-/// Make sure a complete `tcode.db` exists, migrating or creating it, and
-/// finish an archival a previous start left half done. Called with the data
-/// dir's ownership lock held.
+/// Where a running migration is. Each of the importing and verifying phases
+/// goes through every log once, so their counts start again from zero;
+/// publishing and archiving report everything done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MigrationProgress {
+    pub phase: MigrationPhase,
+    pub threads_done: usize,
+    pub threads_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationPhase {
+    /// Listing the logs and importing the index; the totals are not known
+    /// until it ends.
+    Scanning,
+    Importing,
+    Verifying,
+    /// Past the last point a cancellation is honoured.
+    Publishing,
+    Archiving,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Migration {
+    /// `tcode.db` is complete and the sources are in `legacy/`.
+    Completed,
+    /// The staging files are gone, no `tcode.db` exists and every source is
+    /// where it was.
+    Cancelled,
+}
+
+/// Whether the data dir holds an older build's files and no `tcode.db`.
+pub(super) fn needed(root: &Path) -> io::Result<bool> {
+    Ok(!root.join(DB_FILE).exists() && !legacy_sources(root)?.is_empty())
+}
+
+/// Make sure a complete `tcode.db` exists for opening, creating an empty one
+/// on a fresh install, and finish an archival a previous start left half
+/// done. A data dir that still needs migrating is refused: that runs only
+/// through [`run`], which reports progress and can be cancelled. Called with
+/// the data dir's ownership lock held.
 pub(super) fn prepare(root: &Path) -> io::Result<()> {
+    if needed(root)? {
+        return Err(io::Error::other(format!(
+            "{} holds sessions.json or *.jsonl files from an older Tcode that have not been \
+             migrated into {DB_FILE} yet",
+            root.display()
+        )));
+    }
+    run(root, &mut |_| {}, &AtomicBool::new(false)).map(drop)
+}
+
+/// Migrate the older build's files into `tcode.db`, or create an empty one,
+/// reporting progress after every chunk and every log. `cancel` is checked
+/// at the same points until the staged database is complete; once it is set
+/// there, the staging files are removed and nothing else is changed. Called
+/// with the data dir's ownership lock held.
+pub(super) fn run(
+    root: &Path,
+    report: &mut dyn FnMut(MigrationProgress),
+    cancel: &AtomicBool,
+) -> io::Result<Migration> {
     if root.join(DB_FILE).exists() {
-        return archive_sources(root);
+        archive_sources(root)?;
+        return Ok(Migration::Completed);
     }
     remove_staging(root)?;
     let started = Instant::now();
-    let summary = build_staging(root)?;
+    let mut progress = Progress {
+        report,
+        cancel,
+        current: MigrationProgress {
+            phase: MigrationPhase::Scanning,
+            threads_done: 0,
+            threads_total: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+        },
+    };
+    (progress.report)(progress.current);
+    let summary = match build_staging(root, &mut progress) {
+        Ok(summary) => summary,
+        Err(error) => {
+            // `build_staging` has dropped every handle on the staging files.
+            if let Err(cleanup) = remove_staging(root) {
+                log::warn!("could not discard the staged database: {cleanup}");
+            }
+            if error.get_ref().is_some_and(|inner| inner.is::<Cancelled>()) {
+                log::info!(
+                    "migration into {} cancelled; the sources are unchanged",
+                    root.join(DB_FILE).display()
+                );
+                return Ok(Migration::Cancelled);
+            }
+            return Err(error);
+        }
+    };
+    progress.finish(MigrationPhase::Publishing);
     publish(root, &summary.sources)?;
     log::info!(
         "migrated {} thread(s) ({} line(s), {} blank, {} bytes) and {} session(s) in {} \
@@ -65,7 +161,64 @@ pub(super) fn prepare(root: &Path) -> io::Result<()> {
         root.join(DB_FILE).display(),
         started.elapsed().as_secs_f64()
     );
-    archive_sources(root)
+    progress.finish(MigrationPhase::Archiving);
+    archive_sources(root)?;
+    Ok(Migration::Completed)
+}
+
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the migration was cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+struct Progress<'a> {
+    report: &'a mut dyn FnMut(MigrationProgress),
+    cancel: &'a AtomicBool,
+    current: MigrationProgress,
+}
+
+impl Progress<'_> {
+    fn check(&self) -> io::Result<()> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::other(Cancelled));
+        }
+        Ok(())
+    }
+
+    /// Begin a cancellable phase over `threads` logs of `bytes` in all.
+    fn start(&mut self, phase: MigrationPhase, threads: usize, bytes: u64) -> io::Result<()> {
+        self.check()?;
+        self.current = MigrationProgress {
+            phase,
+            threads_done: 0,
+            threads_total: threads,
+            bytes_done: 0,
+            bytes_total: bytes,
+        };
+        (self.report)(self.current);
+        Ok(())
+    }
+
+    fn advance(&mut self, threads: usize, bytes: u64) -> io::Result<()> {
+        self.current.threads_done += threads;
+        self.current.bytes_done += bytes;
+        (self.report)(self.current);
+        self.check()
+    }
+
+    /// Enter a phase that runs to the end whatever `cancel` says.
+    fn finish(&mut self, phase: MigrationPhase) {
+        self.current.phase = phase;
+        self.current.threads_done = self.current.threads_total;
+        self.current.bytes_done = self.current.bytes_total;
+        (self.report)(self.current);
+    }
 }
 
 /// An older build that ran after the migration writes JSON again; this build
@@ -105,7 +258,7 @@ fn remove_staging(root: &Path) -> io::Result<()> {
         root.join(ARCHIVE_LIST),
     ] {
         match fs::remove_file(&path) {
-            Ok(()) => log::warn!("discarded {} from an interrupted migration", path.display()),
+            Ok(()) => log::warn!("discarded {} from an unfinished migration", path.display()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
@@ -142,11 +295,20 @@ fn legacy_sources(root: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
-fn build_staging(root: &Path) -> io::Result<Summary> {
-    let staging = root.join(STAGING_FILE);
-    let db = Db::open(&staging, true)?;
+fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
+    let sources = legacy_sources(root)?;
+    let mut logs = Vec::new();
+    let mut bytes_total = 0;
+    for name in &sources {
+        if let Some(id) = name.strip_suffix(".jsonl") {
+            bytes_total += fs::metadata(root.join(name))?.len();
+            logs.push((id, root.join(name)));
+        }
+    }
     let index = migrate_index(read_legacy_index(root)?);
     reject_duplicates(&index)?;
+    let staging = root.join(STAGING_FILE);
+    let db = Db::open(&staging, true)?;
     db.write(|db, connection| {
         for project in &index.projects {
             let body = serde_json::to_vec(project).map_err(io::Error::other)?;
@@ -167,7 +329,6 @@ fn build_staging(root: &Path) -> io::Result<Summary> {
         Ok(())
     })?;
 
-    let sources = legacy_sources(root)?;
     let mut summary = Summary {
         sources: sources.clone(),
         projects: index.projects.len(),
@@ -177,29 +338,31 @@ fn build_staging(root: &Path) -> io::Result<Summary> {
         blank_lines: 0,
         bytes: 0,
     };
+    progress.start(MigrationPhase::Importing, logs.len(), bytes_total)?;
     let mut tallies = Vec::new();
-    for name in &sources {
-        let Some(id) = name.strip_suffix(".jsonl") else {
-            continue;
-        };
-        let path = root.join(name);
-        let tally = import_log(&db, id, &path)?;
-        verify_log(&db, id, &path, &tally)?;
-        log::info!(
-            "migrated {name}: {} line(s), {} blank, {} bytes, verified byte-identical",
-            tally.lines,
-            tally.blank_lines,
-            tally.bytes
-        );
+    for (id, path) in &logs {
+        let tally = import_log(&db, id, path, progress)?;
         summary.logs += 1;
         summary.lines += tally.lines;
         summary.blank_lines += tally.blank_lines;
         summary.bytes += tally.bytes;
-        tallies.push((id.to_owned(), tally));
+        tallies.push(((*id).to_owned(), tally));
     }
 
+    progress.start(MigrationPhase::Verifying, logs.len(), bytes_total)?;
+    for ((id, path), (_, tally)) in logs.iter().zip(&tallies) {
+        verify_log(&db, id, path, tally, progress)?;
+        log::info!(
+            "migrated {}: {} line(s), {} blank, {} bytes, verified byte-identical",
+            path.display(),
+            tally.lines,
+            tally.blank_lines,
+            tally.bytes
+        );
+    }
     let stored = db.read(read_index)?;
     verify_index(&index, &stored)?;
+    progress.check()?;
     db.write(|db, connection| {
         db.execute(
             connection,
@@ -210,6 +373,8 @@ fn build_staging(root: &Path) -> io::Result<Summary> {
     })?;
     db.checkpoint()?;
     drop(db);
+
+    progress.check()?;
 
     // A fresh open sees only what reached the main file.
     let reopened = Db::open(&staging, false)?;
@@ -276,12 +441,15 @@ fn build_staging(root: &Path) -> io::Result<Summary> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    // The last point a cancellation is honoured: what follows publishes.
+    progress.check()?;
     sync_file(&staging)?;
     Ok(summary)
 }
 
-/// Today's tolerance: the object schema or the legacy bare array; an
-/// unparseable file is preserved beside itself and the logs still migrate.
+/// Today's tolerance: the object schema or the legacy bare array. An
+/// unparseable file is left as it is, to be archived into `legacy/` with the
+/// logs, which still migrate.
 fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
     let path = root.join(LEGACY_INDEX);
     let bytes = match fs::read(&path) {
@@ -295,23 +463,13 @@ fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
             sessions,
         })
     });
-    match parsed {
-        Ok(file) => Ok(file),
-        Err(error) => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0);
-            let corrupt = root.join(format!("{LEGACY_INDEX}.corrupt-{timestamp}"));
-            fs::rename(&path, &corrupt)?;
-            log::warn!(
-                "failed to parse {LEGACY_INDEX}: {error}; preserved it as {} and migrated the \
-                 event logs without it",
-                corrupt.display()
-            );
-            Ok(IndexFile::default())
-        }
-    }
+    Ok(parsed.unwrap_or_else(|error| {
+        log::warn!(
+            "failed to parse {LEGACY_INDEX}: {error}; migrating the event logs without it, and \
+             keeping it in {LEGACY_DIR}/"
+        );
+        IndexFile::default()
+    }))
 }
 
 /// Upserting by id would silently keep only the last of two entries.
@@ -381,7 +539,7 @@ fn read_segments(path: &Path, mut each: impl FnMut(Vec<u8>) -> io::Result<()>) -
     }
 }
 
-fn import_log(db: &Db, id: &str, path: &Path) -> io::Result<Tally> {
+fn import_log(db: &Db, id: &str, path: &Path, progress: &mut Progress) -> io::Result<Tally> {
     let mut tally = Tally::default();
     let mut pending: Vec<Vec<u8>> = Vec::new();
     let mut pending_bytes = 0;
@@ -405,16 +563,24 @@ fn import_log(db: &Db, id: &str, path: &Path) -> io::Result<Tally> {
         pending.push(segment);
         if pending_bytes >= CHUNK_BYTES {
             flush(&mut pending, &mut position)?;
+            progress.advance(0, pending_bytes as u64)?;
             pending_bytes = 0;
         }
         Ok(())
     })?;
     flush(&mut pending, &mut position)?;
+    progress.advance(1, pending_bytes as u64)?;
     Ok(tally)
 }
 
 /// Compare the committed rows with the file again, segment for segment.
-fn verify_log(db: &Db, id: &str, path: &Path, tally: &Tally) -> io::Result<()> {
+fn verify_log(
+    db: &Db,
+    id: &str,
+    path: &Path,
+    tally: &Tally,
+    progress: &mut Progress,
+) -> io::Result<()> {
     let mismatch = |position: i64| {
         io::Error::other(format!(
             "{}: line {} differs from the migrated copy",
@@ -425,8 +591,13 @@ fn verify_log(db: &Db, id: &str, path: &Path, tally: &Tally) -> io::Result<()> {
     let mut page: Vec<Vec<u8>> = Vec::new();
     let mut page_start = 0_i64;
     let mut position = 0_i64;
+    let mut compared = 0;
     read_segments(path, |segment| {
         if position - page_start == page.len() as i64 {
+            if compared > 0 {
+                progress.advance(0, compared)?;
+                compared = 0;
+            }
             page_start = position;
             page = db.read(|db, connection| {
                 // Sizes first, so a page holds about CHUNK_BYTES however long
@@ -470,6 +641,7 @@ fn verify_log(db: &Db, id: &str, path: &Path, tally: &Tally) -> io::Result<()> {
         if *stored != segment {
             return Err(mismatch(position));
         }
+        compared += segment.len() as u64;
         position += 1;
         Ok(())
     })?;
@@ -488,7 +660,7 @@ fn verify_log(db: &Db, id: &str, path: &Path, tally: &Tally) -> io::Result<()> {
     if extra != 0 || position as u64 != tally.lines {
         return Err(mismatch(position));
     }
-    Ok(())
+    progress.advance(1, compared)
 }
 
 fn publish(root: &Path, sources: &[String]) -> io::Result<()> {
