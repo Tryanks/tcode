@@ -417,7 +417,8 @@ fn main() {
     // The local kernel is process composition, not a property of the window's
     // current attachment. Open its store unconditionally and keep it alive even
     // when the window starts on, or later switches to, a remote host.
-    let store = SessionStore::open_default().expect("failed to open tcode data directory");
+    let store =
+        SessionStore::open_host(None).unwrap_or_else(|error| exit_with_startup_failure(error));
     let data_dir = store.root().clone();
     // The UI never resolves a data directory of its own: whatever client-owned
     // files it needs (the WebView2 profile) live under this one.
@@ -431,6 +432,23 @@ fn main() {
     );
 
     if let Some(index) = args.iter().position(|arg| arg == "--pair") {
+        // Pairing writes hosts.json and device.json, at which a later move of
+        // an older data dir would stop.
+        match store.pending_relocation() {
+            Ok(None) => {}
+            Ok(Some(previous)) => {
+                eprintln!(
+                    "tcode: {} has not been moved into {} yet; start Tcode once first, then pair",
+                    previous.display(),
+                    data_dir.display()
+                );
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("tcode: {error}");
+                std::process::exit(1);
+            }
+        }
         match pair_command(&args[index + 1..], &native_client) {
             Ok(host_id) => println!("{host_id}"),
             Err(error) => {
@@ -441,22 +459,28 @@ fn main() {
         return;
     }
 
-    let initial_target = match arg_value(&args, "--connect") {
-        Some(host_id) => {
-            let Some(host) = native_client
-                .load_hosts()
-                .into_iter()
-                .find(|host| host.host_id == host_id)
-            else {
-                eprintln!(
-                    "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <tcode://pair?...>)",
-                    data_dir.display()
-                );
-                std::process::exit(1);
-            };
-            AttachmentTarget::Remote(host)
+    // Read once the data dir is in place, which may be after the migration.
+    let connect = arg_value(&args, "--connect");
+    let initial_target = {
+        let native_client = native_client.clone();
+        let data_dir = data_dir.clone();
+        move || match connect {
+            Some(host_id) => {
+                let Some(host) = native_client
+                    .load_hosts()
+                    .into_iter()
+                    .find(|host| host.host_id == host_id)
+                else {
+                    eprintln!(
+                        "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <tcode://pair?...>)",
+                        data_dir.display()
+                    );
+                    std::process::exit(1);
+                };
+                AttachmentTarget::Remote(host)
+            }
+            None => AttachmentTarget::Local,
         }
-        None => AttachmentTarget::Local,
     };
     // An older build's threads move into tcode.db before the kernel starts,
     // behind a window of their own. With nothing to migrate, the kernel
@@ -526,6 +550,7 @@ fn main() {
             });
 
             let launch = move |cx: &mut App, kernel: Rc<LocalKernel>| {
+                let initial_target = initial_target();
                 let local_settings = kernel.settings();
                 // Hosting belongs to the process-owned local kernel; it carries no
                 // current-attachment mode.
@@ -582,7 +607,7 @@ fn main() {
                         setup: ShellSetup {
                             client_host: Some(native_client.clone()),
                             local: Some(Rc::new(move || local_kernel.transport())),
-                            initial: Some(initial_target.clone()),
+                            initial: Some(initial_target),
                             initial_pairing_error: None,
                             // Only here: bootstrap applies locale and theme from the
                             // host's own settings before the first frame.

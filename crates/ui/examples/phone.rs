@@ -29,7 +29,11 @@ fn main() {
             } else {
                 size(px(393.), px(852.))
             };
-            let host: Rc<dyn ClientHost> = Rc::new(tcode_traverse::NativeClientHost::from_env());
+            let data_dir = tcode_services::store::data_dir().expect("no data directory");
+            let host: Rc<dyn ClientHost> = Rc::new(tcode_traverse::NativeClientHost::new(
+                data_dir,
+                tcode_traverse::native_host::default_device_name(),
+            ));
             tcode_ui::run_shell(
                 cx,
                 host.clone(),
