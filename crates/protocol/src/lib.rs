@@ -46,24 +46,21 @@ pub use wire::{
 // authentication into the transport, so hello carries no token; version 6
 // sends index and history changes instead of whole replacements and
 // compresses the native transport; version 7 carries the running turn and
-// the requests it waits on in the session status; version 8 adds the Cursor
-// and Grok provider kinds, which an older peer cannot decode because
-// `ProviderKind` has no unknown fallback; version 9 sends Orchestrate rows that
-// leave bundled guidance out, which an older peer would read as no guidance.
+// the requests it waits on in the session status; version 8 (v0.2.0) adds
+// the Cursor and Grok provider kinds, which an older peer cannot decode
+// because `ProviderKind` has no unknown fallback, sends Orchestrate rows that
+// leave bundled guidance out, adds provider plugin catalogs with their
+// commands, challenges and switches, merges provider update availability per
+// check round with UpdateProviders replacing UpdateProvider and a sequential
+// update run status, replaces marking a thread read when subscribed with the
+// client's MarkSessionRead, moves working/turn_running into host-authored
+// session activity with action availability, full usage and meter capacity, a
+// separate session plan topic, shared worktree facts and archived-list
+// revisions, makes session log cursors stored row positions, and acknowledges
+// a subscription to an unloaded thread after its window.
 //
-// Unreleased: provider plugin catalogs, their commands, challenges and switches;
-// provider update availability merged per check round, UpdateProvider replaced
-// by UpdateProviders, and sequential update run status with toast progress;
-// MarkSessionRead, the client's acknowledgement that a thread's conversation
-// loaded, replaces marking a thread read when it is subscribed.
-// Unreleased: host-authored session activity, action availability, full usage and
-// meter capacity; a separate session plan topic; shared worktree facts and
-// archived-list revisions. SessionStatus working/turn_running move into activity.
-// Unreleased: session log cursors (window from/end/total, page before/from/end,
-// Subscription.after) are stored row positions, so in a log holding blank or
-// undecodable rows they run ahead of the records; a subscription to a thread
-// whose log is not loaded is acknowledged after its window.
-pub const PROTOCOL_VERSION: u32 = 9;
+// Unreleased: (none)
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]
 mod tests;
