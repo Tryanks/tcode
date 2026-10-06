@@ -24,7 +24,7 @@ pub struct ComposerActiveModel {
 pub struct ComposerCheckoutState {
     pub branch: String,
     pub branches: Vec<String>,
-    pub turn_running: bool,
+    pub checkout_blocked: bool,
     pub is_draft: bool,
     pub worktree_base: Option<String>,
     pub worktree: Option<WorktreeInfo>,
@@ -59,7 +59,7 @@ pub struct ComposerState {
     /// Account rate-limit windows for the profile driving this session.
     pub usage: Option<tcode_core::usage::ProviderUsage>,
     pub provider: Option<agent::ProviderKind>,
-    pub approval_mode: agent::ApprovalMode,
+    pub effective_approval_mode: agent::ApprovalMode,
     pub native_approval_modes_enabled: bool,
     pub approval_pending_restart: bool,
     pub queue: Option<ComposerQueue>,
@@ -81,7 +81,7 @@ pub struct ComposerState {
 
 pub(crate) fn composer_state(
     status: Option<&SessionStatus>,
-    timeline: Option<&Timeline>,
+    _timeline: Option<&Timeline>,
     plan: Option<&SessionPlan>,
     settings: &Settings,
     providers: &ProvidersStatus,
@@ -111,7 +111,7 @@ pub(crate) fn composer_state(
         Some(ComposerCheckoutState {
             branch,
             branches: status.branches.clone(),
-            turn_running: status.checkout_blocked,
+            checkout_blocked: status.checkout_blocked,
             is_draft: status.draft,
             worktree_base: match &status.draft_workspace {
                 WorkspaceMode::NewWorktree { base } => Some(base.clone()),
@@ -174,7 +174,7 @@ pub(crate) fn composer_state(
         token_usage,
         usage,
         provider,
-        approval_mode,
+        effective_approval_mode: approval_mode,
         native_approval_modes_enabled,
         approval_pending_restart: status.is_some_and(|status| status.approval_pending_restart),
         queue: status.map(|status| ComposerQueue {
@@ -184,16 +184,10 @@ pub(crate) fn composer_state(
         }),
         steering_supported: status.is_some_and(|status| status.steering_supported),
         preparing_worktree: status.is_some_and(|status| status.preparing_worktree),
-        plan_ready_markdown: if let Some(plan) = plan {
-            plan.proposed
-                .as_ref()
-                .filter(|plan| plan.ready && !plan.resolved)
-                .map(|plan| plan.markdown.clone())
-        } else {
-            timeline
-                .and_then(Timeline::plan_ready)
-                .map(|plan| plan.markdown.clone())
-        },
+        plan_ready_markdown: plan
+            .and_then(|plan| plan.proposed.as_ref())
+            .filter(|plan| plan.ready && !plan.resolved)
+            .map(|plan| plan.markdown.clone()),
         checkout,
         turn_running: status.is_some_and(|status| status.activity.turn_running),
         stopping: status.is_some_and(|status| status.stopping),
@@ -221,7 +215,7 @@ pub(crate) struct PanelState {
 pub(crate) fn panel_state(
     ui: Option<&ConversationUiState>,
     status: Option<&SessionStatus>,
-    timeline: Option<&Timeline>,
+    _timeline: Option<&Timeline>,
     plan: Option<&SessionPlan>,
 ) -> PanelState {
     PanelState {
@@ -230,11 +224,8 @@ pub(crate) fn panel_state(
         right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
         terminal_open: ui.is_some_and(|ui| ui.terminal_open),
         terminal_height: ui.map_or(240., |ui| ui.terminal_height),
-        plan_tab_active: plan.map_or_else(
-            || timeline.is_some_and(|timeline| timeline.shown_proposed_plan().is_some()),
-            |plan| plan.proposed.is_some(),
-        ) || status
-            .is_some_and(|status| status.interaction_mode == agent::InteractionMode::Plan),
+        plan_tab_active: plan.is_some_and(|plan| plan.proposed.is_some())
+            || status.is_some_and(|status| status.interaction_mode == agent::InteractionMode::Plan),
     }
 }
 
