@@ -653,6 +653,27 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_diagram_wider_than_the_row_shrinks_without_letterboxing(cx: &mut TestAppContext) {
+        let nodes = (0..12)
+            .map(|ix| format!("N{ix}[node {ix}]"))
+            .collect::<Vec<_>>();
+        let source = format!("```mermaid\nflowchart LR\n  {}\n```", nodes.join(" --> "));
+        let (_, cx) = open_timeline_row(&source, cx);
+        let padding = px(12.) * 2.;
+        let mut aspects = Vec::new();
+        for width in [px(393.), px(600.)] {
+            cx.simulate_resize(gpui::size(width, px(852.)));
+            cx.update(|window, cx| _ = window.draw(cx));
+            let block = cx.debug_bounds("markdown-mermaid-root-0").unwrap();
+            aspects.push((block.size.height - padding) / (block.size.width - padding));
+        }
+        assert!(
+            (aspects[0] - aspects[1]).abs() < 0.01,
+            "the diagram box keeps the picture's aspect ratio at every row width: {aspects:?}"
+        );
+    }
+
+    #[gpui::test]
     fn code_block_copy_button_copies_the_whole_fence(cx: &mut TestAppContext) {
         let lines = (0..100).map(|ix| format!("line {ix}")).collect::<Vec<_>>();
         let source = format!("```text\n{}\n```", lines.join("\n"));
