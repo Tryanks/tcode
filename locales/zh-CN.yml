@@ -678,8 +678,6 @@ composer:
   steer_tooltip: "引导当前轮次"
   compacts_automatically: "%{provider} 会在需要时自动压缩其上下文。"
   no_files: "没有匹配的文件或文件夹。"
-  no_skills: "未找到技能。试试用 / 浏览提供方命令。"
-  no_command: "没有匹配的命令。"
   searching: "搜索中…"
   cmd_model_desc: "打开模型选择器"
   cmd_plan_desc: "将此会话切换到计划模式"

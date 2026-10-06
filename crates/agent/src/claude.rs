@@ -1018,11 +1018,16 @@ async fn resolve_response<T>(
     }
 }
 
+/// Add the `ultrathink` keyword, which Claude Code honours anywhere in the
+/// prompt. A message that starts with `/` is a slash command, and the CLI
+/// expands one only at byte 0, so there the keyword trails the text instead.
 fn turn_text(text: String, ultrathink: bool) -> String {
-    if ultrathink {
-        format!("Ultrathink:\n{text}")
-    } else {
+    if !ultrathink {
         text
+    } else if text.starts_with('/') {
+        format!("{text}\n\nultrathink")
+    } else {
+        format!("Ultrathink:\n{text}")
     }
 }
 
@@ -3278,7 +3283,9 @@ fn map_usage(usage: &Value, model_usage: Option<&Value>) -> TokenUsage {
 
 /// Parse Claude system-init `slash_commands` (→ [`ProviderCommandKind::Command`])
 /// and `skills` (→ [`ProviderCommandKind::Skill`]) into [`ProviderCommand`]s.
-/// Both are arrays of bare name strings; the CLI supplies no descriptions.
+/// Both are arrays of bare name strings; the CLI supplies no descriptions. A
+/// skill is listed under both, which is how the runtime knows a `$name`
+/// mention of it is sent as the `/name` command the CLI expands.
 fn parse_provider_commands(init: &Value) -> Vec<ProviderCommand> {
     let mut out = Vec::new();
     let mut push = |field: &str, kind: ProviderCommandKind| {

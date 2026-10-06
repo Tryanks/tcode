@@ -684,8 +684,6 @@ composer:
   steer_tooltip: "Steer the current turn"
   compacts_automatically: "%{provider} automatically compacts its context when needed."
   no_files: "No matching files or folders."
-  no_skills: "No skills found. Try / to browse provider commands."
-  no_command: "No matching command."
   searching: "Searching…"
   cmd_model_desc: "Open the model picker"
   cmd_plan_desc: "Switch this thread into plan mode"

@@ -749,9 +749,12 @@ pub struct ProviderCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCommandKind {
-    /// A `/`-command (Claude slash command).
+    /// A `/`-command, sent as `/name …` at the start of the turn text (Claude
+    /// `slash_commands`, which include its skills).
     Command,
-    /// A `$`-skill (Claude skill / Codex skill).
+    /// A `$`-skill, sent as a `$name` mention in the turn text (Codex skills).
+    /// A skill the provider also lists as a command is sent as that command,
+    /// the only form Claude Code expands.
     Skill,
 }
 
