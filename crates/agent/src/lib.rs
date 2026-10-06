@@ -1382,6 +1382,15 @@ pub async fn start_session(
     provider: ProviderKind,
     opts: SessionOptions,
 ) -> Result<SessionHandle, AgentError> {
+    // Spawning into a missing directory fails with the OS's "not found" (or
+    // Windows' "invalid directory"), which every provider then reports as its
+    // binary being missing. Worktrees are routinely removed under old threads.
+    if !opts.cwd.is_dir() {
+        return Err(AgentError::Spawn(format!(
+            "working directory `{}` no longer exists",
+            opts.cwd.display()
+        )));
+    }
     match provider {
         ProviderKind::Codex => codex::start(opts).await,
         ProviderKind::ClaudeCode => claude::start(opts).await,

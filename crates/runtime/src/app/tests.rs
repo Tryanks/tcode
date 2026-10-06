@@ -3666,6 +3666,105 @@ fn orchestrate_send_reactivates_the_child_and_its_settled_parent() {
     });
 }
 
+/// An orchestrator returning to a long-idle child whose worktree has since been
+/// removed must hear that the child could not start and why, not nothing (the
+/// failure folds into the already-reported turn) or that turn's old output.
+#[test]
+fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-send-missing-cwd-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(TestClientState::new(store));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+    let (child_commands, _child_receiver) = smol::channel::unbounded();
+    let cwd = std::env::temp_dir().join(format!("tcode-removed-{}", uuid::Uuid::new_v4()));
+
+    state.update(cx, |state, cx| {
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state.sessions.push(parent.meta.clone());
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
+
+        let mut child = live_session(ProviderKind::Codex, child_commands);
+        child.meta.id = "child".into();
+        child.meta.parent_session_id = Some("parent".into());
+        child.meta.archive_on_complete = false;
+        child.meta.cwd = cwd.clone();
+        child.turn_in_flight = true;
+        state.sessions.push(child.meta.clone());
+        state.residents.parked.insert(child.meta.id.clone(), child);
+
+        state.on_event("child", persisted_assistant_event("old report"), cx);
+        state.on_event(
+            "child",
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+    });
+    cx.run_until(|state| state.callback_last_turn.contains_key("child"));
+    assert!(matches!(
+        parent_receiver.try_recv(),
+        Ok(SessionCommand::Steer { text, .. }) if text.ends_with("\nold report")
+    ));
+
+    state.update(cx, |state, cx| {
+        state.resident_mut("child").unwrap().shutdown_to_idle();
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Send {
+                parent_id: "parent".into(),
+                thread_id: "child".into(),
+                message: "continue".into(),
+                fast: None,
+            },
+            reply,
+            cx,
+        );
+        assert!(response.try_recv().unwrap().is_ok());
+    });
+    cx.run_until(|_| !parent_receiver.is_empty());
+
+    let Ok(SessionCommand::Steer { text, .. }) = parent_receiver.try_recv() else {
+        panic!("the parent must be told the child failed to start");
+    };
+    assert_eq!(
+        text,
+        format!(
+            "[orchestrate] thread child (\"{}\") failed to start: failed to spawn provider process: working directory `{}` no longer exists",
+            state.read(|state| state.find_meta("child").unwrap().title.clone()),
+            cwd.display()
+        )
+    );
+
+    state.update(cx, |state, cx| {
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Status {
+                parent_id: "parent".into(),
+                thread_id: Some("child".into()),
+            },
+            reply,
+            cx,
+        );
+        let status = response.try_recv().unwrap().unwrap();
+        assert_eq!(status[0]["state"], "failed");
+        assert!(
+            status[0]["start_error"]
+                .as_str()
+                .unwrap()
+                .contains("no longer exists")
+        );
+    });
+}
+
 #[test]
 fn orchestrate_send_fast_switch_persists_and_schedules_restart() {
     let cx = &mut TestAppContext::default();
