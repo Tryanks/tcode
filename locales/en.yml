@@ -271,6 +271,8 @@ settings:
   archived_delete_all: "Delete all"
   archived_delete_all_title: "Delete all %{count} archived threads?"
   archived_delete_all_description: "This permanently deletes every archived thread and its conversation history. This cannot be undone."
+  archived_delete_all_tree_title: "Delete all %{count} archived threads and %{unarchived} unarchived threads under them?"
+  archived_delete_all_tree_description: "Every thread under an archived thread is deleted with it, archived or not. This permanently deletes %{total} threads and their conversation history. This cannot be undone."
   back: "Back"
   restore: "Restore defaults"
   restore_title: "Restore default settings?"

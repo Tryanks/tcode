@@ -2268,7 +2268,7 @@ impl SettingsPage {
                             .small()
                             .label(crate::tr!("settings.archived_delete_all"))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_delete_all_archived(total, window, cx);
+                                this.confirm_delete_all_archived(window, cx);
                             })),
                     ),
             )
@@ -2362,22 +2362,39 @@ impl SettingsPage {
 
     /// Bulk permanent delete. Always confirms, whatever
     /// `skip_delete_confirmation` says — this destroys every archived thread.
-    fn confirm_delete_all_archived(
-        &self,
-        total: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn confirm_delete_all_archived(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(deletion) = self.store.read(cx).archived_deletion() else {
+            return;
+        };
+        let (title, description) = if deletion.unarchived == 0 {
+            (
+                crate::tr!(
+                    "settings.archived_delete_all_title",
+                    count = deletion.archived
+                ),
+                crate::tr!("settings.archived_delete_all_description"),
+            )
+        } else {
+            (
+                crate::tr!(
+                    "settings.archived_delete_all_tree_title",
+                    count = deletion.archived,
+                    unarchived = deletion.unarchived
+                ),
+                crate::tr!(
+                    "settings.archived_delete_all_tree_description",
+                    total = deletion.archived + deletion.unarchived
+                ),
+            )
+        };
         let store = self.store.clone();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let alert = alert.bg(cx.theme().popover);
             let store = store.clone();
+            let deletion = deletion.clone();
             alert
-                .title(crate::tr!(
-                    "settings.archived_delete_all_title",
-                    count = total
-                ))
-                .description(crate::tr!("settings.archived_delete_all_description"))
+                .title(title.clone())
+                .description(description.clone())
                 .button_props(
                     DialogButtons::default()
                         .ok_variant(ButtonVariant::Danger)
@@ -2386,17 +2403,8 @@ impl SettingsPage {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, _cx| {
-                        let ids: Vec<String> = store
-                            .archived_groups()
-                            .into_iter()
-                            .flat_map(|group| group.sessions.into_iter().map(|meta| meta.id))
-                            .collect();
-                        // ponytail: one DeleteSession command per thread; add a bulk command if thousands feel slow.
-                        for id in ids {
-                            store.delete_session(id, false);
-                        }
-                    });
+                    let deletion = deletion.clone();
+                    store.update(cx, |store, _cx| store.delete_archived(deletion));
                     true
                 })
         });
