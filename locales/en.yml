@@ -218,6 +218,7 @@ quit:
   title: "Quit Tcode?"
   description: "%{count} session(s) are still working. Quitting will stop them."
   confirm: "Quit"
+  startup_failed: "Tcode could not start"
 settings:
   title: "Settings"
   sections: "All settings"

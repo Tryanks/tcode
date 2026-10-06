@@ -183,7 +183,7 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
 
 /// Start the in-process host and put the mux in front of it. This window is
 /// then one ordinary client among every link attached to that mux.
-fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
+fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -203,9 +203,61 @@ fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
         }
         Err(error) => log::warn!("MCP host failed to bind: {error}"),
     }
-    let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
+    let host = spawn_host(store, host_services)?;
     let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
-    (host, mux)
+    Ok((host, mux))
+}
+
+/// The local host did not start — most often because another Tcode already
+/// owns the data directory. Say why on stderr and in a dialog, then exit
+/// non-zero.
+fn exit_with_startup_failure(error: std::io::Error) -> ! {
+    struct StartupFailure;
+    impl gpui::Render for StartupFailure {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    eprintln!("tcode: {error}");
+    let detail = error.to_string();
+    gpui_platform::application().run(move |cx| {
+        // gpui ends a quit with status 0; this observer is the last code that
+        // runs before it.
+        cx.on_app_quit(|_| async { std::process::exit(1) }).detach();
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(420.), px(160.)), cx)),
+            ..Default::default()
+        };
+        let opened = cx.open_window(options, |_, cx| {
+            gpui::AppContext::new(cx, |_| StartupFailure)
+        });
+        let Ok(window) = opened else {
+            cx.quit();
+            return;
+        };
+        cx.activate(true);
+        let _ = window.update(cx, |_, window, cx| {
+            let quit = tcode_ui::tr!("quit.confirm");
+            let answer = window.prompt(
+                gpui::PromptLevel::Critical,
+                &tcode_ui::tr!("quit.startup_failed"),
+                Some(&detail),
+                &[quit.as_ref()],
+                cx,
+            );
+            cx.spawn(async move |_, cx| {
+                let _ = answer.await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    });
+    std::process::exit(1)
 }
 
 struct LocalKernel {
@@ -216,18 +268,18 @@ struct LocalKernel {
 }
 
 impl LocalKernel {
-    fn start(store: SessionStore) -> Self {
-        let (host, mux) = start_local(store);
+    fn start(store: SessionStore) -> std::io::Result<Self> {
+        let (host, mux) = start_local(store)?;
         let connection = mux.attach();
         let control_link = HostLink::new(connection.to_host, connection.from_host);
         let pump_link = control_link.clone();
         let control_pump = smol::spawn(async move { pump_link.pump().await });
-        Self {
+        Ok(Self {
             host,
             mux,
             control_link,
             _control_pump: control_pump,
-        }
+        })
     }
 
     /// A window's link to the local kernel. The mux keeps the kernel alive
@@ -356,7 +408,10 @@ fn main() {
     };
     // Kernel ownership is process composition, not a property of whichever
     // host the window currently views.
-    let kernel = Rc::new(LocalKernel::start(store));
+    let kernel = match LocalKernel::start(store) {
+        Ok(kernel) => Rc::new(kernel),
+        Err(error) => exit_with_startup_failure(error),
+    };
     let local_settings = kernel.settings();
 
     gpui_platform::application()
