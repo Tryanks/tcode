@@ -655,7 +655,7 @@ fn line_ranges(
     let boundaries = window
         .text_system()
         .line_wrapper(text_style.font(), font_size)
-        .wrap_line(&fragments, wrap_width)
+        .wrap_line(&fragments, wrap_width, Default::default())
         .map(|boundary| boundary.ix.min(total_len))
         .collect::<Vec<_>>();
     let mut ranges = Vec::with_capacity(boundaries.len() + 1);

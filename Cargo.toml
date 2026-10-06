@@ -16,7 +16,6 @@ members = [
     "crates/orchestrate-mcp",
     "crates/computer-use-mcp",
     "crates/ui",
-    "crates/voice",
     "crates/app",
     "crates/ios",
     "crates/android",

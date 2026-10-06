@@ -2,12 +2,12 @@
 
 use super::{IosDisplay, raw_handles::IosRawHandles};
 use gpui::{
-    Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, KeyDownEvent, KeyUpEvent,
-    Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    Scene, Size, TextInputConfiguration, TextInputStateChange, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
-    WindowVisibility, px, size,
+    Bounds, Capslock, DevicePixels, DispatchEventResult, FrameRequestSource, GpuSpecs,
+    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
+    RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
+    WindowParams, WindowVisibility, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
@@ -304,6 +304,12 @@ impl IosWindow {
             callback(RequestFrameOptions {
                 require_presentation: true,
                 force_render,
+                signal_source: if force_render {
+                    FrameRequestSource::LocalSchedule
+                } else {
+                    FrameRequestSource::NativeCallback
+                },
+                ..Default::default()
             });
         }
         if self.request_frame_callback.borrow().is_none() {
@@ -689,7 +695,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        Some(self.renderer.borrow().gpu_specs())
+        self.renderer.borrow().gpu_specs()
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}

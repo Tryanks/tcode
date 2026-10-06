@@ -293,7 +293,6 @@ crates/mcp-host          shared authenticated loopback host for in-process MCP s
 crates/preview-mcp       MCP server exposing the preview browser to the agent
 crates/orchestrate-mcp   MCP server for orchestration tools
 crates/computer-use-mcp  MCP server for desktop automation (macOS, Windows)
-crates/voice             macOS dictation; explicit unsupported elsewhere
 ```
 
 Runtime emits semantic events; UI owns their localization and presentation.
