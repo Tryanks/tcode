@@ -184,7 +184,11 @@ cargo run -p agent --example probe -- claude \
 
 `TCODE_DATA_DIR` points Tcode at a throwaway profile (its own sessions, settings
 and installed ACP agents) — useful for demos, screenshots and trying a change
-without touching your real threads.
+without touching your real threads. The data directory is otherwise `~/.tcode`.
+`LEGACY_TCODE_DATA_DIR` names an older data directory that a start moves into
+the data directory (by default an earlier version's platform app-data
+directory, and only when `TCODE_DATA_DIR` is unset); set both to try the move
+on a copy of real data.
 
 **Launch flags**: `--open-latest` reopens the most recent thread,
 `--connect <host_id>` starts attached to a paired host, `--pair <invite-url>`

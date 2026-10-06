@@ -91,22 +91,6 @@ impl NativeClientHost {
         }
     }
 
-    /// `TCODE_DATA_DIR`, else the platform data dir; hostname as device name.
-    pub fn from_env() -> Self {
-        Self::from_env_with_device_name(default_device_name())
-    }
-
-    /// Uses the normal platform data directory with a platform-provided name.
-    pub fn from_env_with_device_name(device_name: impl Into<String>) -> Self {
-        let data_dir = match std::env::var_os("TCODE_DATA_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("tcode"),
-        };
-        Self::new(data_dir, device_name)
-    }
-
     /// Operating system name and version reported to hosts, e.g. `Android 15`.
     pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
         self.platform = Some(platform.into());

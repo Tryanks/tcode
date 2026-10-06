@@ -1,4 +1,5 @@
-//! The one-time migration into `tcode.db`, run before the local kernel starts
+//! Preparing the data dir — moving an older build's data dir into it, then
+//! migrating older threads into `tcode.db` — before the local kernel starts,
 //! behind a window that offers nothing but its progress and Quit.
 
 use std::sync::Arc;
@@ -26,6 +27,7 @@ enum Status {
 struct MigrationView {
     status: Status,
     cancel: Arc<AtomicBool>,
+    data_dir: String,
 }
 
 /// The view a Quit reaches while the migration window is up.
@@ -61,6 +63,7 @@ pub(crate) fn run(
     let view = cx.new(|_| MigrationView {
         status: Status::Running(None),
         cancel: cancel.clone(),
+        data_dir: store.root().display().to_string(),
     });
     cx.set_global(Running(view.clone()));
 
@@ -235,8 +238,8 @@ impl Render for MigrationView {
             Status::Running(progress) => (
                 progress.as_ref().map_or(0., overall_percent),
                 progress.as_ref().map_or_else(
-                    || phase_line(MigrationPhase::Scanning, None),
-                    |progress| phase_line(progress.phase, Some(progress)),
+                    || phase_line(MigrationPhase::Scanning, None, &self.data_dir),
+                    |progress| phase_line(progress.phase, Some(progress), &self.data_dir),
                 ),
                 false,
             ),
@@ -256,7 +259,10 @@ impl Render for MigrationView {
             .child(
                 div()
                     .text_color(theme.muted_foreground)
-                    .child(tcode_ui::tr!("migration.description")),
+                    .child(tcode_ui::tr!(
+                        "migration.description",
+                        path = self.data_dir.clone()
+                    )),
             )
             .when(!failed, |column| {
                 column.child(
@@ -277,9 +283,11 @@ impl Render for MigrationView {
     }
 }
 
-/// Import and verification each go through every log once, but import
-/// writes and syncs each chunk while verification only reads it back, which
-/// takes a fraction of the time. The phases around them take a moment.
+/// A move by rename counts entries; a copy across filesystems counts bytes,
+/// and gets a bar of its own before the threads migrate. Import and
+/// verification each go through every log once, but import writes and syncs
+/// each chunk while verification only reads it back, which takes a fraction
+/// of the time. The phases around them take a moment.
 fn overall_percent(progress: &MigrationProgress) -> f32 {
     let fraction = |done: u64, total: u64| {
         if total == 0 {
@@ -290,6 +298,10 @@ fn overall_percent(progress: &MigrationProgress) -> f32 {
     };
     let phase = fraction(progress.bytes_done, progress.bytes_total);
     match progress.phase {
+        MigrationPhase::Relocating if progress.bytes_total == 0 => {
+            fraction(progress.threads_done as u64, progress.threads_total as u64) * 100.
+        }
+        MigrationPhase::Relocating => phase * 100.,
         MigrationPhase::Scanning => 0.,
         MigrationPhase::Importing => phase * 85.,
         MigrationPhase::Verifying => 85. + phase * 15.,
@@ -297,7 +309,11 @@ fn overall_percent(progress: &MigrationProgress) -> f32 {
     }
 }
 
-fn phase_line(phase: MigrationPhase, progress: Option<&MigrationProgress>) -> String {
+fn phase_line(
+    phase: MigrationPhase,
+    progress: Option<&MigrationProgress>,
+    data_dir: &str,
+) -> String {
     let counts = |key: &str| {
         let progress = progress.copied().unwrap_or(MigrationProgress {
             phase,
@@ -311,11 +327,18 @@ fn phase_line(phase: MigrationPhase, progress: Option<&MigrationProgress>) -> St
             done = progress.threads_done,
             total = progress.threads_total,
             bytes = tcode_ui::format_size(progress.bytes_done as usize),
-            total_bytes = tcode_ui::format_size(progress.bytes_total as usize)
+            total_bytes = tcode_ui::format_size(progress.bytes_total as usize),
+            path = data_dir
         )
         .into_owned()
     };
     match phase {
+        MigrationPhase::Relocating if progress.is_some_and(|progress| progress.bytes_total > 0) => {
+            counts("migration.relocating_copy")
+        }
+        MigrationPhase::Relocating => {
+            tcode_ui::tr!("migration.relocating", path = data_dir).into_owned()
+        }
         MigrationPhase::Scanning => tcode_ui::tr!("migration.scanning").into_owned(),
         MigrationPhase::Importing => counts("migration.importing"),
         MigrationPhase::Verifying => counts("migration.verifying"),

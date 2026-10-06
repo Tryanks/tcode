@@ -1,8 +1,7 @@
 //! Persistence for tcode threads.
 //!
 //! Projects, thread metadata and every thread's event log live in one Turso
-//! database, `tcode.db`, in the platform data dir (e.g.
-//! `~/Library/Application Support/tcode/`):
+//! database, `tcode.db`, in the data dir ([`data_dir`]):
 //!   * `projects` and `sessions` hold each [`Project`] / [`SessionMeta`] as the
 //!     JSON serde produces for it.
 //!   * `events` holds each thread's log as raw byte segments, one per line
@@ -16,6 +15,7 @@
 
 mod db;
 mod migrate;
+mod relocate;
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +38,7 @@ use tcode_core::session::StoredEvent;
 
 use db::{Broken, Db, SCHEMA_VERSION, blob, integer, is_broken};
 
+const DATA_DIR_ENV: &str = "TCODE_DATA_DIR";
 const DB_FILE: &str = "tcode.db";
 /// Held with an OS file lock for as long as a host owns the data dir, which
 /// covers the migration as well as the open database. It is never deleted:
@@ -105,6 +106,9 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[derive(Clone)]
 pub struct SessionStore {
     root: PathBuf,
+    /// An older build's data dir that moves into `root` before the store
+    /// opens ([`SessionStore::migrate`]).
+    previous: Option<PathBuf>,
     shared: Arc<Shared>,
 }
 
@@ -112,8 +116,29 @@ impl std::fmt::Debug for SessionStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionStore")
             .field("root", &self.root)
+            .field("previous", &self.previous)
             .finish_non_exhaustive()
     }
+}
+
+/// The data dir: `TCODE_DATA_DIR` when it is set — a throwaway profile (its
+/// own sessions, settings and installed ACP agents) for demos and screenshots —
+/// else `~/.tcode` on every platform.
+pub fn data_dir() -> io::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|dir| !dir.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    dirs::home_dir()
+        .map(|home| home.join(".tcode"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "no home directory to keep Tcode's data in (~/.tcode); set {DATA_DIR_ENV} to \
+                     choose one"
+                ),
+            )
+        })
 }
 
 struct Shared {
@@ -253,21 +278,26 @@ impl Mutation {
 }
 
 impl SessionStore {
-    /// Open (creating if needed) the store under the platform data dir, or under
-    /// `TCODE_DATA_DIR` when it is set — which gives a throwaway profile (its own
-    /// sessions, settings and installed ACP agents) for demos and screenshots.
-    pub fn open_default() -> io::Result<Self> {
-        let root = match std::env::var_os("TCODE_DATA_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("tcode"),
+    /// A host's store: in `root` when one is given (`tcode-headless
+    /// --data-dir`), else in [`data_dir`]. An older build's data dir moves in
+    /// first, from `LEGACY_TCODE_DATA_DIR` when it is set, else — unless the
+    /// data dir was chosen explicitly — from the platform data dir an older
+    /// build used; see [`SessionStore::needs_migration`].
+    pub fn open_host(root: Option<PathBuf>) -> io::Result<Self> {
+        let explicit =
+            root.is_some() || std::env::var_os(DATA_DIR_ENV).is_some_and(|dir| !dir.is_empty());
+        let root = match root {
+            Some(root) => root,
+            None => data_dir()?,
         };
-        Self::open_at(root)
+        let mut store = Self::open_at(root)?;
+        store.previous = relocate::source(explicit);
+        Ok(store)
     }
 
-    /// A handle to `root`, created if needed. The database is not opened until
-    /// [`SessionStore::open`] or the first operation that needs it.
+    /// A handle to `root`, created if needed, that never moves an older data
+    /// dir in. The database is not opened until [`SessionStore::open`] or the
+    /// first operation that needs it.
     pub fn open_at(root: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
         let key = fs::canonicalize(&root)?;
@@ -290,7 +320,11 @@ impl SessionStore {
                 shared
             }
         };
-        Ok(Self { root, shared })
+        Ok(Self {
+            root,
+            previous: None,
+            shared,
+        })
     }
 
     /// How many times [`SessionStore::read_events`] parsed a log through this
@@ -315,10 +349,11 @@ impl SessionStore {
     }
 
     /// Take ownership of the data dir, keeping it for the database opened
-    /// later, and say whether it holds the JSON index or JSONL logs of an
-    /// older build that [`SessionStore::migrate`] must move into `tcode.db`
-    /// before the store opens. Fails with [`io::ErrorKind::ResourceBusy`]
-    /// while another host owns the directory.
+    /// later, and say whether [`SessionStore::migrate`] must prepare it before
+    /// the store opens: an older build's data dir is still to move in, or the
+    /// data dir holds the JSON index or JSONL logs of an older build that must
+    /// move into `tcode.db`. Fails with [`io::ErrorKind::ResourceBusy`] while
+    /// another host owns the directory.
     pub fn needs_migration(&self) -> io::Result<bool> {
         let mut state = self.shared.lock_state()?;
         match &*state {
@@ -327,15 +362,29 @@ impl SessionStore {
             State::Open(_) => return Ok(false),
             other => return Err(unavailable(other, "check for a migration")),
         }
-        migrate::needed(&self.root)
+        Ok(relocate::needed(&self.root, self.previous.as_deref())? || migrate::needed(&self.root)?)
     }
 
-    /// Migrate an older build's files into `tcode.db` under the data dir's
-    /// ownership lock, which the store keeps for the database afterwards.
-    /// `progress` is called after every chunk of about 8 MiB and every log;
-    /// `cancel` is checked at the same points and between phases until the
-    /// migrated database is complete. A cancelled migration removes its
-    /// staging files and changes nothing else; a later one starts over.
+    /// The older data dir still to move into this one, without taking
+    /// ownership: whatever is written to the data dir before the move would
+    /// stop it with a collision.
+    pub fn pending_relocation(&self) -> io::Result<Option<&Path>> {
+        Ok(match self.previous.as_deref() {
+            Some(previous) if relocate::needed(&self.root, Some(previous))? => Some(previous),
+            _ => None,
+        })
+    }
+
+    /// Prepare the data dir under its ownership lock, which the store keeps
+    /// for the database afterwards: first move an older build's data dir in
+    /// ([`MigrationPhase::Relocating`]), then migrate an older build's JSON
+    /// index and JSONL logs into `tcode.db`. `progress` is called after every
+    /// entry moved, every chunk of about 8 MiB copied or imported, and every
+    /// log; `cancel` is checked at the same points and between phases until
+    /// the migrated database is complete. A cancelled move keeps the entries
+    /// it moved and is continued by the next start; a cancelled migration
+    /// removes its staging files and changes nothing else, and a later one
+    /// starts over.
     pub fn migrate(
         &self,
         mut progress: impl FnMut(MigrationProgress),
@@ -364,7 +413,10 @@ impl SessionStore {
             }
         };
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            migrate::run(&self.root, &mut progress, cancel)
+            match relocate::run(&self.root, self.previous.as_deref(), &mut progress, cancel)? {
+                Migration::Cancelled => Ok(Migration::Cancelled),
+                Migration::Completed => migrate::run(&self.root, &mut progress, cancel),
+            }
         }));
         let mut state = self.shared.lock_state()?;
         let result = match outcome {
@@ -494,7 +546,9 @@ impl SessionStore {
         };
         if let Some(ownership) = ownership {
             // Dropping the ownership on failure lets the next attempt start over.
-            match catch_unwind(AssertUnwindSafe(|| open_live(&self.root, ownership))) {
+            match catch_unwind(AssertUnwindSafe(|| {
+                open_live(&self.root, self.previous.as_deref(), ownership)
+            })) {
                 Ok(Ok(live)) => *state = State::Open(live),
                 Ok(Err(error)) => return Err(error),
                 Err(panic) => {
@@ -869,7 +923,18 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// Bring `tcode.db` up to date in the data dir `ownership` holds, and open it.
-fn open_live(root: &Path, ownership: File) -> io::Result<Live> {
+/// A data dir an older one has still to move into is refused, as opening it
+/// would create the data that makes the move look done.
+fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Result<Live> {
+    if let Some(previous) = previous
+        && relocate::needed(root, Some(previous))?
+    {
+        return Err(io::Error::other(format!(
+            "{} has not been moved into {} yet",
+            previous.display(),
+            root.display()
+        )));
+    }
     migrate::prepare(root)?;
     let path = root.join(DB_FILE);
     let db = Db::open(&path, false)?;
@@ -897,6 +962,7 @@ fn open_live(root: &Path, ownership: File) -> io::Result<Live> {
         }
     }
     migrate::warn_about_stray_sources(root);
+    migrate::remove_legacy(root);
     Ok(Live {
         db: Arc::new(db),
         ownership,

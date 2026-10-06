@@ -86,7 +86,12 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
     })
     .filter(|locale| !locale.trim().is_empty());
 
-    let host = NativeClientHost::from_env_with_device_name(device_name)
+    // The app container's Application Support, as on Android its filesDir:
+    // this client's own files, never a host's data dir.
+    let data_dir = dirs::data_dir()
+        .expect("iOS gives every app container a home directory")
+        .join("tcode");
+    let host = NativeClientHost::new(data_dir, device_name)
         .with_platform(platform)
         .with_system_browser(system_browser())
         .with_qr_scanner(|| -> HostFuture<'static, Result<String, String>> {

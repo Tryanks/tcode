@@ -10,7 +10,6 @@ fast-apple-datapath = ["iroh/fast-apple-datapath"]
 # The native client host and the Preview adapters a native client shows a
 # machine's pages through.
 native = [
-    "dep:dirs",
     "dep:libc",
     "dep:core-foundation",
     "dep:system-configuration-sys",
@@ -33,7 +32,6 @@ tcode-protocol = { path = "../protocol", default-features = false }
 async-channel = "2"
 flate2 = "1"
 base64 = { version = "0.23", optional = true }
-dirs = { version = "7", optional = true }
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
 getrandom = "0.4"

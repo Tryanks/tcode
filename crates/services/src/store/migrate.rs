@@ -16,6 +16,9 @@
 //!    `tcode.db.archive`, and the staged file is renamed to `tcode.db`; the
 //!    directory is synced around both.
 //! 5. The sources move into `legacy/`, and the archive list is removed.
+//!    `legacy/` is deleted once the store has opened `tcode.db`
+//!    ([`remove_legacy`]), so a published database that does not open still
+//!    has its sources beside it.
 //!
 //! Nothing before step 4's rename writes, renames or removes a source: the
 //! steps before it only read them. A migration cancelled or failed before
@@ -50,7 +53,9 @@ const VERIFY_ROWS: i64 = 4096;
 
 /// Where a running migration is. Each of the importing and verifying phases
 /// goes through every log once, so their counts start again from zero;
-/// publishing and archiving report everything done.
+/// publishing and archiving report everything done. While relocating, the
+/// thread counts are the older data dir's entries and the byte counts what a
+/// copy across filesystems has written; a move by rename reports no bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationProgress {
     pub phase: MigrationPhase,
@@ -62,6 +67,8 @@ pub struct MigrationProgress {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationPhase {
+    /// Moving an older build's data dir into this one, before anything else.
+    Relocating,
     /// Listing the logs and importing the index; the totals are not known
     /// until it ends.
     Scanning,
@@ -74,10 +81,12 @@ pub enum MigrationPhase {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Migration {
-    /// `tcode.db` is complete and the sources are in `legacy/`.
+    /// The data dir is in place and `tcode.db` is complete.
     Completed,
-    /// The staging files are gone, no `tcode.db` exists and every source is
-    /// where it was.
+    /// Stopped before either was: entries already moved into the data dir
+    /// stay there and the rest stay in the older one, and a JSONL migration
+    /// left no staging file, no `tcode.db` and every source where it was. The
+    /// next start continues.
     Cancelled,
 }
 
@@ -137,7 +146,7 @@ pub(super) fn run(
             if let Err(cleanup) = remove_staging(root) {
                 log::warn!("could not discard the staged database: {cleanup}");
             }
-            if error.get_ref().is_some_and(|inner| inner.is::<Cancelled>()) {
+            if is_cancelled(&error) {
                 log::info!(
                     "migration into {} cancelled; the sources are unchanged",
                     root.join(DB_FILE).display()
@@ -167,7 +176,7 @@ pub(super) fn run(
 }
 
 #[derive(Debug)]
-struct Cancelled;
+pub(super) struct Cancelled;
 
 impl std::fmt::Display for Cancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -177,14 +186,14 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
-struct Progress<'a> {
-    report: &'a mut dyn FnMut(MigrationProgress),
-    cancel: &'a AtomicBool,
-    current: MigrationProgress,
+pub(super) struct Progress<'a> {
+    pub(super) report: &'a mut dyn FnMut(MigrationProgress),
+    pub(super) cancel: &'a AtomicBool,
+    pub(super) current: MigrationProgress,
 }
 
 impl Progress<'_> {
-    fn check(&self) -> io::Result<()> {
+    pub(super) fn check(&self) -> io::Result<()> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(io::Error::other(Cancelled));
         }
@@ -192,7 +201,12 @@ impl Progress<'_> {
     }
 
     /// Begin a cancellable phase over `threads` logs of `bytes` in all.
-    fn start(&mut self, phase: MigrationPhase, threads: usize, bytes: u64) -> io::Result<()> {
+    pub(super) fn start(
+        &mut self,
+        phase: MigrationPhase,
+        threads: usize,
+        bytes: u64,
+    ) -> io::Result<()> {
         self.check()?;
         self.current = MigrationProgress {
             phase,
@@ -205,7 +219,7 @@ impl Progress<'_> {
         Ok(())
     }
 
-    fn advance(&mut self, threads: usize, bytes: u64) -> io::Result<()> {
+    pub(super) fn advance(&mut self, threads: usize, bytes: u64) -> io::Result<()> {
         self.current.threads_done += threads;
         self.current.bytes_done += bytes;
         (self.report)(self.current);
@@ -218,6 +232,21 @@ impl Progress<'_> {
         self.current.threads_done = self.current.threads_total;
         self.current.bytes_done = self.current.bytes_total;
         (self.report)(self.current);
+    }
+}
+
+pub(super) fn is_cancelled(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Cancelled>())
+}
+
+/// Delete `legacy/` and the sources archived in it, once `tcode.db` has
+/// opened. A failure is logged and retried by the next start.
+pub(super) fn remove_legacy(root: &Path) {
+    let legacy = root.join(LEGACY_DIR);
+    match fs::remove_dir_all(&legacy) {
+        Ok(()) => log::info!("removed {}", legacy.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("could not remove {}: {error}", legacy.display()),
     }
 }
 
@@ -448,8 +477,8 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
 }
 
 /// Today's tolerance: the object schema or the legacy bare array. An
-/// unparseable file is left as it is, to be archived into `legacy/` with the
-/// logs, which still migrate.
+/// unparseable file is archived into `legacy/` as it is, with the logs, which
+/// still migrate.
 fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
     let path = root.join(LEGACY_INDEX);
     let bytes = match fs::read(&path) {
@@ -466,7 +495,7 @@ fn read_legacy_index(root: &Path) -> io::Result<IndexFile> {
     Ok(parsed.unwrap_or_else(|error| {
         log::warn!(
             "failed to parse {LEGACY_INDEX}: {error}; migrating the event logs without it, and \
-             keeping it in {LEGACY_DIR}/"
+             archiving it with them"
         );
         IndexFile::default()
     }))
@@ -731,19 +760,19 @@ fn archive_sources(root: &Path) -> io::Result<()> {
 }
 
 /// Windows flushes only a handle opened for writing.
-fn sync_file(path: &Path) -> io::Result<()> {
+pub(super) fn sync_file(path: &Path) -> io::Result<()> {
     fs::OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
 /// Make a directory's entries (a rename, a new file) durable.
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
 /// NTFS journals renames itself, and std cannot open a directory handle on
 /// Windows.
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
