@@ -8,8 +8,6 @@ use std::path::PathBuf;
 use agent::ProviderKind;
 use tcode_core::settings::Settings;
 #[cfg(test)]
-use tcode_core::settings::provider_key;
-#[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode, TraverseSetting};
 
 #[derive(Debug, Clone)]
@@ -50,9 +48,8 @@ impl SettingsStore {
             .unwrap_or_default()
     }
 
-    /// The sensitive env values for one profile id. Built-in profiles use their
-    /// [`provider_key`] as id, so this also covers them; user-created profiles
-    /// are keyed by their slug id.
+    /// The sensitive env values for one profile id: a built-in profile's
+    /// [`Settings::builtin_profile_id`] or a user profile's slug.
     pub fn profile_secrets(&self, profile_id: &str) -> BTreeMap<String, String> {
         self.load_secrets().remove(profile_id).unwrap_or_default()
     }
@@ -187,7 +184,7 @@ mod tests {
         store.save(&settings).unwrap();
         store
             .set_profile_secret(
-                provider_key(ProviderKind::ClaudeCode),
+                Settings::builtin_profile_id(ProviderKind::ClaudeCode),
                 "ANTHROPIC_API_KEY",
                 Some("sk-live"),
             )
@@ -224,20 +221,20 @@ mod tests {
         // Clearing removes the entry (and the now-empty provider bucket).
         store
             .set_profile_secret(
-                provider_key(ProviderKind::ClaudeCode),
+                Settings::builtin_profile_id(ProviderKind::ClaudeCode),
                 "ANTHROPIC_API_KEY",
                 None,
             )
             .unwrap();
         assert!(store.profile_secrets("claude").is_empty());
         // A user profile "klaude-kode" stores its own key, isolated from the
-        // built-in "claude" profile (which shares the provider_key id).
+        // built-in "claude" profile.
         store
             .set_profile_secret("klaude-kode", "ANTHROPIC_API_KEY", Some("sk-kimi-xyz"))
             .unwrap();
         store
             .set_profile_secret(
-                provider_key(ProviderKind::ClaudeCode),
+                Settings::builtin_profile_id(ProviderKind::ClaudeCode),
                 "ANTHROPIC_API_KEY",
                 Some("sk-official"),
             )
@@ -250,7 +247,7 @@ mod tests {
                 .map(String::as_str),
             Some("sk-kimi-xyz")
         );
-        // Built-in profile id == provider_key.
+        // The built-in Claude profile keeps its `claude` bucket.
         assert_eq!(
             store
                 .profile_secrets("claude")

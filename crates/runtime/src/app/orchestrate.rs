@@ -1274,7 +1274,7 @@ pub(super) fn compose_collaboration_brief(
         .decision_models
         .iter()
         .find(|entry| entry.provider == provider && entry.model == model)
-        .map(|entry| entry.description.trim())
+        .map(|entry| entry.guidance(true).trim())
         .unwrap_or_default();
     format!(
         "{}\n\n## Your collaboration guidance\n\n{recognition}\n\n## Discussion\n\n{brief}",
@@ -1347,7 +1347,7 @@ pub(super) fn render_orchestrate_configuration(
                     escape_markdown_inline(&entry.model),
                     escape_markdown_inline(&entry.model),
                     provider_name(entry.provider),
-                    entry.description.trim()
+                    entry.guidance(collaboration).trim()
                 ));
                 continue;
             }
@@ -1364,7 +1364,7 @@ pub(super) fn render_orchestrate_configuration(
                 "\n#### `{}` / `{}` — available `effort`: {efforts}{fast}{profile}\n\n{}\n",
                 provider_name(entry.provider),
                 escape_markdown_inline(&entry.model),
-                entry.description.trim()
+                entry.guidance(collaboration).trim()
             ));
         }
     }
@@ -1434,6 +1434,8 @@ fn resolve_orchestrate_profiles(
         "codex" => ProviderKind::Codex,
         "pi" => ProviderKind::Pi,
         "opencode" | "open_code" | "open-code" => ProviderKind::OpenCode,
+        "cursor" => ProviderKind::Cursor,
+        "grok" => ProviderKind::Grok,
         "acp" => {
             return Err(
                 "ACP child dispatch is not available yet; configure a native-provider child model"
@@ -1579,6 +1581,8 @@ pub(super) fn provider_name(provider: ProviderKind) -> &'static str {
         ProviderKind::ClaudeCode => "claude",
         ProviderKind::Pi => "pi",
         ProviderKind::OpenCode => "opencode",
+        ProviderKind::Cursor => "cursor",
+        ProviderKind::Grok => "grok",
         ProviderKind::Acp => "acp",
     }
 }

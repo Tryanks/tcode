@@ -23,6 +23,15 @@ fn soft_wrapping_example(request: &str) -> Result<String, GalleryError> { proces
 | --- | ---: | ---: |
 | Parsed | 24 files | 1.2s |
 | Verified | 238 tests | 4.8s |
+
+```mermaid
+flowchart LR
+  Client[Client] -->|SessionCommand| Host[Host]
+  Host -->|AgentEvent| Client
+  Host --> Provider{Provider}
+  Provider --> Claude
+  Provider --> Codex
+```
 "#;
 
 struct Gallery {

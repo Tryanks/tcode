@@ -1,18 +1,25 @@
 use super::super::*;
 
 impl Composer {
-    pub(in super::super) fn menu_visible(&self) -> bool {
-        self.active_trigger.is_some() && !self.menu_dismissed
+    /// Whether the trigger menu is shown and owns Enter/arrows. A `/` or `$`
+    /// token that matches nothing is ordinary text (a path, a shell variable,
+    /// a provider command Tcode does not know), so no menu opens for it and
+    /// Enter submits as usual; only the asynchronous `@` menu keeps an empty
+    /// or loading state.
+    pub(in super::super) fn menu_visible(&self, cx: &App) -> bool {
+        let Some(trigger) = self.active_trigger.as_ref() else {
+            return false;
+        };
+        if self.menu_dismissed {
+            return false;
+        }
+        trigger.kind == TriggerKind::Path || !self.menu_rows(cx).0.is_empty()
     }
 
     /// Recompute the active trigger from the input text + cursor, resetting the
     /// highlight (and un-dismissing) when the trigger identity changes, and
     /// lazily loading the workspace listing for `@`-mentions.
     pub(in super::super) fn recompute_trigger(&mut self, cx: &mut Context<Self>) {
-        if self.compact {
-            self.active_trigger = None;
-            return;
-        }
         let (text, cursor) = {
             let state = self.input.read(cx);
             (state.value().to_string(), state.cursor())
@@ -107,7 +114,7 @@ impl Composer {
                             group: Some("composer.group_skills"),
                         })
                         .collect();
-                (rows, crate::tr!("composer.no_skills").into_owned(), false)
+                (rows, String::new(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
                 let builtins: [(&str, Option<&str>, &str, MenuAccept); 5] = [
@@ -158,8 +165,9 @@ impl Composer {
                         group: Some("composer.group_builtin"),
                     })
                     .collect();
-                // Provider-native slash commands (Claude `slash_commands`), shown
-                // after the built-in group, fuzzily filtered without truncation.
+                // Provider-native slash commands (Claude `slash_commands`, which
+                // include its skills), shown after the built-in group, fuzzily
+                // filtered without truncation.
                 let commands = self
                     .workspace_store
                     .read(cx)
@@ -182,7 +190,7 @@ impl Composer {
                         group: Some("composer.group_provider"),
                     }),
                 );
-                (rows, crate::tr!("composer.no_command").into_owned(), false)
+                (rows, String::new(), false)
             }
         }
     }
@@ -248,7 +256,7 @@ impl Composer {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.menu_visible() {
+        if !self.menu_visible(cx) {
             return None;
         }
         let (rows, empty_text, loading) = self.menu_rows(cx);
@@ -411,10 +419,16 @@ fn render_menu_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, size};
+    use gpui::{TestAppContext, VisualTestContext, size};
 
-    #[gpui::test]
-    fn arrow_keys_keep_the_highlighted_mention_laid_out(cx: &mut TestAppContext) {
+    fn composer_window(
+        compact: bool,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        Entity<Composer>,
+        &mut VisualTestContext,
+    ) {
         cx.update(crate::theme::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
@@ -436,8 +450,64 @@ mod tests {
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
         });
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new_with_layout(store.clone(), compact, window, cx)
+        });
+        (store, composer, cx)
+    }
+
+    #[gpui::test]
+    fn the_phone_composer_opens_the_same_trigger_menus(cx: &mut TestAppContext) {
+        let (store, composer, cx) = composer_window(true, cx);
+        cx.simulate_resize(size(px(393.), px(852.)));
+        composer.update_in(cx, |composer, window, cx| {
+            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            composer.workspace = Some((cwd, vec![PathEntry::from_rel("file.rs".into(), false)]));
+            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        });
+        for (trigger, first_row) in [("/", "/model"), ("@", "file.rs")] {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_draft("", window, cx)
+            });
+            cx.simulate_input(trigger);
+            cx.update(|window, cx| _ = window.draw(cx));
+            assert!(cx.debug_bounds("menu-row-0").is_some(), "{trigger}");
+            composer.read_with(cx, |composer, cx| {
+                assert_eq!(composer.menu_rows(cx).0[0].primary, first_row, "{trigger}");
+            });
+        }
+    }
+
+    /// A `/` or `$` token that matches nothing is ordinary text: no menu opens,
+    /// so Enter submits it instead of accepting a row that does not exist.
+    #[gpui::test]
+    fn unmatched_command_and_skill_tokens_open_no_menu(cx: &mut TestAppContext) {
+        let (_store, composer, cx) = composer_window(false, cx);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        composer.update_in(cx, |composer, window, cx| {
+            window.focus(&composer.input.read(cx).focus_handle(cx), cx);
+        });
+        for (text, visible) in [
+            ("/mod", true),
+            ("/nosuchcommand", false),
+            ("$HOME", false),
+            ("/Users/me/notes.md", false),
+        ] {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_draft("", window, cx)
+            });
+            cx.simulate_input(text);
+            cx.update(|window, cx| _ = window.draw(cx));
+            composer.read_with(cx, |composer, cx| {
+                assert_eq!(composer.menu_visible(cx), visible, "{text:?}");
+            });
+            assert_eq!(cx.debug_bounds("menu-row-0").is_some(), visible, "{text:?}");
+        }
+    }
+
+    #[gpui::test]
+    fn arrow_keys_keep_the_highlighted_mention_laid_out(cx: &mut TestAppContext) {
+        let (store, composer, cx) = composer_window(false, cx);
         cx.simulate_resize(size(px(800.), px(600.)));
         composer.update_in(cx, |composer, window, cx| {
             let cwd = store.read(cx).composer_state().active_cwd.unwrap();

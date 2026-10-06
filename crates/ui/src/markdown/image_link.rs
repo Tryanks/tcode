@@ -73,8 +73,7 @@ pub(super) fn badge(
         .tooltip(move |window, cx| Tooltip::new(tooltip_url.clone()).build(window, cx))
         .child(div().min_w_0().truncate().child(label.clone()))
         .on_click(move |_, window, cx| {
-            gpui_base::TextSelection::end(window, cx);
-            cx.stop_propagation();
+            crate::widgets::stop_click_propagation(window, cx);
             let source = view.read(cx).image_source(&url.to_string().into());
             crate::attachments::open_image_lightbox(source, label.to_string(), window, cx);
         });

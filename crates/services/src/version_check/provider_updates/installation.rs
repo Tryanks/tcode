@@ -495,6 +495,8 @@ fn binary_name(provider: ProviderKind) -> &'static str {
         ProviderKind::Codex => "codex",
         ProviderKind::Pi => "pi",
         ProviderKind::OpenCode => "opencode",
+        ProviderKind::Cursor => "cursor-agent",
+        ProviderKind::Grok => "grok",
         ProviderKind::Acp => "",
     }
 }
@@ -814,7 +816,7 @@ fn provider_brew_package(provider: ProviderKind, name: &str) -> bool {
         ProviderKind::Codex => matches!(name, "codex" | "codex@alpha"),
         ProviderKind::Pi => name == "pi-coding-agent",
         ProviderKind::OpenCode => matches!(name, "opencode" | "opencode-v2"),
-        ProviderKind::Acp => false,
+        ProviderKind::Cursor | ProviderKind::Grok | ProviderKind::Acp => false,
     }
 }
 
@@ -1086,7 +1088,8 @@ async fn javascript_windows<P: Probe>(context: &Context<'_, P>) -> Option<Instal
             "@mariozechner/pi-coding-agent",
         ],
         ProviderKind::OpenCode => &["opencode-ai", "@opencode/cli"],
-        ProviderKind::Acp => return None,
+        ProviderKind::Grok => &["@xai-official/grok"],
+        ProviderKind::Cursor | ProviderKind::Acp => return None,
     };
     for (manager, source, args, bin_args) in [
         (

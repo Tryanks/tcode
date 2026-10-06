@@ -349,7 +349,8 @@ mod tests {
 
     use gpui::{
         AppContext as _, Context, Entity, IntoElement, ListAlignment, ListState, Modifiers,
-        MouseButton, Render, TestAppContext, VisualTestContext, Window, div, point, px,
+        MouseButton, Render, StatefulInteractiveElement as _, TestAppContext, VisualTestContext,
+        Window, div, point, px,
     };
 
     use super::*;
@@ -474,6 +475,32 @@ mod tests {
                     window,
                     cx,
                 ))
+                .child(
+                    div()
+                        .h(px(40.))
+                        .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+        }
+    }
+
+    struct SwallowedClickRoot {
+        markdown: Entity<MarkdownState>,
+    }
+
+    impl Render for SwallowedClickRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(TextSelectionLayer)
+                .child(
+                    div()
+                        .id("swallowing-button")
+                        .w_full()
+                        .h(px(52.))
+                        .on_click(|_, window, cx| {
+                            crate::widgets::stop_click_propagation(window, cx)
+                        }),
+                )
                 .child(
                     div()
                         .h(px(40.))
@@ -613,6 +640,33 @@ mod tests {
 
         let selected = cx.update(gpui_base::TextSelection::selected_text);
         assert_eq!(selected, lines[5..].join("\n"));
+    }
+
+    #[gpui::test]
+    fn mermaid_fence_paints_a_diagram_and_unparsable_source_stays_code(cx: &mut TestAppContext) {
+        let (_, cx) = open_timeline_row(
+            "```mermaid\nflowchart LR\n  A --> B\n```\n\n```mermaid\nnot a diagram\n```",
+            cx,
+        );
+        assert!(cx.debug_bounds("markdown-mermaid-root-0").is_some());
+        assert!(cx.debug_bounds("markdown-mermaid-root-1").is_none());
+        let fallback = cx.debug_bounds("markdown-code-line-0");
+        assert!(
+            fallback.is_some(),
+            "the fence that does not parse keeps its code"
+        );
+    }
+
+    #[gpui::test]
+    fn code_block_copy_button_copies_the_whole_fence(cx: &mut TestAppContext) {
+        let lines = (0..100).map(|ix| format!("line {ix}")).collect::<Vec<_>>();
+        let source = format!("```text\n{}\n```", lines.join("\n"));
+        let (_, cx) = open_timeline_row(&source, cx);
+        let button = cx.debug_bounds("markdown-code-copy-root-0").unwrap();
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(copied.as_deref(), Some(lines.join("\n").as_str()));
     }
 
     fn open_timeline_row<'a>(
@@ -955,6 +1009,40 @@ mod tests {
             assert!(
                 gpui_base::TextSelection::selected_text(window, cx).is_empty(),
                 "a titlebar press started a text selection"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn click_that_stops_propagation_does_not_leave_selection_following_pointer(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|_, cx| SwallowedClickRoot {
+            markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_mouse_down(
+            point(px(10.), px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(10.), px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(point(px(80.), px(70.)), None, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert!(
+                gpui_base::TextSelection::selected_text(window, cx).is_empty(),
+                "the released pointer kept selecting text"
             );
         });
     }

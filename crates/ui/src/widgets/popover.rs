@@ -229,7 +229,7 @@ impl Popover {
         let mut root = div()
             .id(self.id)
             .on_click(move |_, window, cx| {
-                cx.stop_propagation();
+                crate::widgets::stop_click_propagation(window, cx);
                 toggle.update(cx, |state, cx| state.toggle_open(window, cx));
                 cx.notify(parent);
             })

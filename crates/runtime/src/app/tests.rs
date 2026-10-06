@@ -1812,6 +1812,70 @@ fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
 }
 
 #[test]
+fn installed_acp_duplicates_of_native_providers_only_serve_their_existing_sessions() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-native-acp-duplicates");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let installed = |id: &str| InstalledAgent {
+        id: id.into(),
+        name: id.into(),
+        version: String::new(),
+        icon: None,
+        launch: agent::AcpLaunch::Custom {
+            command: id.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        },
+        enabled: true,
+        env: Vec::new(),
+        launch_args: None,
+    };
+    let draft = state.update(cx, |state, cx| {
+        for id in ["cursor", "grok-build", "gemini"] {
+            state.settings.acp_agents.insert(id.into(), installed(id));
+        }
+        state.start_draft("project".into(), PathBuf::from("/tmp/project"), cx);
+        state.selected.clone().unwrap()
+    });
+    for (request, id, selected) in [
+        (1, "cursor", None),
+        (2, "grok-build", None),
+        (3, "gemini", Some("gemini")),
+    ] {
+        state.dispatch_command(
+            cx,
+            request,
+            Command::SetActiveAcpAgent {
+                session_id: draft.clone(),
+                id: id.into(),
+            },
+        );
+        state.read(|state| {
+            assert_eq!(
+                state.resident(&draft).unwrap().meta.acp_agent_id.as_deref(),
+                selected,
+                "{id}"
+            );
+        });
+    }
+
+    let mut existing = SessionMeta::new(ProviderKind::Acp, PathBuf::from("/tmp/project"), None);
+    existing.acp_agent_id = Some("cursor".into());
+    state.read(|state| {
+        let opts = session_options(
+            &existing,
+            &state.settings,
+            LaunchEnv::default(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(opts.acp.map(|agent| agent.id).as_deref(), Some("cursor"));
+    });
+}
+
+#[test]
 fn marketplace_items_are_runtime_owned_views() {
     let test_store = TestStore::new("tcode-marketplace-view-test");
     let store = (*test_store).clone();
@@ -1898,7 +1962,7 @@ fn orchestrate_guidance_and_current_configuration_are_composed() {
     );
     assert!(first.contains("### Execution models — `dispatch`"));
     assert!(first.contains(
-        "#### `codex` / `gpt-6-sol` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
+        "#### `codex` / `gpt-6.1-sol` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
     ));
     assert!(first.ends_with("\n\nShip it"));
     settings.decision_models[0].enabled = false;
@@ -1950,8 +2014,8 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
     let catalogs = HashMap::from([(
         ProviderKind::Codex,
         vec![ModelSpec {
-            id: "gpt-6-sol".into(),
-            display_name: "GPT-6 Sol".into(),
+            id: "gpt-6.1-sol".into(),
+            display_name: "GPT-6.1 Sol".into(),
             is_default: false,
             options: vec![OptionDescriptor::Select {
                 id: "reasoningEffort".into(),
@@ -1981,7 +2045,7 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
             .contains("unsupported effort max")
     );
     let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
-    assert!(configuration.contains("`gpt-6-sol` — available `effort`: `medium`, `high`, `deep`"));
+    assert!(configuration.contains("`gpt-6.1-sol` — available `effort`: `medium`, `high`, `deep`"));
 }
 
 #[test]
@@ -2002,13 +2066,13 @@ fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-sol"),
+            Some("gpt-6.1-sol"),
             Some("low"),
             None,
             &catalogs
         )
         .unwrap_err(),
-        expected.replace("gpt-6-astra", "gpt-6-sol")
+        expected.replace("gpt-6-astra", "gpt-6.1-sol")
     );
     assert_eq!(
         resolve_orchestrate_collaboration(
@@ -2024,15 +2088,13 @@ fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
     );
     let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
     assert!(configuration.contains("#### `codex` / `gpt-6-astra` — unavailable"));
-    assert!(configuration.contains("#### `codex` / `gpt-6-sol` — unavailable"));
+    assert!(configuration.contains("#### `codex` / `gpt-6.1-sol` — unavailable"));
     assert!(configuration.contains(
         "Unavailable: model `gpt-6-astra` is not present in the loaded `codex` catalog."
     ));
-    assert!(
-        configuration.contains(
-            "Unavailable: model `gpt-6-sol` is not present in the loaded `codex` catalog."
-        )
-    );
+    assert!(configuration.contains(
+        "Unavailable: model `gpt-6.1-sol` is not present in the loaded `codex` catalog."
+    ));
 }
 
 #[test]
@@ -2065,7 +2127,7 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-sol"),
+            Some("gpt-6.1-sol"),
             Some("low"),
             None,
             &HashMap::new()
@@ -2096,14 +2158,14 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-sol"),
+            Some("gpt-6.1-sol"),
             Some("low"),
             None,
             &HashMap::new()
         )
         .unwrap()
         .1,
-        "gpt-6-sol"
+        "gpt-6.1-sol"
     );
     settings.decision_models[0].enabled = true;
     settings.child_models[0].enabled = false;
@@ -2507,7 +2569,7 @@ fn orchestrate_dispatch_distinguishes_model_from_provider_profile() {
     let settings = OrchestrateSettings::default();
     for (model, effort) in [
         (None, Some("high")),
-        (Some("gpt-6-sol"), Some("high")),
+        (Some("gpt-6.1-sol"), Some("high")),
         (None, None),
     ] {
         let error = resolve_orchestrate_dispatch(
@@ -2515,13 +2577,13 @@ fn orchestrate_dispatch_distinguishes_model_from_provider_profile() {
             "codex",
             model,
             effort,
-            Some("gpt-6-sol"),
+            Some("gpt-6.1-sol"),
             &HashMap::new(),
         )
         .unwrap_err();
         assert!(error.contains("no enabled profile matches"));
         assert!(
-            error.contains("model=gpt-6-sol (built-in endpoint; omit profile)"),
+            error.contains("model=gpt-6.1-sol (built-in endpoint; omit profile)"),
             "{error}"
         );
         assert!(
@@ -2533,7 +2595,7 @@ fn orchestrate_dispatch_distinguishes_model_from_provider_profile() {
         let resolved = resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-sol"),
+            Some("gpt-6.1-sol"),
             effort,
             None,
             &HashMap::new(),
@@ -2551,7 +2613,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-sol"),
+            Some("gpt-6.1-sol"),
             Some("low"),
             None,
             &HashMap::new()
@@ -2559,7 +2621,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         .unwrap(),
         (
             ProviderKind::Codex,
-            "gpt-6-sol".into(),
+            "gpt-6.1-sol".into(),
             Some("low".into()),
             false,
             None
@@ -2570,7 +2632,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-6-sol"),
+            Some("gpt-6.1-sol"),
             Some("medium"),
             Some("KIMI"),
             &HashMap::new()
@@ -2578,7 +2640,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         .unwrap(),
         (
             ProviderKind::Codex,
-            "gpt-6-sol".into(),
+            "gpt-6.1-sol".into(),
             Some("medium".into()),
             false,
             Some("kimi".into()),
@@ -2587,7 +2649,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let unknown_profile = resolve_orchestrate_dispatch(
         &settings,
         "codex",
-        Some("gpt-6-sol"),
+        Some("gpt-6.1-sol"),
         Some("medium"),
         Some("missing"),
         &HashMap::new(),
@@ -2618,7 +2680,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             resolve_orchestrate_dispatch(
                 &settings,
                 "codex",
-                Some("gpt-6-sol"),
+                Some("gpt-6.1-sol"),
                 Some(effort),
                 None,
                 &HashMap::new()
@@ -2632,7 +2694,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let wrong_effort = resolve_orchestrate_dispatch(
         &settings,
         "codex",
-        Some("gpt-6-sol"),
+        Some("gpt-6.1-sol"),
         Some("imaginary"),
         None,
         &HashMap::new(),
@@ -4954,6 +5016,49 @@ fn send_routing_matrix() {
     assert_eq!(dead.route(true), SendRouting::QueueUnsupported);
 }
 
+/// Claude Code expands a slash command only at byte 0 of the message, so the
+/// Ultrathink keyword trails a command instead of displacing it.
+#[test]
+fn ultrathink_keyword_trails_a_slash_command() {
+    assert_eq!(ultrathink_text("deep".into()), "Ultrathink:\ndeep");
+    assert_eq!(
+        ultrathink_text("/review the diff".into()),
+        "/review the diff\n\nultrathink"
+    );
+}
+
+/// A `$skill` the provider also exposes as a slash command (Claude) goes out
+/// as that command; a skill-only mention (Codex) and an unknown `$word` are
+/// sent as typed.
+#[test]
+fn skill_mentions_use_the_providers_native_invocation() {
+    let command = |name: &str, kind| ProviderCommand {
+        name: name.into(),
+        description: None,
+        kind,
+    };
+    let claude = [
+        command("review", ProviderCommandKind::Command),
+        command("review", ProviderCommandKind::Skill),
+    ];
+    let codex = [command("review", ProviderCommandKind::Skill)];
+    assert_eq!(
+        native_skill_invocation("$review the diff".into(), &claude),
+        "/review the diff"
+    );
+    assert_eq!(
+        native_skill_invocation("$review".into(), &claude),
+        "/review"
+    );
+    assert_eq!(
+        native_skill_invocation("$review the diff".into(), &codex),
+        "$review the diff"
+    );
+    for text in ["$HOME is set", "please $review", "$"] {
+        assert_eq!(native_skill_invocation(text.into(), &claude), text);
+    }
+}
+
 /// Ultrathink is per-send: it rides with the message it was armed for, not
 /// with whatever happens to be dispatched later.
 #[test]
@@ -6604,7 +6709,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
             .orchestrate
             .child_models
             .iter_mut()
-            .find(|child| child.model == "gpt-6-sol")
+            .find(|child| child.model == "gpt-6.1-sol")
             .unwrap();
         model.fast = true;
         let mut custom = model.clone();
@@ -6629,6 +6734,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
                     enabled: true,
                     fast: false,
                     description: String::new(),
+                    bundled: None,
                 },
             );
             state.providers.model_catalogs.insert(
@@ -6649,7 +6755,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
         (
             "codex",
             ProviderKind::Codex,
-            "gpt-6-sol",
+            "gpt-6.1-sol",
             Some("medium"),
             None,
             None,
@@ -6661,7 +6767,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
         (
             "codex",
             ProviderKind::Codex,
-            "gpt-6-sol",
+            "gpt-6.1-sol",
             Some("medium"),
             Some(true),
             None,
@@ -6673,7 +6779,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
         (
             "codex",
             ProviderKind::Codex,
-            "gpt-6-sol",
+            "gpt-6.1-sol",
             Some("max"),
             None,
             None,
@@ -6685,7 +6791,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
         (
             "codex",
             ProviderKind::Codex,
-            "gpt-6-sol",
+            "gpt-6.1-sol",
             Some("max"),
             Some(false),
             None,
@@ -6694,7 +6800,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
         (
             "codex",
             ProviderKind::Codex,
-            "gpt-6-sol",
+            "gpt-6.1-sol",
             Some("high"),
             Some(true),
             Some("work-codex"),
@@ -6805,7 +6911,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
-                model: Some("gpt-6-sol".into()),
+                model: Some("gpt-6.1-sol".into()),
                 effort: None,
                 profile: None,
                 access: None,
@@ -6892,7 +6998,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
-                model: Some("gpt-6-sol".into()),
+                model: Some("gpt-6.1-sol".into()),
                 effort: None,
                 profile: None,
                 access: None,

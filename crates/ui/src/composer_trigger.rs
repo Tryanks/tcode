@@ -34,40 +34,44 @@ fn is_ws(b: u8) -> bool {
 
 /// Detect an active trigger at `cursor` (a UTF-8 byte offset into `text`).
 ///
-/// `/` is recognized at the start of a line; `@` and `$` follow whitespace.
+/// `/` is recognized only at the start of the message: Claude Code expands a
+/// command only there, and Tcode's own commands are whole-message too. A `/`
+/// token with a second `/` in it is a path. `@` and `$` follow whitespace.
 pub fn detect_composer_trigger(text: &str, cursor: usize) -> Option<ComposerTrigger> {
     let cursor = cursor.min(text.len());
     // Snap to a char boundary defensively (byte offsets from the input are on
     // boundaries, but clamping above could land mid-char in pathological input).
     let cursor = (0..=cursor).rev().find(|&i| text.is_char_boundary(i))?;
 
-    let line_start = text[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_prefix = &text[line_start..cursor];
+    let prefix = &text[..cursor];
 
-    if let Some(rest) = line_prefix.strip_prefix('/') {
-        // `^/(\S*)$`: a slash command with no whitespace after the slash.
+    if let Some(rest) = prefix.strip_prefix('/') {
+        // `^/([^\s/]*)$`: a slash command with no whitespace after the slash.
         if !rest.bytes().any(is_ws) {
+            if rest.contains('/') {
+                return None;
+            }
             if rest.eq_ignore_ascii_case("model") {
                 return Some(ComposerTrigger {
                     kind: TriggerKind::SlashModel,
                     query: String::new(),
-                    range: line_start..cursor,
+                    range: 0..cursor,
                 });
             }
             return Some(ComposerTrigger {
                 kind: TriggerKind::SlashCommand,
                 query: rest.to_string(),
-                range: line_start..cursor,
+                range: 0..cursor,
             });
         }
         // `^/model(?:\s+(.*))?$`: `/model <query>`.
-        if let Some(after) = line_prefix.strip_prefix("/model")
+        if let Some(after) = prefix.strip_prefix("/model")
             && after.starts_with(|c: char| c.is_whitespace())
         {
             return Some(ComposerTrigger {
                 kind: TriggerKind::SlashModel,
                 query: after.trim().to_string(),
-                range: line_start..cursor,
+                range: 0..cursor,
             });
         }
         // A `/word …` that is not a bare command and not `/model`: fall through.
@@ -154,7 +158,8 @@ mod tests {
             ("\t@文件 suffix", 5, TriggerKind::Path, "文", 1..5),
             ("@文", 2, TriggerKind::Path, "", 0..1),
             ("@file", usize::MAX, TriggerKind::Path, "file", 0..5),
-            ("hi\n/de", 6, TriggerKind::SlashCommand, "de", 3..6),
+            ("/de", 3, TriggerKind::SlashCommand, "de", 0..3),
+            ("/a:b", 4, TriggerKind::SlashCommand, "a:b", 0..4),
             ("/", 1, TriggerKind::SlashCommand, "", 0..1),
             ("/model", 6, TriggerKind::SlashModel, "", 0..6),
             ("/MODEL", 6, TriggerKind::SlashModel, "", 0..6),
@@ -176,7 +181,10 @@ mod tests {
             "cost$rev",
             "hello /pla",
             " /pla",
+            "hi\n/de",
             "/plan done",
+            "/Users/me/file.txt",
+            "/tmp/",
             "@file ",
         ] {
             assert_eq!(detect_composer_trigger(text, text.len()), None, "{text:?}");

@@ -9,6 +9,8 @@
 #[cfg(feature = "process")]
 pub mod acp;
 #[cfg(feature = "process")]
+mod acp_session;
+#[cfg(feature = "process")]
 mod actor;
 #[cfg(feature = "process")]
 pub mod claude;
@@ -22,6 +24,10 @@ pub mod claude {
 }
 #[cfg(feature = "process")]
 pub mod codex;
+#[cfg(feature = "process")]
+pub mod cursor;
+#[cfg(feature = "process")]
+pub mod grok;
 #[cfg(feature = "process")]
 pub mod opencode;
 #[cfg(feature = "process")]
@@ -44,10 +50,12 @@ pub enum ProviderKind {
     ClaudeCode,
     Pi,
     OpenCode,
+    Cursor,
+    Grok,
     /// Any agent speaking the Agent Client Protocol. Which one is carried
-    /// separately ([`SessionOptions::acp`]) so this stays `Copy`: Codex and
-    /// Claude Code keep their richer native clients, and ACP covers the rest
-    /// of the ecosystem.
+    /// separately ([`SessionOptions::acp`]) so this stays `Copy`: the native
+    /// providers keep their own clients, and ACP covers the rest of the
+    /// ecosystem.
     Acp,
 }
 
@@ -98,6 +106,17 @@ pub enum OptionDescriptors {
 }
 
 impl ProviderKind {
+    /// The natively maintained providers, in the order provider lists present
+    /// them.
+    pub const NATIVE: [ProviderKind; 6] = [
+        ProviderKind::ClaudeCode,
+        ProviderKind::Codex,
+        ProviderKind::Pi,
+        ProviderKind::OpenCode,
+        ProviderKind::Cursor,
+        ProviderKind::Grok,
+    ];
+
     /// Provider behavior consumed by runtime and UI policy.
     ///
     /// This is deliberately one exhaustive table so adding a provider forces a
@@ -211,6 +230,40 @@ impl ProviderKind {
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
             },
+            ProviderKind::Cursor => Caps {
+                supports_steering: false,
+                supports_fork: false,
+                native_rewind: false,
+                per_turn_effort: false,
+                options_apply_live: true,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::All,
+                mcp_servers: true,
+                native_computer_use: false,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Wire,
+                home_path: true,
+                trust_project_extensions: false,
+                plugin_management: PluginManagement::NONE,
+            },
+            ProviderKind::Grok => Caps {
+                supports_steering: true,
+                supports_fork: true,
+                native_rewind: false,
+                per_turn_effort: false,
+                options_apply_live: true,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::All,
+                mcp_servers: true,
+                native_computer_use: false,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Wire,
+                home_path: true,
+                trust_project_extensions: false,
+                plugin_management: PluginManagement::NONE,
+            },
         }
     }
 
@@ -220,6 +273,8 @@ impl ProviderKind {
             ProviderKind::ClaudeCode => "Claude Code",
             ProviderKind::Pi => "pi",
             ProviderKind::OpenCode => "OpenCode",
+            ProviderKind::Cursor => "Cursor",
+            ProviderKind::Grok => "Grok",
             ProviderKind::Acp => "ACP agent",
         }
     }
@@ -525,9 +580,11 @@ pub async fn list_plugins(
     match provider {
         ProviderKind::ClaudeCode => claude_plugins::list(context).await,
         ProviderKind::Codex => codex::plugins::list(context).await,
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Acp => {
-            Err(no_plugin_management(provider))
-        }
+        ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => Err(no_plugin_management(provider)),
     }
 }
 
@@ -541,9 +598,11 @@ pub async fn run_plugin_op(
     match provider {
         ProviderKind::ClaudeCode => claude_plugins::run(context, op).await,
         ProviderKind::Codex => codex::plugins::run(context, op).await,
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Acp => {
-            Err(no_plugin_management(provider))
-        }
+        ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => Err(no_plugin_management(provider)),
     }
 }
 
@@ -564,9 +623,16 @@ fn no_plugin_management(provider: ProviderKind) -> AgentError {
     ))
 }
 
-/// Registry agents we never surface because they duplicate richer native
-/// integrations.
-pub const HIDDEN_ACP_AGENT_IDS: [&str; 4] = ["claude-acp", "codex-acp", "pi-acp", "opencode"];
+/// Registry agents never offered for new sessions because they duplicate a
+/// native integration.
+pub const HIDDEN_ACP_AGENT_IDS: [&str; 6] = [
+    "claude-acp",
+    "codex-acp",
+    "pi-acp",
+    "opencode",
+    "cursor",
+    "grok-build",
+];
 
 /// One ACP agent a session can run: its registry identity plus how to launch it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -719,7 +785,8 @@ pub struct LaunchEnv {
     /// entries win, and these override anything inherited from the parent.
     pub env: Vec<(String, String)>,
     /// Home-directory override. Provider-specific: Claude gets `HOME`, Codex
-    /// gets `CODEX_HOME`, and pi gets `PI_CODING_AGENT_DIR`. OpenCode has no
+    /// gets `CODEX_HOME`, pi gets `PI_CODING_AGENT_DIR`, Cursor gets
+    /// `CURSOR_CONFIG_DIR` and Grok gets `GROK_HOME`. OpenCode has no
     /// supported single-directory override, so its value is ignored.
     pub home: Option<PathBuf>,
 }
@@ -735,6 +802,8 @@ impl LaunchEnv {
                 ProviderKind::ClaudeCode => Some("HOME"),
                 ProviderKind::Codex => Some("CODEX_HOME"),
                 ProviderKind::Pi => Some("PI_CODING_AGENT_DIR"),
+                ProviderKind::Cursor => Some("CURSOR_CONFIG_DIR"),
+                ProviderKind::Grok => Some("GROK_HOME"),
                 ProviderKind::OpenCode => None,
                 // ACP agents carry their own env in the launch recipe; there is
                 // no protocol-level home concept to override.
@@ -1015,8 +1084,8 @@ impl UserInputDelivery {
 /// free-text) prompt; answers ride back through [`SessionCommand::RespondUserInput`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputQuestion {
-    /// The answer key. Claude: the complete question text (the SDK indexes
-    /// answers by question text). Codex: the native question id.
+    /// The answer key. Claude and Grok: the complete question text (both index
+    /// answers by question text). Codex and Cursor: the native question id.
     pub id: String,
     pub header: String,
     pub question: String,
@@ -1063,9 +1132,12 @@ pub struct ProviderCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCommandKind {
-    /// A `/`-command (Claude slash command).
+    /// A `/`-command, sent as `/name …` at the start of the turn text (Claude
+    /// `slash_commands`, which include its skills).
     Command,
-    /// A `$`-skill (Claude skill / Codex skill).
+    /// A `$`-skill, sent as a `$name` mention in the turn text (Codex skills).
+    /// A skill the provider also lists as a command is sent as that command,
+    /// the only form Claude Code expands.
     Skill,
 }
 
@@ -1113,6 +1185,8 @@ pub async fn list_models(
         ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env, refresh).await,
         ProviderKind::Pi => pi::list_models(binary_path, launch_env).await,
         ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env).await,
+        ProviderKind::Cursor => cursor::list_models(binary_path, launch_env).await,
+        ProviderKind::Grok => grok::list_models(binary_path, launch_env).await,
         // ACP agents advertise their models over the wire at session start
         // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
         ProviderKind::Acp => Ok(Vec::new()),
@@ -1128,6 +1202,11 @@ pub async fn list_models(
 ///   (mid-session switch may require a resume-restart).
 /// - pi: a bundled fail-closed tool-call extension in front of RPC extension UI.
 /// - OpenCode: `OPENCODE_PERMISSION` rules plus permission reply endpoints.
+/// - Grok: `--permission-mode` default / bypassPermissions at launch; under
+///   AutoAcceptEdits tcode approves Grok's edit permission requests once.
+/// - Cursor: `--force` at launch for FullAccess; otherwise its own permission
+///   requests, of which tcode approves reads and searches once under
+///   ReadOnly, and file changes once under AutoAcceptEdits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
@@ -1231,9 +1310,9 @@ pub enum SessionCommand {
     /// native Plan mode.
     SetInteractionMode(InteractionMode),
     /// Set one of the agent's self-described options (see
-    /// [`AgentEvent::ProviderOptions`]). ACP routes it to `session/set_mode`,
-    /// `session/set_model` or `session/set_config_option` by the descriptor's
-    /// origin; the native providers ignore ids they do not know.
+    /// [`AgentEvent::ProviderOptions`]). An agent speaking ACP gets
+    /// `session/set_mode` or `session/set_config_option` by the descriptor's
+    /// origin; the other providers ignore ids they do not know.
     SetOption {
         id: String,
         value: serde_json::Value,
@@ -1299,6 +1378,8 @@ pub async fn start_session(
         ProviderKind::ClaudeCode => claude::start(opts).await,
         ProviderKind::Pi => pi::start(opts).await,
         ProviderKind::OpenCode => opencode::start(opts).await,
+        ProviderKind::Cursor => cursor::start(opts).await,
+        ProviderKind::Grok => grok::start(opts).await,
         ProviderKind::Acp => acp::start(opts).await,
     }
 }
@@ -1796,10 +1877,10 @@ pub struct ApprovalRequest {
     pub id: String,
     pub turn_id: Option<String>,
     pub kind: ApprovalKind,
-    /// Agent-supplied choices. ACP agents send their own option list
-    /// (`session/request_permission`), so the UI renders exactly those buttons.
-    /// Empty for the native providers, whose four fixed decisions
-    /// ([`ApprovalDecision`]) apply instead.
+    /// Agent-supplied choices. An agent speaking ACP (a registry agent, Cursor
+    /// or Grok) sends its own option list (`session/request_permission`), so the
+    /// UI renders exactly those buttons. Empty for the other providers, whose
+    /// four fixed decisions ([`ApprovalDecision`]) apply instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ApprovalOption>,
 }
@@ -1859,7 +1940,7 @@ pub enum ApprovalDecision {
     /// `"User cancelled tool execution."` (no interrupt); Codex maps it to the
     /// protocol `{decision:"cancel"}` (deny + immediate turn interruption).
     Cancel,
-    /// Pick one of the agent's own [`ApprovalOption`]s (ACP only).
+    /// Pick one of the agent's own [`ApprovalOption`]s (agents speaking ACP).
     Option(String),
 }
 
@@ -2194,6 +2275,17 @@ mod turn_diff_tests {
 #[cfg(test)]
 mod thread_item_serde_tests {
     use super::*;
+
+    #[test]
+    fn cursor_and_grok_use_their_wire_names() {
+        for (kind, wire) in [
+            (ProviderKind::Cursor, r#""cursor""#),
+            (ProviderKind::Grok, r#""grok""#),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<ProviderKind>(wire).unwrap(), kind);
+        }
+    }
 
     #[test]
     fn provider_failure_wire_tag_and_legacy_error_remain_compatible() {
