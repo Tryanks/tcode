@@ -928,6 +928,13 @@ attach:
   tunnel_title: "附件较大"
   tunnel_body: "'%{name}' 大小为 %{size}，当前设备通过互联网直连主机，发送可能需要一些时间。"
   tunnel_confirm: "仍然发送"
+image_viewer:
+  zoom_in: "放大"
+  zoom_out: "缩小"
+  fit: "适应窗口"
+  actual_size: "实际大小"
+  close: "关闭"
+  load_failed: "无法加载此图片。"
 preview:
   external_unavailable: "请先在预览中打开远程页面。转发后的浏览器链接仅在此预览保持打开时有效。"
   remote_forwarding: "远程回环地址通过转发访问，其他地址从此 Mac 直接访问。"

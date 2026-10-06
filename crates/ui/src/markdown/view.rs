@@ -175,12 +175,7 @@ impl Element for MarkdownView {
                 let state = state.clone();
                 move |action: &OpenImage, window, cx| {
                     let source = state.read(cx).image_source(&action.url.clone().into());
-                    crate::attachments::open_image_lightbox(
-                        source,
-                        action.title.clone(),
-                        window,
-                        cx,
-                    );
+                    crate::image_viewer::open(source, action.title.clone(), window, cx);
                 }
             })
             .child(state.clone())

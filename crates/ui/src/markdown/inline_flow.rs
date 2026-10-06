@@ -199,12 +199,7 @@ impl InlineFlow {
                         LinkTarget::Local(path) => cx.open_with_system(&path),
                     }
                 } else {
-                    crate::attachments::open_image_lightbox(
-                        source.clone(),
-                        title.clone(),
-                        window,
-                        cx,
-                    );
+                    crate::image_viewer::open(source.clone(), title.clone(), window, cx);
                 }
             })
             .into_any_element()

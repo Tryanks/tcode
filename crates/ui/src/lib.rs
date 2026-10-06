@@ -18,6 +18,7 @@ mod highlight;
 mod host_permissions;
 pub mod i18n;
 pub mod icon;
+mod image_viewer;
 /// macOS TCC permission status and grant flow. Compiled only where the platform
 /// actually has one; other attachments query the host for read-only status.
 #[cfg(all(feature = "local-permissions", target_os = "macos"))]
