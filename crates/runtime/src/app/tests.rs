@@ -5185,6 +5185,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
     });
 
     assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
+    cx.run_until_parked();
     let outgoing = cx.drain_outgoing();
     assert!(outgoing.iter().any(|message| matches!(
         message,
@@ -7331,11 +7332,13 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
             reply,
             cx,
         );
+        // A reply resolved in the update would be in the channel now; the
+        // background resolution sends it later, from its own task.
+        assert!(
+            response.try_recv().is_err(),
+            "cwd resolution must not reply from the GPUI update"
+        );
     });
-    assert!(
-        response.try_recv().is_err(),
-        "cwd resolution must not reply from the GPUI update"
-    );
 
     assert_eq!(
         recv_dispatch_reply(cx, &response).unwrap_err(),
@@ -7550,6 +7553,14 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
             after: None,
         })
         .unwrap();
+        let window = smol::block_on(smol::future::race(
+            async { link.events().recv().await.unwrap() },
+            async {
+                smol::Timer::after(Duration::from_secs(5)).await;
+                panic!("the subscription was not answered")
+            },
+        ));
+        assert!(matches!(window.event, ServerEvent::SessionSnapshot { .. }));
         id
     };
     let id_one = draft(&one, "one");
@@ -7758,14 +7769,18 @@ fn plan_and_usage_projections_survive_a_partial_history_window_and_emit_only_cha
                 cx,
             );
         }
-        let snapshot = state
-            .subscription_snapshot(&Subscription {
+    });
+    cx.run_until(|state| state.event_records.contains_key(id));
+    state.update(cx, |state, _| {
+        let snapshot = events_reply(
+            state,
+            &Subscription {
                 topic: Topic::SessionEvents {
                     session_id: id.into(),
                 },
                 after: None,
-            })
-            .unwrap();
+            },
+        );
         let ServerEvent::SessionSnapshot { from, records, .. } = snapshot.event else {
             panic!("history snapshot")
         };
@@ -7849,14 +7864,14 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             .collect();
         state
             .event_records
-            .insert("large".into(), SessionLog::from_records(records.clone()));
+            .insert("large".into(), session_log(records.clone()));
         let subscription = tcode_protocol::Subscription {
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
             },
             after: None,
         };
-        let snapshot = state.subscription_snapshot(&subscription).unwrap();
+        let snapshot = events_reply(state, &subscription);
         assert!(
             tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
                 .unwrap()
@@ -7883,7 +7898,9 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 from,
                 end,
                 truncated,
-            } = state.session_history_page("large", before, 200).unwrap()
+            } = state.event_records["large"]
+                .history_page(before, 200)
+                .unwrap()
             else {
                 panic!("page")
             };
@@ -7895,12 +7912,13 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
         }
         assert_eq!(loaded, records);
         for after in [0, 17, 1800, 1999, 2000] {
-            let snapshot = state
-                .subscription_snapshot(&tcode_protocol::Subscription {
+            let snapshot = events_reply(
+                state,
+                &tcode_protocol::Subscription {
                     after: Some(after),
                     ..subscription.clone()
-                })
-                .unwrap();
+                },
+            );
             let ServerEvent::SessionSnapshot {
                 from,
                 records: tail,
@@ -7974,16 +7992,17 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         assert_eq!(turn_starts, [0, 303, 606, 909, 1212]);
         state
             .event_records
-            .insert("streamed".into(), SessionLog::from_records(records.clone()));
+            .insert("streamed".into(), session_log(records.clone()));
 
-        let snapshot = state
-            .subscription_snapshot(&tcode_protocol::Subscription {
+        let snapshot = events_reply(
+            state,
+            &tcode_protocol::Subscription {
                 topic: Topic::SessionEvents {
                     session_id: "streamed".into(),
                 },
                 after: None,
-            })
-            .unwrap();
+            },
+        );
         let ServerEvent::SessionSnapshot { from, .. } = snapshot.event else {
             panic!("snapshot")
         };
@@ -7997,7 +8016,9 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             end,
             records: page,
             truncated,
-        } = state.session_history_page("streamed", from, 200).unwrap()
+        } = state.event_records["streamed"]
+            .history_page(from, 200)
+            .unwrap()
         else {
             panic!("page")
         };
@@ -8048,11 +8069,19 @@ fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<Ses
             status: TurnStatus::Completed,
             usage: None,
         });
-        for (offset, event) in events.iter().enumerate() {
-            store
-                .append_event(id, turn * 1000 + offset as u64, event)
-                .unwrap();
-        }
+        let appends: Vec<_> = events
+            .iter()
+            .enumerate()
+            .map(|(offset, event)| {
+                tcode_services::store::Mutation::append_event(
+                    id,
+                    turn * 1000 + offset as u64,
+                    event,
+                )
+                .unwrap()
+            })
+            .collect();
+        store.apply(&appends).unwrap();
     }
     store.read_events(id).unwrap()
 }
@@ -8063,67 +8092,50 @@ fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<Ses
 fn history_pages_of_an_opened_session_parse_the_log_once() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("history-single-parse");
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
-    meta.id = "paged".into();
-    store.upsert_meta(&meta).unwrap();
+    open_stored_session(&store, "paged");
     let records = persist_streamed_turns(&store, "paged", 5);
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let reads_before_open = store.event_reads();
 
-    state.update(cx, |state, cx| state.select_session("paged", cx));
-    let (from, mut loaded) = state.update(cx, |state, _| {
-        let snapshot = state
-            .subscription_snapshot(&tcode_protocol::Subscription {
-                topic: Topic::SessionEvents {
-                    session_id: "paged".into(),
-                },
-                after: None,
-            })
-            .unwrap();
-        let ServerEvent::SessionSnapshot {
-            from,
-            records,
-            total_turns,
-            ..
-        } = snapshot.event
-        else {
-            panic!("snapshot")
-        };
-        assert_eq!(total_turns, 5, "the absolute turn count comes from the log");
-        (from, records)
-    });
+    let window = window_reply(
+        &through_pipe(&state, cx, 1, subscribe_events("paged", None)),
+        1,
+    );
+    assert_eq!(
+        window.total_turns, 5,
+        "the absolute turn count comes from the log"
+    );
     cx.run_until(|state| {
         state
             .resident("paged")
             .is_some_and(|session| session.timeline.turns.len() == 5)
     });
-    state.update(cx, |state, _| {
-        assert_eq!(
-            state.resident("paged").unwrap().timeline.turns.len(),
-            5,
-            "the timeline load reuses the cached fold"
-        );
-        let mut before = from;
-        while before > 0 {
-            let QueryResponse::SessionHistoryPage {
-                records: page,
-                from,
-                end,
-                ..
-            } = state.session_history_page("paged", before, 200).unwrap()
-            else {
-                panic!("page")
-            };
-            assert_eq!(end, before);
-            loaded.splice(0..0, page);
-            before = from;
-        }
-        assert_eq!(
-            format!("{:?}", Timeline::fold_events(loaded).entries),
-            format!("{:?}", Timeline::fold_events(records).entries),
-            "merged deltas fold as the log does"
-        );
-    });
+    let mut loaded = window.records;
+    let mut before = window.from;
+    let mut id = 2;
+    while before > 0 {
+        let QueryResponse::SessionHistoryPage {
+            records: page,
+            from,
+            end,
+            ..
+        } = query_reply(
+            &through_pipe(&state, cx, id, history_page("paged", before)),
+            id,
+        )
+        else {
+            panic!("page")
+        };
+        assert_eq!(end, before);
+        loaded.splice(0..0, page);
+        before = from;
+        id += 1;
+    }
+    assert_eq!(
+        Timeline::fold_events(loaded),
+        Timeline::fold_events(records),
+        "merged deltas fold as the log does"
+    );
     assert_eq!(
         store.event_reads() - reads_before_open,
         1,
@@ -8131,24 +8143,25 @@ fn history_pages_of_an_opened_session_parse_the_log_once() {
     );
 }
 
-/// The cached log follows residency: it serves appends whose disk writes
-/// are still queued, survives parking, and is dropped only after the session
-/// leaves residency and the store writer has flushed those appends, so the
-/// next cold open replays the whole conversation.
+/// The log of an opened session is read once, extended by its appends, and
+/// kept while the session is resident, parked included; once it leaves
+/// residency it is dropped only after the store writer flushed its appends,
+/// so the next read finds every one of them.
 #[test]
 fn session_log_follows_residency_and_flushes_before_release() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("history-log-residency");
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
-    meta.id = "resident".into();
-    store.upsert_meta(&meta).unwrap();
+    open_stored_session(&store, "resident");
     let persisted = persist_streamed_turns(&store, "resident", 2).len() as u64;
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let reads_before_open = store.event_reads();
     let (commands, _actor) = smol::channel::unbounded();
 
+    window_reply(
+        &through_pipe(&state, cx, 1, subscribe_events("resident", None)),
+        1,
+    );
     state.update(cx, |state, cx| {
-        state.select_session("resident", cx);
         state.record_event(
             "resident",
             &AgentEvent::ItemCompleted(ThreadItem {
@@ -8161,44 +8174,39 @@ fn session_log_follows_residency_and_flushes_before_release() {
                 },
             }),
             cx,
-        );
-        let snapshot = state
-            .subscription_snapshot(&tcode_protocol::Subscription {
-                topic: Topic::SessionEvents {
-                    session_id: "resident".into(),
-                },
-                after: Some(persisted),
-            })
-            .unwrap();
-        let ServerEvent::SessionSnapshot {
-            records,
-            total,
-            total_turns,
-            ..
-        } = snapshot.event
-        else {
-            panic!("snapshot")
-        };
-        assert_eq!((total, total_turns), (persisted + 1, 3));
-        assert!(
-            matches!(&records[..], [record] if matches!(&record.event, AgentEvent::ItemCompleted(item) if item.id == "user-late"))
-        );
-        let QueryResponse::SessionHistoryPage { from, records, .. } = state
-            .session_history_page("resident", persisted + 1, 1)
-            .unwrap()
-        else {
-            panic!("page")
-        };
-        assert_eq!((from, records.len()), (persisted, 1));
-        assert_eq!(
-            state.store.event_reads() - reads_before_open,
-            1,
-            "the appended record is served from the log, not a re-parse"
-        );
+        )
+    });
+    let window = window_reply(
+        &through_pipe(&state, cx, 2, subscribe_events("resident", Some(persisted))),
+        2,
+    );
+    assert_eq!((window.total, window.total_turns), (persisted + 1, 3));
+    assert!(
+        matches!(&window.records[..], [record] if matches!(&record.event, AgentEvent::ItemCompleted(item) if item.id == "user-late"))
+    );
+    let page = tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+        session_id: "resident".into(),
+        before: persisted + 1,
+        limit: 1,
+    });
+    let QueryResponse::SessionHistoryPage { from, records, .. } =
+        query_reply(&through_pipe(&state, cx, 3, page), 3)
+    else {
+        panic!("page")
+    };
+    assert_eq!((from, records.len()), (persisted, 1));
+    assert_eq!(
+        store.event_reads() - reads_before_open,
+        1,
+        "the appended record is served from the log, not a re-read"
+    );
 
-        // Parked with a live provider, the session stays resident and cached.
-        state.selected_session_mut().unwrap().runtime = Runtime::Live(commands);
-        state.park_active(cx);
+    // Parked with a live provider, the session stays resident and cached.
+    state.update(cx, |state, _| {
+        state.residents.live.get_mut("resident").unwrap().runtime = Runtime::Live(commands);
+    });
+    through_pipe(&state, cx, 4, unsubscribe_events("resident"));
+    state.update(cx, |state, cx| {
         assert!(state.residents.parked.contains_key("resident"));
         assert!(state.event_records.contains_key("resident"));
 
@@ -8210,13 +8218,10 @@ fn session_log_follows_residency_and_flushes_before_release() {
         );
     });
     cx.run_until(|state| !state.event_records.contains_key("resident"));
-    state.update(cx, |state, _| {
-        assert!(!state.event_records.contains_key("resident"));
-        assert_eq!(
-            state.store.read_events("resident").unwrap().len() as u64,
-            persisted + 1
-        );
-    });
+    assert_eq!(
+        store.read_events("resident").unwrap().len() as u64,
+        persisted + 1
+    );
     assert_eq!(store.event_reads() - reads_before_open, 2);
 }
 
@@ -8237,14 +8242,14 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
             .collect();
         state
             .event_records
-            .insert("large".into(), SessionLog::from_records(records.clone()));
+            .insert("large".into(), session_log(records.clone()));
         let subscription = tcode_protocol::Subscription {
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
             },
             after: None,
         };
-        let mut snapshot = state.subscription_snapshot(&subscription).unwrap();
+        let mut snapshot = events_reply(state, &subscription);
         snapshot.request_id = Some(u64::MAX);
         assert!(
             tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
@@ -8263,7 +8268,9 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         };
         assert!(truncated);
         assert_eq!(tail, records[from as usize..]);
-        let response = state.session_history_page("large", 10, u32::MAX).unwrap();
+        let response = state.event_records["large"]
+            .history_page(10, u32::MAX)
+            .unwrap();
         let line = tcode_protocol::encode_line(&HostMessage::QueryResult {
             id: u64::MAX,
             result: Ok(response.clone()),
@@ -8281,12 +8288,13 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         };
         assert!(truncated);
         assert_eq!(page, records[from as usize..]);
-        let snapshot = state
-            .subscription_snapshot(&tcode_protocol::Subscription {
+        let snapshot = events_reply(
+            state,
+            &tcode_protocol::Subscription {
                 after: Some(0),
                 ..subscription
-            })
-            .unwrap();
+            },
+        );
         let ServerEvent::SessionSnapshot {
             from,
             records: tail,
@@ -8305,9 +8313,12 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         };
         state
             .event_records
-            .insert("large".into(), SessionLog::from_records(records));
+            .insert("large".into(), session_log(records));
         assert_eq!(
-            state.session_history_page("large", 10, 1).unwrap_err().code,
+            state.event_records["large"]
+                .history_page(10, 1)
+                .unwrap_err()
+                .code,
             "history_record_too_large"
         );
     });
@@ -8689,14 +8700,15 @@ fn history_paging_bench() {
     let opened = started.elapsed();
     let (snapshot_elapsed, pages) = state.update(cx, |state, _| {
         let started = Instant::now();
-        let snapshot = state
-            .subscription_snapshot(&tcode_protocol::Subscription {
+        let snapshot = events_reply(
+            state,
+            &tcode_protocol::Subscription {
                 topic: Topic::SessionEvents {
                     session_id: "bench".into(),
                 },
                 after: None,
-            })
-            .unwrap();
+            },
+        );
         let snapshot_elapsed = started.elapsed();
         let ServerEvent::SessionSnapshot { from, total, .. } = snapshot.event else {
             panic!("snapshot")
@@ -8706,13 +8718,10 @@ fn history_paging_bench() {
         let mut pages = Vec::new();
         while before > 0 && pages.len() < 16 {
             let started = Instant::now();
-            let QueryResponse::SessionHistoryPage { from, records, .. } = state
-                .session_history_page(
-                    "bench",
-                    before,
-                    tcode_protocol::SESSION_HISTORY_RECORDS as u32,
-                )
-                .unwrap()
+            let QueryResponse::SessionHistoryPage { from, records, .. } =
+                state.event_records["bench"]
+                    .history_page(before, tcode_protocol::SESSION_HISTORY_RECORDS as u32)
+                    .unwrap()
             else {
                 panic!("page")
             };
@@ -8939,15 +8948,16 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     state.update(cx, |state, _| {
         state
             .event_records
-            .insert("outputs".into(), SessionLog::from_records(records.clone()));
-        let snapshot = state
-            .subscription_snapshot(&tcode_protocol::Subscription {
+            .insert("outputs".into(), session_log(records.clone()));
+        let snapshot = events_reply(
+            state,
+            &tcode_protocol::Subscription {
                 topic: Topic::SessionEvents {
                     session_id: "outputs".into(),
                 },
                 after: None,
-            })
-            .unwrap();
+            },
+        );
         let ServerEvent::SessionSnapshot { records: sent, .. } = snapshot.event else {
             panic!("snapshot")
         };
@@ -8986,15 +8996,22 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
             ])
         );
         assert_eq!(
-            state.item_output("outputs", "tool").unwrap(),
+            state.event_records["outputs"]
+                .item_output("outputs", "tool")
+                .unwrap(),
             QueryResponse::ItemOutput(tool_output.clone())
         );
         assert_eq!(
-            state.item_output("outputs", "command").unwrap(),
+            state.event_records["outputs"]
+                .item_output("outputs", "command")
+                .unwrap(),
             QueryResponse::ItemOutput(command_output.clone())
         );
         assert_eq!(
-            state.item_output("outputs", "missing").unwrap_err().code,
+            state.event_records["outputs"]
+                .item_output("outputs", "missing")
+                .unwrap_err()
+                .code,
             "unknown_item_output"
         );
     });
@@ -9037,9 +9054,9 @@ fn superseded_turn_changes_cross_without_diffs() {
     state.update(cx, |state, _| {
         state
             .event_records
-            .insert("changes".into(), SessionLog::from_records(records.clone()));
+            .insert("changes".into(), session_log(records.clone()));
         let QueryResponse::SessionHistoryPage { records: sent, .. } =
-            state.session_history_page("changes", 4, 200).unwrap()
+            state.event_records["changes"].history_page(4, 200).unwrap()
         else {
             panic!("page")
         };
@@ -9048,11 +9065,163 @@ fn superseded_turn_changes_cross_without_diffs() {
         };
         assert!(changes.iter().all(|change| change.diff.is_none()));
         assert_eq!(sent[3], records[3]);
-        assert_eq!(
-            format!("{:?}", Timeline::fold_events(sent).turns),
-            format!("{:?}", Timeline::fold_events(records).turns)
-        );
+        assert_eq!(Timeline::fold_events(sent), Timeline::fold_events(records));
     });
+}
+
+/// A stored turn-changes snapshot: the whole diff of `turn` so far.
+fn stored_snapshot(ts: u64, turn: &str, diff: &str) -> String {
+    format!(
+        "{{\"ts\":{ts},\"event\":{{\"type\":\"turn_changes_updated\",\"turn_id\":\"{turn}\",\
+         \"changes\":[{{\"path\":\"f\",\"kind\":\"modify\",\"diff\":{}}}],\
+         \"completeness\":\"exact\"}}}}\n",
+        serde_json::to_string(&Some(diff).filter(|diff| !diff.is_empty())).unwrap()
+    )
+}
+
+/// A snapshot appended to an open thread drops the diffs of the one it
+/// supersedes in the same commit, at that one's stored row even where blank or
+/// undecodable rows put rows and records out of step, and the log windows are
+/// served from holds it the same way. A log with a row that does not decode keeps its stored
+/// rows: its fold may not name the snapshots another build's would.
+#[test]
+fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
+    for (label, gap, rewritten) in [
+        ("blank", "\n", true),
+        ("undecodable", "{not valid json}\n", false),
+    ] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("append-supersedes");
+        let seeded = format!(
+            "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"t\"}}}}\n\n{}{gap}",
+            stored_snapshot(2, "t", "-a\n+b\n")
+        );
+        store
+            .apply(&[tcode_services::store::Mutation::replace_event_log(
+                "thread",
+                seeded.clone().into_bytes(),
+            )])
+            .unwrap();
+        open_stored_session(&store, "thread");
+        let mut conversation = store.read_events("thread").unwrap();
+        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        window_reply(
+            &through_pipe(&state, cx, 1, subscribe_events("thread", None)),
+            1,
+        );
+        let snapshot = |diff: &str| AgentEvent::TurnChangesUpdated {
+            turn_id: "t".into(),
+            changes: vec![agent::FileChange {
+                path: "f".into(),
+                kind: agent::FileChangeKind::Modify,
+                diff: Some(diff.into()),
+            }],
+            completeness: agent::ChangeCompleteness::Exact,
+        };
+        let window = state.update(cx, |state, cx| {
+            for (ts, diff) in [(3, "-a\n+c\n"), (4, "-a\n+d\n")] {
+                state.record_event_for_replica_test("thread", ts, &snapshot(diff), cx);
+                conversation.push(SessionEventRecord {
+                    ts: Some(ts),
+                    event: snapshot(diff),
+                    elided: None,
+                });
+            }
+            let ServerEvent::SessionSnapshot { records, .. } = events_reply(
+                state,
+                &tcode_protocol::Subscription {
+                    topic: Topic::SessionEvents {
+                        session_id: "thread".into(),
+                    },
+                    after: None,
+                },
+            )
+            .event
+            else {
+                panic!("snapshot")
+            };
+            records
+        });
+        let diffs: Vec<_> = window
+            .iter()
+            .filter_map(|record| match &record.event {
+                AgentEvent::TurnChangesUpdated { changes, .. } => Some(changes[0].diff.is_some()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(diffs, [false, false, true], "{label}: the served log");
+        assert_eq!(
+            Timeline::fold_stored(&window),
+            Timeline::fold_stored(&conversation),
+            "{label}"
+        );
+        cx.run_until_parked();
+
+        let stored = String::from_utf8(store.read_event_log("thread").unwrap()).unwrap();
+        let expected = if rewritten {
+            format!(
+                "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"t\"}}}}\n\n{}{gap}{}{}",
+                stored_snapshot(2, "t", ""),
+                stored_snapshot(3, "t", ""),
+                stored_snapshot(4, "t", "-a\n+d\n"),
+            )
+        } else {
+            format!(
+                "{seeded}{}{}",
+                stored_snapshot(3, "t", "-a\n+c\n"),
+                stored_snapshot(4, "t", "-a\n+d\n"),
+            )
+        };
+        assert_eq!(stored, expected, "{label}: the stored rows");
+        assert_eq!(
+            Timeline::fold_events(store.read_events("thread").unwrap()),
+            Timeline::fold_stored(&conversation),
+            "{label}"
+        );
+    }
+}
+
+/// The startup pass drops the superseded diffs of every thread stored before
+/// appends did, an open one included, through the store writer.
+#[test]
+fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("diff-pass");
+    let log = format!(
+        "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"t\"}}}}\n{}{}",
+        stored_snapshot(2, "t", "-a\n+b\n"),
+        stored_snapshot(3, "t", "-a\n+c\n"),
+    );
+    let passed = format!(
+        "{{\"ts\":1,\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"t\"}}}}\n{}{}",
+        stored_snapshot(2, "t", ""),
+        stored_snapshot(3, "t", "-a\n+c\n"),
+    );
+    for id in ["cold", "open"] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        store
+            .apply(&[
+                tcode_services::store::Mutation::upsert_meta(meta),
+                tcode_services::store::Mutation::replace_event_log(id, log.clone().into_bytes()),
+            ])
+            .unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        state.select_session("open", cx);
+        state.start_diff_pass(cx);
+    });
+    cx.run_until(|state| {
+        state.diff_pass.is_none() && state.store.threads_without_diff_pass().unwrap().is_empty()
+    });
+    for id in ["cold", "open"] {
+        assert_eq!(
+            String::from_utf8(store.read_event_log(id).unwrap()).unwrap(),
+            passed,
+            "{id}"
+        );
+    }
 }
 
 /// A thread opens with about half a megabyte of history however long its
@@ -9074,15 +9243,16 @@ fn history_windows_are_byte_budgeted() {
     state.update(cx, |state, _| {
         state
             .event_records
-            .insert("wide".into(), SessionLog::from_records(records.clone()));
-        let mut snapshot = state
-            .subscription_snapshot(&tcode_protocol::Subscription {
+            .insert("wide".into(), session_log(records.clone()));
+        let mut snapshot = events_reply(
+            state,
+            &tcode_protocol::Subscription {
                 topic: Topic::SessionEvents {
                     session_id: "wide".into(),
                 },
                 after: None,
-            })
-            .unwrap();
+            },
+        );
         snapshot.request_id = Some(u64::MAX);
         let line = tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone())).unwrap();
         assert!(line.len() <= tcode_protocol::SESSION_WINDOW_BYTES);
@@ -9105,14 +9275,12 @@ fn history_windows_are_byte_budgeted() {
         huge[199].event = AgentEvent::Warning {
             message: "w".repeat(2 * tcode_protocol::SESSION_WINDOW_BYTES),
         };
-        state
-            .event_records
-            .insert("wide".into(), SessionLog::from_records(huge));
+        state.event_records.insert("wide".into(), session_log(huge));
         let QueryResponse::SessionHistoryPage {
             from,
             records: sent,
             ..
-        } = state.session_history_page("wide", 200, 200).unwrap()
+        } = state.event_records["wide"].history_page(200, 200).unwrap()
         else {
             panic!("page")
         };
@@ -9301,4 +9469,879 @@ fn store_writer_survives_sigkill() {
          committed but unacknowledged, {checkpointed_runs} runs crossed an auto-checkpoint"
     );
     assert!(checkpointed_runs > 0, "no run crossed an auto-checkpoint");
+}
+
+/// A log as a read of densely numbered rows would load it.
+fn session_log(records: impl IntoIterator<Item = SessionEventRecord>) -> SessionLog {
+    let records: Vec<_> = records.into_iter().collect();
+    let rows = (0..records.len() as u64).collect();
+    SessionLog::new(tcode_services::store::EventLog {
+        next_row: records.len() as u64,
+        records,
+        rows,
+        undecodable: 0,
+    })
+}
+
+/// Threads of [`diff_pass_survives_sigkill`]'s fixture, each a run of turns
+/// whose every turn-changes snapshot carries the turn's whole, growing diff.
+const CRASH_PASS_THREADS: usize = 6;
+
+/// The process [`diff_pass_survives_sigkill`] kills: a host started with the
+/// startup diff pass over the fixture in [`CRASH_CHILD_DIR`].
+#[test]
+#[ignore = "the child process of diff_pass_survives_sigkill, which runs it"]
+fn diff_pass_crash_child() {
+    let root = PathBuf::from(std::env::var_os(CRASH_CHILD_DIR).unwrap());
+    let _host = crate::pipe::spawn_host(
+        SessionStore::open_at(root).unwrap(),
+        crate::pipe::HostServices {
+            drop_superseded_diffs: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    println!("{CRASH_ACK}started");
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Kill a host while its startup pass drops superseded diffs, over and over:
+/// every thread is afterwards either exactly as it was and still to be passed,
+/// or exactly as a completed pass leaves it and marked passed, never a mix,
+/// and the files pass sqlite3's integrity check. `TCODE_CRASH_RUNS` sets the
+/// number of kills.
+#[test]
+#[ignore = "spawns and SIGKILLs child processes and needs the sqlite3 CLI; run deliberately"]
+fn diff_pass_survives_sigkill() {
+    let runs: usize = std::env::var("TCODE_CRASH_RUNS")
+        .ok()
+        .and_then(|runs| runs.parse().ok())
+        .unwrap_or(30);
+    let scratch = std::env::temp_dir().join(format!("tcode-pass-crash-{}", uuid::Uuid::new_v4()));
+    let template = scratch.join("template");
+    let ids: Vec<String> = (0..CRASH_PASS_THREADS)
+        .map(|thread| format!("thread-{thread}"))
+        .collect();
+    {
+        let store = SessionStore::open_at(template.clone()).unwrap();
+        for id in &ids {
+            let mut log = String::new();
+            for turn in 0..10 {
+                log.push_str(&format!(
+                    "{{\"ts\":{turn},\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"{turn}\"}}}}\n"
+                ));
+                let mut diff = String::new();
+                for edit in 0..40 {
+                    diff.push_str(&format!("+line {edit} {}\n", "x".repeat(1_000)));
+                    log.push_str(&stored_snapshot(edit, &turn.to_string(), &diff));
+                }
+            }
+            let mut meta = SessionMeta::new(ProviderKind::Codex, template.clone(), None);
+            meta.id = id.clone();
+            store
+                .apply(&[
+                    tcode_services::store::Mutation::upsert_meta(meta),
+                    tcode_services::store::Mutation::replace_event_log(id, log.into_bytes()),
+                ])
+                .unwrap();
+        }
+        store.close().unwrap();
+    }
+    let copy = |to: &Path| {
+        std::fs::create_dir_all(to).unwrap();
+        std::fs::copy(template.join("tcode.db"), to.join("tcode.db")).unwrap();
+    };
+    let rows_of = |store: &SessionStore, id: &str| store.read_event_log(id).unwrap();
+    let passed_dir = scratch.join("passed");
+    copy(&passed_dir);
+    let (before, after, pass_time) = {
+        let store = SessionStore::open_at(passed_dir.clone()).unwrap();
+        let before: Vec<_> = ids.iter().map(|id| rows_of(&store, id)).collect();
+        let started = Instant::now();
+        for id in &ids {
+            assert!(matches!(
+                store.drop_superseded_diffs(id).unwrap(),
+                tcode_services::store::DiffPass::Dropped { .. }
+            ));
+        }
+        let pass_time = started.elapsed();
+        let after: Vec<_> = ids.iter().map(|id| rows_of(&store, id)).collect();
+        store.close().unwrap();
+        (before, after, pass_time)
+    };
+    println!(
+        "fixture: {} bytes in {CRASH_PASS_THREADS} threads, passed in {pass_time:.1?} in process",
+        before.iter().map(Vec::len).sum::<usize>()
+    );
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+        | 1;
+    let mut random = move |range: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % range
+    };
+    let (mut mixed_runs, mut partial_runs) = (0, 0);
+    for run in 0..runs {
+        let root = scratch.join(format!("run-{run}"));
+        copy(&root);
+        let mut child = tcode_services::process::command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::diff_pass_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CRASH_CHILD_DIR, &root)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                std::io::BufRead::read_line(&mut stdout, &mut line).unwrap(),
+                0,
+                "run {run}: the child exited before starting"
+            );
+            if line.contains(CRASH_ACK) {
+                break;
+            }
+        }
+        let delay = random(pass_time.as_millis() as u64 * 3 / 2 + 1);
+        std::thread::sleep(Duration::from_millis(delay));
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let preserved = root.join("preserved");
+        std::fs::create_dir_all(&preserved).unwrap();
+        for name in ["tcode.db", "tcode.db-wal"] {
+            if root.join(name).exists() {
+                std::fs::copy(root.join(name), preserved.join(name)).unwrap();
+            }
+        }
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let unpassed = store.threads_without_diff_pass().unwrap();
+        let mut done = 0;
+        for (index, id) in ids.iter().enumerate() {
+            let rows = rows_of(&store, id);
+            if unpassed.contains(id) {
+                assert!(
+                    rows == before[index],
+                    "run {run}: {id} changed but is unpassed"
+                );
+            } else {
+                assert!(
+                    rows == after[index],
+                    "run {run}: {id} is passed but not as a pass leaves it"
+                );
+                done += 1;
+            }
+        }
+        if done > 0 && done < ids.len() {
+            partial_runs += 1;
+        }
+        store.close().unwrap();
+        drop(store);
+        let check = tcode_services::process::command("sqlite3")
+            .arg(preserved.join("tcode.db"))
+            .arg("PRAGMA integrity_check;")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&check.stdout).trim(),
+            "ok",
+            "run {run}: sqlite3 integrity_check: {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        mixed_runs += usize::from(done > 0);
+        println!(
+            "run {run}: killed after {delay} ms, {done} of {CRASH_PASS_THREADS} threads passed"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    std::fs::remove_dir_all(&scratch).unwrap();
+    println!("{runs} kills: {mixed_runs} after some thread passed, {partial_runs} mid-pass");
+    assert!(partial_runs > 0, "no kill landed mid-pass");
+}
+
+/// The reply a subscription to a session whose log is resident gets.
+fn events_reply(state: &AppState, subscription: &Subscription) -> EventEnvelope {
+    let Topic::SessionEvents { session_id } = &subscription.topic else {
+        panic!("a subscription to a session's events")
+    };
+    EventEnvelope {
+        request_id: None,
+        topic: subscription.topic.clone(),
+        event: state.event_records[session_id].events_window(subscription),
+    }
+}
+
+/// Hand `payload` to the host as client message `id`, without running
+/// anything it queues.
+fn send_to_host(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    id: u64,
+    payload: tcode_protocol::ClientPayload,
+) {
+    state.deliver(cx, id, payload);
+}
+
+/// Run the host until it answered client message `id` and parked, and
+/// return every message it serialized since the last drain.
+fn answered(cx: &mut TestAppContext, id: u64) -> Vec<HostMessage> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut messages = Vec::new();
+    loop {
+        cx.run_until_parked();
+        messages.extend(cx.drain_outgoing());
+        if messages.iter().any(|message| {
+            matches!(message, HostMessage::Ack { id: reply, .. } | HostMessage::QueryResult { id: reply, .. } if *reply == id)
+        }) {
+            return messages;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the host did not answer message {id} within five seconds"
+        );
+    }
+}
+
+/// Send `payload` through the host pipe as client message `id`, and return
+/// every message the host serialized since the last drain, once the host
+/// answered it and parked.
+fn through_pipe(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    id: u64,
+    payload: tcode_protocol::ClientPayload,
+) -> Vec<HostMessage> {
+    send_to_host(state, cx, id, payload);
+    answered(cx, id)
+}
+
+fn subscribe_events(session_id: &str, after: Option<u64>) -> tcode_protocol::ClientPayload {
+    tcode_protocol::ClientPayload::Subscribe(Subscription {
+        topic: Topic::SessionEvents {
+            session_id: session_id.into(),
+        },
+        after,
+    })
+}
+
+fn unsubscribe_events(session_id: &str) -> tcode_protocol::ClientPayload {
+    tcode_protocol::ClientPayload::Unsubscribe(Subscription {
+        topic: Topic::SessionEvents {
+            session_id: session_id.into(),
+        },
+        after: None,
+    })
+}
+
+fn history_page(session_id: &str, before: u64) -> tcode_protocol::ClientPayload {
+    tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+        session_id: session_id.into(),
+        before,
+        limit: 200,
+    })
+}
+
+/// A session window as the host sent it.
+#[derive(Debug, Clone, PartialEq)]
+struct Window {
+    from: u64,
+    end: u64,
+    records: Vec<SessionEventRecord>,
+    total: u64,
+    total_turns: u64,
+}
+
+fn window_of(event: &ServerEvent) -> Option<Window> {
+    match event {
+        ServerEvent::SessionSnapshot {
+            from,
+            end,
+            records,
+            total,
+            total_turns,
+            ..
+        } => Some(Window {
+            from: *from,
+            end: *end,
+            records: records.clone(),
+            total: *total,
+            total_turns: *total_turns,
+        }),
+        _ => None,
+    }
+}
+
+/// The window answering subscription request `id`.
+fn window_reply(messages: &[HostMessage], id: u64) -> Window {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                request_id: Some(request),
+                event,
+                ..
+            }) if *request == id => window_of(event),
+            _ => None,
+        })
+        .expect("a window answers the subscription")
+}
+
+fn query_reply(messages: &[HostMessage], id: u64) -> QueryResponse {
+    messages
+        .iter()
+        .find_map(|message| match message {
+            HostMessage::QueryResult { id: reply, result } if *reply == id => {
+                Some(result.clone().expect("query succeeds"))
+            }
+            _ => None,
+        })
+        .expect("the query is answered")
+}
+
+/// The live records among `messages`, in order.
+fn live_records(messages: &[HostMessage]) -> Vec<SessionEventRecord> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                request_id: None,
+                event: ServerEvent::SessionEvent(record),
+                ..
+            }) => Some(record.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn open_stored_session(store: &SessionStore, id: &str) -> SessionMeta {
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
+    meta.id = id.into();
+    store.upsert_meta(&meta).unwrap();
+    meta
+}
+
+/// The index of the first message matching `matches`.
+fn first_at(messages: &[HostMessage], matches: impl Fn(&HostMessage) -> bool) -> usize {
+    messages
+        .iter()
+        .position(matches)
+        .expect("the message was sent")
+}
+
+fn is_live_record(message: &HostMessage) -> bool {
+    matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            request_id: None,
+            event: ServerEvent::SessionEvent(_),
+            ..
+        })
+    )
+}
+
+/// Subscriptions made while a cold log is read share that one read. Each
+/// gets a window ending where the read log ends, and a record accepted
+/// meanwhile follows every window, once.
+#[test]
+fn subscriptions_made_while_a_cold_log_is_read_share_it_and_get_each_record_once() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("cold-subscriptions");
+    open_stored_session(&store, "cold");
+    let persisted = persist_streamed_turns(&store, "cold", 2).len() as u64;
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let reads_before_open = store.event_reads();
+
+    send_to_host(&state, cx, 1, subscribe_events("cold", None));
+    send_to_host(&state, cx, 2, subscribe_events("cold", None));
+    let live = AgentEvent::Warning {
+        message: "first live".into(),
+    };
+    state.update(cx, |state, cx| {
+        assert!(state.log_hydrations.contains_key("cold"));
+        state.on_event("cold", live.clone(), cx);
+    });
+    let messages = answered(cx, 2);
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, HostMessage::Ack { id: 1, .. }))
+    );
+
+    let live_at = first_at(&messages, is_live_record);
+    for id in [1, 2] {
+        let window = window_reply(&messages, id);
+        assert_eq!((window.end, window.total), (persisted, persisted));
+        let window_at = first_at(
+            &messages,
+            |message| matches!(message, HostMessage::Event(EventEnvelope { request_id: Some(request), .. }) if *request == id),
+        );
+        assert!(window_at < live_at, "window {id} comes before the record");
+    }
+    assert_eq!(
+        live_records(&messages)
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>(),
+        [live]
+    );
+    assert_eq!(
+        store.event_reads() - reads_before_open,
+        1,
+        "both subscriptions were answered from one read"
+    );
+}
+
+/// The first event of a resident thread whose log is not loaded starts the
+/// read of that log, which therefore does not contain it: a subscription
+/// made before the read completes gets a window without it, and the event
+/// follows once, at the end of the window.
+#[test]
+fn the_event_that_starts_a_read_follows_the_window_once() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("first-event-read");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let first = AgentEvent::Warning {
+        message: "first".into(),
+    };
+    let id = state.update(cx, |state, cx| {
+        state.start_draft("project".into(), store.root().clone(), cx);
+        let id = state.active_session_id().unwrap().to_string();
+        state.record_event(&id, &first, cx);
+        assert!(state.log_hydrations.contains_key(&id));
+        id
+    });
+    send_to_host(&state, cx, 1, subscribe_events(&id, None));
+    let messages = answered(cx, 1);
+
+    let window = window_reply(&messages, 1);
+    assert_eq!((window.end, window.records.len()), (0, 0));
+    assert_eq!(
+        live_records(&messages)
+            .into_iter()
+            .map(|record| record.event)
+            .collect::<Vec<_>>(),
+        [first]
+    );
+    assert!(
+        first_at(&messages, |message| matches!(
+            message,
+            HostMessage::Event(EventEnvelope {
+                request_id: Some(1),
+                ..
+            })
+        )) < first_at(&messages, is_live_record)
+    );
+}
+
+/// A subscriber that leaves a cold thread before its log is read gets no
+/// window for it, and a log read for a session that is no longer resident is
+/// not kept.
+#[test]
+fn a_cold_thread_left_before_its_log_is_read_sends_no_window_and_keeps_no_log() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("cold-left");
+    open_stored_session(&store, "left");
+    persist_streamed_turns(&store, "left", 2);
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+
+    send_to_host(&state, cx, 1, subscribe_events("left", None));
+    send_to_host(&state, cx, 2, unsubscribe_events("left"));
+    state.read(|state| assert!(state.log_hydrations.contains_key("left")));
+    let messages = answered(cx, 1);
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, HostMessage::Ack { id: 2, .. }))
+    );
+    assert!(
+        !messages.iter().any(|message| matches!(
+            message,
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::SessionEvents { .. },
+                ..
+            })
+        )),
+        "nothing of the thread reaches the client that left it"
+    );
+    state.read(|state| {
+        assert!(state.resident("left").is_none());
+        assert!(state.log_hydrations.is_empty());
+        assert!(state.event_records.is_empty());
+    });
+}
+
+/// History pages and whole outputs of a thread no client holds open are
+/// answered from its whole log, read off the mailbox and not kept.
+#[test]
+fn pages_and_outputs_of_a_thread_nobody_opened_are_read_and_not_kept() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("cold-queries");
+    open_stored_session(&store, "cold");
+    let mut records = persist_streamed_turns(&store, "cold", 2);
+    let output = "o".repeat(2 * tcode_protocol::OUTPUT_PREVIEW_BYTES);
+    let tool = tool_call("tool", output.clone());
+    store.append_event("cold", 5000, &tool.event).unwrap();
+    records.push(tool);
+    let total = records.len() as u64;
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+
+    let QueryResponse::SessionHistoryPage {
+        end, records: page, ..
+    } = query_reply(&through_pipe(&state, cx, 1, history_page("cold", total)), 1)
+    else {
+        panic!("page")
+    };
+    assert_eq!(end, total);
+    assert!(
+        matches!(&page.last().unwrap().event, AgentEvent::ItemCompleted(item) if item.id == "tool")
+    );
+    let read_output = tcode_protocol::ClientPayload::Query(tcode_protocol::Query::ReadItemOutput {
+        session_id: "cold".into(),
+        item_id: "tool".into(),
+    });
+    assert_eq!(
+        query_reply(&through_pipe(&state, cx, 2, read_output), 2),
+        QueryResponse::ItemOutput(output)
+    );
+    state.read(|state| {
+        assert!(state.resident("cold").is_none());
+        assert!(state.log_hydrations.is_empty());
+        assert!(state.event_records.is_empty());
+    });
+}
+
+/// A child whose turn completes while its log is still being read reports
+/// that turn: its status and result, and the callback to its parent, see the
+/// completion and the final message accepted just before it.
+#[test]
+fn a_child_completing_while_its_log_is_read_reports_that_turn() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("child-completing-while-read");
+    let mut child = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    child.id = "child".into();
+    child.parent_session_id = Some("parent".into());
+    child.archive_on_complete = false;
+    store.upsert_meta(&child).unwrap();
+    persist_streamed_turns(&store, "child", 1);
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+
+    state.update(cx, |state, cx| {
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
+        state.load_background_session(child, cx);
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "turn-new".into(),
+            },
+            persisted_assistant_event("the new answer"),
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-new".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            state.on_event("child", event, cx);
+        }
+        assert!(state.log_hydrations.contains_key("child"));
+
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Status {
+                parent_id: "parent".into(),
+                thread_id: Some("child".into()),
+            },
+            reply,
+            cx,
+        );
+        let status = response.try_recv().unwrap().unwrap();
+        assert_eq!(status[0]["state"], "completed");
+        assert_eq!(status[0]["last_output_tail"], "the new answer");
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Result {
+                parent_id: "parent".into(),
+                thread_id: "child".into(),
+            },
+            reply,
+            cx,
+        );
+        let result = response.try_recv().unwrap().unwrap();
+        assert_eq!(result["state"], "completed");
+        assert_eq!(result["final_message"], "the new answer");
+    });
+
+    cx.run_until(|state| state.callback_last_turn.contains_key("child"));
+    let callback = std::iter::from_fn(|| parent_receiver.try_recv().ok())
+        .find_map(|command| match command {
+            SessionCommand::Steer { text, .. } => Some(text),
+            _ => None,
+        })
+        .expect("the parent is called back");
+    assert!(callback.starts_with("[orchestrate] thread child"));
+    assert!(callback.ends_with("\nthe new answer"));
+}
+
+/// Deliver `event` as the session's provider would, as soon as a read of the
+/// session's log is in flight. Queued on the mailbox before that read began,
+/// it runs before the read's completion, which is queued only after.
+fn record_while_hydrating(
+    state: &mut AppState,
+    cx: &mut HostCx,
+    session_id: &'static str,
+    event: AgentEvent,
+    recorded: smol::channel::Sender<()>,
+) {
+    assert!(!state.event_records.contains_key(session_id));
+    if state.log_hydrations.contains_key(session_id) {
+        state.on_event(session_id, event, cx);
+        let _ = recorded.try_send(());
+    } else {
+        cx.enqueue(move |state, cx| record_while_hydrating(state, cx, session_id, event, recorded));
+    }
+}
+
+/// Two clients of a real host, through the multiplexer, open a cold thread
+/// whose first live event arrives while its log is read: each gets its own
+/// window, routed to it although it comes long after the request, then the
+/// event; every record reaches each client once, and the log is read once.
+#[test]
+fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
+    use crate::pipe::{HostServices, spawn_host};
+    use tcode_client::HostLink;
+
+    let root = TestStore::new("cold-open-mux");
+    open_stored_session(&root, "cold");
+    let persisted = persist_streamed_turns(&root, "cold", 3).len() as u64;
+    let reads_before_open = root.event_reads();
+    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
+    let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let clients: Vec<HostLink> = (0..2)
+        .map(|_| {
+            let connection = mux.attach();
+            let link = HostLink::new(connection.to_host, connection.from_host);
+            smol::spawn({
+                let link = link.clone();
+                async move { link.pump().await }
+            })
+            .detach();
+            link
+        })
+        .collect();
+
+    // Hold the host until the event is queued ahead of anything the
+    // subscriptions start.
+    let (entered, host_held) = smol::channel::bounded(1);
+    let (release, released) = smol::channel::bounded::<()>(1);
+    let (recorded, event_recorded) = smol::channel::bounded(1);
+    let holder = host.clone();
+    let held = smol::spawn(async move {
+        holder
+            .update_state_for_test(move |_, cx| {
+                entered.try_send(()).unwrap();
+                released.recv_blocking().unwrap();
+                let event = AgentEvent::Warning {
+                    message: "first live".into(),
+                };
+                cx.enqueue(move |state, cx| {
+                    record_while_hydrating(state, cx, "cold", event, recorded)
+                });
+            })
+            .await
+    });
+    host_held.recv_blocking().unwrap();
+    for link in &clients {
+        link.subscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "cold".into(),
+            },
+            after: None,
+        })
+        .unwrap();
+    }
+    release.try_send(()).unwrap();
+    smol::block_on(held).unwrap();
+
+    fn within_five_seconds<T>(future: impl std::future::Future<Output = T>) -> T {
+        smol::block_on(smol::future::race(future, async {
+            smol::Timer::after(Duration::from_secs(5)).await;
+            panic!("the host stopped sending the thread")
+        }))
+    }
+    within_five_seconds(event_recorded.recv()).unwrap();
+    let next_event = |link: &HostLink| within_five_seconds(link.events().recv()).unwrap();
+    for link in &clients {
+        let mut window = None;
+        let mut end = 0;
+        let mut seen = 0;
+        while end < persisted + 1 {
+            let event = next_event(link).event;
+            if let Some(received) = window_of(&event) {
+                assert!(window.is_none(), "one window per subscription");
+                end = received.end;
+                seen += received
+                    .records
+                    .iter()
+                    .filter(|record| matches!(record.event, AgentEvent::Warning { .. }))
+                    .count();
+                window = Some(received);
+                continue;
+            }
+            let ServerEvent::SessionEvent(record) = event else {
+                panic!("unexpected {event:?}")
+            };
+            // The mux routes a topic to a connection once it forwards the
+            // subscription, so a record can precede the window of a
+            // subscription the host answers later; clients drop it.
+            if window.is_none() {
+                continue;
+            }
+            end += 1;
+            seen += usize::from(matches!(record.event, AgentEvent::Warning { .. }));
+        }
+        assert_eq!(end, persisted + 1);
+        assert_eq!(seen, 1, "the live record reaches the client once");
+    }
+    assert_eq!(
+        root.event_reads() - reads_before_open,
+        1,
+        "every subscriber was served by one read"
+    );
+    clients[0].shutdown_blocking().unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
+}
+
+/// A long thread with a turn index opens with a baseline window cut from its
+/// last rows, sent while the whole log is still being read, and equal to the
+/// window the whole log gives: the index the first open built, kept current
+/// by the appends of a resident log, a rewind included, serves it. An append
+/// to a log nobody holds forgets the index, and the next open waits for the
+/// whole log, with the same result.
+#[test]
+fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tail-window");
+    open_stored_session(&store, "long");
+    persist_streamed_turns(&store, "long", 3);
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut id = 0;
+    // Open the thread cold, returning its window, whether it went out while
+    // the whole log was still being read, and the window the whole log gives.
+    let mut open = |state: &TestEntity, cx: &mut TestAppContext| {
+        id += 1;
+        send_to_host(state, cx, id, subscribe_events("long", None));
+        let (window, early) = loop {
+            cx.run_next();
+            let messages = cx.drain_outgoing();
+            if let Some(window) = messages.iter().find_map(|message| match message {
+                HostMessage::Event(EventEnvelope {
+                    request_id: Some(request),
+                    event,
+                    ..
+                }) if *request == id => window_of(event),
+                _ => None,
+            }) {
+                break (
+                    window,
+                    state.read(|state| state.log_hydrations.contains_key("long")),
+                );
+            }
+        };
+        cx.run_until(|state| state.event_records.contains_key("long"));
+        let whole = SessionLog::new(store.read_log("long").unwrap()).events_window(&Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "long".into(),
+            },
+            after: None,
+        });
+        (window, early, window_of(&whole).unwrap())
+    };
+    let release = |state: &TestEntity, cx: &mut TestAppContext, id: u64| {
+        through_pipe(state, cx, id, unsubscribe_events("long"));
+        state.update(cx, |state, cx| state.drop_background("long", cx));
+        cx.run_until(|state| !state.event_records.contains_key("long"));
+    };
+
+    let (window, early, whole) = open(&state, cx);
+    assert!(
+        !early,
+        "without an index the first open reads the whole log"
+    );
+    assert_eq!(window, whole);
+    release(&state, cx, 100);
+
+    let (window, early, whole) = open(&state, cx);
+    assert!(early, "the index the first open built serves the tail");
+    assert_eq!(window, whole);
+    assert!(window.from > 0 && window.total_turns == 3);
+    let turn = |index: usize| {
+        vec![
+            AgentEvent::TurnStarted {
+                turn_id: format!("late-{index}"),
+            },
+            AgentEvent::TurnCheckpoint {
+                turn_id: format!("late-{index}"),
+                checkpoint_id: format!("checkpoint-{index}"),
+            },
+            persisted_assistant_event(&format!("late answer {index}")),
+            AgentEvent::TurnCompleted {
+                turn_id: format!("late-{index}"),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ]
+    };
+    state.update(cx, |state, cx| {
+        // The rewind drops the last late turn and is the last change to
+        // the turns.
+        for event in
+            turn(0)
+                .into_iter()
+                .chain(turn(1))
+                .chain(turn(2))
+                .chain([AgentEvent::RewindCompleted {
+                    checkpoint_id: "checkpoint-2".into(),
+                    mode: agent::RewindMode::Conversation,
+                    prefill: None,
+                }])
+        {
+            state.record_event("long", &event, cx);
+        }
+    });
+    release(&state, cx, 101);
+
+    let (window, early, whole) = open(&state, cx);
+    assert!(early, "appends to the resident log kept the index current");
+    assert_eq!(window, whole);
+    assert_eq!(
+        window.total_turns, 5,
+        "three, and three late ones less the rewound one"
+    );
+    release(&state, cx, 102);
+
+    state.update(cx, |state, cx| {
+        state.record_event("long", &persisted_assistant_event("nobody held it"), cx)
+    });
+    cx.run_until_parked();
+    let (window, early, whole) = open(&state, cx);
+    assert!(!early, "an append nobody folded forgot the index");
+    assert_eq!(window, whole);
 }

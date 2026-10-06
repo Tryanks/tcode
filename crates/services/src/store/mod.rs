@@ -6,7 +6,12 @@
 //!     JSON serde produces for it.
 //!   * `events` holds each thread's log as raw byte segments, one per line
 //!     including its `\n`, densely numbered from 0: the bytes of a `{ ts, event }`
-//!     record, or whatever a migrated or imported log contained.
+//!     record, or whatever a migrated or imported log contained. A turn-changes
+//!     snapshot that a later one supersedes is kept without its diffs
+//!     ([`tcode_core::session::TurnSnapshots`]).
+//!   * `diff_pass` names the threads whose superseded snapshots
+//!     [`SessionStore::drop_superseded_diffs`] has dealt with.
+//!   * `turn_index` holds a thread's [`TurnIndex`], while the host knows it.
 //!   * `kept_worktrees` holds the path of every worktree whose thread was
 //!     deleted with the worktree kept.
 //!
@@ -18,10 +23,14 @@
 mod db;
 mod migrate;
 mod relocate;
+mod superseded;
 #[cfg(test)]
 mod tests;
+mod turn_index;
 
 pub use migrate::{Migration, MigrationPhase, MigrationProgress};
+pub use superseded::DiffPass;
+pub use turn_index::TurnIndex;
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -197,9 +206,29 @@ pub struct Mutation(Op);
 
 #[derive(Debug, Clone)]
 enum Op {
-    AppendEvent { session_id: String, line: Vec<u8> },
-    ReplaceEventLog { session_id: String, bytes: Vec<u8> },
-    CloneEvents { src: String, dst: String },
+    AppendEvent {
+        session_id: String,
+        line: Vec<u8>,
+    },
+    ReplaceEventLog {
+        session_id: String,
+        bytes: Vec<u8>,
+    },
+    CloneEvents {
+        src: String,
+        dst: String,
+    },
+    DropTurnDiffs {
+        session_id: String,
+        position: u64,
+        turn_id: String,
+    },
+    ForgetDiffPass(String),
+    SetTurnIndex {
+        session_id: String,
+        index: TurnIndex,
+    },
+    ForgetTurnIndex(String),
     UpsertMeta(Box<SessionMeta>),
     UpsertProject(Box<Project>),
     RemoveSession(String),
@@ -234,6 +263,39 @@ impl Mutation {
             src: src.to_owned(),
             dst: dst.to_owned(),
         })
+    }
+
+    /// Drop the diffs of the turn-changes snapshot of `turn_id` stored at
+    /// `position` of the session's log, which a later snapshot supersedes. A
+    /// row that holds anything else is left as it is.
+    pub fn drop_turn_diffs(session_id: &str, position: u64, turn_id: &str) -> Self {
+        Self(Op::DropTurnDiffs {
+            session_id: session_id.to_owned(),
+            position,
+            turn_id: turn_id.to_owned(),
+        })
+    }
+
+    /// Have the next [`SessionStore::drop_superseded_diffs`] pass cover the
+    /// session again: an append superseded a snapshot whose row could not be
+    /// named.
+    pub fn forget_diff_pass(session_id: &str) -> Self {
+        Self(Op::ForgetDiffPass(session_id.to_owned()))
+    }
+
+    /// Record the turns of the fold of the session's whole log, as of this
+    /// change.
+    pub fn set_turn_index(session_id: &str, index: TurnIndex) -> Self {
+        Self(Op::SetTurnIndex {
+            session_id: session_id.to_owned(),
+            index,
+        })
+    }
+
+    /// Forget the session's turn index: this change may alter its turns
+    /// without anyone having folded it.
+    pub fn forget_turn_index(session_id: &str) -> Self {
+        Self(Op::ForgetTurnIndex(session_id.to_owned()))
     }
 
     /// Insert or replace a meta (by id).
@@ -275,12 +337,15 @@ impl Mutation {
     /// The session whose event log this change rewrites, if any.
     fn event_log(&self) -> Option<&str> {
         match &self.0 {
-            Op::AppendEvent { session_id, .. } | Op::ReplaceEventLog { session_id, .. } => {
-                Some(session_id)
-            }
+            Op::AppendEvent { session_id, .. }
+            | Op::ReplaceEventLog { session_id, .. }
+            | Op::DropTurnDiffs { session_id, .. } => Some(session_id),
             Op::CloneEvents { dst, .. } => Some(dst),
             Op::RemoveSession(id) => Some(id),
-            Op::UpsertMeta(_)
+            Op::ForgetDiffPass(_)
+            | Op::SetTurnIndex { .. }
+            | Op::ForgetTurnIndex(_)
+            | Op::UpsertMeta(_)
             | Op::UpsertProject(_)
             | Op::RemoveProject(_)
             | Op::KeepWorktree(_) => None,
@@ -601,21 +666,23 @@ impl SessionStore {
                 Ok(icons)
             })
         })?;
-        {
-            let mut generations = self
-                .shared
-                .generations
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for id in mutations.iter().filter_map(Mutation::event_log) {
-                let generation = self.shared.next_generation.fetch_add(1, Ordering::Relaxed);
-                generations.insert(id.to_owned(), generation);
-            }
-        }
+        self.advance_event_generations(mutations.iter().filter_map(Mutation::event_log));
         for icon in icons {
             self.remove_project_icon(icon);
         }
         Ok(())
+    }
+
+    fn advance_event_generations<'a>(&self, ids: impl IntoIterator<Item = &'a str>) {
+        let mut generations = self
+            .shared
+            .generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for id in ids {
+            let generation = self.shared.next_generation.fetch_add(1, Ordering::Relaxed);
+            generations.insert(id.to_owned(), generation);
+        }
     }
 
     /// A value that changes whenever a committed write changes `id`'s event
@@ -809,38 +876,79 @@ impl SessionStore {
     /// (`{"ts":…,"event":…}`) or a legacy bare event (`{"type":…}`), so logs
     /// written before the envelope format still replay (with `ts == None`).
     pub fn read_events(&self, id: &str) -> io::Result<Vec<StoredEvent>> {
+        self.read_log(id).map(|log| log.records)
+    }
+
+    /// [`SessionStore::read_events`] with the stored row each record came
+    /// from and what the read skipped.
+    pub fn read_log(&self, id: &str) -> io::Result<EventLog> {
+        self.read_log_until(id, u64::MAX)
+    }
+
+    /// [`SessionStore::read_log`] of the rows before position `end` alone:
+    /// what the log held when [`SessionStore::next_row`] returned `end`, since
+    /// rows are only ever appended.
+    pub fn read_log_until(&self, id: &str, end: u64) -> io::Result<EventLog> {
         #[cfg(any(test, feature = "test-support"))]
         self.shared
             .event_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.read_rows(id, 0..end)
+    }
+
+    /// The records of the rows at `positions` of a session's log, without
+    /// reading the rest of it.
+    pub fn read_rows(&self, id: &str, positions: std::ops::Range<u64>) -> io::Result<EventLog> {
+        let bound = |position: u64| i64::try_from(position).unwrap_or(i64::MAX);
         self.run("read events", |db| {
             db.read(|db, connection| {
-                let mut events = Vec::new();
+                let mut log = EventLog::default();
                 db.query(
                     connection,
-                    "SELECT position, line FROM events WHERE session_id = ?1 ORDER BY position",
-                    (id,),
+                    "SELECT position, line FROM events \
+                     WHERE session_id = ?1 AND position >= ?2 AND position < ?3 ORDER BY position",
+                    (id, bound(positions.start), bound(positions.end)),
                     |row| {
                         let position = integer(row, 0)?;
                         let line = blob(row, 1)?;
-                        let Ok(line) = std::str::from_utf8(&line) else {
-                            log::warn!("skipping event {position} of {id}: not UTF-8");
-                            return Ok(());
-                        };
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            return Ok(());
-                        }
-                        match parse_stored_line(trimmed) {
-                            Ok(stored) => events.push(stored),
-                            Err(err) => {
-                                log::warn!("skipping unparseable event {position} of {id}: {err}")
+                        log.next_row = position as u64 + 1;
+                        match decode_row(&line) {
+                            Row::Record(stored) => {
+                                log.records.push(stored);
+                                log.rows.push(position as u64);
+                            }
+                            Row::Blank => {}
+                            Row::Undecodable(reason) => {
+                                log.undecodable += 1;
+                                log::warn!("skipping event {position} of {id}: {reason}");
                             }
                         }
                         Ok(())
                     },
                 )?;
-                Ok(events)
+                Ok(log)
+            })
+        })
+    }
+
+    /// The position the next row appended to a session's log takes.
+    pub fn next_row(&self, id: &str) -> io::Result<u64> {
+        self.run("read the end of an event log", |db| {
+            db.read(|db, connection| {
+                let mut last = None;
+                db.query(
+                    connection,
+                    "SELECT max(position) FROM events WHERE session_id = ?1",
+                    (id,),
+                    |row| {
+                        last = match row.get_value(0) {
+                            Ok(turso::Value::Integer(position)) => Some(position as u64),
+                            _ => None,
+                        };
+                        Ok(())
+                    },
+                )?;
+                Ok(last.map_or(0, |last| last + 1))
             })
         })
     }
@@ -986,7 +1094,12 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
             ));
         }
     }
-    db.write(|db, connection| db.execute(connection, KEPT_WORKTREES, ()))?;
+    db.write(|db, connection| {
+        db.execute(connection, KEPT_WORKTREES, ())?;
+        db.execute(connection, superseded::DIFF_PASS_TABLE, ())?;
+        db.execute(connection, turn_index::TURN_INDEX_TABLE, ())
+            .map(drop)
+    })?;
     migrate::warn_about_stray_sources(root);
     migrate::remove_legacy(root);
     Ok(Live {
@@ -994,6 +1107,40 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
         ownership,
         in_flight: 0,
     })
+}
+
+/// A session's event log as one read of its rows saw it.
+#[derive(Debug, Default)]
+pub struct EventLog {
+    pub records: Vec<StoredEvent>,
+    /// The position of the row each record was read from.
+    pub rows: Vec<u64>,
+    /// The position after the last row read.
+    pub next_row: u64,
+    /// Rows that hold no record this build reads and are not blank.
+    pub undecodable: usize,
+}
+
+/// What one stored row holds.
+enum Row {
+    Record(StoredEvent),
+    /// Only whitespace: no record in any build.
+    Blank,
+    Undecodable(String),
+}
+
+fn decode_row(line: &[u8]) -> Row {
+    let Ok(line) = std::str::from_utf8(line) else {
+        return Row::Undecodable("not UTF-8".into());
+    };
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Row::Blank;
+    }
+    match parse_stored_line(trimmed) {
+        Ok(stored) => Row::Record(stored),
+        Err(error) => Row::Undecodable(format!("unparseable: {error}")),
+    }
 }
 
 fn acquire_ownership(root: &Path) -> io::Result<File> {
@@ -1147,6 +1294,8 @@ fn apply_op(
                 (session_id.as_str(),),
             )?;
             insert_segments(db, connection, session_id, 0, segments(bytes))?;
+            superseded::forget_pass(db, connection, session_id)?;
+            turn_index::forget(db, connection, session_id)?;
         }
         Op::CloneEvents { src, dst } => {
             db.execute(
@@ -1160,7 +1309,19 @@ fn apply_op(
                  SELECT ?2, position, line FROM events WHERE session_id = ?1",
                 (src.as_str(), dst.as_str()),
             )?;
+            superseded::forget_pass(db, connection, dst)?;
+            turn_index::forget(db, connection, dst)?;
         }
+        Op::DropTurnDiffs {
+            session_id,
+            position,
+            turn_id,
+        } => superseded::drop_row_diffs(db, connection, session_id, *position, turn_id)?,
+        Op::ForgetDiffPass(session_id) => superseded::forget_pass(db, connection, session_id)?,
+        Op::SetTurnIndex { session_id, index } => {
+            turn_index::set(db, connection, session_id, index)?
+        }
+        Op::ForgetTurnIndex(session_id) => turn_index::forget(db, connection, session_id)?,
         Op::UpsertMeta(meta) => {
             let body = serde_json::to_vec(meta.as_ref()).map_err(invalid_data)?;
             db.execute(
@@ -1195,6 +1356,8 @@ fn apply_op(
                 "DELETE FROM sessions WHERE id = ?1",
                 (id.as_str(),),
             )?;
+            superseded::forget_pass(db, connection, id)?;
+            turn_index::forget(db, connection, id)?;
         }
         Op::RemoveProject(id) => {
             if let Some(previous) = stored_project(db, connection, id)? {

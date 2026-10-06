@@ -1402,7 +1402,8 @@ pub(crate) enum ListSync {
 /// spliced in where they stand, which is how the list keeps the reader's
 /// anchor across a steer landing mid-turn or a page arriving above. Rows
 /// that vanish or trade places reset the list, except inside the partial
-/// first turn, whose entries a page may merge or shift.
+/// first turn, whose entries a page may merge or shift, and above every row
+/// that survives: dropping the pages read above the tail removes rows there.
 fn list_sync_with<'a>(
     old: &[TimelineRow],
     new_len: usize,
@@ -1438,11 +1439,13 @@ fn list_sync_with<'a>(
     let mut splices: Vec<(Range<usize>, usize)> = Vec::new();
     let mut remeasure = Vec::new();
     let mut carried = Vec::new();
+    let mut aligned = false;
     let (mut i, mut j) = (0, 0);
     while i < old.len() || j < new_len {
         if i < old.len() && j < new_len {
             let (old_row, new_row) = (&old[i], new_at(j));
             if old_row.identity == new_row.identity {
+                aligned = true;
                 if old_row.content != new_row.content || old_row.entry_count != new_row.entry_count
                 {
                     remeasure.push(j);
@@ -1476,7 +1479,21 @@ fn list_sync_with<'a>(
                     || row.part != RowPart::Segment
             };
             if !replaceable(&old[i]) {
-                return ListSync::Reset { count: new_len };
+                let below_survives = old[i..]
+                    .iter()
+                    .any(|row| new_pos.contains_key(&row.identity));
+                if aligned || j > 0 || !below_survives {
+                    return ListSync::Reset { count: new_len };
+                }
+                let start = i;
+                while !new_pos.contains_key(&old[i].identity) {
+                    i += 1;
+                }
+                match splices.last_mut() {
+                    Some((dropped, 0)) if dropped.end == start => dropped.end = i,
+                    _ => splices.push((start..i, 0)),
+                }
+                continue;
             }
             let start = i;
             while i < old.len() && !new_pos.contains_key(&old[i].identity) && replaceable(&old[i]) {
@@ -1884,6 +1901,34 @@ mod tests {
                         count: 1,
                         remeasure: vec![1, 2, 3, 4],
                     },
+                )
+            }],
+        });
+        scenarios.push(Scenario {
+            name: "pages dropped above the tail",
+            initial: Snapshot::new(
+                4,
+                vec![
+                    entry("paged", assistant("an earlier page")),
+                    at_turn(entry("paged-later", assistant("a later page")), 1),
+                    at_turn(entry("kept-user", user_item("question")), 2),
+                    at_turn(entry("kept", assistant("answer")), 2),
+                    at_turn(entry("newest", assistant("latest")), 3),
+                ],
+            ),
+            steps: vec![Step {
+                continuity: TimelineContinuity::PartialFirstTurn,
+                ..step(
+                    "drop the pages above the tail's window",
+                    Snapshot::new(
+                        2,
+                        vec![
+                            entry("kept-user", user_item("question")),
+                            entry("kept", assistant("answer")),
+                            at_turn(entry("newest", assistant("latest")), 1),
+                        ],
+                    ),
+                    incremental(vec![(0..2, 0)], vec![]),
                 )
             }],
         });

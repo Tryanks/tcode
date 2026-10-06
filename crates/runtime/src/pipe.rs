@@ -12,7 +12,7 @@ use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
 use tcode_services::store::SessionStore;
 
 use crate::app::{AppState, DomainDiff};
-use crate::host::{HostCx, HostEvent, HostFn};
+use crate::host::{HostCx, HostFn};
 
 /// Optional process-local services attached before the host starts accepting
 /// client traffic.
@@ -22,6 +22,9 @@ pub struct HostServices {
     pub background_startup_probes: bool,
     /// Generate AI-authored titles for new threads and explicit regeneration.
     pub ai_title_generation: bool,
+    /// Drop the diffs of superseded turn-changes snapshots from logs stored
+    /// before appends dropped them, one thread at a time in the background.
+    pub drop_superseded_diffs: bool,
     /// URL/tokens and the broker receiver stay host-side. Requests reach
     /// subscribed WebViews through the preview reverse-RPC topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
@@ -147,6 +150,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 }
                 state.refresh_provider_usage(&mut cx);
                 state.refresh_provider_status(&mut cx);
+            }
+            if services.drop_superseded_diffs {
+                state.start_diff_pass(&mut cx);
             }
             state.sync_terminal_handles();
             let _ = ready_tx.send(Ok(()));
@@ -285,14 +291,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         }
         ClientPayload::Subscribe(subscription) => {
             state.subscribe(&subscription, cx);
-            if let Some(mut snapshot) = state.subscription_snapshot(&subscription) {
-                snapshot.request_id = Some(id);
-                cx.emit(HostEvent::Domain(snapshot));
-            }
-            cx.send_message(HostMessage::Ack {
-                id,
-                result: Ok(CommandResponse::Unit),
-            });
+            state.reply_to_subscription(Some(id), subscription, cx);
         }
         ClientPayload::Unsubscribe(subscription) => {
             state.unsubscribe(&subscription, cx);
@@ -696,10 +695,7 @@ fn dispatch_query(
             session_id,
             before,
             limit,
-        } => {
-            let result = app.session_history_page(&session_id, before, limit);
-            cx.spawn_background(async move { result })
-        }
+        } => app.session_history_page(&session_id, before, limit, cx),
         Query::Hosting { .. } => cx.spawn_background(async {
             Err(ProtocolError {
                 code: "unsupported".into(),
@@ -828,10 +824,7 @@ fn dispatch_query(
         Query::ReadItemOutput {
             session_id,
             item_id,
-        } => {
-            let result = app.item_output(&session_id, &item_id);
-            cx.spawn_background(async move { result })
-        }
+        } => app.item_output(&session_id, item_id, cx),
         Query::ArchivedSessions => {
             let archived = app.archived_sessions();
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
@@ -1652,10 +1645,16 @@ mod tests {
         let snapshot = next_event(&stream, |event| {
             event.topic == topic && matches!(event.event, ServerEvent::SessionSnapshot { .. })
         });
-        let ServerEvent::SessionSnapshot { records, total, .. } = snapshot.event else {
+        let ServerEvent::SessionSnapshot {
+            records,
+            end,
+            total,
+            ..
+        } = snapshot.event
+        else {
             unreachable!("filtered to snapshots")
         };
-        assert_eq!(total, 5);
+        assert_eq!(end, total, "the window reaches the end of the log");
         assert_eq!(
             format!("{:?}", Timeline::fold_events(records)),
             format!(

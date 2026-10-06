@@ -114,9 +114,11 @@ pub enum ServerEvent {
         /// the reviewer judged the flag not a false positive.
         draft: String,
     },
-    /// Records standing for the log cursors `from..end`. The host may merge
-    /// or drop records whose effect a later record in the log repeats, so
-    /// `records` can be shorter than the range.
+    /// Records standing for the log cursors `from..end`. A cursor is the
+    /// position of a stored row of the log, and a row without a readable
+    /// record stands for none; the host may also merge or drop records whose
+    /// effect a later record in the log repeats, so `records` can be shorter
+    /// than the range.
     SessionSnapshot {
         from: u64,
         end: u64,
