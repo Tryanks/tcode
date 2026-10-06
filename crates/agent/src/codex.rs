@@ -24,6 +24,7 @@ use crate::{
 };
 
 mod developer_instructions;
+pub(crate) mod plugins;
 use developer_instructions::{DEFAULT_MODE_INSTRUCTIONS, PLAN_MODE_INSTRUCTIONS};
 
 /// Fallback model slug for `collaborationMode.settings.model` when the session

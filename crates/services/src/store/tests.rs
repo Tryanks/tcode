@@ -672,7 +672,7 @@ fn removing_project_cleans_only_managed_icons() {
 }
 
 #[test]
-fn command_cache_roundtrips_per_provider_and_acp_agent() {
+fn command_cache_is_kept_per_native_home_and_acp_agent() {
     let dir = DataDir::new();
     let root = dir.path().to_path_buf();
     let store = dir.store();
@@ -686,33 +686,42 @@ fn command_cache_roundtrips_per_provider_and_acp_agent() {
         description: None,
         kind: ProviderCommandKind::Skill,
     }];
-    store
-        .save_commands(ProviderKind::ClaudeCode, None, &native)
-        .unwrap();
-    store
-        .save_commands(ProviderKind::Acp, Some("vendor/agent"), &acp)
-        .unwrap();
+    let default_home = CommandsCacheKey::Native {
+        provider: ProviderKind::ClaudeCode,
+        home: None,
+    };
+    let shadow_home = CommandsCacheKey::Native {
+        provider: ProviderKind::ClaudeCode,
+        home: Some(PathBuf::from("/tmp/claude-shadow")),
+    };
+    let agent = CommandsCacheKey::Acp {
+        agent_id: "vendor/agent".into(),
+    };
+    store.save_commands(&default_home, &native).unwrap();
+    store.save_commands(&agent, &acp).unwrap();
 
     // Reopen the store to prove the values come from disk, not memory.
     let reopened = SessionStore::open_at(root.clone()).unwrap();
-    assert_eq!(
-        reopened.load_commands(ProviderKind::ClaudeCode, None),
-        native
-    );
-    assert_eq!(
-        reopened.load_commands(ProviderKind::Acp, Some("vendor/agent")),
-        acp
-    );
+    assert_eq!(reopened.load_commands(&default_home), native);
+    assert!(reopened.load_commands(&shadow_home).is_empty());
+    assert_eq!(reopened.load_commands(&agent), acp);
     assert!(
         reopened
-            .load_commands(ProviderKind::Acp, Some("different-agent"))
+            .load_commands(&CommandsCacheKey::Acp {
+                agent_id: "different-agent".into()
+            })
             .is_empty()
     );
-    assert!(root.join("commands-claude.json").is_file());
     assert!(
         root.join("commands-acp-76656e646f722f6167656e74.json")
             .is_file()
     );
+
+    reopened.save_commands(&shadow_home, &native).unwrap();
+    reopened.invalidate_commands(&default_home).unwrap();
+    reopened.invalidate_commands(&default_home).unwrap();
+    assert!(reopened.load_commands(&default_home).is_empty());
+    assert_eq!(reopened.load_commands(&shadow_home), native);
 }
 
 /// This test binary, re-run as another process that opens `root` and holds

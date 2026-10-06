@@ -1,6 +1,12 @@
 //! Headless end-to-end probe for provider clients.
 //!
 //! Catalog mode: `probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]`.
+//! Plugin mode: `probe plugins <provider> [--home <dir>] [--project <dir>] [<op> …]`
+//! lists the native plugin catalog after running the optional operation:
+//! `install|update <id> <scope> [--accept <sha256>]`, `uninstall|enable|disable <id> <scope>`,
+//! `add-marketplace <source>` or `remove-marketplace <name>`. `--home` isolates
+//! the provider's native state (`CODEX_HOME` for Codex; for Claude Code `HOME`
+//! and `CLAUDE_CONFIG_DIR`).
 //! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
 //! Flags are `--binary <path>`, `--model <id>`, `--mode plan`, `--effort <value>`,
 //! `--resume <cursor-json>`, `--fork`, `--leave-questions` (user-input requests
@@ -16,8 +22,9 @@ use std::time::{Duration, Instant};
 
 use agent::{
     AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
-    ItemContent, McpRegistration, OptionSelection, ProviderKind, ResumeCursor, SessionCommand,
-    SessionOptions, TurnOptions, TurnStatus, list_models, start_session,
+    ItemContent, LaunchEnv, McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope,
+    ProviderKind, ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus,
+    list_models, list_plugins, run_plugin_op, start_session,
 };
 use base64::Engine as _;
 
@@ -41,7 +48,105 @@ fn usage() -> ! {
     eprintln!(
         "       probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]"
     );
+    eprintln!("       probe plugins <provider> [--home <dir>] [--project <dir>] [<op> …]");
     std::process::exit(2);
+}
+
+fn parse_scope(arg: Option<String>) -> PluginScope {
+    match arg.as_deref() {
+        Some("user") => PluginScope::User,
+        Some("project") => PluginScope::Project,
+        Some("local") => PluginScope::Local,
+        Some("managed") => PluginScope::Managed,
+        _ => usage(),
+    }
+}
+
+fn plugins(mut args: impl Iterator<Item = String>) -> i32 {
+    let provider = parse_provider(args.next().as_deref());
+    let mut home = None;
+    let mut project = None;
+    let mut accept = None;
+    let mut positional = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--home" => home = args.next().map(PathBuf::from),
+            "--project" => project = args.next().map(PathBuf::from),
+            "--accept" => accept = args.next(),
+            _ => positional.push(arg),
+        }
+    }
+    let mut env = Vec::new();
+    if let (ProviderKind::ClaudeCode, Some(home)) = (provider, &home) {
+        env.push((
+            "CLAUDE_CONFIG_DIR".to_string(),
+            home.join(".claude").display().to_string(),
+        ));
+    }
+    let context = PluginContext {
+        binary_path: None,
+        launch_env: LaunchEnv {
+            env,
+            home: home.clone(),
+        },
+        cwd: project
+            .clone()
+            .or(home)
+            .unwrap_or_else(|| std::env::current_dir().unwrap()),
+        project: project.is_some(),
+    };
+    let mut positional = positional.into_iter();
+    let op = positional.next().map(|verb| {
+        let mut id = || positional.next().unwrap_or_else(|| usage());
+        match verb.as_str() {
+            "install" => PluginOp::Install {
+                id: id(),
+                scope: parse_scope(positional.next()),
+                accept_command: accept.clone(),
+            },
+            "update" => PluginOp::Update {
+                id: id(),
+                scope: parse_scope(positional.next()),
+                accept_command: accept.clone(),
+            },
+            "uninstall" => PluginOp::Uninstall {
+                id: id(),
+                scope: parse_scope(positional.next()),
+            },
+            "enable" | "disable" => PluginOp::SetEnabled {
+                id: id(),
+                scope: parse_scope(positional.next()),
+                enabled: verb == "enable",
+            },
+            "add-marketplace" => PluginOp::AddMarketplace { source: id() },
+            "remove-marketplace" => PluginOp::RemoveMarketplace { name: id() },
+            _ => usage(),
+        }
+    });
+    smol::block_on(async move {
+        if let Some(op) = op {
+            eprintln!("probe: {op:?} in {}", context.cwd.display());
+            match run_plugin_op(provider, &context, &op).await {
+                Ok(outcome) => println!("outcome: {outcome:#?}"),
+                Err(error) => println!("outcome: error: {error}"),
+            }
+        }
+        match list_plugins(provider, &context).await {
+            Ok(listing) => {
+                let listing = serde_json::json!({
+                    "marketplaces": listing.marketplaces,
+                    "marketplace_actions": listing.marketplace_actions,
+                    "entries": listing.entries,
+                });
+                println!("{}", serde_json::to_string_pretty(&listing).unwrap());
+                0
+            }
+            Err(error) => {
+                eprintln!("list_plugins failed: {error}");
+                1
+            }
+        }
+    })
 }
 
 fn parse_provider(arg: Option<&str>) -> ProviderKind {
@@ -99,6 +204,9 @@ fn image_attachment(path: PathBuf) -> Attachment {
 fn main() {
     env_logger::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("plugins") {
+        std::process::exit(plugins(args.into_iter().skip(1)));
+    }
     if args.first().map(String::as_str) == Some("--list-models") {
         let provider = parse_provider(args.get(1).map(String::as_str));
         let binary = match args.get(2).map(String::as_str) {

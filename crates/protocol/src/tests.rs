@@ -1033,3 +1033,133 @@ fn path_info_kinds_read_older_peers_and_spell_the_flags() {
     );
     assert!(!relayed.probing_direct);
 }
+
+/// A provider-plugin catalog and a plugin command are read by clients that
+/// render the actions the host computed, so their literal shapes are the
+/// contract; an older providers snapshot still decodes with no catalogs.
+#[test]
+fn provider_plugin_catalog_and_commands_use_their_documented_wire_shapes() {
+    let older: ProvidersStatus = serde_json::from_value(json!({
+        "model_catalogs": {}, "models_loading": {}, "provider_versions": {},
+        "tcode_update": {"current": "1.0.0", "latest": null, "release_url": null,
+            "update_available": false, "checking": false},
+        "provider_snapshots": {}, "acp_marketplace_items": [], "acp_registry_loading": false,
+        "acp_registry_error": null, "acp_installing": [], "providers_checked_at": null,
+        "providers_checking": false, "secret_names": {}
+    }))
+    .unwrap();
+    assert!(older.plugins.is_empty());
+
+    let catalog: ProviderPluginCatalog = serde_json::from_value(json!({
+        "profile_id": "claude",
+        "context_cwd": "/work/proj",
+        "marketplaces": [{"name": "tcode-probe", "source": "/tmp/tcode-probe/mkt",
+            "kind": "local_path", "location": "/tmp/tcode-probe/mkt"}],
+        "marketplace_actions": [
+            {"type": "add"},
+            {"type": "remove", "marketplace": "tcode-probe", "uninstalls": ["alpha@tcode-probe"]}
+        ],
+        "entries": [{
+            "id": "alpha@tcode-probe",
+            "name": "alpha",
+            "version": "1.0.0",
+            "source": {"marketplace": "tcode-probe", "kind": "local_path"},
+            "installations": [{"scope": "project", "location": "/cache/alpha/1.0.0",
+                "version": "1.0.0", "scope_enabled": true}],
+            "enabled": "yes",
+            "declared": {"skills": ["greet", "hello"], "hooks": ["SessionStart"],
+                "mcp_servers": ["alpha-dead"]},
+            "actions": [{"type": "disable", "scope": "project"},
+                {"type": "update", "scope": "project"}],
+            "diagnostics": [["message", "Restart to apply changes."]]
+        }],
+        "errors": ["failed to load marketplace /work/proj/.agents/plugins/marketplace.json"],
+        "state": {"type": "stale", "content": {"reason": "changed"}},
+        "loading": true,
+        "pending": ["gamma@tcode-probe"],
+        "challenges": [{
+            "op_id": 12,
+            "profile_id": "claude",
+            "entry_id": "gamma@tcode-probe",
+            "kind": {"type": "accept_command", "content": {
+                "command": "echo /tmp/tcode-probe/gamma-src", "sha256": "b9c02c85", "mode": "copy"}},
+            "native_text": "\"gamma\" is installed by running a command"
+        }]
+    }))
+    .unwrap();
+    assert_eq!(
+        catalog.errors,
+        ["failed to load marketplace /work/proj/.agents/plugins/marketplace.json"]
+    );
+    let alpha = &catalog.entries[0];
+    assert_eq!(alpha.enabled, agent::Tri::Yes);
+    assert_eq!(alpha.description, None);
+    assert!(alpha.errors.is_empty());
+    assert_eq!(
+        alpha.installations[0],
+        agent::PluginInstallation {
+            scope: agent::PluginScope::Project,
+            location: Some(PathBuf::from("/cache/alpha/1.0.0")),
+            version: Some("1.0.0".into()),
+            scope_enabled: Some(true),
+        }
+    );
+    let declared = alpha.declared.as_ref().unwrap();
+    assert_eq!(declared.agents, None);
+    assert_eq!(
+        declared.mcp_servers.as_deref(),
+        Some(&["alpha-dead".to_string()][..])
+    );
+    assert_eq!(
+        alpha.actions,
+        [
+            agent::PluginAction::Disable {
+                scope: agent::PluginScope::Project
+            },
+            agent::PluginAction::Update {
+                scope: agent::PluginScope::Project
+            },
+        ]
+    );
+    assert_eq!(
+        catalog.marketplace_actions[1],
+        agent::MarketplaceAction::Remove {
+            marketplace: "tcode-probe".into(),
+            uninstalls: vec!["alpha@tcode-probe".into()],
+        }
+    );
+    assert_eq!(
+        catalog.state,
+        PluginCatalogState::Stale {
+            reason: PluginStaleReason::Changed
+        }
+    );
+    assert_eq!(
+        catalog.challenges[0].kind,
+        PluginChallengeKind::AcceptCommand {
+            command: "echo /tmp/tcode-probe/gamma-src".into(),
+            sha256: "b9c02c85".into(),
+            mode: Some("copy".into()),
+        }
+    );
+    assert_eq!(catalog.challenges[0].op_id, RuntimeOperationId(12));
+
+    let command = decode_client_line(r#"{"id":4,"payload":{"type":"command","content":{"type":"install_provider_plugin","content":{"profile_id":"claude","entry_id":"gamma@tcode-probe","scope":"project","cwd":"/work/proj"}}}}"#).unwrap();
+    assert_eq!(
+        command.payload,
+        ClientPayload::Command(Command::InstallProviderPlugin {
+            profile_id: "claude".into(),
+            entry_id: "gamma@tcode-probe".into(),
+            scope: agent::PluginScope::Project,
+            cwd: Some(PathBuf::from("/work/proj")),
+        })
+    );
+    let resolve = decode_client_line(r#"{"id":5,"payload":{"type":"command","content":{"type":"resolve_plugin_challenge","content":{"op_id":12,"accept":true}}}}"#).unwrap();
+    assert_eq!(
+        resolve.payload,
+        ClientPayload::Command(Command::ResolvePluginChallenge {
+            op_id: RuntimeOperationId(12),
+            accept: true,
+        })
+    );
+}

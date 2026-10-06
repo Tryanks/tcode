@@ -296,7 +296,7 @@ impl AppState {
         self.upsert_session_in_memory(meta.clone());
 
         let id = meta.id.clone();
-        let commands = self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
+        let commands = self.cached_provider_commands_for(&meta);
         let mut mirror = Self::build_draft_session(
             meta.project_id.clone().unwrap_or_default(),
             meta.cwd.clone(),

@@ -200,7 +200,7 @@ impl AppState {
     /// provider rail). ACP agents have no model catalog: the agent publishes its
     /// models over the wire once the session starts.
     pub fn set_active_acp_agent(&mut self, target_id: &str, id: &str, cx: &mut HostCx) {
-        let provider_commands = self.cached_provider_commands(ProviderKind::Acp, Some(id));
+        let provider_commands = self.cached_provider_commands(ProviderKind::Acp, None, Some(id));
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };

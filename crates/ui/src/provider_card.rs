@@ -31,6 +31,9 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 use agent::ProviderKind;
 use tcode_core::settings::builtin_provider_color;
 
+/// The card's dialog asked to manage this profile's plugins.
+pub struct ManagePlugins(pub String);
+
 pub struct ProviderCard {
     store: Entity<WorkspaceStore>,
     /// The protocol this card's profile drives (glyph, shared model catalog /
@@ -43,6 +46,8 @@ pub struct ProviderCard {
     email_revealed: bool,
     _subscription: Subscription,
 }
+
+impl gpui::EventEmitter<ManagePlugins> for ProviderCard {}
 
 impl ProviderCard {
     pub fn new(
@@ -71,8 +76,21 @@ impl ProviderCard {
             .store
             .read(cx)
             .provider_profile_display_name(&profile_id);
-        let dialog = cx
-            .new(|cx| ProviderDialog::new(store.clone(), provider, profile_id.clone(), window, cx));
+        let card = cx.entity().downgrade();
+        let manage_id = profile_id.clone();
+        let manage_plugins: std::rc::Rc<dyn Fn(&mut gpui::App)> = std::rc::Rc::new(move |cx| {
+            _ = card.update(cx, |_, cx| cx.emit(ManagePlugins(manage_id.clone())));
+        });
+        let dialog = cx.new(|cx| {
+            ProviderDialog::new(
+                store.clone(),
+                provider,
+                profile_id.clone(),
+                manage_plugins,
+                window,
+                cx,
+            )
+        });
         window.open_dialog(cx, move |dlg, window, cx| {
             let content = dialog.clone();
             dlg.title(title.clone())
@@ -156,6 +174,12 @@ impl ProviderCard {
                                 .text_color(muted)
                                 .child(crate::tr!("providers.mcp_unavailable")),
                         )
+                    })
+                    .when(provider.caps().native_computer_use, |this| {
+                        this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
+                            "providers.native_computer_use",
+                            name = name.clone()
+                        )))
                     }),
             )
             .tooltip({

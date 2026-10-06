@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use agent::{ApprovalDecision, ApprovalMode, InteractionMode, ProviderKind, RewindMode};
+use agent::{
+    ApprovalDecision, ApprovalMode, InteractionMode, PluginAction, ProviderKind, RewindMode,
+};
 use gpui::{App, Context, Task};
 use tcode_core::{
     acp::AcpAgentPatch,
@@ -11,7 +13,7 @@ use tcode_core::{
     },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
-use tcode_protocol::{Command, CommandResponse, ProtocolError, SettingsPatch};
+use tcode_protocol::{Command, CommandResponse, ProtocolError, RuntimeOperationId, SettingsPatch};
 
 use super::{StoreChange, TopicKind, WorkspaceStore};
 
@@ -769,6 +771,85 @@ impl WorkspaceStore {
             session_id: self.active_session_id().unwrap_or_default(),
             id,
         });
+    }
+}
+
+impl WorkspaceStore {
+    pub fn set_plugin_management_enabled(&mut self, enabled: bool) {
+        self.patch_settings(SettingsPatch::PluginManagementEnabled(enabled));
+    }
+    pub fn set_provider_plugin_management(&mut self, provider: ProviderKind, enabled: bool) {
+        self.patch_settings(SettingsPatch::PluginManagementProvider { provider, enabled });
+    }
+    pub fn refresh_provider_plugins(&mut self, profile_id: String, cwd: Option<PathBuf>) {
+        self.dispatch(Command::RefreshProviderPlugins { profile_id, cwd });
+    }
+    /// Run one action the host offered for `entry_id` in the catalog listed
+    /// from `cwd`.
+    pub fn run_provider_plugin_action(
+        &mut self,
+        profile_id: String,
+        entry_id: String,
+        action: PluginAction,
+        cwd: Option<PathBuf>,
+    ) {
+        let scope = action.scope();
+        self.dispatch(match action {
+            PluginAction::Install { .. } => Command::InstallProviderPlugin {
+                profile_id,
+                entry_id,
+                scope,
+                cwd,
+            },
+            PluginAction::Uninstall { .. } => Command::UninstallProviderPlugin {
+                profile_id,
+                entry_id,
+                scope,
+                cwd,
+            },
+            PluginAction::Enable { .. } | PluginAction::Disable { .. } => {
+                Command::SetProviderPluginEnabled {
+                    profile_id,
+                    entry_id,
+                    scope,
+                    enabled: matches!(action, PluginAction::Enable { .. }),
+                    cwd,
+                }
+            }
+            PluginAction::Update { .. } => Command::UpdateProviderPlugin {
+                profile_id,
+                entry_id,
+                scope,
+                cwd,
+            },
+        });
+    }
+    pub fn add_provider_marketplace(
+        &mut self,
+        profile_id: String,
+        source: String,
+        cwd: Option<PathBuf>,
+    ) {
+        self.dispatch(Command::AddProviderMarketplace {
+            profile_id,
+            source,
+            cwd,
+        });
+    }
+    pub fn remove_provider_marketplace(
+        &mut self,
+        profile_id: String,
+        name: String,
+        cwd: Option<PathBuf>,
+    ) {
+        self.dispatch(Command::RemoveProviderMarketplace {
+            profile_id,
+            name,
+            cwd,
+        });
+    }
+    pub fn resolve_plugin_challenge(&mut self, op_id: RuntimeOperationId, accept: bool) {
+        self.dispatch(Command::ResolvePluginChallenge { op_id, accept });
     }
 }
 
