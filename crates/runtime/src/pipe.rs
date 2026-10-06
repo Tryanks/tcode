@@ -373,7 +373,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RefreshProviderStatus => app.refresh_provider_status(cx),
         Command::RefreshProviderUsage => app.refresh_provider_usage(cx),
         Command::CheckProviderVersions => app.check_provider_versions(cx),
-        Command::UpdateProvider { provider } => app.update_provider(provider, cx),
+        Command::UpdateProviders { providers } => app.update_providers(providers, cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),
         Command::RunGitAction {
             session_id,

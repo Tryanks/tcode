@@ -2081,6 +2081,26 @@ impl WorkspaceStore {
             .cloned()
     }
 
+    pub fn provider_update_run(&self) -> Option<tcode_protocol::ProviderUpdateRun> {
+        self.providers_replica.update_run.clone()
+    }
+
+    pub fn automatic_provider_updates(&self) -> Vec<agent::ProviderKind> {
+        agent::ProviderKind::NATIVE
+            .into_iter()
+            .filter(|provider| {
+                self.providers_replica
+                    .provider_versions
+                    .get(provider)
+                    .is_some_and(|status| {
+                        status.update_available
+                            && status.update_command.is_some()
+                            && !status.update_requires_terminal
+                    })
+            })
+            .collect()
+    }
+
     pub fn tcode_update_status(&self) -> tcode_protocol::TcodeUpdateStatus {
         self.providers_replica.tcode_update.clone()
     }

@@ -7,6 +7,63 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn provider_update_command_and_toasts_have_literal_wire_contracts() {
+    let command = Command::UpdateProviders {
+        providers: vec![agent::ProviderKind::ClaudeCode, agent::ProviderKind::Codex],
+    };
+    let wire =
+        json!({"type": "update_providers", "content": {"providers": ["claude_code", "codex"]}});
+    assert_eq!(serde_json::to_value(&command).unwrap(), wire);
+    assert_eq!(serde_json::from_value::<Command>(wire).unwrap(), command);
+    let updates = RuntimeToast::ProviderUpdatesAvailable {
+        updates: vec![ProviderUpdateAvailable {
+            provider: agent::ProviderKind::Codex,
+            version: "2.0.0".into(),
+            automatic: true,
+        }],
+    };
+    let wire = json!({"type": "provider_updates_available", "content": {"updates": [{"provider": "codex", "version": "2.0.0", "automatic": true}]}});
+    assert_eq!(serde_json::to_value(&updates).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<RuntimeToast>(wire).unwrap(),
+        updates
+    );
+    let run = ProviderUpdateRun {
+        total: 2,
+        completed: 1,
+        current: Some(agent::ProviderKind::Codex),
+        failed: vec![agent::ProviderKind::ClaudeCode],
+    };
+    for (name, toast) in [
+        (
+            "provider_update_started",
+            RuntimeToast::ProviderUpdateStarted {
+                operation: RuntimeOperationId(7),
+                run: run.clone(),
+            },
+        ),
+        (
+            "provider_update_progress",
+            RuntimeToast::ProviderUpdateProgress {
+                operation: RuntimeOperationId(7),
+                run: run.clone(),
+            },
+        ),
+        (
+            "provider_update_finished",
+            RuntimeToast::ProviderUpdateFinished {
+                operation: RuntimeOperationId(7),
+                run,
+            },
+        ),
+    ] {
+        let wire = json!({"type": name, "content": {"operation": 7, "run": {"total": 2, "completed": 1, "current": "codex", "failed": ["claude_code"]}}});
+        assert_eq!(serde_json::to_value(&toast).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<RuntimeToast>(wire).unwrap(), toast);
+    }
+}
+
+#[test]
 fn provider_update_status_accepts_older_hosts_and_preserves_terminal_requirement() {
     let older = json!({
         "installed": "1.0.0", "latest": "1.0.1", "update_available": true,

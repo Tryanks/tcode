@@ -375,7 +375,7 @@ impl ProviderCard {
                                 let store = store.clone();
                                 move |_, _, cx| {
                                     store.update(cx, |store, _cx| {
-                                        store.update_provider(provider);
+                                        store.update_providers(vec![provider]);
                                     });
                                 }
                             }),

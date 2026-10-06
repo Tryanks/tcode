@@ -706,8 +706,8 @@ impl WorkspaceStore {
     pub fn delete_profile(&mut self, profile_id: String) {
         self.dispatch(Command::DeleteProfile { profile_id });
     }
-    pub fn update_provider(&mut self, provider: ProviderKind) {
-        self.dispatch(Command::UpdateProvider { provider });
+    pub fn update_providers(&mut self, providers: Vec<ProviderKind>) {
+        self.dispatch(Command::UpdateProviders { providers });
     }
     pub fn set_active_model(
         &mut self,

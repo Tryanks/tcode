@@ -1,4 +1,4 @@
-use agent::RewindMode;
+use agent::{ProviderKind, RewindMode};
 use tcode_core::git::GitAction;
 use tcode_protocol::{
     GitActionRequest, MergeWorktreeFailure, NoticeSeverity, PluginOperationTarget, RuntimeEffect,
@@ -41,14 +41,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 }
                 RuntimeError::PersistSettings { error } => {
                     crate::tr!("errors.persist_settings", error = error).into_owned()
-                }
-                RuntimeError::UpdateUnknown { provider } => {
-                    crate::tr!("errors.update_unknown", provider = provider.display_name())
-                        .into_owned()
-                }
-                RuntimeError::UpdateFailed { provider } => {
-                    crate::tr!("errors.update_failed", provider = provider.display_name())
-                        .into_owned()
                 }
                 RuntimeError::TerminalStart { error } => {
                     crate::tr!("errors.terminal_start", error = error).into_owned()
@@ -112,23 +104,8 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
             };
             let message = match notice {
                 RuntimeNotice::ProviderMessage(message) => message.clone(),
-                RuntimeNotice::UpdateAvailable { provider, version } => crate::tr!(
-                    "notice.update_available",
-                    provider = provider.display_name(),
-                    version = version
-                )
-                .into_owned(),
                 RuntimeNotice::TcodeUpdateAvailable { version } => {
                     crate::tr!("notice.tcode_update_available", version = version).into_owned()
-                }
-                RuntimeNotice::UpdatingProvider { provider } => crate::tr!(
-                    "notice.updating_provider",
-                    provider = provider.display_name()
-                )
-                .into_owned(),
-                RuntimeNotice::UpdateDone { provider } => {
-                    crate::tr!("notice.update_done", provider = provider.display_name())
-                        .into_owned()
                 }
                 RuntimeNotice::NativeRewindCompleted { mode } => match mode {
                     RewindMode::Files => crate::tr!("chat.rewind_files_done").into_owned(),
@@ -211,6 +188,7 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
 pub(super) enum RuntimeToastDisposition {
     Push,
     Start(RuntimeOperationId),
+    Update(RuntimeOperationId),
     Finish(RuntimeOperationId),
 }
 
@@ -220,7 +198,14 @@ pub(super) struct PresentedRuntimeToast {
     pub kind: ToastKind,
     pub title: String,
     pub detail: Option<String>,
-    pub retry: Option<GitActionRequest>,
+    pub action: Option<RuntimeToastAction>,
+    pub progress: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RuntimeToastAction {
+    RetryGit(GitActionRequest),
+    UpdateProviders(Vec<ProviderKind>),
 }
 
 fn git_action_toast_titles(action: GitAction) -> (String, String) {
@@ -307,7 +292,104 @@ fn plugin_operation_toast_titles(target: &PluginOperationTarget) -> [String; 3] 
 }
 
 pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToast {
-    let (disposition, kind, title, detail, retry) = match toast {
+    match toast {
+        RuntimeToast::ProviderUpdatesAvailable { updates } => {
+            let automatic: Vec<_> = updates
+                .iter()
+                .filter(|update| update.automatic)
+                .map(|update| update.provider)
+                .collect();
+            let title = if let [update] = updates.as_slice() {
+                crate::tr!(
+                    "providers.updates_available_one",
+                    provider = update.provider.display_name(),
+                    version = &update.version
+                )
+                .into_owned()
+            } else {
+                crate::tr!("providers.updates_available_many", count = updates.len()).into_owned()
+            };
+            return PresentedRuntimeToast {
+                disposition: RuntimeToastDisposition::Push,
+                kind: ToastKind::Info,
+                title,
+                detail: (updates.len() > 1).then(|| {
+                    updates
+                        .iter()
+                        .map(|update| {
+                            format!("{} v{}", update.provider.display_name(), update.version)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }),
+                action: (!automatic.is_empty())
+                    .then_some(RuntimeToastAction::UpdateProviders(automatic)),
+                progress: None,
+            };
+        }
+        RuntimeToast::ProviderUpdateStarted { operation, run }
+        | RuntimeToast::ProviderUpdateProgress { operation, run }
+        | RuntimeToast::ProviderUpdateFinished { operation, run } => {
+            let finished = matches!(toast, RuntimeToast::ProviderUpdateFinished { .. });
+            let failed = run
+                .failed
+                .iter()
+                .map(|provider| provider.display_name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let title = if finished {
+                if run.failed.is_empty() {
+                    crate::tr!("providers.updated_count", count = run.completed).into_owned()
+                } else {
+                    crate::tr!(
+                        "providers.update_result",
+                        updated = run.completed - run.failed.len(),
+                        failed = run.failed.len(),
+                        providers = &failed
+                    )
+                    .into_owned()
+                }
+            } else {
+                crate::tr!(
+                    "providers.update_progress",
+                    provider = run
+                        .current
+                        .map(|provider| provider.display_name())
+                        .unwrap_or_default(),
+                    completed = run.completed,
+                    total = run.total
+                )
+                .into_owned()
+            };
+            return PresentedRuntimeToast {
+                disposition: if finished {
+                    RuntimeToastDisposition::Finish(*operation)
+                } else if matches!(toast, RuntimeToast::ProviderUpdateStarted { .. }) {
+                    RuntimeToastDisposition::Start(*operation)
+                } else {
+                    RuntimeToastDisposition::Update(*operation)
+                },
+                kind: if !finished {
+                    ToastKind::Loading
+                } else if run.failed.is_empty() {
+                    ToastKind::Success
+                } else if run.failed.len() == run.total {
+                    ToastKind::Error
+                } else {
+                    ToastKind::Warning
+                },
+                title,
+                detail: (!failed.is_empty()).then(|| {
+                    crate::tr!("providers.update_failures", providers = failed).into_owned()
+                }),
+                action: None,
+                progress: (!finished)
+                    .then_some(100. * run.completed as f32 / run.total.max(1) as f32),
+            };
+        }
+        _ => {}
+    }
+    let (disposition, kind, title, detail, action) = match toast {
         RuntimeToast::GitBusy => (
             RuntimeToastDisposition::Push,
             ToastKind::Warning,
@@ -338,7 +420,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
             ToastKind::Error,
             crate::tr!("git.toast.failed").into_owned(),
             Some(detail.clone()),
-            Some(retry.clone()),
+            Some(RuntimeToastAction::RetryGit(retry.clone())),
         ),
         RuntimeToast::CommitMessageGenerated { message } => (
             RuntimeToastDisposition::Push,
@@ -432,7 +514,8 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         kind,
         title,
         detail,
-        retry,
+        action,
+        progress: None,
     }
 }
 
@@ -441,6 +524,52 @@ mod tests {
     use agent::ProviderKind;
 
     use super::*;
+
+    #[test]
+    fn merged_provider_toast_offers_only_automatic_updates_in_both_locales() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for language in [crate::LANGUAGE_ENGLISH, crate::LANGUAGE_SIMPLIFIED_CHINESE] {
+            crate::set_locale(language);
+            let mut updates = vec![
+                tcode_protocol::ProviderUpdateAvailable {
+                    provider: ProviderKind::ClaudeCode,
+                    version: "2.1.0".into(),
+                    automatic: false,
+                },
+                tcode_protocol::ProviderUpdateAvailable {
+                    provider: ProviderKind::Codex,
+                    version: "1.2.0".into(),
+                    automatic: false,
+                },
+            ];
+            let manual = present_runtime_toast(&RuntimeToast::ProviderUpdatesAvailable {
+                updates: updates.clone(),
+            });
+            assert!(manual.action.is_none());
+            assert_eq!(
+                manual.detail.as_deref(),
+                Some("Claude Code v2.1.0\nCodex v1.2.0")
+            );
+            assert_eq!(
+                manual.title,
+                if language == crate::LANGUAGE_ENGLISH {
+                    "Updates available for 2 providers"
+                } else {
+                    "有 2 个 Provider 可更新"
+                }
+            );
+            updates[1].automatic = true;
+            let automatic =
+                present_runtime_toast(&RuntimeToast::ProviderUpdatesAvailable { updates });
+            assert_eq!(
+                automatic.action,
+                Some(RuntimeToastAction::UpdateProviders(vec![
+                    ProviderKind::Codex
+                ]))
+            );
+        }
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+    }
 
     #[test]
     fn locale_effect_is_applied_only_at_ui_boundary() {
@@ -626,7 +755,10 @@ mod tests {
                 retry: retry.clone(),
             });
             assert_eq!(failed.detail.as_deref(), Some("git raw\0detail"));
-            assert_eq!(failed.retry.as_ref(), Some(&retry));
+            assert_eq!(
+                failed.action,
+                Some(RuntimeToastAction::RetryGit(retry.clone()))
+            );
             assert_eq!(
                 present_runtime_toast(&RuntimeToast::CommitMessageGenerated {
                     message: "generated raw\0message".into(),
@@ -688,8 +820,8 @@ mod tests {
                     Some("provider-warning\0diagnostic"),
                 ),
                 (
-                    RuntimeEvent::Notice(RuntimeNotice::UpdateDone {
-                        provider: ProviderKind::Codex,
+                    RuntimeEvent::Notice(RuntimeNotice::TcodeUpdateAvailable {
+                        version: "1.0.0".into(),
                     }),
                     RuntimeEventSeverity::Success,
                     None,
