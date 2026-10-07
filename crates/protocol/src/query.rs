@@ -318,6 +318,7 @@ pub enum SpaceAction {
     },
     RemoveMember {
         device_id: String,
+        regenerate_link: bool,
     },
 }
 
@@ -345,6 +346,8 @@ pub enum DeviceAccess {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostingState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_space_id: Option<String>,
     pub enabled: bool,
     /// Seconds until `invite` expires; `0` without one.
     #[serde(default)]

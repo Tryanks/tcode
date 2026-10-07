@@ -572,6 +572,7 @@ mod tests {
             let principals = [
                 Principal::Full,
                 Principal::Space {
+                    policy_revision: 0,
                     space_id: "space".into(),
                     space_name: "Shared".into(),
                     project_ids: vec!["project".into()],

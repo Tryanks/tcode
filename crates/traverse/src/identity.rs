@@ -47,6 +47,7 @@ pub struct HostIdentity {
     secret_key: SecretKey,
     pub devices: Vec<DeviceRecord>,
     pub spaces: Vec<SpaceRecord>,
+    pub policy_revision: u64,
     pub pairing_enabled: bool,
     path: PathBuf,
 }
@@ -60,6 +61,8 @@ struct HostFile {
     devices: Vec<DeviceRecord>,
     #[serde(default)]
     spaces: Vec<SpaceRecord>,
+    #[serde(default)]
+    policy_revision: u64,
     #[serde(default = "enabled")]
     pairing_enabled: bool,
 }
@@ -107,6 +110,7 @@ impl HostIdentity {
                     secret_key: parse_secret_key(&file.secret_key)?,
                     devices: file.devices,
                     spaces: file.spaces,
+                    policy_revision: file.policy_revision,
                     pairing_enabled: file.pairing_enabled,
                     path,
                 };
@@ -122,6 +126,7 @@ impl HostIdentity {
                     secret_key: SecretKey::generate(),
                     devices: Vec::new(),
                     spaces: Vec::new(),
+                    policy_revision: 0,
                     pairing_enabled: true,
                     path,
                 };
@@ -147,6 +152,7 @@ impl HostIdentity {
             secret_key: encode_hex(&self.secret_key.to_bytes()),
             devices: self.devices.clone(),
             spaces: self.spaces.clone(),
+            policy_revision: self.policy_revision,
             pairing_enabled: self.pairing_enabled,
         };
         write_private(&self.path, &serde_json::to_vec_pretty(&file)?)

@@ -244,7 +244,9 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
             name: device_name.clone(),
         }),
     };
-    state.observe_principal(&cx.principal);
+    if !matches!(payload, ClientPayload::Unsubscribe(_)) {
+        state.observe_principal(&cx.principal);
+    }
     if let Err(error) = state.authorize(&cx.principal, &payload, cx) {
         let reply = if matches!(payload, ClientPayload::Query(_)) {
             HostMessage::QueryResult {

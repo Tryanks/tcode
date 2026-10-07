@@ -853,7 +853,19 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let (host_tx, from_host) = async_channel::unbounded();
     let host = start_host(HostMux::new(to_host, from_host), &host_dir, None);
     host.new_invitation();
-    let id = host.create_space("Shared".into()).unwrap();
+    let created = host
+        .hosting(HostingAction::Spaces(SpaceAction::Create {
+            name: "Shared".into(),
+        }))
+        .unwrap();
+    let id = created.created_space_id.unwrap();
+    assert_eq!(created.spaces[0].id, id);
+    assert!(
+        host.hosting(HostingAction::State)
+            .unwrap()
+            .created_space_id
+            .is_none()
+    );
     host.set_space_projects(&id, vec!["project-a".into(), "project-b".into()])
         .unwrap();
     let invite = space_invite(&host, &id);
@@ -878,6 +890,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let client = tcode_traverse::connect(&paired, &member);
     wait_state(&client, syncing_directly);
     let mut principal = Principal::Space {
+        policy_revision: persisted.policy_revision,
         space_id: id.clone(),
         space_name: "Shared".into(),
         project_ids: vec!["project-a".into(), "project-b".into()],
@@ -1006,6 +1019,14 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     wait_state(&other_client, syncing_directly);
     let mut other_principal = principal.clone();
     if let Principal::Space {
+        policy_revision, ..
+    } = &mut other_principal
+    {
+        *policy_revision = HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .policy_revision;
+    }
+    if let Principal::Space {
         device_id,
         device_name,
         ..
@@ -1018,7 +1039,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     scoped_ping(&client, &host_rx, &host_tx, &principal, 4);
     assert_stayed_connected(&client);
 
-    host.remove_member(&member.endpoint_id().to_string())
+    host.remove_member(&member.endpoint_id().to_string(), false)
         .unwrap();
     let unpaired = |state: &ConnectionState| {
         state
@@ -1031,7 +1052,38 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let rejected = tcode_traverse::connect(&paired, &member);
     wait_state(&rejected, unpaired);
     rejected.to_host.close();
-    let repaired = tcode_traverse::pair_blocking(&regenerated, &member).unwrap();
+    tcode_traverse::pair_blocking(&regenerated, &member).unwrap();
+    let blocker = host_dir.0.join("traverse.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    assert!(
+        host.remove_member(&member.endpoint_id().to_string(), true)
+            .is_err()
+    );
+    assert_eq!(space_invite(&host, &id).secret, regenerated.secret);
+    assert!(
+        host.devices()
+            .iter()
+            .any(|device| device.id == member.endpoint_id().to_string())
+    );
+    std::fs::remove_dir(blocker).unwrap();
+    host.hosting(HostingAction::Spaces(SpaceAction::RemoveMember {
+        device_id: member.endpoint_id().to_string(),
+        regenerate_link: true,
+    }))
+    .unwrap();
+    assert_eq!(
+        tcode_traverse::pair_blocking(&regenerated, &member),
+        Err(PairError::Invalid)
+    );
+    let repaired = tcode_traverse::pair_blocking(&space_invite(&host, &id), &member).unwrap();
+    if let Principal::Space {
+        policy_revision, ..
+    } = &mut principal
+    {
+        *policy_revision = HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .policy_revision;
+    }
     let client = tcode_traverse::connect(&repaired, &member);
     wait_state(&client, syncing_directly);
     scoped_ping(&client, &host_rx, &host_tx, &principal, 5);
@@ -1054,7 +1106,15 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         matches!(state, ConnectionState::Reconnecting { .. })
     });
     wait_state(&client, syncing_directly);
-    if let Principal::Space { project_ids, .. } = &mut principal {
+    if let Principal::Space {
+        project_ids,
+        policy_revision,
+        ..
+    } = &mut principal
+    {
+        *policy_revision = HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .policy_revision;
         *project_ids = vec!["project-b".into()];
     }
     scoped_ping(&client, &host_rx, &host_tx, &principal, 7);
@@ -1062,7 +1122,15 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         matches!(state, ConnectionState::Reconnecting { .. })
     });
     wait_state(&other_client, syncing_directly);
-    if let Principal::Space { project_ids, .. } = &mut other_principal {
+    if let Principal::Space {
+        project_ids,
+        policy_revision,
+        ..
+    } = &mut other_principal
+    {
+        *policy_revision = HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .policy_revision;
         *project_ids = vec!["project-b".into()];
     }
     scoped_ping(&other_client, &host_rx, &host_tx, &other_principal, 11);
@@ -1071,7 +1139,15 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         matches!(state, ConnectionState::Reconnecting { .. })
     });
     wait_state(&client, syncing_directly);
-    if let Principal::Space { space_name, .. } = &mut principal {
+    if let Principal::Space {
+        space_name,
+        policy_revision,
+        ..
+    } = &mut principal
+    {
+        *policy_revision = HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .policy_revision;
         *space_name = "Renamed".into();
     }
     scoped_ping(&client, &host_rx, &host_tx, &principal, 8);
@@ -1091,9 +1167,13 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         space_id,
         space_name,
         project_ids,
+        policy_revision,
         ..
     } = &mut principal
     {
+        *policy_revision = HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .policy_revision;
         *space_id = moved_space.clone();
         *space_name = "Moved".into();
         project_ids.clear();
@@ -1140,6 +1220,20 @@ fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed(
     let migrated = std::fs::read(dir.0.join(HOST_FILE)).unwrap();
     let persisted: Value = serde_json::from_slice(&migrated).unwrap();
     assert_eq!(persisted["v"], 3);
+    assert_eq!(identity.policy_revision, 0);
+    let mut older_v3 = persisted.clone();
+    older_v3.as_object_mut().unwrap().remove("policy_revision");
+    std::fs::write(
+        dir.0.join(HOST_FILE),
+        serde_json::to_vec(&older_v3).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        HostIdentity::load_or_create(&dir.0, "Test Host")
+            .unwrap()
+            .policy_revision,
+        0
+    );
     assert_eq!(persisted["devices"][0]["access"], json!({"type":"full"}));
     for access in [
         None,
