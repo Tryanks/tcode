@@ -836,6 +836,8 @@ composer:
   voice_preparing: "正在准备语音输入…"
   voice_stop: "停止语音输入"
   voice_error: "语音输入失败：%{error}"
+  voice_enable_dictation: "macOS 提示 Siri 或听写已停用。仅授权麦克风还不够，请在「系统设置 → 键盘」中开启「听写」，然后重试语音输入。"
+  voice_open_dictation_settings: "打开听写设置"
 permission:
   recommended: "★ 推荐"
   pending: "待生效"

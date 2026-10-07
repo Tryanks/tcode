@@ -190,12 +190,32 @@ impl Composer {
             }
             SpeechEvent::Error(error) => {
                 self.voice.insertion = None;
-                window.push_notification(
-                    Notification::error(
-                        crate::tr!("composer.voice_error", error = error).into_owned(),
-                    ),
-                    cx,
+                let notification = Notification::error(
+                    crate::tr!("composer.voice_error", error = error).into_owned(),
                 );
+                #[cfg(target_os = "macos")]
+                let notification = match error {
+                    // gpui-component flattens NSError into a message ending in (domain code).
+                    gpui_component::speech::SpeechError::Recognizer(error)
+                        if error.to_string().ends_with("(kLSRErrorDomain 201)") =>
+                    {
+                        Notification::error(crate::tr!("composer.voice_enable_dictation"))
+                            .id1::<Voice>("dictation-disabled")
+                            .autohide(false)
+                            .action(|_, _, _| {
+                                Button::new("open-dictation-settings")
+                                    .outline()
+                                    .label(crate::tr!("composer.voice_open_dictation_settings"))
+                                    .on_click(|_, _, cx| {
+                                        cx.open_url(
+                                            "x-apple.systempreferences:com.apple.preference.keyboard?Dictation",
+                                        );
+                                    })
+                            })
+                    }
+                    _ => notification,
+                };
+                window.push_notification(notification, cx);
             }
             SpeechEvent::Cancelled => self.voice.insertion = None,
         }
