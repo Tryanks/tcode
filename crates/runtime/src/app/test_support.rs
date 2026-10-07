@@ -230,6 +230,7 @@ impl TestEntity {
             &mut self.0.borrow_mut(),
             &mut host_cx,
             ClientMessage {
+                principal: None,
                 key: None,
                 id,
                 payload,

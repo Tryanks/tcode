@@ -361,6 +361,7 @@ impl HostLink {
         };
         // Reject unencodable platform paths before they can block the FIFO.
         encode_line(&ClientMessage {
+            principal: None,
             id,
             key: Some(entry.key.clone()),
             payload: ClientPayload::Command(entry.command.clone()),
@@ -451,6 +452,7 @@ impl HostLink {
             .skip_while(|write| write.sent.is_some())
         {
             let message = ClientMessage {
+                principal: None,
                 id: write.id,
                 key: Some(write.entry.key.clone()),
                 payload: ClientPayload::Command(write.entry.command.clone()),
@@ -526,6 +528,7 @@ impl HostLink {
 
     fn send_payload(&self, id: u64, payload: ClientPayload) -> Result<(), ProtocolError> {
         let line = encode_line(&ClientMessage {
+            principal: None,
             key: None,
             id,
             payload,
@@ -911,6 +914,7 @@ fn snapshot_bytes(delivery: &Delivery) -> Result<usize, ProtocolError> {
         .len();
     let wire = delivery.writes.iter().try_fold(0_usize, |bytes, write| {
         encode_line(&ClientMessage {
+            principal: None,
             id: write.id,
             key: Some(write.entry.key.clone()),
             payload: ClientPayload::Command(write.entry.command.clone()),

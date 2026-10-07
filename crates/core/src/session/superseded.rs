@@ -69,6 +69,7 @@ mod tests {
 
     fn at(ts: u64, event: AgentEvent) -> StoredEvent {
         StoredEvent {
+            author: None,
             ts: Some(ts),
             event,
             elided: None,

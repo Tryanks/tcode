@@ -951,6 +951,7 @@ struct Lost {
 /// ID zero is reserved for transport probes; `HostLink` starts at one.
 fn ping_line() -> String {
     tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+        principal: None,
         key: None,
         id: 0,
         payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping),

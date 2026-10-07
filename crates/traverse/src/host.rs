@@ -558,6 +558,12 @@ impl Shared {
 
     fn hosting(self: &Arc<Self>, action: HostingAction) -> Result<HostingState, ProtocolError> {
         match action {
+            HostingAction::Spaces(_) => {
+                return Err(ProtocolError {
+                    code: "unsupported".into(),
+                    message: "space hosting is not available yet".into(),
+                });
+            }
             HostingAction::State => {}
             HostingAction::SetEnabled(enabled) => {
                 self.set_pairing_enabled(enabled);
@@ -580,6 +586,7 @@ impl Shared {
             .map(|(invitation, remaining)| (Some(invitation.url()), remaining.as_secs()))
             .unwrap_or((None, 0));
         Ok(HostingState {
+            spaces: Vec::new(),
             enabled,
             expires_in_secs,
             host_id: addr.id,
@@ -590,6 +597,7 @@ impl Shared {
                 .devices
                 .iter()
                 .map(|device| HostedDevice {
+                    access: tcode_protocol::DeviceAccess::Full,
                     id: device.id.clone(),
                     name: device.name.clone(),
                     created_unix: device.created_unix,
@@ -994,7 +1002,7 @@ impl StreamTask {
     async fn bridge(&self, send: SendStream, reader: LineReader) -> io::Result<()> {
         let mut send = wire::LineWriter::new(send);
         let mut reader = wire::LineStream::new(reader);
-        let attachment = self.shared.mux.attach();
+        let attachment = self.shared.mux.attach(tcode_protocol::Principal::Full);
         let scope = self.connection.remote_id().to_string();
         let (outbound, outbound_rx) = async_channel::unbounded::<String>();
         let from_host = attachment.from_host.clone();
@@ -1027,6 +1035,7 @@ impl StreamTask {
                         ));
                     };
                     if let Ok(tcode_protocol::ClientMessage {
+                        principal: _,
                         id,
                         payload:
                             tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {

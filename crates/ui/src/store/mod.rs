@@ -54,6 +54,8 @@ pub enum TopicKind {
     SessionStatus,
     SessionPlan,
     Index,
+    SpaceIndex,
+    Scope,
     Settings,
     Providers,
     GitStatus,
@@ -70,6 +72,8 @@ impl From<&Topic> for TopicKind {
             Topic::SessionEvents { .. } => Self::SessionEvents,
             Topic::SessionStatus { .. } => Self::SessionStatus,
             Topic::SessionPlan { .. } => Self::SessionPlan,
+            Topic::SpaceIndex { .. } => Self::SpaceIndex,
+            Topic::Scope => Self::Scope,
             Topic::Index => Self::Index,
             Topic::Settings => Self::Settings,
             Topic::Providers => Self::Providers,
@@ -3977,6 +3981,7 @@ mod tests {
                     from: 10,
                     end: 20,
                     records: vec![StoredEvent {
+                        author: None,
                         ts: Some(1),
                         event: tool.clone(),
                         elided: Some(700_000),
@@ -4337,6 +4342,7 @@ mod tests {
 
     fn recorded(ts: u64, event: AgentEvent) -> SessionEventRecord {
         SessionEventRecord {
+            author: None,
             ts: Some(ts),
             ..event.into()
         }

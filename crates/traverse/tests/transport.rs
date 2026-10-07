@@ -34,9 +34,6 @@ impl Drop for TestDir {
     }
 }
 
-/// Answers subscriptions with an index event, `create_project` with a
-/// broadcast event, pings with pong, and acks every command. Records every
-/// dedup key it sees.
 fn fake_host() -> (
     HostMux,
     Arc<AtomicUsize>,
@@ -49,43 +46,64 @@ fn fake_host() -> (
     let count = subscribe_count.clone();
     let seen_keys = keys.clone();
     std::thread::spawn(move || {
-        let event = json!({
-            "type": "event",
-            "content": {
-                "topic": "index",
-                "event": {"type": "index_snapshot", "content": {"sessions": [], "projects": []}}
-            }
-        })
-        .to_string();
         while let Ok(line) = host_rx.recv_blocking() {
-            let value: Value = serde_json::from_str(line.trim_end()).unwrap();
-            let id = value["id"].as_u64().unwrap();
-            if let Some(key) = value["key"].as_str() {
-                seen_keys.lock().unwrap().push(key.to_owned());
+            let request = tcode_protocol::decode_client_line(&line).unwrap();
+            let id = request.id;
+            if let Some(key) = request.key {
+                seen_keys.lock().unwrap().push(key);
             }
-            let kind = value["payload"]["type"].as_str().unwrap();
-            if kind == "subscribe" {
+            if let tcode_protocol::ClientPayload::Subscribe(subscription) = &request.payload {
                 count.fetch_add(1, Ordering::Relaxed);
-                host_tx.send_blocking(event.clone()).unwrap();
+                let snapshot = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: Some(id),
+                    topic: subscription.topic.clone(),
+                    event: tcode_protocol::ServerEvent::IndexSnapshot(
+                        tcode_protocol::IndexSnapshot {
+                            summary: tcode_protocol::IndexSummary::default(),
+                            sessions: Vec::new(),
+                            projects: Vec::new(),
+                        },
+                    ),
+                });
+                host_tx
+                    .send_blocking(tcode_protocol::encode_line(&snapshot).unwrap())
+                    .unwrap();
             }
-            if kind == "query" && value["payload"]["content"]["type"] == "ping" {
+            if let tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping) =
+                &request.payload
+            {
                 host_tx
                     .send_blocking(
-                        json!({"type":"query_result","content":{"id":id,"result":{"Ok":{"type":"pong"}}}})
-                            .to_string(),
+                        tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                            id,
+                            result: Ok(tcode_protocol::QueryResponse::Pong),
+                        })
+                        .unwrap(),
                     )
                     .unwrap();
                 continue;
             }
-            if kind == "command"
-                && value["payload"]["content"]["type"].as_str() == Some("create_project")
+            let mut response = tcode_protocol::CommandResponse::Unit;
+            if let tcode_protocol::ClientPayload::Command(
+                tcode_protocol::Command::CreateProject { root },
+            ) = &request.payload
             {
-                host_tx.send_blocking(event.clone()).unwrap();
+                let broadcast = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: None, topic: tcode_protocol::Topic::Index,
+                    event: serde_json::from_value(json!({"type":"index_upsert_project","content":{"id":"project","name":"Shared","root":root,"created_at":1}})).unwrap(),
+                });
+                host_tx
+                    .send_blocking(tcode_protocol::encode_line(&broadcast).unwrap())
+                    .unwrap();
+                response = tcode_protocol::CommandResponse::ProjectId(Some("project".into()));
             }
             host_tx
                 .send_blocking(
-                    json!({"type": "ack", "content": {"id": id, "result": {"Ok": {"type": "unit"}}}})
-                        .to_string(),
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                        id,
+                        result: Ok(response),
+                    })
+                    .unwrap(),
                 )
                 .unwrap();
         }
@@ -174,7 +192,16 @@ fn recv_type(transport: &Transport, kind: &str, id: Option<u64>) -> Value {
 }
 
 fn subscribe(id: u64) -> String {
-    json!({"id": id, "payload": {"type": "subscribe", "content": {"topic": "index"}}}).to_string()
+    tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+        id,
+        key: None,
+        principal: None,
+        payload: tcode_protocol::ClientPayload::Subscribe(tcode_protocol::Subscription {
+            topic: tcode_protocol::Topic::Index,
+            after: None,
+        }),
+    })
+    .unwrap()
 }
 
 #[test]

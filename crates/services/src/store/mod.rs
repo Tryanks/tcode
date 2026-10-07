@@ -45,7 +45,7 @@ use agent::{AgentEvent, ModelSpec, ProviderCommand, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 use tcode_core::project::{IndexFile, Project, SessionMeta};
-use tcode_core::session::StoredEvent;
+use tcode_core::session::{Author, StoredEvent};
 
 use db::{Broken, Db, KEPT_WORKTREES, SCHEMA_VERSION, blob, integer, is_broken};
 
@@ -64,12 +64,16 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 /// callers deal in [`StoredEvent`] (which tolerates the legacy bare form).
 #[derive(Serialize, Deserialize)]
 struct EventEnvelope {
+    #[serde(default)]
+    author: Option<Author>,
     ts: u64,
     event: AgentEvent,
 }
 
 #[derive(Serialize)]
 struct EventEnvelopeRef<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<&'a Author>,
     ts: u64,
     event: &'a AgentEvent,
 }
@@ -240,7 +244,12 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
-        let mut line = serde_json::to_vec(&EventEnvelopeRef { ts, event }).map_err(invalid_data)?;
+        let mut line = serde_json::to_vec(&EventEnvelopeRef {
+            ts,
+            event,
+            author: None,
+        })
+        .map_err(invalid_data)?;
         line.push(b'\n');
         Ok(Self(Op::AppendEvent {
             session_id: session_id.to_owned(),
@@ -914,7 +923,7 @@ impl SessionStore {
                         log.next_row = position as u64 + 1;
                         match decode_row(&line) {
                             Row::Record(stored) => {
-                                log.records.push(stored);
+                                log.records.push(*stored);
                                 log.rows.push(position as u64);
                             }
                             Row::Blank => {}
@@ -1123,7 +1132,7 @@ pub struct EventLog {
 
 /// What one stored row holds.
 enum Row {
-    Record(StoredEvent),
+    Record(Box<StoredEvent>),
     /// Only whitespace: no record in any build.
     Blank,
     Undecodable(String),
@@ -1138,7 +1147,7 @@ fn decode_row(line: &[u8]) -> Row {
         return Row::Blank;
     }
     match parse_stored_line(trimmed) {
-        Ok(stored) => Row::Record(stored),
+        Ok(stored) => Row::Record(Box::new(stored)),
         Err(error) => Row::Undecodable(format!("unparseable: {error}")),
     }
 }
@@ -1409,12 +1418,14 @@ fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> i
 pub(crate) fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
     match serde_json::from_str::<EventEnvelope>(line) {
         Ok(envelope) => Ok(StoredEvent {
+            author: envelope.author,
             ts: Some(envelope.ts),
             event: envelope.event,
             elided: None,
         }),
         Err(_envelope_err) => match serde_json::from_str::<AgentEvent>(line) {
             Ok(event) => Ok(StoredEvent {
+                author: None,
                 ts: None,
                 event,
                 elided: None,
