@@ -1752,12 +1752,17 @@ impl ChatView {
         );
 
         let bubble = if let Some(author) = self.workspace_store.read(cx).message_byline(entry_id) {
+            // Inset by the bubble's own padding, so the name lines up with the
+            // message text rather than the bubble's rounded corner.
             v_flex()
                 .w_full()
                 .items_end()
-                .gap_1()
+                .gap(px(2.))
                 .child(
                     div()
+                        .max_w_3_4()
+                        .px(px(10.))
+                        .truncate()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .child(author),

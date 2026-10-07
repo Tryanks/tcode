@@ -415,12 +415,13 @@ impl RemotePanel {
                         .truncate()
                         .child(name.clone()),
                 )
-                .when_some(host.space_name.clone(), |column, space| {
+                .when_some(host.space_name.as_deref(), |column, space| {
                     column.child(
                         div()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(space),
+                            .truncate()
+                            .child(crate::tr!("member.space", space = space).into_owned()),
                     )
                 })
                 .when_some(reason, |column, reason| {
