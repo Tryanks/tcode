@@ -44,22 +44,39 @@ use crate::{
 /// needs a stable id that routes back to the right ACP method.
 const MODE_OPTION_ID: &str = "acp:mode";
 const MODEL_OPTION_ID: &str = "acp:model";
+/// A thought-level option takes the id every native provider gives its
+/// reasoning effort, so it is presented, inherited and set like theirs.
+const EFFORT_OPTION_ID: &str = "reasoningEffort";
 const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 
-/// The persisted selection for the session config option `config_id`, as
-/// [`SessionOptions::option_selections`] carries it into a new process.
+/// The descriptor id of the session config option `config_id` in `category`.
+fn config_option_id(
+    config_id: &str,
+    category: Option<&acp::SessionConfigOptionCategory>,
+) -> String {
+    match category {
+        Some(acp::SessionConfigOptionCategory::Mode) => MODE_OPTION_ID.to_string(),
+        Some(acp::SessionConfigOptionCategory::Model) => MODEL_OPTION_ID.to_string(),
+        Some(acp::SessionConfigOptionCategory::ThoughtLevel) => EFFORT_OPTION_ID.to_string(),
+        _ => format!("{CONFIG_OPTION_PREFIX}{config_id}"),
+    }
+}
+
+/// The persisted selection for the session config option `config_id` in
+/// `category`, as [`SessionOptions::option_selections`] carries it into a new
+/// process.
 pub(crate) fn config_selection<'a>(
     selections: &'a [OptionSelection],
     config_id: &str,
+    category: Option<&acp::SessionConfigOptionCategory>,
 ) -> Option<&'a str> {
-    selections
-        .iter()
-        .find(|selection| {
-            selection
-                .id
-                .strip_prefix(CONFIG_OPTION_PREFIX)
-                .is_some_and(|id| id == config_id)
-        })
+    let id = config_option_id(config_id, category);
+    // Selections saved while every config option was `acp:cfg:<id>` still
+    // name a thought-level option that way.
+    let legacy = format!("{CONFIG_OPTION_PREFIX}{config_id}");
+    let find = |id: &str| selections.iter().find(|selection| selection.id == id);
+    find(&id)
+        .or_else(|| find(&legacy))
         .and_then(|selection| selection.value.as_str())
 }
 
@@ -1535,11 +1552,10 @@ impl OptionRegistry {
             });
         }
         for option in config.unwrap_or_default() {
-            let id = match option.category.as_ref() {
-                Some(acp::SessionConfigOptionCategory::Mode) => MODE_OPTION_ID.to_string(),
-                Some(acp::SessionConfigOptionCategory::Model) => MODEL_OPTION_ID.to_string(),
-                _ => format!("{CONFIG_OPTION_PREFIX}{}", option.id.0),
-            };
+            // The mode, model and thought-level categories take tcode's
+            // canonical ids (the runtime reads `acp:mode`); every option,
+            // whatever its category, is set through `session/set_config_option`.
+            let id = config_option_id(&option.id.0, option.category.as_ref());
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
                     let options = match &select.options {
@@ -3204,12 +3220,7 @@ mod tests {
         let ids: Vec<&str> = descriptors.iter().map(descriptor_id).collect();
         assert_eq!(
             ids,
-            vec![
-                "acp:mode",
-                "acp:model",
-                "acp:cfg:thought_level",
-                "acp:cfg:web"
-            ]
+            vec!["acp:mode", "acp:model", "reasoningEffort", "acp:cfg:web"]
         );
         assert_eq!(state.options.origin("acp:mode"), Some(OptionOrigin::Mode));
         assert_eq!(
@@ -3265,6 +3276,29 @@ mod tests {
             }
             other => panic!("expected ProviderOptions, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_thought_level_selection_saved_under_its_config_id_still_restores() {
+        let thought = Some(&acp::SessionConfigOptionCategory::ThoughtLevel);
+        let saved = |id: &str| {
+            vec![OptionSelection {
+                id: id.into(),
+                value: json!("low"),
+            }]
+        };
+        assert_eq!(
+            config_selection(&saved("reasoningEffort"), "reasoning_effort", thought),
+            Some("low")
+        );
+        assert_eq!(
+            config_selection(
+                &saved("acp:cfg:reasoning_effort"),
+                "reasoning_effort",
+                thought
+            ),
+            Some("low")
+        );
     }
 
     #[test]

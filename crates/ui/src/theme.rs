@@ -102,6 +102,13 @@ impl Theme {
         gpui::rgb(0xF5A524).into()
     }
 
+    /// The effort slider's fill and label at the highest reasoning level.
+    /// Deliberately not a theme token, for the same reason as
+    /// [`Self::fast_mode_accent`].
+    pub(crate) fn max_effort_accent(&self) -> Hsla {
+        gpui::rgb(0x924FF7).into()
+    }
+
     pub fn theme_name(&self) -> &SharedString {
         &self.theme_name
     }

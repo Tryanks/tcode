@@ -293,7 +293,7 @@ pub(super) fn resolved_select_value(
 }
 
 /// The traits chip label: every resolved descriptor label joined with " · "
-/// (e.g. "High · 200k", "High · 200k · Fast", "Thinking Off"). `None` when the
+/// (e.g. "High", "High · Fast", "Thinking Off"). `None` when the
 /// model has no descriptors.
 pub(super) fn traits_chip_label(
     spec: &ModelSpec,
@@ -312,28 +312,6 @@ pub(super) fn traits_chip_label(
                 default_value,
                 ..
             } => {
-                if id == "contextWindow" {
-                    let selected = selections
-                        .iter()
-                        .find(|selection| selection.id == *id)
-                        .and_then(|selection| {
-                            agent::claude::parse_context_window_tokens(&selection.value)
-                        });
-                    if let Some(selected) = selected {
-                        parts.push(
-                            options
-                                .iter()
-                                .find(|option| {
-                                    agent::claude::parse_context_window_tokens(&serde_json::json!(
-                                        option.value
-                                    )) == Some(selected)
-                                })
-                                .map(|option| option.label.clone())
-                                .unwrap_or_else(|| agent::claude::format_context_window(selected)),
-                        );
-                        continue;
-                    }
-                }
                 let part = resolved_select_value(id, options, default_value, selections)
                     .and_then(|value| options.iter().find(|o| o.value == value))
                     .map(|option| option.label.clone())
