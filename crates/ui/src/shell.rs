@@ -5026,7 +5026,6 @@ mod tests {
             model_pending_restart: false,
             options_pending_restart: false,
             approval_pending_restart: false,
-            ultrathink_armed: false,
         }
     }
 

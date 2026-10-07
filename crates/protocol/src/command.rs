@@ -395,9 +395,6 @@ pub enum Command {
         id: String,
         value: Option<serde_json::Value>,
     },
-    SelectUltrathink {
-        session_id: String,
-    },
     SetInteractionMode {
         session_id: String,
         mode: InteractionMode,
@@ -508,7 +505,6 @@ impl Command {
             | Self::RespondUserInput { session_id, .. }
             | Self::SetActiveModel { session_id, .. }
             | Self::SetActiveOption { session_id, .. }
-            | Self::SelectUltrathink { session_id, .. }
             | Self::SetInteractionMode { session_id, .. }
             | Self::ToggleInteractionMode { session_id, .. }
             | Self::ImplementPlan { session_id, .. }

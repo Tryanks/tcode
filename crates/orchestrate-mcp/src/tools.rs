@@ -22,7 +22,7 @@ struct DispatchParams {
     model: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Reasoning effort for this call. Choose any available effort listed for this model in the current Orchestrate configuration (for example low, medium, high, xhigh, max, ultra, ultracode, or ultrathink when supported). Use the model description and task difficulty; the model is not pinned to a preset effort. Omit to use medium when available, otherwise the provider default. Unsupported values are rejected."
+        description = "Reasoning effort for this call. Choose any available effort listed for this model in the current Orchestrate configuration (for example low, medium, high, xhigh, max, ultra, or ultracode when supported). Use the model description and task difficulty; the model is not pinned to a preset effort. Omit to use medium when available, otherwise the provider default. Unsupported values are rejected."
     )]
     effort: Option<String>,
     #[serde(default)]
