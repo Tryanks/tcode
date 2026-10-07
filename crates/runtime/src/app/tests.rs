@@ -5291,17 +5291,6 @@ fn send_routing_matrix() {
     assert_eq!(dead.route(true), SendRouting::QueueUnsupported);
 }
 
-/// Claude Code expands a slash command only at byte 0 of the message, so the
-/// Ultrathink keyword trails a command instead of displacing it.
-#[test]
-fn ultrathink_keyword_trails_a_slash_command() {
-    assert_eq!(ultrathink_text("deep".into()), "Ultrathink:\ndeep");
-    assert_eq!(
-        ultrathink_text("/review the diff".into()),
-        "/review the diff\n\nultrathink"
-    );
-}
-
 /// A `$skill` the provider also exposes as a slash command (Claude) goes out
 /// as that command; a skill-only mention (Codex) and an unknown `$word` are
 /// sent as typed.
@@ -5332,36 +5321,6 @@ fn skill_mentions_use_the_providers_native_invocation() {
     for text in ["$HOME is set", "please $review", "$"] {
         assert_eq!(native_skill_invocation(text.into(), &claude), text);
     }
-}
-
-/// Ultrathink is per-send: it rides with the message it was armed for, not
-/// with whatever happens to be dispatched later.
-#[test]
-fn ultrathink_rides_with_the_queued_message() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = live_session(ProviderKind::Codex, commands);
-    active.turn_in_flight = true;
-    active.pending_ultrathink = true;
-    active.push_queued("deep".into(), Vec::new());
-    // The flag is consumed by the message that was armed for it.
-    assert!(!active.pending_ultrathink);
-    active.push_queued("shallow".into(), Vec::new());
-
-    active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    let first_delivery = match receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id, text, ..
-        }) if text == "Ultrathink:\ndeep" => delivery_id,
-        other => panic!("expected Ultrathink SendTurn, got {other:?}"),
-    };
-    active.accept_turn_delivery(first_delivery).unwrap();
-    active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    assert!(matches!(
-        receiver.try_recv(),
-        Ok(SessionCommand::SendTurn { text, .. }) if text == "shallow"
-    ));
 }
 
 /// An image-only send keeps its empty text in the transcript (the bubble

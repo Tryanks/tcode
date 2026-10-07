@@ -1,4 +1,4 @@
-use super::active_session::{native_skill_invocation, ultrathink_text};
+use super::active_session::native_skill_invocation;
 use super::*;
 
 impl AppState {
@@ -122,9 +122,6 @@ impl AppState {
             else {
                 continue;
             };
-            if let Some(session) = self.resident_mut(&session_id) {
-                session.pending_ultrathink = message.ultrathink;
-            }
             self.send_turn_assembled(&session_id, message.text, message.attachments, cx);
         }
 
@@ -586,18 +583,12 @@ impl AppState {
                 let session_id = active.meta.id.clone();
                 let wire_text = wire_text_with_placeholder(text.clone(), &attachments);
                 let wire_text = native_skill_invocation(wire_text, &active.provider_commands);
-                let wire_text = if active.pending_ultrathink {
-                    ultrathink_text(wire_text)
-                } else {
-                    wire_text
-                };
                 // Persist the pending request before handing it to the provider.
                 let request_id = self.record_steer_request(&session_id, &text, &attachments, cx);
 
                 let Some(active) = self.resident_mut(target_id) else {
                     return;
                 };
-                active.pending_ultrathink = false;
                 // A steered orchestrate turn joins a turn already in flight and is
                 // logged via `record_steer_request`, which carries no split, so it
                 // renders as a plain bubble. Drop any staged split rather than let
@@ -622,9 +613,6 @@ impl AppState {
         let Some(message) = active.take_queued(id) else {
             return;
         };
-        // `steer` consumes the session's armed Ultrathink flag, but this
-        // message captured its own at queue time — re-arm so it rides along.
-        active.pending_ultrathink = message.ultrathink;
         let command_key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
         self.steer_assembled(target_id, message.text, message.attachments, cx);
         cx.delivery_key = command_key;

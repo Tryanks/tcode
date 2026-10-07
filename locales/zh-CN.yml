@@ -798,7 +798,6 @@ composer:
   context_window_custom: "自定义"
   context_window_custom_placeholder: "例如 500k（100k–1M）"
   context_window_invalid: "请输入 100k–1M 之间的值，例如 500k"
-  ultrathink_locked: "你的提示文本中包含 “ultrathink”。请删除它以更改此选项。"
   context: "上下文"
   context_heading: "上下文"
   used: "已用"
