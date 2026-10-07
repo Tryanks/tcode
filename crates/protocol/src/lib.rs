@@ -57,21 +57,19 @@ pub use wire::{
 // session activity with action availability, full usage and meter capacity, a
 // separate session plan topic, shared worktree facts and archived-list
 // revisions, makes session log cursors stored row positions, and acknowledges
-// a subscription to an unloaded thread after its window.
+// a subscription to an unloaded thread after its window; version 9 (v0.2.1)
+// removes the app Plan commands, interaction mode, proposed-plan snapshots,
+// SelectUltrathink and ultrathink_armed, so an older peer sending a removed
+// command is rejected, replaces approval modes with native permission options
+// and requested selections, makes Orchestrate child approval Auto the default,
+// and adds Shared Spaces: transport principals with a policy revision, the
+// scope and space-index topics with correlated scope snapshots, space hosting
+// actions including atomic member removal with link rotation and the created
+// space id, device access, optional stored-event authors, and a space id on
+// pairing with the space name in the paired reply and two pairing rejections.
 //
-// Unreleased: removes app Plan commands, interaction mode and proposed-plan
-// snapshots; replaces approval modes with native permission options and
-// requested selections; adds Orchestrate child approval Auto as the default;
-// removes SelectUltrathink and ultrathink_armed from session status. An older
-// peer sending a removed command is rejected. Adds transport principals, scope and
-// space-index topics, scope snapshots, space hosting actions and device access,
-// optional stored-event authors, a space id on pairing with a space name in the
-// paired reply and two pairing rejections for Shared Spaces. Space principals
-// carry a default-zero policy_revision; RemoveMember carries regenerate_link
-// for atomic revocation and rotation; HostingState optionally returns
-// created_space_id for Create. Scope is a correlated snapshot only; removes
-// ScopeReplaced broadcasts.
-pub const PROTOCOL_VERSION: u32 = 8;
+// Unreleased: (none)
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]
 mod tests;
