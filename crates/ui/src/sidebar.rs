@@ -1771,9 +1771,19 @@ impl SessionsSidebar {
                     this.window_state
                         .update(cx, |state, cx| state.go(Destination::Hosts, cx));
                 }))
-                .when_some(remote.clone(), |row, (_, _, connection)| {
+                // The row truncates a long machine or space name; the tooltip
+                // carries it whole, above the link's state.
+                .when_some(remote.clone(), |row, (host, _, connection)| {
                     row.tooltip(move |window, cx| {
-                        Tooltip::new(connection.clone()).build(window, cx)
+                        let (host, connection) = (host.clone(), connection.clone());
+                        Tooltip::element(move |_, cx| {
+                            v_flex().child(host.clone()).child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(connection.clone()),
+                            )
+                        })
+                        .build(window, cx)
                     })
                 })
                 .child(
