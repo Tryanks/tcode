@@ -44,6 +44,7 @@ impl SpaceHost {
             meta.project_id = Some(project.id.clone());
             meta.updated_at = updated_at;
             meta.archived_at = archived_at;
+            meta.resume_cursor = Some(agent::ResumeCursor(serde_json::json!({"thread_id": id})));
             mutations.push(Mutation::upsert_meta(meta));
             mutations.push(
                 Mutation::append_event(
@@ -536,6 +537,17 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
     let mut host = SpaceHost::new();
     let one = host.member("one");
     let two = host.member("two");
+    let mut both = one.clone();
+    if let Principal::Space { project_ids, .. } = &mut both {
+        project_ids.push(host.b.id.clone());
+    }
+    denied(host.request(
+        both,
+        ClientPayload::Command(Command::StartDraft {
+            project_id: host.a.id.clone(),
+            cwd: host.b.root.clone(),
+        }),
+    ));
     denied(host.request(
         one.clone(),
         ClientPayload::Command(Command::StartDraft {
@@ -593,7 +605,7 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
         CommandResponse::Unit
     );
     host.command(
-        one,
+        one.clone(),
         Command::MarkSessionRead {
             session_id: "a".into(),
             through: u64::MAX,
@@ -607,6 +619,33 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
         panic!("settings snapshot")
     };
     assert!(!settings.last_visited.contains_key("a"));
+    let CommandResponse::SessionId(Some(fork)) =
+        host.command(one.clone(), Command::ForkThread { id: "a".into() })
+    else {
+        panic!("fork response")
+    };
+    host.subscribe(
+        one.clone(),
+        Topic::SessionStatus {
+            session_id: fork.clone(),
+        },
+    );
+    host.subscribe(
+        one.clone(),
+        Topic::SessionEvents {
+            session_id: fork.clone(),
+        },
+    );
+    host.event(|event| {
+        event.request_id.is_some()
+            && matches!(&event.topic, Topic::SessionStatus { session_id } if session_id == &fork)
+    });
+    let ServerEvent::SessionSnapshot { records, .. } = host.event(|event| {
+        event.request_id.is_some()
+            && matches!(&event.topic, Topic::SessionEvents { session_id } if session_id == &fork)
+    }).event else { panic!("fork history snapshot") };
+    assert!(records.iter().any(|record| matches!(&record.event,
+        AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::UserMessage { text, .. }, .. }) if text == "needle")));
     host.finish();
 }
 

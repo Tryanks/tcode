@@ -118,7 +118,11 @@ impl AppState {
                         .find(|p| &p.id == project_id && project_ids.contains(&p.id))
                         .ok_or_else(|| refusal("project"))?;
                     if cwd == &project.root
-                        || self.scoped_metas(project_ids).any(|meta| &meta.cwd == cwd)
+                        || self.scoped_metas(project_ids).any(|meta| {
+                            meta.project_id.as_ref() == Some(project_id)
+                                && meta.worktree.is_some()
+                                && &meta.cwd == cwd
+                        })
                     {
                         Ok(())
                     } else {

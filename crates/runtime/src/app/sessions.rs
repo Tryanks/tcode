@@ -1012,6 +1012,7 @@ impl AppState {
         // generated worktree or offer to delete it.
 
         let fork_id = fork.id.clone();
+        self.upsert_session_in_memory(fork.clone());
         let (completion, completed) = smol::channel::bounded(1);
         self.enqueue_store_write(
             StoreWrite::Fork {
@@ -1029,7 +1030,6 @@ impl AppState {
                 .unwrap_or_else(|_| Err("session store writer stopped".into()));
             host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
-                    state.upsert_session_in_memory(fork.clone());
                     state.select_session(&fork.id, cx);
                     state.reply_to_subscription(
                         None,
