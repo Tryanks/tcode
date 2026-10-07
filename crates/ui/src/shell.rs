@@ -4308,12 +4308,10 @@ mod tests {
     fn model_picker_focuses_its_search_only_off_phone(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tmp")
-            .join(format!(
-                "model-picker-focus-{}",
-                tcode_services::store::now_millis()
-            ));
+        let root = std::env::temp_dir().join(format!(
+            "tcode-model-picker-focus-{}",
+            tcode_services::store::now_millis()
+        ));
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));
         let mut meta = tcode_core::project::SessionMeta::new(
@@ -4379,6 +4377,8 @@ mod tests {
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui::test]
@@ -4388,12 +4388,10 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         cx.update(crate::shortcut::init);
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tmp")
-            .join(format!(
-                "thread-shortcuts-{}",
-                tcode_services::store::now_millis()
-            ));
+        let root = std::env::temp_dir().join(format!(
+            "tcode-thread-shortcuts-{}",
+            tcode_services::store::now_millis()
+        ));
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         let project = tcode_core::project::Project::from_root(root.join("project"));
         let sessions = [("third", 10), ("first", 30), ("second", 20)]
