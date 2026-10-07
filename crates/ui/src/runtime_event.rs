@@ -116,9 +116,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                         crate::tr!("chat.rewind_all_done").into_owned()
                     }
                 },
-                RuntimeNotice::PlanSaved { file } => {
-                    crate::tr!("plan.saved_workspace", file = file).into_owned()
-                }
                 RuntimeNotice::SwitchedBranch { branch } => {
                     crate::tr!("notice.switched_branch", branch = branch).into_owned()
                 }

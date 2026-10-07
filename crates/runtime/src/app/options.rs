@@ -20,6 +20,10 @@ impl AppState {
     ) {
         let profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
         let remembered_effort = self.remembered_effort(provider, model.as_deref());
+        let project_id = self
+            .resident(target_id)
+            .and_then(|active| active.meta.project_id.clone());
+        let permission_default = self.project_permission_selection(project_id.as_deref(), provider);
         let provider_commands =
             self.cached_provider_commands(provider, profile_id.as_deref(), None);
         let Some(active) = self.resident_mut(target_id) else {
@@ -35,14 +39,37 @@ impl AppState {
             {
                 return;
             }
+            let same_provider = active.meta.provider == provider;
+            let permission = if same_provider {
+                permission_control(provider).and_then(|descriptor| {
+                    let id = match descriptor {
+                        OptionDescriptor::Select { id, .. }
+                        | OptionDescriptor::Boolean { id, .. } => id,
+                    };
+                    active
+                        .meta
+                        .option_selections
+                        .iter()
+                        .find(|selection| selection.id == id)
+                        .cloned()
+                })
+            } else {
+                None
+            };
             active.meta.provider = provider;
             active.meta.acp_agent_id = None;
             active.meta.profile_id = profile_id;
             active.meta.model = model;
-            // A different model has different option descriptors: drop stale
-            // selections, then restore the effort last used with this model.
             active.meta.option_selections.clear();
             active.meta.option_selections.extend(remembered_effort);
+            active
+                .meta
+                .option_selections
+                .extend(permission.or(permission_default));
+            if !same_provider {
+                active.provider_options.clear();
+                active.confirmed_option_selections.clear();
+            }
             active.provider_commands = provider_commands;
             return;
         }
@@ -72,8 +99,10 @@ impl AppState {
             active.meta.model = model;
             active.meta.option_selections.clear();
             active.meta.option_selections.extend(remembered_effort);
+            active.meta.option_selections.extend(permission_default);
             active.provider_commands = provider_commands;
             active.provider_options.clear();
+            active.confirmed_option_selections.clear();
             if active.pending_relay.is_some() {
                 return;
             }
@@ -83,8 +112,14 @@ impl AppState {
         if active.meta.model == model {
             return;
         }
+        let permission_id = permission_control(provider).map(|descriptor| match descriptor {
+            OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
+        });
         active.meta.model = model;
-        active.meta.option_selections.clear();
+        active
+            .meta
+            .option_selections
+            .retain(|selection| Some(selection.id.as_str()) == permission_id.as_deref());
         active.meta.option_selections.extend(remembered_effort);
         if active.pending_relay.is_some() {
             return;
@@ -106,6 +141,24 @@ impl AppState {
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
+        let permission = active.permission_descriptor();
+        let value = value.or_else(|| {
+            permission.as_ref().and_then(|descriptor| match descriptor {
+                OptionDescriptor::Select {
+                    id: option_id,
+                    default_value,
+                    ..
+                } if option_id == id => default_value
+                    .as_ref()
+                    .map(|value| serde_json::Value::String(value.clone())),
+                OptionDescriptor::Boolean {
+                    id: option_id,
+                    default_value,
+                    ..
+                } if option_id == id => Some(serde_json::Value::Bool(*default_value)),
+                _ => None,
+            })
+        });
         active.meta.option_selections.retain(|s| s.id != id);
         if let Some(value) = value {
             active.meta.option_selections.push(OptionSelection {
@@ -113,9 +166,36 @@ impl AppState {
                 value,
             });
         }
-        // ACP agents apply every option change live; pi applies its thinking
-        // level live. Route those choices back instead of waiting for a restart.
-        if active.meta.provider.caps().live_option_push.supports(id)
+        let permission_push = permission
+            .as_ref()
+            .is_some_and(|descriptor| match descriptor {
+                OptionDescriptor::Select {
+                    id: option_id,
+                    apply,
+                    ..
+                }
+                | OptionDescriptor::Boolean {
+                    id: option_id,
+                    apply,
+                    ..
+                } => option_id == id && *apply != ApplyTiming::Restart,
+            });
+        let permission_restart = permission
+            .as_ref()
+            .is_some_and(|descriptor| match descriptor {
+                OptionDescriptor::Select {
+                    id: option_id,
+                    apply,
+                    ..
+                }
+                | OptionDescriptor::Boolean {
+                    id: option_id,
+                    apply,
+                    ..
+                } => option_id == id && *apply == ApplyTiming::Restart,
+            });
+        if (permission_push
+            || (!permission_restart && active.meta.provider.caps().live_option_push.supports(id)))
             && let Runtime::Live(commands) = &active.runtime
             && let Some(selection) = active.meta.option_selections.iter().find(|s| s.id == id)
         {
@@ -123,241 +203,14 @@ impl AppState {
                 id: selection.id.clone(),
                 value: selection.value.clone(),
             });
-            active.live_option_selections = active.meta.option_selections.clone();
-        }
-        self.preview_draft_or_persist_active(target_id, cx);
-    }
-
-    /// The active session's Build/Plan interaction mode (`Build` when none).
-    pub(crate) fn active_interaction_mode(&self, target_id: &str) -> InteractionMode {
-        self.resident(target_id)
-            .map(|a| a.meta.interaction_mode)
-            .unwrap_or_default()
-    }
-
-    /// Set Build/Plan mode on the resident session and notify its adapter.
-    /// Adapters apply it live or on the next turn without a restart.
-    pub fn set_interaction_mode(
-        &mut self,
-        target_id: &str,
-        mode: InteractionMode,
-        cx: &mut HostCx,
-    ) {
-        let Some(active) = self.resident_mut(target_id) else {
-            return;
-        };
-        if active.meta.interaction_mode == mode {
-            return;
-        }
-        active.meta.interaction_mode = mode;
-        if let Runtime::Live(commands) = &active.runtime {
-            let _ = commands.try_send(SessionCommand::SetInteractionMode(mode));
-        }
-        self.preview_draft_or_persist_active(target_id, cx);
-    }
-
-    /// Toggle Build ↔ Plan (the chip click and Shift+Tab).
-    pub fn toggle_interaction_mode(&mut self, target_id: &str, cx: &mut HostCx) {
-        let next = match self.active_interaction_mode(target_id) {
-            InteractionMode::Build => InteractionMode::Plan,
-            InteractionMode::Plan => InteractionMode::Build,
-        };
-        self.set_interaction_mode(target_id, next, cx);
-    }
-
-    /// Accept the proposed plan: send the verbatim implementation prompt, switch
-    /// to Build mode, and persist the decision before dispatching the turn.
-    pub fn implement_plan(&mut self, target_id: &str, cx: &mut HostCx) {
-        // A pending provider handoff makes `send_turn` defer. Validate it before
-        // resolving the plan or changing mode, or the implementation prompt can
-        // vanish while the UI claims the plan was accepted.
-        if self.relay_confirmation(target_id).is_some() {
-            return;
-        }
-        let Some((session_id, item_id, markdown)) = self.resident(target_id).and_then(|active| {
-            active.timeline.plan_ready().map(|plan| {
-                (
-                    active.meta.id.clone(),
-                    plan.item_id.clone(),
-                    plan.markdown.clone(),
-                )
-            })
-        }) else {
-            return;
-        };
-        self.record_event(
-            &session_id,
-            &AgentEvent::PlanResolved {
-                item_id,
-                resolution: PlanResolution::Implemented,
-            },
-            cx,
-        );
-        self.set_interaction_mode(target_id, InteractionMode::Build, cx);
-        self.send_turn_assembled(target_id, implement_prompt(&markdown), Vec::new(), cx);
-    }
-
-    /// Leave the plan captured in history while removing its actionable
-    /// composer state.
-    pub fn dismiss_plan(&mut self, target_id: &str, cx: &mut HostCx) {
-        let Some((session_id, item_id)) = self.resident(target_id).and_then(|active| {
-            active
-                .timeline
-                .plan_ready()
-                .map(|plan| (active.meta.id.clone(), plan.item_id.clone()))
-        }) else {
-            return;
-        };
-        self.record_event(
-            &session_id,
-            &AgentEvent::PlanResolved {
-                item_id,
-                resolution: PlanResolution::Dismissed,
-            },
-            cx,
-        );
-    }
-
-    /// Accept the proposed plan in a fresh thread in the same project (same
-    /// cwd/model/options, Build mode) titled "Implement <plan title>".
-    pub fn implement_plan_in_new_thread(
-        &mut self,
-        target_id: &str,
-        title: String,
-        cx: &mut HostCx,
-    ) -> Option<String> {
-        let active = self.resident(target_id)?;
-        let plan = active.timeline.plan_ready()?;
-        let source_session_id = active.meta.id.clone();
-        let plan_item_id = plan.item_id.clone();
-        let markdown = plan.markdown.clone();
-        let provider = active.meta.provider;
-        let cwd = active.meta.cwd.clone();
-        let model = active.meta.model.clone();
-        let option_selections = active.meta.option_selections.clone();
-        let approval_mode = active.meta.approval_mode;
-        let project_id = active.meta.project_id.clone();
-        let acp_agent_id = active.meta.acp_agent_id.clone();
-        let profile_id = active.meta.profile_id.clone();
-
-        let mut meta = SessionMeta::new(provider, cwd, model);
-        meta.title = title;
-        meta.option_selections = option_selections;
-        meta.approval_mode = approval_mode;
-        meta.interaction_mode = InteractionMode::Build;
-        meta.project_id = project_id;
-        meta.acp_agent_id = acp_agent_id;
-        meta.profile_id = profile_id;
-        let destination_session_id = meta.id.clone();
-        self.record_event(
-            &source_session_id,
-            &AgentEvent::PlanResolved {
-                item_id: plan_item_id,
-                resolution: PlanResolution::HandedOff {
-                    session_id: destination_session_id,
-                },
-            },
-            cx,
-        );
-        self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
-                initial: true,
-            },
-            cx,
-        );
-        self.upsert_session_in_memory(meta.clone());
-        let session_id = meta.id.clone();
-        let cwd = meta.cwd.clone();
-        let provider_commands = self.cached_provider_commands_for(&meta);
-        self.residents.live.insert(
-            session_id.clone(),
-            ActiveSession::new(meta, false, provider_commands),
-        );
-        self.emit_domain(
-            Topic::SessionEvents {
-                session_id: session_id.clone(),
-            },
-            ServerEvent::SessionSnapshot {
-                total: 0,
-                total_turns: 0,
-                truncated: false,
-                from: 0,
-                end: 0,
-                records: Vec::new(),
-            },
-            cx,
-        );
-        self.refresh_session_git_branch(session_id.clone(), cwd, cx);
-        self.send_turn_assembled(&session_id, implement_prompt(&markdown), Vec::new(), cx);
-        Some(session_id)
-    }
-
-    /// Copy plan markdown to the clipboard (the "Copy to clipboard" action).
-    pub fn copy_plan(&mut self, markdown: String, cx: &mut HostCx) {
-        emit_runtime(
-            cx,
-            RuntimeEvent::Effect(RuntimeEffect::CopyToClipboard { text: markdown }),
-        );
-    }
-
-    /// Write the plan markdown to `PLAN-<n>.md` in the session cwd, choosing the
-    /// lowest unused index ("Save to workspace"). Emits a success/error notice.
-    pub fn save_plan_to_workspace(&mut self, target_id: &str, markdown: String, cx: &mut HostCx) {
-        let Some(cwd) = self.resident(target_id).map(|a| a.meta.cwd.clone()) else {
-            return;
-        };
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = host_cx
-                .unblock(move || user_files::save_plan_to_workspace(&cwd, &markdown))
-                .await;
-            host_cx.enqueue(move |state, cx| state.finish_plan_save(result, cx));
-        });
-    }
-
-    /// Save the plan markdown to the user's Downloads directory (falling back to
-    /// the session cwd) with a title-derived filename ("Download as markdown").
-    pub fn download_plan(
-        &mut self,
-        target_id: &str,
-        markdown: String,
-        fallback_title: String,
-        cx: &mut HostCx,
-    ) {
-        let title = plan_title(&markdown).unwrap_or(fallback_title);
-        let filename = format!("{}.md", sanitize_filename(&title));
-        let fallback_cwd = self.resident(target_id).map(|a| a.meta.cwd.clone());
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = host_cx
-                .unblock(move || {
-                    user_files::save_plan_download(&filename, &markdown, fallback_cwd.as_deref())
-                })
-                .await;
-            host_cx.enqueue(move |state, cx| state.finish_plan_save(result, cx));
-        });
-    }
-
-    pub(super) fn finish_plan_save(&mut self, result: std::io::Result<PathBuf>, cx: &mut HostCx) {
-        match result {
-            Ok(path) => {
-                let name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                emit_runtime(
-                    cx,
-                    RuntimeEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
-                );
+            if !permission_push {
+                active
+                    .live_option_selections
+                    .retain(|selection| selection.id != id);
+                active.live_option_selections.push(selection.clone());
             }
-            Err(error) => self.report_error(
-                RuntimeError::PersistEvent {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
         }
+        self.preview_draft_or_persist_active(target_id, cx);
     }
 
     /// Load the local branches for the active session's cwd in the background
@@ -425,38 +278,6 @@ impl AppState {
         });
     }
 
-    /// Select `mode` for the active session and persist it. Claude applies the
-    /// switch live over the control protocol; Codex (which binds the mode at
-    /// thread start) instead restarts via the resume cursor on the next turn.
-    pub fn set_active_approval_mode(
-        &mut self,
-        target_id: &str,
-        mode: ApprovalMode,
-        cx: &mut HostCx,
-    ) {
-        let Some(active) = self.resident_mut(target_id) else {
-            return;
-        };
-        if active.meta.approval_mode == mode {
-            return;
-        }
-        active.meta.approval_mode = mode;
-        active.meta.updated_at = now_secs();
-
-        if let Runtime::Live(commands) = &active.runtime {
-            let _ = commands.try_send(SessionCommand::SetApprovalMode(mode));
-            // Claude applies the switch live: keep `live_approval_mode` in sync so
-            // no restart is scheduled. Codex can't, so leave it stale — the next
-            // `send_turn` sees the mismatch and restarts from the resume cursor.
-            if active.meta.provider.caps().live_approval_mode_switch {
-                active.live_approval_mode = Some(mode);
-            }
-        }
-
-        let meta = active.meta.clone();
-        self.persist_meta(&meta, cx);
-    }
-
     /// Toggle a model id in the persisted favorites list.
     pub fn toggle_favorite_model(&mut self, model: &str, cx: &mut HostCx) {
         let mut settings = self.settings.clone();
@@ -467,24 +288,4 @@ impl AppState {
         }
         self.update_settings(settings, cx);
     }
-}
-
-/// A filesystem-safe filename fragment: replace path separators and control
-/// characters with `-`, collapse runs, and cap the length.
-pub(super) fn sanitize_filename(name: &str) -> String {
-    let mut out: String = name
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    out = out.trim().trim_matches('-').to_string();
-    if out.is_empty() {
-        out = "plan".to_string();
-    }
-    out.chars().take(80).collect()
 }

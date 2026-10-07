@@ -62,7 +62,6 @@ pub struct ProviderDialog {
     home: Entity<InputState>,
     launch_args: Entity<InputState>,
     pi_trust_project_extensions: bool,
-    pi_native_approvals: bool,
     custom_model: Entity<InputState>,
     slug_error: Option<String>,
     /// Draft accent (`#rrggbb`); applied on Save.
@@ -186,7 +185,6 @@ impl ProviderDialog {
             home,
             launch_args,
             pi_trust_project_extensions: settings.pi.trust_project_extensions,
-            pi_native_approvals: settings.pi.native_approvals,
             custom_model,
             slug_error: None,
             accent: settings.accent_color.clone(),
@@ -253,7 +251,6 @@ impl ProviderDialog {
         let home = trimmed(&self.home, cx);
         let launch = trimmed(&self.launch_args, cx);
         let pi_trust_project_extensions = self.pi_trust_project_extensions;
-        let pi_native_approvals = self.pi_native_approvals;
         let accent = self.accent.clone();
         let custom = self.custom_models.clone();
         let hidden = self.hidden_models.clone();
@@ -279,7 +276,6 @@ impl ProviderDialog {
                         launch_args: provider.caps().launch_args.then_some(launch).flatten(),
                         pi: tcode_core::settings::PiProviderSettings {
                             trust_project_extensions: pi_trust_project_extensions,
-                            native_approvals: pi_native_approvals,
                         },
                         custom_models: custom,
                         hidden_models: hidden,
@@ -550,26 +546,6 @@ impl ProviderDialog {
                     crate::tr!(home_help).into_owned().into(),
                     Input::new(&self.home)
                         .rounded(crate::material::radius_input(cx))
-                        .into_any_element(),
-                    cx,
-                ),
-            );
-        }
-        if provider.caps().downgrade_approval_without_native_approvals {
-            blocks.push(
-                self.field_block(
-                    crate::tr!("providers.pi_native_approvals")
-                        .into_owned()
-                        .into(),
-                    crate::tr!("providers.pi_native_approvals_help")
-                        .into_owned()
-                        .into(),
-                    Switch::new("pi-native-approvals")
-                        .checked(self.pi_native_approvals)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.pi_native_approvals = *checked;
-                            cx.notify();
-                        }))
                         .into_any_element(),
                     cx,
                 ),

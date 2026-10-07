@@ -234,16 +234,10 @@ impl AppState {
             message.delivery_key = cx.delivery_key.clone();
         }
 
-        // If the user switched models — or a provider that can't switch its
-        // approval mode live (Codex) had its mode changed, or a launch-time
-        // option changed — while the provider is live, restart it first: the
-        // queued turn then flushes on the fresh process, resumed from the stored
-        // cursor with the current model + options + mode.
         let model_changed = active.model_changed_while_live();
-        let approval_changed = active.approval_mode_changed_while_live();
         let options_changed = active.options_changed_while_live();
         let restart_deferred = active.settings_restart_deferred();
-        if model_changed || approval_changed || options_changed {
+        if model_changed || options_changed {
             if restart_deferred {
                 log::info!(
                     "deferring provider settings restart (background tasks: {}, delivery pending: {})",
@@ -255,11 +249,6 @@ impl AppState {
                     log::info!(
                         "model changed to {:?} while live; restarting provider before next turn",
                         active.meta.model
-                    );
-                } else if approval_changed {
-                    log::info!(
-                        "approval mode changed to {:?} while live; restarting provider before next turn",
-                        active.meta.approval_mode
                     );
                 } else {
                     log::info!(

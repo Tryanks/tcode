@@ -112,13 +112,28 @@ impl Composer {
                     .child(detail.clone())
                     .into_any_element(),
             ),
-            ApprovalKind::ToolUse { name, input, .. } => detail_area(
-                div()
-                    .text_size(px(13.))
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .child(format!("{name} {input}"))
-                    .into_any_element(),
-            ),
+            ApprovalKind::ToolUse {
+                name,
+                input,
+                detail,
+            } => {
+                let input = input.to_string();
+                detail_area(
+                    v_flex()
+                        .gap_1()
+                        .when(
+                            !detail.is_empty() && *detail != *name && *detail != input,
+                            |this| this.child(div().text_size(px(13.)).child(detail.clone())),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(format!("{name} {input}")),
+                        )
+                        .into_any_element(),
+                )
+            }
         };
 
         let pending = self
@@ -126,9 +141,6 @@ impl Composer {
             .read(cx)
             .approval_delivery_pending(&request.id);
         let expanded = self.approval_expanded;
-        let approve_id = request.id.clone();
-        let always_id = request.id.clone();
-        let deny_id = request.id.clone();
         let cancel_id = request.id.clone();
 
         v_flex()
@@ -211,20 +223,14 @@ impl Composer {
                     ),
             )
             .when(expanded, |this| this.child(detail))
-            .when(!request.options.is_empty(), |this| {
-                // An ACP agent sends its own option list: render exactly those
-                // buttons (the labels are the agent's), ordered rejections-first
-                // like our fixed four, and answer with the chosen option id.
-                let mut row = h_flex().w_full().gap_2().items_center().flex_wrap();
-                let mut options = request.options.clone();
-                options.sort_by_key(|option| match option.kind {
-                    ApprovalOptionKind::RejectAlways => 0,
-                    ApprovalOptionKind::RejectOnce => 1,
-                    ApprovalOptionKind::AllowAlways => 2,
-                    ApprovalOptionKind::AllowOnce => 3,
-                });
-                let last = options.len().saturating_sub(1);
-                for (index, option) in options.into_iter().enumerate() {
+            .child({
+                let mut options = h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .flex_wrap();
+                for option in &request.options {
                     let request_id = request.id.clone();
                     let option_id = option.id.clone();
                     let rejects = matches!(
@@ -237,16 +243,11 @@ impl Composer {
                     )))
                     .small()
                     .h(px(28.))
-                    .when(self.compact, |button| {
-                        button
-                            .min_h(px(44.))
-                            .min_w(px(44.))
-                            .w(gpui::relative(0.48))
-                            .flex_none()
-                    })
+                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
                     .disabled(!self.interactive(cx) || pending)
                     .rounded(crate::material::radius_input(cx))
                     .label(option.label.clone())
+                    .when(rejects, |button| button.danger().outline())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.respond(
                             request_id.clone(),
@@ -254,125 +255,26 @@ impl Composer {
                             cx,
                         );
                     }));
-                    // The agent's preferred (last) option is the primary action.
-                    let button = if index == last {
-                        button.primary()
-                    } else if rejects {
-                        button.ghost().text_color(cx.theme().danger)
-                    } else {
-                        button.ghost()
-                    };
-                    if index == 1 {
-                        row = row.child(div().flex_1());
-                    }
-                    row = row.child(button);
+                    options = options.child(button);
                 }
-                this.child(row)
-            })
-            .when(request.options.is_empty(), |this| {
-                // Keep long localized approval labels on separate compact rows
-                // so they cannot overlap the Deny/Allow controls.
-                let compact = self.compact;
-                let interactive = self.interactive(cx) && !pending;
-                let half = |button: Button| {
-                    if compact {
-                        button
-                            .min_h(px(44.))
-                            .min_w(px(44.))
-                            .w(gpui::relative(0.48))
-                            .flex_none()
-                    } else {
-                        button
-                    }
-                };
-                let full = |button: Button| {
-                    if compact {
-                        button.min_h(px(44.)).w_full().flex_none()
-                    } else {
-                        button
-                    }
-                };
-                let cancel = full(
-                    Button::new("approval-cancel")
-                        .ghost()
-                        .small()
-                        .h(px(28.))
-                        .disabled(!interactive)
-                        .rounded(crate::material::radius_input(cx))
-                        .label(crate::tr!("approval.cancel_turn"))
-                        .text_color(cx.theme().muted_foreground)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
-                        })),
-                );
-                let deny = half(
-                    Button::new("approval-deny")
-                        .ghost()
-                        .small()
-                        .h(px(28.))
-                        .disabled(!interactive)
-                        .rounded(crate::material::radius_input(cx))
-                        .label(if compact {
-                            crate::tr!("mobile.deny")
-                        } else {
-                            crate::tr!("approval.decline")
-                        })
-                        .text_color(cx.theme().danger)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
-                        })),
-                );
-                let always = full(
-                    Button::new("approval-always")
-                        .ghost()
-                        .small()
-                        .h(px(28.))
-                        .disabled(!interactive)
-                        .rounded(crate::material::radius_input(cx))
-                        .label(if compact {
-                            crate::tr!("mobile.always_allow")
-                        } else {
-                            crate::tr!("approval.always_allow_session")
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.respond(
-                                always_id.clone(),
-                                ApprovalDecision::ApproveForSession,
-                                cx,
-                            );
-                        })),
-                );
-                let approve = half(
-                    Button::new("approval-approve")
-                        .primary()
-                        .small()
-                        .h(px(28.))
-                        .disabled(!interactive)
-                        .rounded(crate::material::radius_input(cx))
-                        .label(if compact {
-                            crate::tr!("mobile.allow")
-                        } else {
-                            crate::tr!("approval.approve_once")
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
-                        })),
-                );
-                let row = h_flex().w_full().gap_2().items_center().flex_wrap();
-                let row = if compact {
-                    row.child(deny)
-                        .child(div().flex_1())
-                        .child(approve)
-                        .child(always)
-                        .child(cancel)
-                } else {
-                    row.child(cancel)
-                        .child(div().flex_1())
-                        .child(deny)
-                        .child(always)
-                        .child(approve)
-                };
-                this.child(row)
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_start()
+                    .child(options)
+                    .child(
+                        Button::new("approval-cancel")
+                            .ghost()
+                            .small()
+                            .h(px(28.))
+                            .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
+                            .disabled(!self.interactive(cx) || pending)
+                            .rounded(crate::material::radius_input(cx))
+                            .label(crate::tr!("approval.cancel_turn"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
+                            })),
+                    )
             })
             .into_any_element()
     }

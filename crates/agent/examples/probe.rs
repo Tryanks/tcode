@@ -7,8 +7,8 @@
 //! `add-marketplace <source>` or `remove-marketplace <name>`. `--home` isolates
 //! the provider's native state (`CODEX_HOME` for Codex, `GROK_HOME` for Grok;
 //! for Claude Code `HOME` and `CLAUDE_CONFIG_DIR`).
-//! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
-//! Flags are `--binary <path>`, `--model <id>`, `--mode plan`, `--effort <value>`,
+//! Turn mode: `probe <provider> <prompt> [cwd] [acp-command args…] [flags]`.
+//! Flags are `--binary <path>`, `--model <id>`, `--option <id>=<value>`, `--effort <value>`,
 //! `--resume <cursor-json>`, `--fork`, `--leave-questions` (user-input requests
 //! stay unanswered), `--mcp <name> <url> <token>` (an HTTP MCP server registered
 //! as tcode registers its own), `--linger <seconds>` (stay open until no turn has
@@ -21,10 +21,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agent::{
-    AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
-    ItemContent, LaunchEnv, McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope,
-    ProviderKind, ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus,
-    list_models, list_plugins, run_plugin_op, start_session,
+    AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, Attachment, ItemContent, LaunchEnv,
+    McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope, ProviderKind,
+    ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus, list_models,
+    list_plugins, run_plugin_op, start_session,
 };
 use base64::Engine as _;
 
@@ -43,7 +43,7 @@ enum ProbeMode {
 fn usage() -> ! {
     eprintln!(
         "usage: probe <codex|claude|pi|opencode|cursor|grok|acp> <prompt> [cwd] \
-         [supervised|read_only|auto_edits|full_access] [acp-command args…] [flags]"
+         [--option <id>=<value>] [acp-command args…] [flags]"
     );
     eprintln!(
         "       probe --list-models <codex|claude|pi|opencode|cursor|grok> [--binary <path>]"
@@ -229,10 +229,10 @@ fn main() {
         std::process::exit(exit_code);
     }
 
-    let mut interaction_mode = InteractionMode::Build;
     let mut binary = None;
     let mut model = None;
     let mut effort = None;
+    let mut option_selections = Vec::new();
     let mut resume = None;
     let mut fork = false;
     let mut leave_questions = false;
@@ -243,20 +243,17 @@ fn main() {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--mode" => {
-                interaction_mode = match args.next().as_deref() {
-                    Some("plan") => InteractionMode::Plan,
-                    Some("build" | "default") => InteractionMode::Build,
-                    Some(other) => {
-                        eprintln!("unknown --mode {other:?}; use plan|build");
-                        std::process::exit(2);
-                    }
-                    None => usage(),
-                };
-            }
             "--binary" => binary = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage())),
             "--model" => model = Some(args.next().unwrap_or_else(|| usage())),
             "--effort" => effort = Some(args.next().unwrap_or_else(|| usage())),
+            "--option" => {
+                let option = args.next().unwrap_or_else(|| usage());
+                let (id, value) = option.split_once('=').unwrap_or_else(|| usage());
+                option_selections.push(OptionSelection {
+                    id: id.into(),
+                    value: serde_json::from_str(value).unwrap_or_else(|_| serde_json::json!(value)),
+                });
+            }
             "--resume" => {
                 let cursor = args.next().unwrap_or_else(|| usage());
                 resume = Some(ResumeCursor(serde_json::from_str(&cursor).unwrap_or_else(
@@ -321,25 +318,7 @@ fn main() {
             std::env::current_dir().unwrap()
         }
     });
-    let mut remaining: Vec<String> = positional.collect();
-    let approval_mode = match remaining.first().map(String::as_str) {
-        Some("supervised" | "read_only" | "auto_edits" | "full_access") => {
-            match remaining.remove(0).as_str() {
-                "supervised" => ApprovalMode::Supervised,
-                "read_only" => ApprovalMode::ReadOnly,
-                "auto_edits" => ApprovalMode::AutoAcceptEdits,
-                _ => ApprovalMode::FullAccess,
-            }
-        }
-        None => ApprovalMode::Supervised,
-        Some(_) if provider == ProviderKind::Acp => ApprovalMode::Supervised,
-        Some(other) => {
-            eprintln!(
-                "unknown approval mode {other:?}; use supervised|read_only|auto_edits|full_access"
-            );
-            std::process::exit(2);
-        }
-    };
+    let remaining: Vec<String> = positional.collect();
     let acp = if provider == ProviderKind::Acp {
         let mut launch = remaining.into_iter();
         let command = launch.next().unwrap_or_else(|| {
@@ -361,18 +340,11 @@ fn main() {
         }
         None
     };
-    let approval_mode = if matches!(probe_mode, ProbeMode::Steer(_) | ProbeMode::Image(_)) {
-        ApprovalMode::FullAccess
-    } else {
-        approval_mode
-    };
-
     let exit_code = smol::block_on(run_probe(
         provider,
         prompt,
         cwd,
-        approval_mode,
-        interaction_mode,
+        option_selections,
         effort,
         probe_mode,
         acp,
@@ -406,8 +378,7 @@ async fn run_probe(
     provider: ProviderKind,
     prompt: String,
     cwd: PathBuf,
-    approval_mode: ApprovalMode,
-    interaction_mode: InteractionMode,
+    mut option_selections: Vec<OptionSelection>,
     effort: Option<String>,
     probe_mode: ProbeMode,
     acp: Option<AcpAgent>,
@@ -422,13 +393,10 @@ async fn run_probe(
         ProviderKind::Grok => "acp:cfg:reasoning_effort",
         _ => "reasoningEffort",
     };
-    let option_selections = effort
-        .iter()
-        .map(|value| OptionSelection {
-            id: effort_id.into(),
-            value: serde_json::Value::String(value.clone()),
-        })
-        .collect();
+    option_selections.extend(effort.iter().map(|value| OptionSelection {
+        id: effort_id.into(),
+        value: serde_json::Value::String(value.clone()),
+    }));
     let model = model.or_else(|| match (provider, effort.is_some()) {
         (ProviderKind::ClaudeCode, true) => Some("claude-opus-4-8".to_string()),
         _ => None,
@@ -439,9 +407,7 @@ async fn run_probe(
         resume: resumption.resume,
         fork: resumption.fork,
         binary_path,
-        approval_mode,
         option_selections,
-        interaction_mode,
         mcp_servers,
         launch_env: Default::default(),
         extra_args: Vec::new(),
@@ -467,10 +433,7 @@ async fn run_probe(
         .send(SessionCommand::SendTurn {
             delivery_id: 0,
             text: prompt,
-            options: Some(TurnOptions {
-                effort,
-                interaction_mode: Some(interaction_mode),
-            }),
+            options: Some(TurnOptions { effort }),
             attachments,
         })
         .await
@@ -580,7 +543,12 @@ async fn run_probe(
                     .commands
                     .send(SessionCommand::RespondApproval {
                         request_id: request.id.clone(),
-                        decision: ApprovalDecision::Approve,
+                        decision: request
+                            .options
+                            .iter()
+                            .find(|option| option.kind == agent::ApprovalOptionKind::AllowOnce)
+                            .map(|option| ApprovalDecision::Option(option.id.clone()))
+                            .unwrap_or(ApprovalDecision::Cancel),
                     })
                     .await
                     .ok();

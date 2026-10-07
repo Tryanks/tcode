@@ -302,6 +302,7 @@ fn descriptor(option: &OptionFile) -> Result<Option<OptionDescriptor>, String> {
                     value,
                     label: non_empty(&option.label, "option label")?,
                     description: option.description.clone(),
+                    unavailable: None,
                 });
             }
             OptionDescriptor::Select {
@@ -309,12 +310,20 @@ fn descriptor(option: &OptionFile) -> Result<Option<OptionDescriptor>, String> {
                 label: non_empty(label, "option label")?,
                 options: mapped,
                 default_value,
+                role: crate::OptionRole::Model,
+                apply: crate::ApplyTiming::Live,
+                recommended: None,
+                permissive: None,
             }
         }
         OptionFile::Boolean { id, label } => OptionDescriptor::Boolean {
             id: option_id(&non_empty(id, "option id")?).to_owned(),
             label: non_empty(label, "option label")?,
             default_value: false,
+            role: crate::OptionRole::Model,
+            apply: crate::ApplyTiming::Live,
+            recommended: None,
+            permissive: None,
         },
         OptionFile::Unknown => return Ok(None),
     }))
@@ -802,24 +811,32 @@ mod tests {
                             value: "low".into(),
                             label: "Low".into(),
                             description: None,
+                            unavailable: None,
                         },
                         SelectOption {
                             value: "medium".into(),
                             label: "Medium".into(),
                             description: None,
+                            unavailable: None,
                         },
                         SelectOption {
                             value: "max".into(),
                             label: "Max".into(),
                             description: None,
+                            unavailable: None,
                         },
                         SelectOption {
                             value: "ultracode".into(),
                             label: "Ultracode".into(),
                             description: Some("xhigh plus orchestration".into()),
+                            unavailable: None,
                         },
                     ],
                     default_value: Some("medium".into()),
+                    role: crate::OptionRole::Model,
+                    apply: crate::ApplyTiming::Live,
+                    recommended: None,
+                    permissive: None,
                 },
                 OptionDescriptor::Select {
                     id: "contextWindow".into(),
@@ -829,14 +846,20 @@ mod tests {
                             value: "200k".into(),
                             label: "200k".into(),
                             description: None,
+                            unavailable: None,
                         },
                         SelectOption {
                             value: "1m".into(),
                             label: "1M".into(),
                             description: None,
+                            unavailable: None,
                         },
                     ],
                     default_value: Some("1m".into()),
+                    role: crate::OptionRole::Model,
+                    apply: crate::ApplyTiming::Live,
+                    recommended: None,
+                    permissive: None,
                 },
             ],
             "unknown descriptor types and prompt-injected values are dropped"
@@ -848,6 +871,10 @@ mod tests {
                 id: "fastMode".into(),
                 label: "Fast Mode".into(),
                 default_value: false,
+                role: crate::OptionRole::Model,
+                apply: crate::ApplyTiming::Live,
+                recommended: None,
+                permissive: None,
             }
         );
         // Lookups tolerate whitespace and a context suffix.

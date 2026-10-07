@@ -1,11 +1,11 @@
 //! Projects and session-index domain data.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
-use agent::{ApprovalMode, InteractionMode, OptionSelection, ProviderKind, ResumeCursor};
+use agent::{OptionSelection, ProviderKind, ResumeCursor};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{ProjectSort, Settings, acp_color_key};
@@ -19,6 +19,8 @@ pub struct Project {
     /// Host-owned image selected by the user; absent uses the project config's iconPath.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_path: Option<PathBuf>,
+    #[serde(default)]
+    pub permission_defaults: BTreeMap<String, String>,
     pub created_at: u64,
 }
 
@@ -33,6 +35,7 @@ impl Project {
             name,
             root,
             icon_path: None,
+            permission_defaults: BTreeMap::new(),
             created_at: now_secs(),
         }
     }
@@ -88,11 +91,6 @@ pub struct SessionMeta {
     /// worktree instead of the project checkout. Absent = local checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeInfo>,
-    /// The user-facing permission model for this session. Older index files
-    /// predate the field; a missing value defaults to `ApprovalMode::default()`
-    /// (`FullAccess`).
-    #[serde(default)]
-    pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
     /// Whether the next provider start must fork `resume_cursor` rather than
@@ -103,16 +101,9 @@ pub struct SessionMeta {
     /// ("claude:<id>" / "codex:<id>"). Used to keep re-imports idempotent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_from: Option<String>,
-    /// Chosen values for the selected model's option descriptors (reasoning
-    /// effort, context window, service tier, fast mode, thinking, …). Absent in
-    /// index files written before this slice; defaults to no selections (each
-    /// descriptor then resolves to its own default).
+    /// Requested provider option values; absent choices use the descriptor default.
     #[serde(default)]
     pub option_selections: Vec<OptionSelection>,
-    /// Build (default) vs Plan interaction mode. Absent in legacy files;
-    /// defaults to `Build`.
-    #[serde(default)]
-    pub interaction_mode: InteractionMode,
     /// Which ACP agent this session runs (its registry id), when
     /// `provider == ProviderKind::Acp`. `None` for the native providers, and
     /// absent in every index file written before ACP existed.
@@ -232,12 +223,10 @@ impl SessionMeta {
             archived_at: None,
             settled_at: None,
             worktree: None,
-            approval_mode: ApprovalMode::default(),
             resume_cursor: None,
             pending_fork: false,
             imported_from: None,
             option_selections: Vec::new(),
-            interaction_mode: InteractionMode::default(),
             acp_agent_id: None,
             parent_session_id: None,
             native_subagent: None,
@@ -686,6 +675,7 @@ mod tests {
                 name: "Old".into(),
                 root: PathBuf::from("/old"),
                 icon_path: None,
+                permission_defaults: Default::default(),
                 created_at: 1,
             },
             Project {
@@ -693,6 +683,7 @@ mod tests {
                 name: "New".into(),
                 root: PathBuf::from("/new"),
                 icon_path: None,
+                permission_defaults: Default::default(),
                 created_at: 2,
             },
             Project {
@@ -700,6 +691,7 @@ mod tests {
                 name: "Empty".into(),
                 root: PathBuf::from("/empty"),
                 icon_path: None,
+                permission_defaults: Default::default(),
                 created_at: 15,
             },
         ];
@@ -734,6 +726,7 @@ mod tests {
             name: "Project".into(),
             root: PathBuf::from("/p"),
             icon_path: None,
+            permission_defaults: BTreeMap::new(),
             created_at: 1,
         }];
         let make = |id: &str, updated_at: u64, parent: Option<&str>| {
@@ -773,10 +766,10 @@ mod tests {
         let legacy = serde_json::json!({
             "id": "legacy", "title": "Legacy", "provider": "codex",
             "cwd": "/work", "forked_from": "source", "created_at": 1, "updated_at": 2,
-            "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}]
+            "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}],
+            "approval_mode": "read_only"
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert_eq!(meta.approval_mode, ApprovalMode::FullAccess);
         assert!(!meta.pending_fork);
         assert_eq!(meta.parent_session_id, None);
         assert_eq!(meta.native_subagent, None);
@@ -787,6 +780,7 @@ mod tests {
         for omitted in [
             "forked_from",
             "checkpoints",
+            "approval_mode",
             "pending_fork",
             "parent_session_id",
             "native_subagent",
@@ -798,7 +792,6 @@ mod tests {
         }
 
         let mut meta = meta;
-        meta.approval_mode = ApprovalMode::Supervised;
         meta.pending_fork = true;
         meta.parent_session_id = Some("parent".into());
         meta.native_subagent = Some("spawn-1".into());
@@ -810,7 +803,6 @@ mod tests {
             branch: "tcode/abc".into(),
         });
         let json = serde_json::to_value(&meta).unwrap();
-        assert_eq!(json["approval_mode"], "supervised");
         assert!(json.get("forked_from").is_none());
         assert!(json.get("checkpoints").is_none());
         assert_eq!(serde_json::from_value::<SessionMeta>(json).unwrap(), meta);
