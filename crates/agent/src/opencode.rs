@@ -17,8 +17,8 @@ use smol::future;
 use crate::TurnStatus;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::{
-    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
+    ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
     ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
     SessionHandle, SessionOptions, ThreadItem, TokenUsage, UserInputDelivery, UserInputOption,
@@ -46,14 +46,8 @@ pub async fn list_models(
 ) -> Result<Vec<ModelSpec>, AgentError> {
     crate::process::unblock(move || {
         let cwd = std::env::current_dir()?;
-        let mut server = OpenCodeServer::spawn(
-            binary_path.as_deref(),
-            &cwd,
-            &launch_env,
-            ApprovalMode::FullAccess,
-            &[],
-            &[],
-        )?;
+        let mut server =
+            OpenCodeServer::spawn(binary_path.as_deref(), &cwd, &launch_env, &[], &[])?;
         let result = (|| {
             server.wait_healthy(Duration::from_secs(15))?;
             let provider_state = server.http.get_json("/provider")?;
@@ -77,7 +71,6 @@ async fn run_actor(
         opts.binary_path.as_deref(),
         &opts.cwd,
         &opts.launch_env,
-        opts.approval_mode,
         &opts.extra_args,
         &opts.mcp_servers.iter().collect::<Vec<_>>(),
     ) {
@@ -157,8 +150,12 @@ async fn run_actor(
         mapper: OpenCodeMapper::new(session_id.clone()),
         model,
         variant: selected_variant(&opts.option_selections).map(str::to_owned),
-        interaction_mode: opts.interaction_mode,
-        approval_mode: opts.approval_mode,
+        auto_approve: opts
+            .option_selections
+            .iter()
+            .find(|selection| selection.id == "permission_mode")
+            .and_then(|selection| selection.value.as_str())
+            == Some("auto"),
         pending_permissions: HashSet::new(),
         pending_questions: HashMap::new(),
     };
@@ -170,6 +167,7 @@ async fn run_actor(
             model: resolved_model,
         })
         .await;
+    actor.emit_options().await;
     actor
         .events
         .emit(AgentEvent::ProviderCommands {
@@ -200,8 +198,8 @@ struct OpenCodeActor {
     mapper: OpenCodeMapper,
     model: Option<(String, String)>,
     variant: Option<String>,
-    interaction_mode: InteractionMode,
-    approval_mode: ApprovalMode,
+
+    auto_approve: bool,
     pending_permissions: HashSet<String>,
     pending_questions: HashMap<String, Vec<String>>,
 }
@@ -235,14 +233,7 @@ impl SessionActor for OpenCodeActor {
                 if let Some((provider_id, model_id)) = &self.model {
                     body["model"] = json!({"providerID":provider_id,"modelID":model_id});
                 }
-                let interaction_mode = options
-                    .as_ref()
-                    .and_then(|options| options.interaction_mode)
-                    .unwrap_or(self.interaction_mode);
-                body["agent"] = json!(match interaction_mode {
-                    InteractionMode::Build => "build",
-                    InteractionMode::Plan => "plan",
-                });
+                body["agent"] = json!("build");
                 let variant = options
                     .and_then(|options| options.effort)
                     .or_else(|| self.variant.clone());
@@ -283,16 +274,18 @@ impl SessionActor for OpenCodeActor {
                 request_id,
                 decision,
             } => {
+                let reply = match &decision {
+                    ApprovalDecision::Option(id)
+                        if matches!(id.as_str(), "once" | "always" | "reject") =>
+                    {
+                        id.as_str()
+                    }
+                    ApprovalDecision::Cancel => "reject",
+                    ApprovalDecision::Option(_) => return Ok(()),
+                };
                 if !self.pending_permissions.remove(&request_id) {
                     return Ok(());
                 }
-                let reply = match decision {
-                    ApprovalDecision::Approve => "once",
-                    ApprovalDecision::ApproveForSession => "always",
-                    ApprovalDecision::Deny
-                    | ApprovalDecision::Cancel
-                    | ApprovalDecision::Option(_) => "reject",
-                };
                 self.server
                     .http
                     .post_json(
@@ -315,19 +308,37 @@ impl SessionActor for OpenCodeActor {
                     .await;
                 Ok(())
             }
-            SessionCommand::SetApprovalMode(mode) => {
-                if mode != self.approval_mode {
-                    self.events.emit(AgentEvent::Warning {
-                        message:
-                            "OpenCode permission changes require restarting the per-session server"
-                                .into(),
-                    })
-                    .await;
+            SessionCommand::SetOption { id, value } if id == "permission_mode" => {
+                if let Some(value @ ("normal" | "auto")) = value.as_str() {
+                    self.auto_approve = value == "auto";
+                    self.emit_options().await;
+                    if self.auto_approve {
+                        let requests: Vec<_> = self.pending_permissions.iter().cloned().collect();
+                        for request_id in requests {
+                            match self.server.http.post_json(
+                                &format!("/permission/{request_id}/reply"),
+                                &json!({"reply":"once"}),
+                            ) {
+                                Ok(_) => {
+                                    self.pending_permissions.remove(&request_id);
+                                    self.events
+                                        .emit(AgentEvent::ApprovalResolved {
+                                            request_id,
+                                            decision: ApprovalDecision::Option("once".into()),
+                                        })
+                                        .await;
+                                }
+                                Err(error) => {
+                                    self.events
+                                        .emit(AgentEvent::Warning {
+                                            message: error.to_string(),
+                                        })
+                                        .await
+                                }
+                            }
+                        }
+                    }
                 }
-                Ok(())
-            }
-            SessionCommand::SetInteractionMode(mode) => {
-                self.interaction_mode = mode;
                 Ok(())
             }
             SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
@@ -416,10 +427,41 @@ impl SessionActor for OpenCodeActor {
 }
 
 impl OpenCodeActor {
+    async fn emit_options(&self) {
+        self.events
+            .emit(AgentEvent::ProviderOptions {
+                descriptors: crate::permission_control(ProviderKind::OpenCode)
+                    .into_iter()
+                    .collect(),
+                selections: vec![OptionSelection {
+                    id: "permission_mode".into(),
+                    value: json!(if self.auto_approve { "auto" } else { "normal" }),
+                }],
+            })
+            .await;
+    }
     async fn handle_event(&mut self, event: &Value) {
-        let mapped = self.mapper.on_event(event);
+        let mut mapped = self.mapper.on_event(event);
         for request_id in mapped.permission_ids {
-            self.pending_permissions.insert(request_id);
+            self.pending_permissions.insert(request_id.clone());
+            if self.auto_approve {
+                match self.server.http.post_json(
+                    &format!("/permission/{request_id}/reply"),
+                    &json!({"reply":"once"}),
+                ) {
+                    Ok(_) => {
+                        self.pending_permissions.remove(&request_id);
+                        mapped.events.retain(|event| !matches!(event, AgentEvent::ApprovalRequested(request) if request.id == request_id));
+                        mapped.events.push(AgentEvent::ApprovalResolved {
+                            request_id,
+                            decision: ApprovalDecision::Option("once".into()),
+                        });
+                    }
+                    Err(err) => mapped.events.push(AgentEvent::Warning {
+                        message: format!("failed to auto-approve OpenCode permission: {err}"),
+                    }),
+                }
+            }
         }
         for (request_id, question_ids) in mapped.question_requests {
             self.pending_questions.insert(request_id, question_ids);
@@ -1016,7 +1058,23 @@ fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
         id,
         turn_id: None,
         kind,
-        options: Vec::new(),
+        options: vec![
+            ApprovalOption {
+                id: "once".into(),
+                label: "Allow once".into(),
+                kind: ApprovalOptionKind::AllowOnce,
+            },
+            ApprovalOption {
+                id: "always".into(),
+                label: "Always allow".into(),
+                kind: ApprovalOptionKind::AllowAlways,
+            },
+            ApprovalOption {
+                id: "reject".into(),
+                label: "Reject".into(),
+                kind: ApprovalOptionKind::RejectOnce,
+            },
+        ],
     })
 }
 
@@ -1218,9 +1276,14 @@ fn map_models(catalog: &Value) -> Vec<ModelSpec> {
                             label: title_case(&variant),
                             value: variant,
                             description: None,
+                            unavailable: None,
                         })
                         .collect(),
                     default_value: None,
+                    role: crate::OptionRole::Model,
+                    apply: crate::ApplyTiming::Live,
+                    recommended: None,
+                    permissive: None,
                 });
             }
             models.push(ModelSpec {
@@ -1380,7 +1443,6 @@ impl OpenCodeServer {
         binary_path: Option<&Path>,
         cwd: &Path,
         launch_env: &LaunchEnv,
-        approval_mode: ApprovalMode,
         extra_args: &[String],
         registrations: &[&crate::McpRegistration],
     ) -> Result<Self, AgentError> {
@@ -1402,12 +1464,7 @@ impl OpenCodeServer {
         for (key, value) in launch_env.pairs(ProviderKind::OpenCode) {
             command.env(key, value);
         }
-        // These values define the transport and permission boundary. Apply
-        // them after profile env so they cannot be replaced by a stale custom
-        // variable from Settings.
-        command
-            .env("OPENCODE_SERVER_PASSWORD", &password)
-            .env("OPENCODE_PERMISSION", permission_policy(approval_mode));
+        command.env("OPENCODE_SERVER_PASSWORD", &password);
         if let Some(config) = opencode_config_content(launch_env, registrations)? {
             command.env("OPENCODE_CONFIG_CONTENT", config);
         }
@@ -1670,33 +1727,6 @@ fn reserve_loopback_port() -> Result<u16, AgentError> {
     Ok(listener.local_addr()?.port())
 }
 
-fn permission_policy(mode: ApprovalMode) -> String {
-    match mode {
-        ApprovalMode::Supervised => json!({
-            "*":"allow",
-            "edit":"ask",
-            "bash":"ask",
-            "external_directory":"ask"
-        }),
-        ApprovalMode::ReadOnly => json!({
-            "*":"deny",
-            "read":"allow",
-            "glob":"allow",
-            "grep":"allow",
-            "list":"allow",
-            "webfetch":"allow",
-            "websearch":"allow"
-        }),
-        ApprovalMode::AutoAcceptEdits => json!({
-            "*":"allow",
-            "bash":"ask",
-            "external_directory":"ask"
-        }),
-        ApprovalMode::FullAccess => json!({"*":"allow"}),
-    }
-    .to_string()
-}
-
 fn opencode_config_content(
     launch_env: &LaunchEnv,
     registrations: &[&crate::McpRegistration],
@@ -1753,6 +1783,120 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn native_auto_approve_replies_once_and_toggle_restores_requests() {
+        use std::io::Write as _;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+                requests.push((
+                    request_line,
+                    serde_json::from_slice::<Value>(&body).unwrap(),
+                ));
+            }
+            requests
+        });
+        smol::block_on(async {
+            let (events, receiver) = smol::channel::unbounded();
+            let (_, sse) = smol::channel::unbounded();
+            let mut actor = OpenCodeActor {
+                server: OpenCodeServer {
+                    child: crate::process::command("/usr/bin/true").spawn().unwrap(),
+                    http: HttpClient::new(format!("http://{address}"), "test".into()),
+                    stderr_tail: crate::process::StderrTail::default(),
+                },
+                sse,
+                events,
+                mapper: OpenCodeMapper::new("ses_target".into()),
+                model: None,
+                variant: None,
+                auto_approve: false,
+                pending_permissions: HashSet::new(),
+                pending_questions: HashMap::new(),
+            };
+            actor
+                .handle_command(SessionCommand::SetOption {
+                    id: "permission_mode".into(),
+                    value: json!("auto"),
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(receiver.try_recv().unwrap(), AgentEvent::ProviderOptions { selections, .. } if selections[0].value == "auto")
+            );
+            actor.handle_event(&json!({"type":"permission.asked", "properties": {
+                "id":"permission-1", "sessionID":"ses_target", "permission":"bash", "patterns":["pwd"], "metadata":{}
+            }})).await;
+            assert!(
+                matches!(receiver.try_recv().unwrap(), AgentEvent::ApprovalResolved { decision:ApprovalDecision::Option(id), .. } if id == "once")
+            );
+            actor
+                .handle_command(SessionCommand::SetOption {
+                    id: "permission_mode".into(),
+                    value: json!("normal"),
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(receiver.try_recv().unwrap(), AgentEvent::ProviderOptions { selections, .. } if selections[0].value == "normal")
+            );
+            actor.handle_event(&json!({"type":"permission.asked", "properties": {
+                "id":"permission-2", "sessionID":"ses_target", "permission":"bash", "patterns":["pwd"], "metadata":{}
+            }})).await;
+            assert!(
+                matches!(receiver.try_recv().unwrap(), AgentEvent::ApprovalRequested(request)
+                if request.options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>() == ["once", "always", "reject"])
+            );
+            actor
+                .handle_command(SessionCommand::SetOption {
+                    id: "permission_mode".into(),
+                    value: json!("auto"),
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(receiver.try_recv().unwrap(), AgentEvent::ProviderOptions { selections, .. } if selections[0].value == "auto")
+            );
+            assert!(
+                matches!(receiver.try_recv().unwrap(), AgentEvent::ApprovalResolved { request_id, decision: ApprovalDecision::Option(id) } if request_id == "permission-2" && id == "once")
+            );
+            let requests = server.join().unwrap();
+            for (index, (request, body)) in requests.iter().enumerate() {
+                assert_eq!(
+                    request,
+                    &format!(
+                        "POST /permission/permission-{}/reply HTTP/1.1\r\n",
+                        index + 1
+                    )
+                );
+                assert_eq!(*body, json!({"reply":"once"}));
+            }
+            actor.server.stop();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn health_timeout_stops_the_child_before_draining_its_output() {
         let dir =
             std::env::temp_dir().join(format!("agent-opencode-health-{}", uuid::Uuid::new_v4()));
@@ -1768,7 +1912,6 @@ mod tests {
             Some(Path::new("/bin/sh")),
             &dir,
             &LaunchEnv::default(),
-            ApprovalMode::FullAccess,
             &[],
             &[],
         )
@@ -1907,18 +2050,6 @@ mod tests {
             late.events.as_slice(),
             [AgentEvent::TurnChangesUpdated { turn_id: id, .. }] if id == &turn_id
         ));
-    }
-
-    #[test]
-    fn approval_modes_generate_fail_safe_policies() {
-        let read_only: Value =
-            serde_json::from_str(&permission_policy(ApprovalMode::ReadOnly)).unwrap();
-        assert_eq!(read_only["*"], "deny");
-        assert_eq!(read_only["read"], "allow");
-        let supervised: Value =
-            serde_json::from_str(&permission_policy(ApprovalMode::Supervised)).unwrap();
-        assert_eq!(supervised["edit"], "ask");
-        assert_eq!(supervised["bash"], "ask");
     }
 
     #[test]

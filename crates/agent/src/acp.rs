@@ -18,8 +18,8 @@ use crate::acp_session::{
     prompt_status,
 };
 use crate::{
-    AcpAgent, AcpLaunch, AgentError, AgentEvent, ApprovalMode, Attachment, InteractionMode,
-    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TokenUsage,
+    AcpAgent, AcpLaunch, AgentError, AgentEvent, Attachment, ProviderKind, ResumeCursor,
+    SessionHandle, SessionOptions, TokenUsage,
 };
 
 /// How long we let an agent's `authenticate` run before giving up and telling
@@ -122,20 +122,6 @@ impl Dialect for Registry {
         };
         setup.adopt(modes.as_ref(), config_options.as_deref());
 
-        let wants_plan = opts.approval_mode == ApprovalMode::ReadOnly
-            || opts.interaction_mode == InteractionMode::Plan;
-        if wants_plan || setup.in_plan_mode() {
-            setup
-                .apply_interaction_mode(
-                    &session_id,
-                    if wants_plan {
-                        InteractionMode::Plan
-                    } else {
-                        InteractionMode::Build
-                    },
-                )
-                .await;
-        }
         Ok(Established {
             resume: ResumeCursor(json!({
                 "acp_session_id": session_id.0.to_string(),
@@ -192,16 +178,6 @@ impl Dialect for Registry {
         _text: String,
         _attachments: Vec<Attachment>,
     ) {
-    }
-
-    async fn set_approval_mode(&self, session: &Session, _mode: ApprovalMode) {
-        session
-            .emit(AgentEvent::Warning {
-                message:
-                    "ACP agents own their permission policy; use the agent's own mode selector"
-                        .into(),
-            })
-            .await;
     }
 }
 

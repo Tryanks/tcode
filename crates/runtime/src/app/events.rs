@@ -125,51 +125,85 @@ impl AppState {
                 return;
             }
 
-            // The agent's own options (ACP modes / models / config options). Same
-            // deal: session metadata for the traits picker, not timeline content.
-            // The pushed selections become the session's selections, so the picker
-            // shows what the agent is actually running with.
             AgentEvent::ProviderOptions {
                 descriptors,
                 selections,
             } => {
                 let apply = |active: &mut ActiveSession| {
-                    active.provider_options = descriptors.clone();
-                    for selection in selections {
-                        active
-                            .meta
-                            .option_selections
-                            .retain(|s| s.id != selection.id);
-                        active.meta.option_selections.push(selection.clone());
-                    }
                     if matches!(
                         active.meta.provider.caps().option_descriptors,
                         OptionDescriptors::Wire
                     ) {
-                        let plan_mode =
-                            descriptors.iter().find_map(|descriptor| match descriptor {
-                                OptionDescriptor::Select { id, options, .. }
-                                    if id == "acp:mode" =>
-                                {
-                                    options
-                                        .iter()
-                                        .find(|option| option.value.eq_ignore_ascii_case("plan"))
-                                        .map(|option| option.value.as_str())
-                                }
-                                _ => None,
-                            });
-                        let current_mode = selections
+                        let current_ids: HashSet<_> = descriptors
                             .iter()
-                            .find(|selection| selection.id == "acp:mode")
-                            .and_then(|selection| selection.value.as_str());
-                        active.meta.interaction_mode = match (plan_mode, current_mode) {
-                            (Some(plan), Some(current)) if current.eq_ignore_ascii_case(plan) => {
-                                InteractionMode::Plan
-                            }
-                            _ => InteractionMode::Build,
-                        };
+                            .map(|descriptor| match descriptor {
+                                OptionDescriptor::Select { id, .. }
+                                | OptionDescriptor::Boolean { id, .. } => id.as_str(),
+                            })
+                            .collect();
+                        let retired_ids: HashSet<_> = active
+                            .provider_options
+                            .iter()
+                            .filter_map(|descriptor| {
+                                let id = match descriptor {
+                                    OptionDescriptor::Select { id, .. }
+                                    | OptionDescriptor::Boolean { id, .. } => id,
+                                };
+                                (!current_ids.contains(id.as_str())).then(|| id.clone())
+                            })
+                            .collect();
+                        active
+                            .meta
+                            .option_selections
+                            .retain(|selection| !retired_ids.contains(&selection.id));
+                        active
+                            .live_option_selections
+                            .retain(|selection| !retired_ids.contains(&selection.id));
+                        active
+                            .confirmed_option_selections
+                            .retain(|selection| !retired_ids.contains(&selection.id));
+                        active.provider_options = descriptors.clone();
+                    } else {
+                        for descriptor in descriptors {
+                            let id = match descriptor {
+                                OptionDescriptor::Select { id, .. }
+                                | OptionDescriptor::Boolean { id, .. } => id,
+                            };
+                            active.provider_options.retain(|existing| match existing {
+                                OptionDescriptor::Select {
+                                    id: existing_id, ..
+                                }
+                                | OptionDescriptor::Boolean {
+                                    id: existing_id, ..
+                                } => existing_id != id,
+                            });
+                            active.provider_options.push(descriptor.clone());
+                        }
                     }
-                    active.live_option_selections = active.meta.option_selections.clone();
+                    let permission_id =
+                        active
+                            .permission_descriptor()
+                            .map(|descriptor| match descriptor {
+                                OptionDescriptor::Select { id, .. }
+                                | OptionDescriptor::Boolean { id, .. } => id,
+                            });
+                    for selection in selections {
+                        active
+                            .confirmed_option_selections
+                            .retain(|value| value.id != selection.id);
+                        active.confirmed_option_selections.push(selection.clone());
+                        active
+                            .live_option_selections
+                            .retain(|value| value.id != selection.id);
+                        active.live_option_selections.push(selection.clone());
+                        if permission_id.as_deref() != Some(selection.id.as_str()) {
+                            active
+                                .meta
+                                .option_selections
+                                .retain(|value| value.id != selection.id);
+                            active.meta.option_selections.push(selection.clone());
+                        }
+                    }
                 };
                 let meta = self.resident_mut(session_id).map(|resident| {
                     apply(resident);
@@ -842,8 +876,6 @@ pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMe
         .profile_id
         .clone()
         .filter(|id| settings.resolved_profile(id).is_some());
-    meta.approval_mode = ApprovalMode::Supervised;
-    meta.interaction_mode = InteractionMode::Build;
     meta.orchestrate_enabled = false;
     meta.option_selections.push(OptionSelection {
         id: "reasoningEffort".into(),
@@ -860,8 +892,6 @@ pub(super) fn fallback_review_session_meta(settings: &Settings, cwd: PathBuf) ->
         .profile_id
         .clone()
         .filter(|id| settings.resolved_profile(id).is_some());
-    meta.approval_mode = ApprovalMode::Supervised;
-    meta.interaction_mode = InteractionMode::Build;
     meta.orchestrate_enabled = false;
     meta
 }
@@ -869,7 +899,6 @@ pub(super) fn fallback_review_session_meta(settings: &Settings, cwd: PathBuf) ->
 pub(super) fn title_turn_options() -> TurnOptions {
     TurnOptions {
         effort: Some(AI_TITLE_REASONING_EFFORT.into()),
-        interaction_mode: Some(InteractionMode::Build),
     }
 }
 
@@ -881,9 +910,6 @@ pub(super) async fn generate_ai_title(
     attachments: Vec<Attachment>,
     executor: HostCx,
 ) -> Option<String> {
-    // Isolate even a badly behaved title request from the user's checkout. The
-    // title prompt forbids tools and Supervised mode denies side effects, but a
-    // scratch cwd gives us another cheap boundary.
     let scratch = std::env::temp_dir().join(format!("tcode-title-{}", uuid::Uuid::new_v4()));
     let scratch_for_create = scratch.clone();
     if let Err(err) = executor
@@ -944,27 +970,7 @@ pub(super) async fn generate_ai_title_inner(
                 text,
                 ..
             } => streamed_text.push_str(&text),
-            AgentEvent::ApprovalRequested(request) => {
-                let decision = request
-                    .options
-                    .iter()
-                    .find(|option| {
-                        matches!(
-                            option.kind,
-                            agent::ApprovalOptionKind::RejectOnce
-                                | agent::ApprovalOptionKind::RejectAlways
-                        )
-                    })
-                    .map(|option| ApprovalDecision::Option(option.id.clone()))
-                    .unwrap_or(ApprovalDecision::Deny);
-                let _ = handle
-                    .commands
-                    .send(SessionCommand::RespondApproval {
-                        request_id: request.id,
-                        decision,
-                    })
-                    .await;
-            }
+            AgentEvent::ApprovalRequested(_) => break None,
             AgentEvent::UserInputRequested { .. }
             | AgentEvent::Error { fatal: true, .. }
             | AgentEvent::SessionClosed { .. } => break None,
@@ -1047,10 +1053,7 @@ pub(super) async fn run_fallback_review_inner(
         .send(SessionCommand::SendTurn {
             delivery_id: 0,
             text: prompt,
-            options: Some(TurnOptions {
-                effort: None,
-                interaction_mode: Some(InteractionMode::Build),
-            }),
+            options: Some(TurnOptions { effort: None }),
             attachments: Vec::new(),
         })
         .await
@@ -1072,27 +1075,7 @@ pub(super) async fn run_fallback_review_inner(
                 text,
                 ..
             } => streamed_text.push_str(&text),
-            AgentEvent::ApprovalRequested(request) => {
-                let decision = request
-                    .options
-                    .iter()
-                    .find(|option| {
-                        matches!(
-                            option.kind,
-                            agent::ApprovalOptionKind::RejectOnce
-                                | agent::ApprovalOptionKind::RejectAlways
-                        )
-                    })
-                    .map(|option| ApprovalDecision::Option(option.id.clone()))
-                    .unwrap_or(ApprovalDecision::Deny);
-                let _ = handle
-                    .commands
-                    .send(SessionCommand::RespondApproval {
-                        request_id: request.id,
-                        decision,
-                    })
-                    .await;
-            }
+            AgentEvent::ApprovalRequested(_) => break None,
             AgentEvent::UserInputRequested { .. }
             | AgentEvent::Error { fatal: true, .. }
             | AgentEvent::SessionClosed { .. } => break None,

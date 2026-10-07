@@ -674,7 +674,6 @@ impl DiffPanel {
         let panel_open = chrome.right_panel_open;
         let expanded = chrome.right_panel_expanded;
         let active = chrome.right_tab;
-        let plan_tab_active = chrome.plan_tab_active;
         // Windows: the open Diff/Plan panel is the rightmost column, so this
         // strip hosts the caption buttons. It is shorter than the 52px shell
         // header, so grow it to match — the buttons must reach the window top,
@@ -685,13 +684,6 @@ impl DiffPanel {
             panel_open,
             active,
         );
-        // The second tab is "Plan" when a plan exists or the session is in Plan
-        // mode, else "Tasks".
-        let plan_label = if plan_tab_active {
-            crate::tr!("plan.tab_plan")
-        } else {
-            crate::tr!("plan.tab_tasks")
-        };
         let store = self.workspace_store.clone();
         let store_close = self.workspace_store.clone();
         let store_diff = self.workspace_store.clone();
@@ -754,7 +746,7 @@ impl DiffPanel {
                 tab(
                     "plan-tab",
                     IconName::Map,
-                    plan_label.into_owned().into(),
+                    crate::tr!("tasks.tab").into_owned().into(),
                     active == RightTab::Plan,
                     cx,
                 )

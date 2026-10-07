@@ -41,8 +41,6 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         );
         parent_meta.id = "parent".into();
         parent_meta.project_id = Some("project".into());
-        parent_meta.approval_mode = ApprovalMode::ReadOnly;
-        parent_meta.interaction_mode = InteractionMode::Plan;
         parent_meta.option_selections = vec![OptionSelection {
             id: "reasoningEffort".into(),
             value: serde_json::json!("high"),
@@ -75,8 +73,6 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             .expect("native subagent mirror metadata");
         assert_eq!(mirror.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(mirror.title, "explorer: Inspect event routing");
-        assert_eq!(mirror.approval_mode, ApprovalMode::ReadOnly);
-        assert_eq!(mirror.interaction_mode, InteractionMode::Plan);
         assert_eq!(mirror.option_selections[0].value, serde_json::json!("high"));
         assert_eq!(mirror.model.as_deref(), Some("gpt-test"));
 
@@ -183,7 +179,6 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             persisted.option_selections[0].value,
             serde_json::json!("low")
         );
-        assert_eq!(persisted.interaction_mode, InteractionMode::Plan);
         let mirror_events = state.store.read_events(&mirror.id).unwrap();
         assert!(mirror_events.iter().any(|stored| matches!(
             &stored.event,
@@ -1505,8 +1500,6 @@ fn title_session_uses_configured_model_with_low_effort() {
     assert_eq!(custom.provider, ProviderKind::ClaudeCode);
     assert_eq!(custom.model.as_deref(), Some("claude-haiku-4-5"));
     assert_eq!(custom.profile_id.as_deref(), Some("work-claude"));
-    assert_eq!(custom.approval_mode, ApprovalMode::Supervised);
-    assert_eq!(custom.interaction_mode, InteractionMode::Build);
     assert!(!custom.orchestrate_enabled);
     assert_eq!(
         title_turn_options().effort.as_deref(),
@@ -2158,12 +2151,17 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
             display_name: "GPT-6.1 Sol".into(),
             is_default: false,
             options: vec![OptionDescriptor::Select {
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
                 id: "reasoningEffort".into(),
                 label: "Effort".into(),
                 default_value: Some("high".into()),
                 options: ["medium", "high", "deep"]
                     .into_iter()
                     .map(|value| agent::SelectOption {
+                        unavailable: None,
                         value: value.into(),
                         label: value.into(),
                         description: None,
@@ -2347,7 +2345,7 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
 }
 
 #[test]
-fn collaboration_starts_a_read_only_peer_discussion() {
+fn collaboration_starts_a_peer_discussion_with_native_permission() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-peer-collaboration-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
@@ -2369,7 +2367,7 @@ fn collaboration_starts_a_read_only_peer_discussion() {
                 model: None,
                 effort: None,
                 profile: None,
-                access: Some("full".into()),
+                permission: Some("auto_review".into()),
                 title: "Compare architectures".into(),
                 brief: "Challenge these alternatives".into(),
                 cwd: None,
@@ -2383,13 +2381,13 @@ fn collaboration_starts_a_read_only_peer_discussion() {
         );
         let result = response.try_recv().unwrap().unwrap();
         let id = result["thread_id"].as_str().unwrap();
+        assert_eq!(result["permission"], "auto_review");
         let child = state.resident(id).unwrap();
         assert_eq!(child.meta.model.as_deref(), Some("gpt-6-astra"));
         assert_eq!(
             child.meta.parent_session_id.as_deref(),
             Some(parent_id.as_str())
         );
-        assert_eq!(child.meta.approval_mode, ApprovalMode::ReadOnly);
         assert!(child.meta.worktree.is_none());
         assert!(!child.meta.orchestrate_enabled);
         assert!(
@@ -2538,7 +2536,6 @@ fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
         // Match the live launch state so the send is an ordinary turn rather
         // than a restart (which would flush through a different path).
         active.live_model = active.meta.model.clone();
-        active.live_approval_mode = Some(active.meta.approval_mode);
         state.install_selected(active);
 
         state.orchestrate_turn("orchestrator", "执行某某任务".into(), Vec::new(), cx);
@@ -2635,7 +2632,6 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
             active.meta.id = "orchestrator-title".into();
             active.meta.orchestrate_enabled = true;
             active.live_model = active.meta.model.clone();
-            active.live_approval_mode = Some(active.meta.approval_mode);
             state.install_selected(active);
 
             state.orchestrate_turn("orchestrator-title", request, attachments, cx);
@@ -2859,27 +2855,6 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(&empty, "codex", None, None, None, &HashMap::new())
             .unwrap_err()
             .contains("enabled model/endpoint combinations: none")
-    );
-}
-
-#[test]
-fn orchestrate_dispatch_access_maps_known_values() {
-    assert_eq!(resolve_dispatch_access(None), Ok(ApprovalMode::FullAccess));
-    assert_eq!(
-        resolve_dispatch_access(Some(" FULL ")),
-        Ok(ApprovalMode::FullAccess)
-    );
-    assert_eq!(
-        resolve_dispatch_access(Some("read_only")),
-        Ok(ApprovalMode::ReadOnly)
-    );
-    assert_eq!(
-        resolve_dispatch_access(Some("WORKSPACE_WRITE")),
-        Ok(ApprovalMode::AutoAcceptEdits)
-    );
-    assert_eq!(
-        resolve_dispatch_access(Some("admin")),
-        Err("unknown access: admin; expected read_only, workspace_write, or full".into())
     );
 }
 
@@ -3415,7 +3390,7 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
 }
 
 #[test]
-fn session_launch_preserves_approval_policy_and_scopes_mcp_registrations() {
+fn session_launch_scopes_mcp_registrations() {
     let registration = |name: &str, port| agent::McpRegistration {
         name: name.into(),
         url: format!("http://127.0.0.1:{port}/mcp"),
@@ -3425,79 +3400,51 @@ fn session_launch_preserves_approval_policy_and_scopes_mcp_registrations() {
     let orchestrate = registration(agent::McpRegistration::SERVER_NAME_ORCHESTRATE, 8);
     let report = registration("child-report", 9);
     let computer = registration(agent::McpRegistration::SERVER_NAME_COMPUTER_USE, 10);
-    // Codex ships its own computer use, so tcode's server is withheld from it.
     for (provider, preview_supported, computer_supported) in [
         (ProviderKind::ClaudeCode, true, true),
         (ProviderKind::Codex, true, false),
         (ProviderKind::Pi, false, true),
     ] {
-        for native_approvals in [false, true] {
-            let mut settings = Settings::default();
-            settings.provider_mut(provider).pi.native_approvals = native_approvals;
-            for mode in [
-                ApprovalMode::Supervised,
-                ApprovalMode::AutoAcceptEdits,
-                ApprovalMode::ReadOnly,
-                ApprovalMode::FullAccess,
+        let mut settings = Settings::default();
+        for (lead, child, computer_enabled) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, true),
+            (true, true, true),
+            (false, false, true),
+        ] {
+            settings.computer_use.enabled = computer_enabled;
+            let mut meta = SessionMeta::new(provider, PathBuf::from("/x"), None);
+            meta.orchestrate_enabled = lead;
+            meta.parent_session_id = child.then(|| "parent".into());
+            let options = session_options(
+                &meta,
+                &settings,
+                LaunchEnv::default(),
+                Some(preview.clone()),
+                Some(orchestrate.clone()),
+                Some(report.clone()),
+                Some(computer.clone()),
+            );
+            let mut expected = Vec::new();
+            for (enabled, reg) in [
+                (preview_supported, &preview),
+                (lead, &orchestrate),
+                (child, &report),
+                (computer_enabled && computer_supported, &computer),
             ] {
-                for (lead, child, computer_enabled) in [
-                    (false, false, false),
-                    (true, false, false),
-                    (false, true, true),
-                    (true, true, true),
-                    (false, false, true),
-                ] {
-                    settings.computer_use.enabled = computer_enabled;
-                    let mut meta = SessionMeta::new(provider, PathBuf::from("/x"), None);
-                    meta.approval_mode = mode;
-                    meta.orchestrate_enabled = lead;
-                    meta.parent_session_id = child.then(|| "parent".into());
-                    let options = session_options(
-                        &meta,
-                        &settings,
-                        LaunchEnv::default(),
-                        Some(preview.clone()),
-                        Some(orchestrate.clone()),
-                        Some(report.clone()),
-                        Some(computer.clone()),
-                    );
-                    let expected_mode = match (provider, native_approvals, mode) {
-                        (
-                            ProviderKind::Pi,
-                            false,
-                            ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits,
-                        ) => ApprovalMode::FullAccess,
-                        _ => mode,
-                    };
-                    assert_eq!(
-                        options.approval_mode, expected_mode,
-                        "{provider:?}, native approvals {native_approvals}, {mode:?}"
-                    );
-                    assert_eq!(
-                        meta.approval_mode, mode,
-                        "launch must not rewrite saved intent"
-                    );
-                    let mut expected = Vec::new();
-                    for (enabled, reg) in [
-                        (preview_supported, &preview),
-                        (lead, &orchestrate),
-                        (child, &report),
-                        (computer_enabled && computer_supported, &computer),
-                    ] {
-                        if enabled {
-                            expected.push((&reg.name, &reg.url, &reg.bearer_token));
-                        }
-                    }
-                    assert_eq!(
-                        options
-                            .mcp_servers
-                            .iter()
-                            .map(|reg| (&reg.name, &reg.url, &reg.bearer_token))
-                            .collect::<Vec<_>>(),
-                        expected
-                    );
+                if enabled {
+                    expected.push((&reg.name, &reg.url, &reg.bearer_token));
                 }
             }
+            assert_eq!(
+                options
+                    .mcp_servers
+                    .iter()
+                    .map(|reg| (&reg.name, &reg.url, &reg.bearer_token))
+                    .collect::<Vec<_>>(),
+                expected
+            );
         }
     }
 }
@@ -4049,241 +3996,287 @@ fn orchestrate_archive_is_batch_atomic_and_parent_scoped() {
 }
 
 #[test]
-fn child_approval_policy_distinguishes_report_tools_and_deduplicates_notices() {
-    for mode in [
-        ChildApprovalMode::Orchestrator,
-        ChildApprovalMode::Manual,
-        ChildApprovalMode::AlwaysAllow,
-    ] {
-        for (provider, tool, is_report) in [
-            (ProviderKind::Codex, None, false),
+fn dispatch_launches_with_setting_permission_and_validates_native_overrides() {
+    use ChildApprovalMode::{AlwaysAllow, Auto, Manual, Orchestrator};
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-native-dispatch-permissions");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        let parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/workspace"), None);
+        let parent_id = parent.id.clone();
+        state.sessions.push(parent);
+        for (provider, id, defaults, explicit, valid) in [
             (
                 ProviderKind::ClaudeCode,
-                Some("mcp__tcode_report__report_result"),
-                true,
+                Some("permissionMode"),
+                [
+                    serde_json::json!("default"),
+                    serde_json::json!("auto"),
+                    serde_json::json!("bypassPermissions"),
+                    serde_json::json!("default"),
+                ],
+                Some("acceptEdits"),
+                "default, acceptEdits, auto, dontAsk, bypassPermissions",
             ),
             (
-                ProviderKind::ClaudeCode,
-                Some("mcp__evil_tcode_report__delete_files"),
-                false,
+                ProviderKind::Codex,
+                Some("permissions"),
+                [
+                    serde_json::json!("ask"),
+                    serde_json::json!("auto_review"),
+                    serde_json::json!("full_access"),
+                    serde_json::json!("ask"),
+                ],
+                Some("ask"),
+                "ask, auto_review, read_only, full_access",
             ),
             (
-                ProviderKind::ClaudeCode,
-                Some("mcp__tcode_report__delete_files"),
-                false,
+                ProviderKind::OpenCode,
+                Some("permission_mode"),
+                [
+                    serde_json::json!("normal"),
+                    serde_json::json!("auto"),
+                    serde_json::json!("auto"),
+                    serde_json::json!("normal"),
+                ],
+                Some("normal"),
+                "normal, auto",
             ),
             (
                 ProviderKind::Pi,
-                Some("mcp__tcode_report__report_result"),
-                false,
-            ),
-            (
-                ProviderKind::Acp,
-                Some("mcp__tcode_report__report_result"),
-                false,
+                None,
+                [
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                ],
+                None,
+                "none (omit permission)",
             ),
         ] {
-            let cx = &mut TestAppContext::default();
-            let store = TestStore::new("tcode-child-approval-policy");
-            let state = cx.new_entity(TestClientState::new((*store).clone()));
-            let (parent_commands, parent_receiver) = smol::channel::unbounded();
-            let (child_commands, child_receiver) = smol::channel::unbounded();
-            state.update(cx, |state, cx| {
-                state.settings.orchestrate.child_approval = mode;
-                let mut parent = live_session(ProviderKind::Codex, parent_commands);
-                parent.meta.id = "parent".into();
-                parent.turn_in_flight = true;
-                state.residents.parked.insert("parent".into(), parent);
-                let mut child = live_session(provider, child_commands);
-                child.meta.id = "child".into();
-                child.meta.title = "Review".into();
-                child.meta.parent_session_id = Some("parent".into());
-                state.sessions.push(child.meta.clone());
-                state.residents.parked.insert("child".into(), child);
-                let (kind, summary) = if let Some(name) = tool {
-                    (
-                        agent::ApprovalKind::ToolUse {
-                            name: name.into(),
-                            input: serde_json::json!({"text": "report"}),
-                            detail: name.into(),
-                        },
-                        format!("tool `{name}`"),
-                    )
-                } else {
-                    (
-                        agent::ApprovalKind::ExecCommand {
-                            command: "touch blocked".into(),
-                            cwd: None,
-                            reason: None,
-                        },
-                        "command `touch blocked`".into(),
-                    )
-                };
-                let request = agent::ApprovalRequest {
-                    id: "approval".into(),
-                    turn_id: None,
-                    kind,
-                    options: Vec::new(),
-                };
-                state.on_event("child", AgentEvent::ApprovalRequested(request.clone()), cx);
-                if is_report || mode == ChildApprovalMode::AlwaysAllow {
-                    let expected_decision = if is_report {
-                        ApprovalDecision::Approve
-                    } else {
-                        ApprovalDecision::ApproveForSession
-                    };
-                    assert!(
-                        matches!(child_receiver.try_recv(), Ok(SessionCommand::RespondApproval {
-                        request_id, decision,
-                    }) if request_id == "approval" && decision == expected_decision),
-                        "{provider:?} {mode:?} {tool:?}"
-                    );
-                    assert!(parent_receiver.try_recv().is_err());
-                    assert!(state.approval_requests("child").is_empty());
-                } else {
-                    assert!(
-                        child_receiver.try_recv().is_err(),
-                        "unexpected automatic approval: {provider:?} {mode:?} {tool:?}"
-                    );
-                    state.on_event("child", AgentEvent::ApprovalRequested(request), cx);
-                    let SessionCommand::Steer { text, .. } = parent_receiver.try_recv().unwrap()
-                    else {
-                        panic!("approval notice must steer the parent");
-                    };
-                    let prefix = format!(
-                        "[orchestrate] thread child (\"Review\") is waiting for approval: {summary}"
-                    );
-                    if mode == ChildApprovalMode::Manual {
-                        assert_eq!(text, format!("{prefix}."));
-                    } else {
-                        assert!(text.starts_with(&format!("{prefix} (request_id: approval).")));
-                        assert!(text.contains("decide with the approve tool"));
-                    }
-                    assert!(
-                        parent_receiver.try_recv().is_err(),
-                        "duplicate provider request produced another notice"
-                    );
-                    let status = state.child_status_json(&state.sessions[0], &Timeline::default());
-                    assert_eq!(status["waiting_approval"], summary);
-                    assert_eq!(status["approval_request_id"], "approval");
+            let profile = tcode_core::settings::OrchestrateChildModel {
+                provider,
+                model: "permission-test-model".into(),
+                profile_id: None,
+                enabled: true,
+                fast: false,
+                description: String::new(),
+                bundled: None,
+            };
+            state.settings.orchestrate.child_models = vec![profile];
+            let configuration = render_orchestrate_configuration(
+                &state.settings.orchestrate,
+                None,
+                &HashMap::new(),
+            );
+            match provider {
+                ProviderKind::ClaudeCode => assert!(
+                    configuration.contains(
+                        "auto — Auto: A background safety classifier reviews each action;"
+                    ) && configuration.contains("(recommended)")
+                ),
+                ProviderKind::Codex => assert!(
+                    configuration.contains("auto_review — Approve for me: Same workspace sandbox;")
+                        && configuration.contains("(recommended)")
+                ),
+                ProviderKind::OpenCode => {
+                    assert!(configuration.contains("auto — Auto-approve: Answers every ask with once, as OpenCode's own clients do; explicit deny rules still deny. (recommended)"))
                 }
-            });
+                ProviderKind::Pi => assert!(
+                    configuration.contains("No native permission control; omit `permission`.")
+                ),
+                _ => unreachable!(),
+            }
+            for (mode, expected) in [Orchestrator, Auto, AlwaysAllow, Manual]
+                .into_iter()
+                .zip(defaults)
+            {
+                state.settings.orchestrate.child_approval = mode;
+                for (permission, expected) in [
+                    (None, expected),
+                    (
+                        explicit,
+                        explicit.map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
+                    ),
+                ]
+                .into_iter()
+                .take(if explicit.is_some() { 2 } else { 1 })
+                {
+                    let (reply, response) = smol::channel::bounded(1);
+                    state.handle_orchestrate_op(
+                        orchestrate_mcp::OrchestrateOp::Dispatch {
+                            purpose: orchestrate_mcp::ThreadPurpose::Execution,
+                            parent_id: parent_id.clone(),
+                            provider: provider_name(provider).into(),
+                            model: None,
+                            effort: None,
+                            profile: None,
+                            permission: permission.map(str::to_string),
+                            title: "Permission child".into(),
+                            brief: "Inspect".into(),
+                            cwd: None,
+                            worktree: Some(false),
+                            archive_on_complete: None,
+                            result_max_chars: None,
+                            fast: None,
+                        },
+                        reply,
+                        cx,
+                    );
+                    let result = response.try_recv().unwrap().unwrap();
+                    assert_eq!(
+                        result["permission"], expected,
+                        "{provider:?} {mode:?} {permission:?}"
+                    );
+                    let child = state
+                        .resident(result["thread_id"].as_str().unwrap())
+                        .unwrap();
+                    if let Some(id) = id {
+                        assert_eq!(
+                            child
+                                .meta
+                                .option_selections
+                                .iter()
+                                .find(|selection| selection.id == id)
+                                .unwrap()
+                                .value,
+                            expected
+                        );
+                    } else {
+                        assert!(child.meta.option_selections.is_empty());
+                    }
+                }
+            }
+            for invalid in ["unknown-native-value", ""] {
+                let count = state.sessions.len();
+                let (reply, response) = smol::channel::bounded(1);
+                state.handle_orchestrate_op(
+                    orchestrate_mcp::OrchestrateOp::Dispatch {
+                        purpose: orchestrate_mcp::ThreadPurpose::Execution,
+                        parent_id: parent_id.clone(),
+                        provider: provider_name(provider).into(),
+                        model: None,
+                        effort: None,
+                        profile: None,
+                        permission: Some(invalid.into()),
+                        title: "Invalid".into(),
+                        brief: "Inspect".into(),
+                        cwd: None,
+                        worktree: Some(false),
+                        archive_on_complete: None,
+                        result_max_chars: None,
+                        fast: None,
+                    },
+                    reply,
+                    cx,
+                );
+                assert!(
+                    response
+                        .try_recv()
+                        .unwrap()
+                        .unwrap_err()
+                        .contains(&format!("valid permission values: {valid}"))
+                );
+                assert_eq!(
+                    state.sessions.len(),
+                    count,
+                    "invalid permission must not create a child"
+                );
+            }
         }
-    }
+    });
 }
 
 #[test]
-fn orchestrate_approve_routes_decisions_and_validates_scope() {
+fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() {
+    use agent::ApprovalOptionKind::{AllowAlways, AllowOnce, RejectOnce};
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-orchestrate-approve-op-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-
+    let store = TestStore::new("tcode-native-child-approvals");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+    let (child_commands, child_receiver) = smol::channel::unbounded();
     state.update(cx, |state, cx| {
-        let mut child = live_session(ProviderKind::Codex, commands);
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        let mut child = live_session(ProviderKind::Codex, child_commands);
         child.meta.id = "child".into();
         child.meta.parent_session_id = Some("parent".into());
-        state.sessions.push(child.meta.clone());
-        state.residents.parked.insert(child.meta.id.clone(), child);
-        state.record_approval_event(
-            "child",
-            &AgentEvent::ApprovalRequested(agent::ApprovalRequest {
-                id: "approval-op".into(),
-                turn_id: None,
-                kind: agent::ApprovalKind::ExecCommand {
-                    command: "cargo test".into(),
-                    cwd: None,
-                    reason: None,
-                },
-                options: Vec::new(),
-            }),
-        );
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Approve {
-                parent_id: "parent".into(),
-                thread_id: "child".into(),
-                request_id: None,
-                decision: " APPROVE ".into(),
-            },
-            reply,
-            cx,
-        );
-        let result = response.try_recv().unwrap().unwrap();
-        assert_eq!(
-            result,
-            serde_json::json!({ "ok": true, "request_id": "approval-op" })
-        );
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::RespondApproval {
-                request_id,
-                decision: ApprovalDecision::Approve,
-            }) if request_id == "approval-op"
-        ));
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Approve {
-                parent_id: "parent".into(),
-                thread_id: "child".into(),
-                request_id: Some("missing".into()),
-                decision: "deny".into(),
-            },
-            reply,
-            cx,
-        );
-        let unknown_request = response.try_recv().unwrap().unwrap_err();
-        assert_eq!(unknown_request, "no pending approval with that request_id");
-
-        // The successful response above clears the request immediately. Seed a
-        // fresh provider request before independently exercising validation.
-        state.record_approval_event(
-            "child",
-            &AgentEvent::ApprovalRequested(agent::ApprovalRequest {
-                id: "approval-op".into(),
-                turn_id: None,
-                kind: agent::ApprovalKind::ExecCommand {
-                    command: "cargo test".into(),
-                    cwd: None,
-                    reason: None,
-                },
-                options: Vec::new(),
-            }),
-        );
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Approve {
-                parent_id: "parent".into(),
-                thread_id: "child".into(),
-                request_id: Some("approval-op".into()),
-                decision: "later".into(),
-            },
-            reply,
-            cx,
-        );
-        let bad_decision = response.try_recv().unwrap().unwrap_err();
-        assert_eq!(
-            bad_decision,
-            "unknown decision: later; expected approve, approve_for_session, or deny"
-        );
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Approve {
-                parent_id: "other-parent".into(),
-                thread_id: "child".into(),
-                request_id: Some("approval-op".into()),
-                decision: "deny".into(),
-            },
-            reply,
-            cx,
-        );
-        let non_child = response.try_recv().unwrap().unwrap_err();
-        assert_eq!(non_child, "unknown thread or not a child of this parent");
+        state.sessions.extend([parent.meta.clone(), child.meta.clone()]);
+        state.residents.parked.insert("parent".into(), parent);
+        state.residents.parked.insert("child".into(), child);
+        for (n, mode) in [ChildApprovalMode::Orchestrator, ChildApprovalMode::Auto, ChildApprovalMode::Manual, ChildApprovalMode::AlwaysAllow].into_iter().enumerate() {
+            state.settings.orchestrate.child_approval = mode;
+            let request_id = format!("request-{n}");
+            let options = if mode == ChildApprovalMode::AlwaysAllow {
+                vec![agent::ApprovalOption { id: "Reject:Native".into(), label: "Reject".into(), kind: RejectOnce }]
+            } else {
+                vec![
+                    agent::ApprovalOption { id: "Allow:Native".into(), label: "Native allowance".into(), kind: AllowOnce },
+                    agent::ApprovalOption { id: "Reject:Native".into(), label: "Reject".into(), kind: RejectOnce },
+                ]
+            };
+            state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                id: request_id.clone(), turn_id: None,
+                kind: agent::ApprovalKind::ToolUse { name: "mcp__tcode_report__report_result".into(), input: serde_json::json!({}), detail: "Native MCP consent".into() },
+                options: options.clone(),
+            }), cx);
+            assert!(child_receiver.try_recv().is_err(), "requests without automatic allow must remain pending");
+            let SessionCommand::Steer { text, .. } = parent_receiver.try_recv().unwrap() else { panic!("approval must reach lead") };
+            assert!(text.contains(&request_id));
+            let native = text.split_once("Native options: ").unwrap().1.split_once(". ").unwrap().0;
+            let offered: Vec<agent::ApprovalOption> = serde_json::from_str(native).unwrap();
+            assert_eq!(offered, options);
+            if mode == ChildApprovalMode::Manual {
+                assert!(text.contains("The user answers in the child thread."));
+            } else {
+                assert!(text.contains("option: <exact id> or cancel: true"));
+            }
+            for (parent, request, option, cancel, error) in [
+                ("other-parent", None, Some("Reject:Native"), false, "not a child"),
+                ("parent", Some("missing"), Some("Reject:Native"), false, "no pending approval"),
+                ("parent", None, Some("invented-id"), false, "valid option ids"),
+                ("parent", None, Some("Reject:Native"), true, "never both"),
+                ("parent", None, None, false, "never both"),
+            ] {
+                let (reply, response) = smol::channel::bounded(1);
+                state.handle_orchestrate_op(orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: parent.into(), thread_id: "child".into(), request_id: request.map(str::to_string),
+                    option: option.map(str::to_string), cancel,
+                }, reply, cx);
+                assert!(response.try_recv().unwrap().unwrap_err().contains(error));
+                assert!(child_receiver.try_recv().is_err());
+                assert_eq!(state.approval_requests("child").len(), 1);
+            }
+            let cancel = mode == ChildApprovalMode::Manual;
+            let chosen = offered.first().unwrap().id.clone();
+            let (reply, response) = smol::channel::bounded(1);
+            state.handle_orchestrate_op(orchestrate_mcp::OrchestrateOp::Approve {
+                parent_id: "parent".into(), thread_id: "child".into(), request_id: None,
+                option: (!cancel).then_some(chosen.clone()), cancel,
+            }, reply, cx);
+            assert_eq!(response.try_recv().unwrap().unwrap()["request_id"], request_id);
+            let SessionCommand::RespondApproval { request_id: delivered, decision } = child_receiver.try_recv().unwrap() else { panic!("missing native approval response") };
+            assert_eq!(delivered, request_id);
+            assert_eq!(decision, if cancel { ApprovalDecision::Cancel } else { ApprovalDecision::Option(chosen) });
+            assert!(state.approval_requests("child").is_empty());
+        }
+        state.settings.orchestrate.child_approval = ChildApprovalMode::AlwaysAllow;
+        for (n, kinds, expected) in [
+            (0, vec![RejectOnce, AllowOnce, AllowAlways, AllowOnce], "native-2"),
+            (1, vec![RejectOnce, AllowOnce], "native-1"),
+        ] {
+            let request_id = format!("automatic-{n}");
+            state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                id: request_id.clone(), turn_id: None,
+                kind: agent::ApprovalKind::ExecCommand { command: "cargo check".into(), cwd: None, reason: None },
+                options: kinds.into_iter().enumerate().map(|(i, kind)| agent::ApprovalOption { id: format!("native-{i}"), label: "Native choice".into(), kind }).collect(),
+            }), cx);
+            assert!(matches!(child_receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id: delivered, decision: ApprovalDecision::Option(option) }) if delivered == request_id && option == expected));
+            assert!(parent_receiver.try_recv().is_err());
+            assert!(state.approval_requests("child").is_empty());
+        }
     });
 }
 
@@ -4773,61 +4766,6 @@ fn due_scheduled_message_reenters_the_ordinary_send_path() {
 }
 
 #[test]
-fn implement_plan_waits_for_pending_relay_without_mutating_state() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-plan-relay-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::Codex, commands);
-        active.meta.id = "plan-relay".into();
-        active.meta.interaction_mode = InteractionMode::Plan;
-        active.pending_relay = Some(PendingRelay {
-            from_provider: ProviderKind::ClaudeCode,
-            from_model: Some("opus".into()),
-            from_profile: None,
-        });
-        active.timeline.apply_at(
-            None,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "user-1".into(),
-                parent_item_id: None,
-                content: ItemContent::UserMessage {
-                    text: "make a plan".into(),
-                    context_len: None,
-                    attachments: Vec::new(),
-                },
-            }),
-        );
-        active.timeline.apply_at(
-            None,
-            &AgentEvent::ProposedPlan {
-                item_id: "plan-1".into(),
-                markdown: "# Plan".into(),
-            },
-        );
-        active.timeline.apply_at(
-            None,
-            &AgentEvent::TurnCompleted {
-                turn_id: "plan-turn".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        );
-        state.install_selected(active);
-
-        state.implement_plan("plan-relay", cx);
-
-        let active = state.selected_session().unwrap();
-        assert_eq!(active.meta.interaction_mode, InteractionMode::Plan);
-        assert!(active.timeline.plan_ready().is_some());
-        assert!(receiver.try_recv().is_err());
-    });
-}
-
-#[test]
 fn profile_switch_within_one_provider_requires_a_relay() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-profile-relay-test");
@@ -4898,47 +4836,6 @@ fn profile_switch_within_one_provider_requires_a_relay() {
     });
 }
 
-#[test]
-fn queued_turns_keep_the_interaction_mode_selected_at_submit_time() {
-    let (commands, receiver) = smol::channel::unbounded();
-    let mut active = live_session(ProviderKind::Codex, commands);
-    active.turn_in_flight = true;
-    active.meta.interaction_mode = InteractionMode::Plan;
-    active.push_queued("plan turn".into(), Vec::new());
-    active.meta.interaction_mode = InteractionMode::Build;
-    active.turn_in_flight = false;
-
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    let first_delivery = match receiver.try_recv() {
-        Ok(SessionCommand::SendTurn {
-            delivery_id,
-            options: Some(options),
-            ..
-        }) => {
-            assert_eq!(options.interaction_mode, Some(InteractionMode::Plan));
-            delivery_id
-        }
-        other => panic!("expected queued Plan turn, got {other:?}"),
-    };
-    active.accept_turn_delivery(first_delivery).unwrap();
-    active.turn_in_flight = false;
-
-    active.meta.interaction_mode = InteractionMode::Build;
-    active.push_queued("build turn".into(), Vec::new());
-    active.meta.interaction_mode = InteractionMode::Plan;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
-    assert!(matches!(
-        receiver.try_recv(),
-        Ok(SessionCommand::SendTurn {
-            options: Some(TurnOptions {
-                interaction_mode: Some(InteractionMode::Build),
-                ..
-            }),
-            ..
-        })
-    ));
-}
-
 /// A live session with `provider`, nothing queued, no turn in flight.
 fn live_session(
     provider: ProviderKind,
@@ -4946,12 +4843,135 @@ fn live_session(
 ) -> ActiveSession {
     ActiveSession {
         runtime: Runtime::Live(commands),
-        live_approval_mode: Some(ApprovalMode::default()),
         ..ActiveSession::new(
             SessionMeta::new(provider, PathBuf::from("/tmp/project"), None),
             false,
             Vec::new(),
         )
+    }
+}
+
+#[test]
+fn provider_config_options_remove_retired_wire_controls() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-provider-config-retirement");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        let (commands, _receiver) = smol::channel::unbounded();
+        let mut session = live_session(ProviderKind::Acp, commands);
+        session.meta.id = "config-session".into();
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        state.on_event(
+            "config-session",
+            AgentEvent::ProviderOptions {
+                descriptors: vec![OptionDescriptor::Boolean {
+                    id: "acp:config:thinking".into(),
+                    label: "Thinking".into(),
+                    default_value: true,
+                    role: Default::default(),
+                    apply: Default::default(),
+                    recommended: None,
+                    permissive: None,
+                }],
+                selections: vec![OptionSelection {
+                    id: "acp:config:thinking".into(),
+                    value: serde_json::json!(true),
+                }],
+            },
+            cx,
+        );
+        assert_eq!(
+            state
+                .session_status_snapshot("config-session")
+                .unwrap()
+                .provider_option_descriptors
+                .len(),
+            1
+        );
+        state.on_event(
+            "config-session",
+            AgentEvent::ProviderOptions {
+                descriptors: Vec::new(),
+                selections: Vec::new(),
+            },
+            cx,
+        );
+        let removed = state.session_status_snapshot("config-session").unwrap();
+        assert!(removed.provider_option_descriptors.is_empty());
+        assert!(removed.provider_option_selections.is_empty());
+        assert!(removed.provider_option_requested_selections.is_empty());
+    });
+}
+
+#[test]
+fn native_permission_selection_stays_pending_until_provider_confirmation() {
+    for (provider, id, initial, requested, restart) in [
+        (
+            ProviderKind::ClaudeCode,
+            "permissionMode",
+            serde_json::json!("default"),
+            serde_json::json!("auto"),
+            false,
+        ),
+        (
+            ProviderKind::Codex,
+            "permissions",
+            serde_json::json!("ask"),
+            serde_json::json!("full_access"),
+            false,
+        ),
+        (
+            ProviderKind::OpenCode,
+            "permission_mode",
+            serde_json::json!("normal"),
+            serde_json::json!("auto"),
+            false,
+        ),
+        (
+            ProviderKind::Grok,
+            "permissionMode",
+            serde_json::json!("default"),
+            serde_json::json!("auto"),
+            true,
+        ),
+    ] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-permission-confirmation");
+        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        let (commands, receiver) = smol::channel::unbounded();
+        state.update(cx, |state, cx| {
+            let mut session = live_session(provider, commands);
+            session.meta.id = "permission-session".into();
+            state.sessions.push(session.meta.clone());
+            state.install_selected(session);
+            let confirmed = |value| AgentEvent::ProviderOptions {
+                descriptors: vec![permission_control(provider).unwrap()],
+                selections: vec![OptionSelection { id: id.into(), value }],
+            };
+            state.on_event("permission-session", confirmed(initial.clone()), cx);
+            assert!(!state.session_status_snapshot("permission-session").unwrap().options_pending_restart);
+            state.set_active_option("permission-session", id, Some(requested.clone()), cx);
+            if restart {
+                assert!(receiver.try_recv().is_err());
+            } else {
+                assert!(matches!(receiver.try_recv(), Ok(SessionCommand::SetOption { id: sent_id, value }) if sent_id == id && value == requested));
+            }
+            state.on_event("permission-session", confirmed(initial.clone()), cx);
+            let pending = state.session_status_snapshot("permission-session").unwrap();
+            assert_eq!(pending.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, initial);
+            assert_eq!(pending.provider_option_requested_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
+            assert_eq!(pending.options_pending_restart, restart);
+            assert!(matches!(state.resident("permission-session").unwrap().runtime, Runtime::Live(_)));
+            if !restart {
+                state.on_event("permission-session", confirmed(requested.clone()), cx);
+                let applied = state.session_status_snapshot("permission-session").unwrap();
+                assert_eq!(applied.provider_option_selections.iter().find(|selection| selection.id == id).unwrap().value, requested);
+                assert_eq!(applied.provider_option_requested_selections, applied.provider_option_selections);
+                assert!(!applied.options_pending_restart);
+            }
+            assert!(receiver.try_recv().is_err());
+        });
     }
 }
 
@@ -6293,7 +6313,6 @@ fn fake_live_session(cwd: PathBuf) -> (ActiveSession, smol::channel::Receiver<Se
     // sees a live-config mismatch and restarts the provider instead of
     // dispatching.
     session.live_model = session.meta.model.clone();
-    session.live_approval_mode = Some(session.meta.approval_mode);
     session.live_option_selections = session.meta.option_selections.clone();
     (session, receiver)
 }
@@ -7062,34 +7081,6 @@ fn failed_provider_start_keeps_the_queued_message() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
-#[test]
-fn plan_workspace_save_completes_after_background_executor_runs() {
-    let cx = &mut TestAppContext::default();
-    let cwd = std::env::temp_dir().join(format!("tcode-plan-save-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&cwd).unwrap();
-    let test_store = TestStore::new("tcode-plan-save-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        state.start_draft("plan-project".into(), cwd.clone(), cx);
-        state.host.save_plan_to_workspace(
-            state.selected.as_deref().unwrap_or_default(),
-            "# Saved plan".into(),
-            cx,
-        );
-        // No "not written yet" assertion here: the write runs on the global
-        // smol pool, whose threads are concurrent with this update, so any
-        // file-existence check races them (flaked on fast Windows runners
-        // both inside and after this update).
-    });
-
-    cx.run_until(|_| {
-        std::fs::read_to_string(cwd.join("PLAN-1.md")).is_ok_and(|text| text == "# Saved plan")
-    });
-    let _ = std::fs::remove_dir_all(&cwd);
-}
-
 fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<T>) -> T {
     let mut reply = None;
     cx.run_until(|_| {
@@ -7155,8 +7146,6 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
         }
     });
 
-    // The same dispatch boundary owns model effort, provider-specific fast mode,
-    // parent/profile metadata and the queued reporting contract.
     for (provider, kind, model, effort, fast, profile, expected_options) in [
         (
             "codex",
@@ -7245,7 +7234,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
                     model: Some(model.into()),
                     effort: effort.map(str::to_string),
                     profile: profile.map(str::to_string),
-                    access: Some(if custom { "workspace_write" } else { "full" }.into()),
+                    permission: None,
                     title: "Child".into(),
                     brief: "Inspect the workspace".into(),
                     cwd: None,
@@ -7268,19 +7257,15 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
             assert_eq!(meta.model.as_deref(), Some(model));
             assert_eq!(meta.profile_id.as_deref(), profile);
             assert_eq!(meta.cwd, PathBuf::from("/tmp/project"));
-            assert_eq!(
-                meta.approval_mode,
-                if custom {
-                    ApprovalMode::AutoAcceptEdits
-                } else {
-                    ApprovalMode::FullAccess
-                }
-            );
             assert_eq!(meta.archive_on_complete, custom);
             assert_eq!(meta.result_max_chars, custom.then_some(2400));
             assert_eq!(
                 meta.option_selections
                     .iter()
+                    .filter(|selection| matches!(
+                        selection.id.as_str(),
+                        "reasoningEffort" | "serviceTier" | "fastMode"
+                    ))
                     .map(|selection| (selection.id.as_str(), selection.value.clone()))
                     .collect::<Vec<_>>(),
                 expected_options,
@@ -7320,7 +7305,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
                 model: Some("gpt-6.1-sol".into()),
                 effort: None,
                 profile: None,
-                access: None,
+                permission: None,
                 title: "Child".into(),
                 brief: "Inspect the workspace".into(),
                 cwd: Some(missing.to_string_lossy().into_owned()),
@@ -7385,7 +7370,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
                 model: Some("gpt-6.1-sol".into()),
                 effort: None,
                 profile: None,
-                access: None,
+                permission: None,
                 title: "Isolated child".into(),
                 brief: "Inspect the workspace".into(),
                 cwd: None,
@@ -7701,7 +7686,7 @@ fn archived_revision_invalidates_sharing_facts_when_another_thread_or_draft_leav
 }
 
 #[test]
-fn plan_and_usage_projections_survive_a_partial_history_window_and_emit_only_changes() {
+fn usage_projection_survives_a_partial_history_window() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("session-plan-usage-window");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -7734,14 +7719,6 @@ fn plan_and_usage_projections_survive_a_partial_history_window_and_emit_only_cha
                 freshness: agent::ContextFreshness::Current,
                 ..Default::default()
             }),
-            cx,
-        );
-        state.on_event(
-            id,
-            AgentEvent::ProposedPlan {
-                item_id: "plan-item".into(),
-                markdown: "# Keep the plan".into(),
-            },
             cx,
         );
         state.on_event(
@@ -7787,64 +7764,13 @@ fn plan_and_usage_projections_survive_a_partial_history_window_and_emit_only_cha
         assert!(from > 0);
         let partial = Timeline::fold_events(records);
         assert!(partial.usage.is_none());
-        assert!(partial.proposed_plan.is_none());
         let status = state.session_status_snapshot(id).unwrap();
         let usage = status.usage.unwrap();
         assert_eq!(usage.used_tokens, Some(1234));
         assert_eq!(usage.total_processed_tokens, Some(9876));
         assert_eq!(usage.context_window, Some(1_000_000));
         assert_eq!(status.context_window, Some(500_000));
-        let plan = state
-            .subscription_snapshot(&Subscription {
-                topic: Topic::SessionPlan {
-                    session_id: id.into(),
-                },
-                after: None,
-            })
-            .unwrap();
-        let ServerEvent::SessionPlanReplaced(plan) = plan.event else {
-            panic!("plan baseline")
-        };
-        let proposed = plan.proposed.unwrap();
-        assert_eq!(proposed.markdown, "# Keep the plan");
-        assert_eq!(proposed.turn, 0);
-        assert!(proposed.ready && !proposed.resolved);
     });
-    cx.run_until_parked();
-    let plans = |messages: Vec<HostMessage>| {
-        messages
-            .into_iter()
-            .filter_map(|message| match message {
-                HostMessage::Event(EventEnvelope {
-                    event: ServerEvent::SessionPlanReplaced(plan),
-                    ..
-                }) => Some(plan),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(plans(cx.drain_outgoing()).len(), 1);
-    state.dispatch_command(
-        cx,
-        88,
-        Command::RenameSession {
-            session_id: id.into(),
-            title: "Unrelated metadata".into(),
-        },
-    );
-    cx.run_until_parked();
-    assert!(plans(cx.drain_outgoing()).is_empty());
-    state.dispatch_command(
-        cx,
-        89,
-        Command::DismissPlan {
-            session_id: id.into(),
-        },
-    );
-    cx.run_until_parked();
-    let changed = plans(cx.drain_outgoing());
-    assert_eq!(changed.len(), 1);
-    assert!(changed[0].proposed.as_ref().unwrap().resolved);
 }
 
 #[test]

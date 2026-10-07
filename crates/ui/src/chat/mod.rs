@@ -44,7 +44,6 @@ use tcode_core::ui::RightTab;
 use crate::commit_dialog::CommitDialog;
 use crate::composer::Composer;
 use crate::git::{git_action_label_key, git_hint_key};
-use crate::plan_panel::{PlanMenu, PlanMenuKind};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
 use crate::terminal_drawer::TerminalDrawer;
@@ -746,9 +745,6 @@ impl ChatView {
                     &mut self.rows,
                     &timeline.turns,
                     &timeline.entries,
-                    timeline
-                        .shown_proposed_plan()
-                        .map(|plan| (plan.turn, plan.item_id.as_str(), plan.markdown.as_str())),
                     &self.expanded,
                     continuity,
                 );
@@ -761,7 +757,6 @@ impl ChatView {
                     &mut self.rows,
                     &[],
                     &[],
-                    None,
                     &self.expanded,
                     continuity,
                 );
@@ -1026,16 +1021,6 @@ impl ChatView {
                         }
                     }
                 }
-                if let Some(plan) = timeline.shown_proposed_plan() {
-                    let id = format!("plan:{}", plan.item_id);
-                    if decisions.build.contains(&id) {
-                        texts.push((
-                            rows_of_turn(&self.rows, plan.turn).last(),
-                            id,
-                            plan.markdown.clone(),
-                        ));
-                    }
-                }
                 (texts, decisions)
             })
             .unwrap_or_default();
@@ -1086,19 +1071,10 @@ impl ChatView {
         self.remeasure_markdown_rows(range);
     }
 
-    /// The row rendering the Markdown document `id` (an entry id, or
-    /// `plan:<item>` for the proposed plan), looked up when it is needed:
-    /// rows shift while a build runs, so a build carries no row.
     fn markdown_row(&self, id: &str, cx: &App) -> Option<usize> {
         self.workspace_store
             .read(cx)
             .with_active_timeline(|timeline| {
-                if let Some(item_id) = id.strip_prefix("plan:") {
-                    return timeline
-                        .shown_proposed_plan()
-                        .filter(|plan| plan.item_id == item_id)
-                        .and_then(|plan| rows_of_turn(&self.rows, plan.turn).last());
-                }
                 timeline
                     .entries
                     .iter()
@@ -1557,21 +1533,6 @@ impl ChatView {
             return column.into_any_element();
         }
 
-        if let Some((item_id, markdown)) = self
-            .workspace_store
-            .read(cx)
-            .with_active_timeline(|timeline| {
-                timeline
-                    .shown_proposed_plan()
-                    .filter(|plan| plan.turn == index)
-                    .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
-            })
-            .flatten()
-        {
-            column =
-                column.child(self.compose_proposed_plan_card(index, &item_id, &markdown, cwd, cx));
-        }
-
         // Changed-file evidence is the turn's settled summary: while the turn
         // still runs, the live per-file rows inside the work log carry this
         // information, so the section appears only once the turn finishes.
@@ -1682,27 +1643,6 @@ impl ChatView {
         let OpenFileDiff { turn, path } = action.clone();
         self.workspace_store
             .update(cx, |store, cx| store.open_diff_for_file(turn, path, cx));
-    }
-
-    fn on_plan_menu(&mut self, action: &PlanMenu, _: &mut Window, cx: &mut Context<Self>) {
-        let markdown = action.markdown.clone();
-        match action.kind {
-            PlanMenuKind::Copy => {
-                self.workspace_store
-                    .update(cx, |store, _cx| store.copy_plan(markdown));
-                self.mark_copied("plan".into(), cx);
-            }
-            PlanMenuKind::Download => {
-                let fallback_title = crate::tr!("plan.proposed_plan").into_owned();
-                self.workspace_store.update(cx, |store, _cx| {
-                    store.download_plan(markdown, fallback_title)
-                });
-            }
-            PlanMenuKind::Save => {
-                self.workspace_store
-                    .update(cx, |store, _cx| store.save_plan_to_workspace(markdown));
-            }
-        }
     }
 
     fn compose_user(
@@ -2231,62 +2171,6 @@ impl ChatView {
         components::subagent::subagent_row(entry, on_open, cx)
     }
 
-    fn compose_proposed_plan_card(
-        &self,
-        turn: usize,
-        item_id: &str,
-        markdown: &str,
-        cwd: &Path,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let long = markdown.chars().count() > 900 || markdown.lines().count() > 20;
-        let collapse_key = format!("plan-card-{turn}");
-        let collapsed = long && self.expanded.contains(&collapse_key);
-        let markdown_state = self
-            .md_states
-            .get(&format!("plan:{item_id}"))
-            .map(|md| md.state.clone());
-        let md_copy = markdown.to_string();
-        let md_download = markdown.to_string();
-        let md_save = markdown.to_string();
-        let copied = self.copied.is("plan");
-        let toggle_key = collapse_key;
-        components::disclosure::proposed_plan_card(
-            components::disclosure::PlanCardData {
-                turn,
-                markdown,
-                cwd,
-                markdown_state,
-                collapsed,
-                copied,
-            },
-            components::disclosure::PlanCardHandlers {
-                toggle: Box::new(cx.listener(move |this, _, _, cx| {
-                    this.toggle_expanded(turn, &toggle_key, cx);
-                })),
-                copy: Box::new(cx.listener(move |this, _, _, cx| {
-                    let markdown = md_copy.clone();
-                    this.workspace_store
-                        .update(cx, |store, _cx| store.copy_plan(markdown));
-                    this.mark_copied("plan".into(), cx);
-                })),
-                download: Box::new(cx.listener(move |this, _, _, cx| {
-                    let markdown = md_download.clone();
-                    let fallback_title = crate::tr!("plan.proposed_plan").into_owned();
-                    this.workspace_store.update(cx, |store, _cx| {
-                        store.download_plan(markdown, fallback_title)
-                    });
-                })),
-                save: Box::new(cx.listener(move |this, _, _, cx| {
-                    let markdown = md_save.clone();
-                    this.workspace_store
-                        .update(cx, |store, _cx| store.save_plan_to_workspace(markdown));
-                })),
-            },
-            cx,
-        )
-    }
-
     /// Show the "Copied!" confirmation on `key` for 2s; a second copy re-arms the timer.
     fn mark_copied(&mut self, key: String, cx: &mut Context<Self>) {
         self.copied.mark(key, |this| &mut this.copied, cx);
@@ -2453,7 +2337,7 @@ impl ChatView {
                                     .compact()
                                     .icon(IconName::Map)
                                     .selected(plan_showing)
-                                    .tooltip(crate::tr!("chat.toggle_plan"))
+                                    .tooltip(crate::tr!("chat.toggle_tasks"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.workspace_store
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
@@ -3044,15 +2928,6 @@ fn markdown_entries_for_residency(
             });
         }
     }
-    if let Some(plan) = timeline.shown_proposed_plan()
-        && let Some(row) = rows_of_turn(rows, plan.turn).last()
-        && scope.includes(row)
-    {
-        entries.push(MarkdownEntry {
-            id: format!("plan:{}", plan.item_id),
-            row,
-        });
-    }
     entries
 }
 
@@ -3474,7 +3349,6 @@ impl Render for ChatView {
             .min_h_0()
             .on_action(cx.listener(Self::on_rewind_turn))
             .on_action(cx.listener(Self::on_open_file_diff))
-            .on_action(cx.listener(Self::on_plan_menu))
             .child(
                 div()
                     .id("timeline")
@@ -4545,7 +4419,6 @@ mod tests {
         let rows = super::model::index_rows(
             &timeline.turns,
             &timeline.entries,
-            None,
             &std::collections::HashSet::new(),
         );
         assert_eq!(rows.len(), 600);
@@ -4597,8 +4470,13 @@ mod tests {
                             value: "xhigh".into(),
                             label: "Extra High".into(),
                             description: None,
+                            unavailable: None,
                         }],
                         default_value: Some("xhigh".into()),
+                        role: Default::default(),
+                        apply: Default::default(),
+                        recommended: None,
+                        permissive: None,
                     }],
                 }],
             );
@@ -4626,7 +4504,6 @@ mod tests {
                     let _ = window.draw(cx);
                 });
                 let permission = cx.debug_bounds("permission-chip").expect("approval option");
-                let mode = cx.debug_bounds("mode-chip").expect("Build option");
                 let effort = cx
                     .debug_bounds("traits-chip")
                     .expect("standalone effort option");
@@ -4645,9 +4522,8 @@ mod tests {
                     "Send shares the model row at {width}"
                 );
                 assert_eq!(permission.top(), meter.top());
-                assert_eq!(mode.top(), meter.top());
+                assert!(permission.right() <= meter.left());
                 assert_eq!(effort.top(), model.top(), "Effort sits on the model row");
-                assert!(permission.right() <= mode.left() && mode.right() <= meter.left());
                 assert!(permission.left() >= px(0.) && meter.right() <= px(width));
                 assert!(
                     model.right() <= effort.left() && effort.right() <= send.left(),

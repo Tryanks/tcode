@@ -949,8 +949,6 @@ impl AppState {
         let mut fork = SessionMeta::new(source.provider, source.cwd.clone(), source.model.clone());
         fork.title = format!("{} (fork)", source.title);
         fork.option_selections = source.option_selections.clone();
-        fork.approval_mode = source.approval_mode;
-        fork.interaction_mode = source.interaction_mode;
         fork.project_id = source.project_id.clone();
         fork.acp_agent_id = source.acp_agent_id.clone();
         fork.profile_id = source.profile_id.clone();
@@ -1386,6 +1384,33 @@ impl AppState {
         }
     }
 
+    pub(super) fn project_permission_selection(
+        &self,
+        project_id: Option<&str>,
+        provider: ProviderKind,
+    ) -> Option<OptionSelection> {
+        let descriptor = permission_control(provider)?;
+        let configured = project_id
+            .and_then(|id| self.projects.iter().find(|project| project.id == id))
+            .and_then(|project| {
+                project
+                    .permission_defaults
+                    .get(tcode_core::settings::provider_key(provider))
+            })?;
+        match descriptor {
+            OptionDescriptor::Select { id, .. } => Some(OptionSelection {
+                id,
+                value: serde_json::Value::String(configured.clone()),
+            }),
+            OptionDescriptor::Boolean {
+                id, default_value, ..
+            } => Some(OptionSelection {
+                id,
+                value: serde_json::Value::Bool(configured.parse().unwrap_or(default_value)),
+            }),
+        }
+    }
+
     /// The reasoning effort last used with exactly this (provider, model),
     /// from the most recently updated session that ran it (archived included:
     /// memory outlives the thread). Model switches restore this instead of
@@ -1455,6 +1480,11 @@ impl AppState {
         );
         draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
+        if let Some(selection) =
+            self.project_permission_selection(draft.meta.project_id.as_deref(), provider)
+        {
+            draft.meta.option_selections.push(selection);
+        }
         let terminal_preferences = self.terminal_preferences_for(&draft);
         let restored_terminal = self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();

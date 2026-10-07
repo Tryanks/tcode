@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use agent::{
-    ApprovalMode, FileChangeKind, InteractionMode, ModelSpec, OptionDescriptor, ProviderCommand,
-    ProviderCommandKind, TokenUsage, UserInputQuestion,
+    FileChangeKind, ModelSpec, OptionDescriptor, ProviderCommand, ProviderCommandKind, TokenUsage,
+    UserInputQuestion,
 };
 use chrono::{DateTime, Local, NaiveDate, TimeZone as _};
 use tcode_core::ui::ConversationDestination;
@@ -10,45 +10,7 @@ use tcode_core::ui::ConversationDestination;
 use crate::context_meter;
 use crate::palette::fuzzy_score;
 
-/// Approval modes in picker order, with translation keys and chip icons.
-pub(super) const APPROVAL_MODES: [(ApprovalMode, &str, &str, &str); 3] = [
-    (
-        ApprovalMode::Supervised,
-        "approval.supervised",
-        "approval.supervised_description",
-        "icons/lock.svg",
-    ),
-    (
-        ApprovalMode::AutoAcceptEdits,
-        "approval.auto_edits",
-        "approval.auto_edits_description",
-        "icons/pencil.svg",
-    ),
-    (
-        ApprovalMode::FullAccess,
-        "approval.full_access",
-        "approval.full_access_description",
-        "icons/unlock.svg",
-    ),
-];
-
-pub(super) fn approval_mode_meta(mode: ApprovalMode) -> (String, &'static str) {
-    // ReadOnly is dispatch-only for now. A selected child still needs a stable
-    // chip, but it must not add a fourth choice to the user-facing picker.
-    let mode = match mode {
-        ApprovalMode::ReadOnly => ApprovalMode::Supervised,
-        mode => mode,
-    };
-    let (_, label_key, _, icon) = APPROVAL_MODES
-        .iter()
-        .find(|(m, ..)| *m == mode)
-        .expect("every ApprovalMode is present in APPROVAL_MODES");
-    (crate::tr!(*label_key).into_owned(), icon)
-}
-
 pub(super) enum SlashIntent {
-    Plan,
-    Default,
     Model,
 }
 
@@ -164,11 +126,8 @@ pub(crate) fn format_countdown(secs: u64) -> String {
     }
 }
 
-/// Recognize standalone mode-switch or model-picker commands without sending a turn.
 pub(super) fn slash_command(text: &str) -> Option<SlashIntent> {
     match text.trim() {
-        "/plan" => Some(SlashIntent::Plan),
-        "/default" => Some(SlashIntent::Default),
         "/model" => Some(SlashIntent::Model),
         _ => None,
     }
@@ -261,8 +220,6 @@ pub(super) enum MenuAccept {
     InsertLater,
     /// Strip the `/model` command and open the model picker.
     OpenModelPicker,
-    /// Strip the command and switch interaction mode.
-    SetMode(InteractionMode),
 }
 
 #[derive(Clone)]
@@ -354,6 +311,7 @@ pub(super) fn traits_chip_label(
                 label,
                 options,
                 default_value,
+                ..
             } => {
                 // An armed Ultrathink shows in the reasoning segment (it is not
                 // persisted, so it does not resolve as an ordinary selection).
@@ -396,6 +354,7 @@ pub(super) fn traits_chip_label(
                 id,
                 label,
                 default_value,
+                ..
             } => {
                 let on = option_selection_bool(selections, id).unwrap_or(*default_value);
                 if id == "fastMode" {
@@ -732,6 +691,10 @@ mod tests {
                 id: "fastMode".into(),
                 label: "Fast Mode".into(),
                 default_value: false,
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
             }],
         };
         assert_eq!(traits_chip_label(&fast, &[], false), Some("Normal".into()));
@@ -743,6 +706,10 @@ mod tests {
                 id: "thinking".into(),
                 label: "Thinking".into(),
                 default_value: false,
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
             }],
         };
         assert_eq!(
@@ -760,8 +727,13 @@ mod tests {
                     value: "high".into(),
                     label: "High".into(),
                     description: None,
+                    unavailable: None,
                 }],
                 default_value: None,
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
             }],
         };
         assert_eq!(

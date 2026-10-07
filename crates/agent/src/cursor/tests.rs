@@ -12,9 +12,8 @@ use smol::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufR
 use smol::net::{TcpListener, TcpStream};
 
 use crate::{
-    AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, InteractionMode, ItemContent,
-    ItemStatus, LaunchEnv, OptionSelection, PlanStepStatus, ResumeCursor, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TurnStatus,
+    AgentEvent, ItemContent, ItemStatus, LaunchEnv, OptionSelection, PlanStepStatus, ResumeCursor,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TurnStatus,
 };
 
 const RECORDED: &str = include_str!("../../tests/fixtures/cursor/recorded_signed_out.jsonl");
@@ -99,9 +98,7 @@ impl Agent {
             resume: None,
             fork: false,
             binary_path: Some(stand_in()),
-            approval_mode: ApprovalMode::Supervised,
             option_selections: Vec::new(),
-            interaction_mode: InteractionMode::Build,
             mcp_servers: Vec::new(),
             launch_env: self.launch_env(),
             extra_args: Vec::new(),
@@ -411,11 +408,32 @@ fn the_composers_model_and_the_sessions_parameters_are_selected_at_start() {
             panic!("{events:#?}");
         };
         assert_eq!(model.as_deref(), Some("gpt-5"));
-        let Some(AgentEvent::ProviderOptions { selections, .. }) = events.last() else {
+        let Some(AgentEvent::ProviderOptions {
+            descriptors,
+            selections,
+        }) = events.last()
+        else {
             unreachable!();
         };
+        let model_option_ids: Vec<_> = descriptors
+            .iter()
+            .filter_map(|descriptor| match descriptor {
+                crate::OptionDescriptor::Select {
+                    id,
+                    role: crate::OptionRole::Model,
+                    ..
+                }
+                | crate::OptionDescriptor::Boolean {
+                    id,
+                    role: crate::OptionRole::Model,
+                    ..
+                } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
         let selections: Vec<_> = selections
             .iter()
+            .filter(|selection| model_option_ids.contains(&selection.id.as_str()))
             .map(|selection| (selection.id.as_str(), selection.value.as_str().unwrap()))
             .collect();
         assert_eq!(
@@ -527,7 +545,7 @@ fn tool_results_are_judged_by_their_raw_output_and_cursors_failure_text_fails_th
 }
 
 #[test]
-fn questions_and_plans_are_answered_in_cursors_nested_shapes() {
+fn questions_and_todos_are_answered_in_cursors_nested_shapes() {
     smol::block_on(bounded(async {
         let mut agent = Agent::new().await;
         let handle = agent.start(agent.options()).await;
@@ -599,24 +617,6 @@ fn questions_and_plans_are_answered_in_cursors_nested_shapes() {
             } })
         );
 
-        agent.update(SESSION, source("create_plan_entries")).await;
-        let planned = agent
-            .request("cursor/create_plan", source("create_plan"))
-            .await;
-        assert_eq!(
-            agent.answer(&planned).await["result"],
-            json!({ "outcome": { "outcome": "accepted" } })
-        );
-        let events = events_until(&handle, |event| {
-            matches!(event, AgentEvent::ProposedPlan { .. })
-        })
-        .await;
-        assert!(matches!(
-            events.last(),
-            Some(AgentEvent::ProposedPlan { item_id, markdown })
-                if item_id == "call_plan_1" && markdown == "# Storage\n\n1. Add the migration\n2. Wire the repository\n"
-        ));
-
         let todos = agent
             .request("cursor/update_todos", source("update_todos"))
             .await;
@@ -658,6 +658,107 @@ fn questions_and_plans_are_answered_in_cursors_nested_shapes() {
 }
 
 #[test]
+fn native_plan_requests_return_the_users_choice_and_cancel_on_interrupt() {
+    smol::block_on(bounded(async {
+        for grok in [false, true] {
+            let mut agent = Agent::new().await;
+            let handle = if grok {
+                let starting = smol::spawn(crate::grok::start(agent.options()));
+                let (stream, _) = agent.listener.accept().await.unwrap();
+                agent.out = Some(stream.clone());
+                let mut lines = BufReader::new(stream);
+                let mut argv = String::new();
+                lines.read_line(&mut argv).await.unwrap();
+                agent.lines = Some(lines);
+                let initialize = agent.expect("initialize").await;
+                agent.reply(&initialize, recorded_initialize()).await;
+                agent.new_session().await;
+                starting.await.unwrap()
+            } else {
+                agent.start(agent.options()).await
+            };
+            send_turn(&handle, "Review the native plan").await;
+            let prompt = agent.expect("session/prompt").await;
+            let (method, params, cases) = if grok {
+                (
+                    "_x.ai/exit_plan_mode",
+                    json!({"sessionId": SESSION, "toolCallId": "native-plan", "planContent": "# Native content"}),
+                    vec![
+                        ("Approve", json!({"outcome": "approved"})),
+                        ("Request changes", json!({"outcome": "cancelled"})),
+                        (
+                            "Use another approach",
+                            json!({"outcome": "cancelled", "feedback": "Use another approach"}),
+                        ),
+                        ("Abandon", json!({"outcome": "abandoned"})),
+                    ],
+                )
+            } else {
+                (
+                    "cursor/create_plan",
+                    json!({"sessionId": SESSION, "toolCallId": "native-plan", "plan": "# Native content"}),
+                    vec![
+                        ("Accept", json!({"outcome": {"outcome": "accepted"}})),
+                        ("Reject", json!({"outcome": {"outcome": "rejected"}})),
+                        (
+                            "Use another approach",
+                            json!({"outcome": {"outcome": "rejected", "reason": "Use another approach"}}),
+                        ),
+                    ],
+                )
+            };
+            for (choice, expected) in cases {
+                let requested = agent.request(method, params.clone()).await;
+                let events = events_until(&handle, |event| {
+                    matches!(event, AgentEvent::UserInputRequested { .. })
+                })
+                .await;
+                let Some(AgentEvent::UserInputRequested {
+                    request_id,
+                    questions,
+                    ..
+                }) = events.last()
+                else {
+                    unreachable!()
+                };
+                assert_eq!(questions[0].question, "# Native content");
+                handle
+                    .commands
+                    .send(SessionCommand::RespondUserInput {
+                        request_id: request_id.clone(),
+                        answers: Map::from_iter([("decision".into(), json!(choice))]),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(agent.answer(&requested).await["result"], expected);
+            }
+            let requested = agent.request(method, params).await;
+            events_until(&handle, |event| {
+                matches!(event, AgentEvent::UserInputRequested { .. })
+            })
+            .await;
+            handle
+                .commands
+                .send(SessionCommand::Interrupt)
+                .await
+                .unwrap();
+            let expected = if grok {
+                json!({"outcome": "abandoned"})
+            } else {
+                json!({"outcome": {"outcome": "cancelled"}})
+            };
+            assert_eq!(agent.answer(&requested).await["result"], expected);
+            agent.expect("session/cancel").await;
+            agent
+                .reply(&prompt, json!({"stopReason": "cancelled"}))
+                .await;
+            events_until(&handle, turn_completed).await;
+            agent.finish(Some(handle)).await;
+        }
+    }));
+}
+
+#[test]
 fn an_interrupt_cancels_a_pending_question() {
     smol::block_on(bounded(async {
         let mut agent = Agent::new().await;
@@ -687,93 +788,6 @@ fn an_interrupt_cancels_a_pending_question() {
             .await;
         let events = events_until(&handle, turn_completed).await;
         assert_eq!(turn_status(&events), TurnStatus::Interrupted);
-        agent.finish(Some(handle)).await;
-    }));
-}
-
-#[test]
-fn permissions_are_granted_once_by_kind_and_otherwise_asked() {
-    smol::block_on(bounded(async {
-        for (mode, granted, asked) in [
-            (ApprovalMode::ReadOnly, "permission_read", "permission_edit"),
-            (
-                ApprovalMode::AutoAcceptEdits,
-                "permission_edit",
-                "permission_shell",
-            ),
-            (ApprovalMode::Supervised, "", "permission_read"),
-        ] {
-            let mut agent = Agent::new().await;
-            let mut opts = agent.options();
-            opts.approval_mode = mode;
-            let handle = agent.start(opts).await;
-            assert_eq!(agent.argv, "acp", "{mode:?}");
-            send_turn(&handle, "Go").await;
-            let prompt = agent.expect("session/prompt").await;
-
-            if !granted.is_empty() {
-                let mut params = source(granted);
-                params["sessionId"] = json!(SESSION);
-                let id = agent.request("session/request_permission", params).await;
-                assert_eq!(
-                    agent.answer(&id).await["result"],
-                    json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }),
-                    "{mode:?}"
-                );
-            }
-
-            let mut params = source(asked);
-            params["sessionId"] = json!(SESSION);
-            let id = agent.request("session/request_permission", params).await;
-            let events = events_until(&handle, |event| {
-                matches!(event, AgentEvent::ApprovalRequested(_))
-            })
-            .await;
-            let approvals: Vec<_> = events
-                .iter()
-                .filter_map(|event| match event {
-                    AgentEvent::ApprovalRequested(request) => Some(request),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                approvals.len(),
-                1,
-                "{mode:?}: only {asked} is asked: {events:#?}"
-            );
-            let request = approvals[0];
-            let expected_kind = match asked {
-                "permission_edit" => matches!(request.kind, ApprovalKind::FileChange { .. }),
-                "permission_shell" => matches!(request.kind, ApprovalKind::ExecCommand { .. }),
-                _ => matches!(request.kind, ApprovalKind::FileRead { .. }),
-            };
-            assert!(expected_kind, "{mode:?}: {request:?}");
-            handle
-                .commands
-                .send(SessionCommand::RespondApproval {
-                    request_id: request.id.clone(),
-                    decision: ApprovalDecision::ApproveForSession,
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                agent.answer(&id).await["result"],
-                json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }),
-                "{mode:?}: a session-wide approval never writes Cursor's allowlist"
-            );
-            agent
-                .reply(&prompt, json!({ "stopReason": "end_turn" }))
-                .await;
-            events_until(&handle, turn_completed).await;
-            agent.finish(Some(handle)).await;
-        }
-
-        let mut agent = Agent::new().await;
-        let mut opts = agent.options();
-        opts.approval_mode = ApprovalMode::FullAccess;
-        opts.extra_args = vec!["--sandbox".into(), "disabled".into()];
-        let handle = agent.start(opts).await;
-        assert_eq!(agent.argv, "--force --sandbox disabled acp");
         agent.finish(Some(handle)).await;
     }));
 }

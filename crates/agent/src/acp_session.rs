@@ -25,19 +25,18 @@ use std::time::Duration;
 
 use agent_client_protocol::{self as sdk, schema::ProtocolVersion, schema::v1 as acp};
 use serde::Deserialize as _;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use smol::channel::{Receiver, Sender};
 use smol::future;
 use smol::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 use smol::prelude::*;
 
 use crate::{
-    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOption,
-    ApprovalOptionKind, ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind,
-    InteractionMode, ItemContent, ItemStatus, McpRegistration, OptionDescriptor, OptionSelection,
-    PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnStatus, UserInputDelivery, UserInputQuestion,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
+    ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
+    McpRegistration, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, TurnStatus, UserInputDelivery, UserInputQuestion,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -108,11 +107,6 @@ macro_rules! request_handler {
 
 /// What one ACP agent family does on top of the shared protocol machinery.
 ///
-/// Each required method is a policy the dialect states for itself (launch,
-/// authentication, session establishment, replay suppression, turn completion,
-/// steering, approval-mode changes); only the extension routing defaults to
-/// "no vendor methods", the client services to "offered", and option
-/// ownership and automatic approval to "none".
 pub(crate) trait Dialect: Send + Sync + 'static {
     /// The agent's name in messages and logs.
     fn name(&self) -> &str;
@@ -147,9 +141,6 @@ pub(crate) trait Dialect: Send + Sync + 'static {
         text: String,
         attachments: Vec<Attachment>,
     );
-
-    /// [`SessionCommand::SetApprovalMode`] on a live session.
-    async fn set_approval_mode(&self, session: &Session, mode: ApprovalMode);
 
     /// Whether an agent→client request outside the standard set belongs to
     /// this dialect, by its literal method name.
@@ -189,14 +180,6 @@ pub(crate) trait Dialect: Send + Sync + 'static {
     /// in [`AgentEvent::ProviderOptions`].
     fn owned_config_options(&self) -> &'static [&'static str] {
         &[]
-    }
-
-    /// Whether a permission request for this tool call is approved without
-    /// asking the user: an approval mode the agent does not apply itself.
-    /// Only the request's allow-once option is chosen automatically; without
-    /// one the user is asked.
-    fn auto_approves(&self, _tool_call: &acp::ToolCallUpdate) -> bool {
-        false
     }
 }
 
@@ -299,23 +282,6 @@ impl Setup<'_> {
         let mut state = self.state.lock_recover();
         state.ingest_modes(modes);
         state.options.ingest(None, config_options);
-    }
-
-    /// Whether the adopted session is currently in the agent's Plan mode.
-    pub(crate) fn in_plan_mode(&self) -> bool {
-        self.state
-            .lock_recover()
-            .modes
-            .as_ref()
-            .is_some_and(|modes| acp_plan_mode(modes).as_ref() == Some(&modes.current_mode_id))
-    }
-
-    pub(crate) async fn apply_interaction_mode(
-        &self,
-        session_id: &acp::SessionId,
-        mode: InteractionMode,
-    ) {
-        apply_interaction_mode(mode, self.state, self.events, self.connection, session_id).await;
     }
 }
 
@@ -618,22 +584,10 @@ async fn run_actor<D: Dialect>(
         .on_receive_request(
             {
                 let client = client.clone();
-                let dialect = dialect.clone();
                 async move |args: acp::RequestPermissionRequest, responder, connection| {
                     let client = client.clone();
-                    let automatic = dialect
-                        .auto_approves(&args.tool_call)
-                        .then(|| allow_once(&args.options))
-                        .flatten();
                     connection.spawn(async move {
-                        responder.respond_with_result(match automatic {
-                            Some(option) => Ok(acp::RequestPermissionResponse::new(
-                                acp::RequestPermissionOutcome::Selected(
-                                    acp::SelectedPermissionOutcome::new(option),
-                                ),
-                            )),
-                            None => client.request_permission(args).await,
-                        })
+                        responder.respond_with_result(client.request_permission(args).await)
                     })?;
                     Ok(())
                 }
@@ -711,6 +665,7 @@ async fn run_actor<D: Dialect>(
             async move |connection| {
                 connected_actor(
                     &executor,
+                    provider,
                     connection,
                     dialect.as_ref(),
                     &launch,
@@ -774,6 +729,7 @@ enum Exit {
 #[allow(clippy::too_many_arguments)]
 async fn connected_actor<D: Dialect>(
     executor: &Rc<smol::LocalExecutor<'static>>,
+    provider: ProviderKind,
     connection: Connection,
     dialect: &D,
     launch: &Launch,
@@ -827,6 +783,50 @@ async fn connected_actor<D: Dialect>(
     let model = {
         let mut state = state.lock_recover();
         state.session_id = Some(session_id.clone());
+        if let Some(mut descriptor) = crate::permission_control(provider) {
+            let id = descriptor_id(&descriptor).to_owned();
+            let mut value = opts
+                .option_selections
+                .iter()
+                .find(|selection| selection.id == id)
+                .map(|selection| selection.value.clone())
+                .or_else(|| match &descriptor {
+                    OptionDescriptor::Select { default_value, .. } => {
+                        default_value.as_ref().map(|value| json!(value))
+                    }
+                    OptionDescriptor::Boolean { default_value, .. } => Some(json!(default_value)),
+                });
+            if provider == ProviderKind::Cursor {
+                value = Some(json!("unrestricted"));
+            } else if provider == ProviderKind::Grok {
+                let mut arguments = launch.args.iter();
+                while let Some(argument) = arguments.next() {
+                    if argument == "--permission-mode" {
+                        if let Some(mode) = arguments.next() {
+                            value = Some(json!(mode));
+                        }
+                    } else if let Some(mode) = argument.strip_prefix("--permission-mode=") {
+                        value = Some(json!(mode));
+                    }
+                }
+            }
+            if let Some(value) = value {
+                if let (OptionDescriptor::Select { options, .. }, Some(mode)) =
+                    (&mut descriptor, value.as_str())
+                    && !options.iter().any(|option| option.value == mode)
+                {
+                    options.push(SelectOption {
+                        value: mode.to_owned(),
+                        label: mode.to_owned(),
+                        description: None,
+                        unavailable: Some("Reported by the launch arguments".into()),
+                    });
+                }
+                state
+                    .options
+                    .upsert(descriptor, OptionOrigin::Launch, value);
+            }
+        }
         state.options.current_model()
     };
 
@@ -1093,6 +1093,9 @@ async fn handle_command<D: Dialect>(
                 log::warn!("acp: unknown option id `{id}`");
                 return;
             };
+            if origin == OptionOrigin::Launch {
+                return;
+            }
             match set_option(connection, session_id, &origin, &value).await {
                 Ok(config_options) => {
                     {
@@ -1134,10 +1137,6 @@ async fn handle_command<D: Dialect>(
                     answers,
                 })
                 .await;
-        }
-        SessionCommand::SetApprovalMode(mode) => dialect.set_approval_mode(session, mode).await,
-        SessionCommand::SetInteractionMode(mode) => {
-            apply_interaction_mode(mode, state, events, connection, session_id).await;
         }
         SessionCommand::Rewind {
             checkpoint_id,
@@ -1331,23 +1330,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ObservedWriter<W> {
     }
 }
 
-fn acp_plan_mode(modes: &acp::SessionModeState) -> Option<acp::SessionModeId> {
-    modes
-        .available_modes
-        .iter()
-        .find(|mode| mode.id.0.eq_ignore_ascii_case("plan"))
-        .map(|mode| mode.id.clone())
-}
-
-fn first_non_plan_mode(modes: &acp::SessionModeState) -> Option<acp::SessionModeId> {
-    let plan = acp_plan_mode(modes);
-    modes
-        .available_modes
-        .iter()
-        .find(|mode| Some(&mode.id) != plan.as_ref())
-        .map(|mode| mode.id.clone())
-}
-
 /// ACP's `auth_required` error.
 pub(crate) fn is_auth_required(err: &acp::Error) -> bool {
     i32::from(err.code) == -32000
@@ -1387,6 +1369,7 @@ async fn set_option(
     value: &Value,
 ) -> Result<Option<Vec<acp::SessionConfigOption>>, acp::Error> {
     match origin {
+        OptionOrigin::Launch => Ok(None),
         OptionOrigin::Mode => {
             let Some(mode) = value.as_str() else {
                 return Err(acp::Error::invalid_params());
@@ -1421,113 +1404,20 @@ async fn set_option(
     }
 }
 
-async fn apply_interaction_mode(
-    mode: InteractionMode,
-    state: &Arc<Mutex<State>>,
-    events: &Sender<AgentEvent>,
-    connection: &Connection,
-    session_id: &acp::SessionId,
-) {
-    let target = interaction_mode_target(mode, &state.lock_recover());
-    let Some(target) = target else {
-        let _ = events.send(missing_mode_warning(mode)).await;
-        // Republish the actual selection so the runtime rolls back its
-        // optimistic Build/Plan toggle instead of leaving a lying chip.
-        emit_provider_options(state, events, true).await;
-        return;
-    };
-
-    if state
-        .lock_recover()
-        .modes
-        .as_ref()
-        .is_some_and(|modes| modes.current_mode_id == target)
-    {
-        return;
-    }
-
-    match connection
-        .send_request(acp::SetSessionModeRequest::new(
-            session_id.clone(),
-            target.clone(),
-        ))
-        .block_task()
-        .await
-    {
-        Ok(_) => {
-            state.lock_recover().select_mode(target);
-            emit_provider_options(state, events, false).await;
-        }
-        Err(err) => {
-            let _ = events
-                .send(AgentEvent::Warning {
-                    message: format!("could not switch this agent's mode: {}", describe(&err)),
-                })
-                .await;
-            emit_provider_options(state, events, true).await;
-        }
-    }
-}
-
-fn interaction_mode_target(mode: InteractionMode, state: &State) -> Option<acp::SessionModeId> {
-    match mode {
-        InteractionMode::Plan => state.modes.as_ref().and_then(acp_plan_mode),
-        InteractionMode::Build => state.build_mode(),
-    }
-}
-
-fn missing_mode_warning(mode: InteractionMode) -> AgentEvent {
-    let mode_name = match mode {
-        InteractionMode::Plan => "Plan",
-        InteractionMode::Build => "Build",
-    };
-    AgentEvent::Warning {
-        message: format!(
-            "This agent does not advertise a {mode_name} mode; the mode switch was not applied."
-        ),
-    }
-}
-
-/// Map the approval UI's four fixed decisions onto the agent's own permission
-/// options, and pass an offered `Option(id)` through.
-///
-/// An agent's `allow_always`/`reject_always` options record a rule in its own
-/// persistent allowlist, beyond this session. Only the user's explicit choice of
-/// such an option may select one; every fixed decision, including the
-/// session-scoped `ApproveForSession`, answers once.
 fn approval_outcome(
     decision: &ApprovalDecision,
     options: &[ApprovalOption],
 ) -> Option<acp::RequestPermissionOutcome> {
-    let offered = |kind: ApprovalOptionKind| {
-        options
-            .iter()
-            .find(|option| option.kind == kind)
-            .map(|option| option.id.clone())
-    };
     let selected = match decision {
         ApprovalDecision::Cancel => return Some(acp::RequestPermissionOutcome::Cancelled),
         ApprovalDecision::Option(id) => options
             .iter()
             .any(|option| &option.id == id)
             .then(|| id.clone()),
-        ApprovalDecision::Approve | ApprovalDecision::ApproveForSession => {
-            offered(ApprovalOptionKind::AllowOnce)
-        }
-        ApprovalDecision::Deny => offered(ApprovalOptionKind::RejectOnce),
     }?;
     Some(acp::RequestPermissionOutcome::Selected(
         acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(selected)),
     ))
-}
-
-/// The option an automatic approval selects. Persistent options would record a
-/// rule beyond this session that no one chose.
-fn allow_once(options: &[acp::PermissionOption]) -> Option<acp::PermissionOptionId> {
-    options
-        .iter()
-        .find(|option| option.kind == acp::PermissionOptionKind::AllowOnce)
-        .map(|option| option.option_id.clone())
 }
 
 /// `stopReason` → canonical turn status, plus the message to surface (if any).
@@ -1589,6 +1479,7 @@ async fn emit_provider_options(
 
 #[derive(Debug, Clone, PartialEq)]
 enum OptionOrigin {
+    Launch,
     Mode,
     Config(acp::SessionConfigId),
 }
@@ -1624,26 +1515,26 @@ impl OptionRegistry {
                             value: mode.id.0.to_string(),
                             label: mode.name.clone(),
                             description: mode.description.clone(),
+                            unavailable: None,
                         })
                         .collect(),
                     default_value: Some(modes.current_mode_id.0.to_string()),
+                    role: crate::OptionRole::Model,
+                    apply: crate::ApplyTiming::Live,
+                    recommended: None,
+                    permissive: None,
                 },
                 OptionOrigin::Mode,
                 Value::String(modes.current_mode_id.0.to_string()),
             );
         }
-        // Each list is the agent's complete set: an option it no longer
-        // offers (a parameter of the previous model) goes.
         if let Some(config) = config {
             self.records.retain(|record| match &record.origin {
                 OptionOrigin::Config(id) => config.iter().any(|option| &option.id == id),
-                OptionOrigin::Mode => true,
+                OptionOrigin::Mode | OptionOrigin::Launch => true,
             });
         }
         for option in config.unwrap_or_default() {
-            // The mode and model categories keep tcode's canonical ids (the
-            // runtime reads `acp:mode`); every option, whatever its category,
-            // is set through `session/set_config_option`.
             let id = match option.category.as_ref() {
                 Some(acp::SessionConfigOptionCategory::Mode) => MODE_OPTION_ID.to_string(),
                 Some(acp::SessionConfigOptionCategory::Model) => MODEL_OPTION_ID.to_string(),
@@ -1658,6 +1549,7 @@ impl OptionRegistry {
                                 value: option.value.0.to_string(),
                                 label: option.name.clone(),
                                 description: option.description.clone(),
+                                unavailable: None,
                             })
                             .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
@@ -1667,6 +1559,7 @@ impl OptionRegistry {
                                     value: option.value.0.to_string(),
                                     label: format!("{} · {}", group.name, option.name),
                                     description: option.description.clone(),
+                                    unavailable: None,
                                 })
                             })
                             .collect(),
@@ -1678,6 +1571,10 @@ impl OptionRegistry {
                             label: option.name.clone(),
                             options,
                             default_value: Some(select.current_value.0.to_string()),
+                            role: crate::OptionRole::Model,
+                            apply: crate::ApplyTiming::Live,
+                            recommended: None,
+                            permissive: None,
                         },
                         OptionOrigin::Config(option.id.clone()),
                         Value::String(select.current_value.0.to_string()),
@@ -1688,6 +1585,10 @@ impl OptionRegistry {
                         id,
                         label: option.name.clone(),
                         default_value: boolean.current_value,
+                        role: crate::OptionRole::Model,
+                        apply: crate::ApplyTiming::Live,
+                        recommended: None,
+                        permissive: None,
                     },
                     OptionOrigin::Config(option.id.clone()),
                     Value::Bool(boolean.current_value),
@@ -1793,7 +1694,6 @@ pub(crate) struct State {
     /// A turn the agent started while another was still open.
     next_turn: Option<String>,
     modes: Option<acp::SessionModeState>,
-    previous_non_plan_mode: Option<acp::SessionModeId>,
 }
 
 impl State {
@@ -1817,7 +1717,6 @@ impl State {
             owned_options: &[],
             next_turn: None,
             modes: None,
-            previous_non_plan_mode: None,
         }
     }
 
@@ -1895,29 +1794,11 @@ impl State {
     }
 
     fn select_mode(&mut self, mode: acp::SessionModeId) {
-        let is_plan = self
-            .modes
-            .as_ref()
-            .and_then(acp_plan_mode)
-            .is_some_and(|plan| plan == mode);
-        if !is_plan {
-            self.previous_non_plan_mode = Some(mode.clone());
-        }
         if let Some(modes) = self.modes.as_mut() {
             modes.current_mode_id = mode.clone();
         }
         self.options
             .select(MODE_OPTION_ID, Value::String(mode.0.to_string()));
-    }
-
-    fn build_mode(&self) -> Option<acp::SessionModeId> {
-        let modes = self.modes.as_ref()?;
-        // ACP exposes no distinct default mode. Remember the last non-plan
-        // selection from before Plan; if the session began in Plan, fall back
-        // to the first advertised non-plan mode (the agent's ordering).
-        self.previous_non_plan_mode
-            .clone()
-            .or_else(|| first_non_plan_mode(modes))
     }
 
     fn provider_options(&self) -> AgentEvent {
@@ -2811,37 +2692,6 @@ mod tests {
         serde_json::from_value(json).expect("valid session/update payload")
     }
 
-    fn modes(current: &str, available: &[&str]) -> acp::SessionModeState {
-        serde_json::from_value(json!({
-            "currentModeId": current,
-            "availableModes": available
-                .iter()
-                .map(|id| json!({ "id": id, "name": id }))
-                .collect::<Vec<_>>()
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn plan_mode_requires_advertisement_and_restores_the_previous_mode() {
-        for previous in ["build", "review"] {
-            let mut state = state();
-            state.ingest_modes(Some(&modes(previous, &["build", "review", "plan"])));
-            let plan = interaction_mode_target(InteractionMode::Plan, &state).unwrap();
-            assert_eq!(plan, acp::SessionModeId::new("plan"));
-            state.select_mode(plan);
-            assert_eq!(
-                interaction_mode_target(InteractionMode::Build, &state),
-                Some(acp::SessionModeId::new(previous))
-            );
-        }
-        let mut state = state();
-        state.ingest_modes(Some(&modes("build", &["build", "review"])));
-        assert_eq!(interaction_mode_target(InteractionMode::Plan, &state), None);
-        assert!(matches!(missing_mode_warning(InteractionMode::Plan),
-            AgentEvent::Warning { message } if message.contains("does not advertise a Plan mode")));
-    }
-
     #[test]
     fn prompt_acceptance_follows_the_complete_stdio_write() {
         smol::block_on(async {
@@ -3447,8 +3297,6 @@ mod tests {
         assert_eq!(approval.options.len(), 3);
         assert_eq!(approval.options[0].label, "Allow");
         assert_eq!(approval.options[1].kind, ApprovalOptionKind::AllowAlways);
-
-        // Our fixed four map onto the agent's own options…
         let selected =
             |decision: ApprovalDecision| match approval_outcome(&decision, &approval.options) {
                 Some(acp::RequestPermissionOutcome::Selected(outcome)) => {
@@ -3456,11 +3304,8 @@ mod tests {
                 }
                 other => panic!("expected a selection, got {other:?}"),
             };
-        assert_eq!(selected(ApprovalDecision::Approve), "yes");
-        assert_eq!(selected(ApprovalDecision::Deny), "no");
-        // A persistent native option is chosen only explicitly, and only one
-        // the agent offered.
-        assert_eq!(selected(ApprovalDecision::ApproveForSession), "yes");
+        assert_eq!(selected(ApprovalDecision::Option("yes".into())), "yes");
+        assert_eq!(selected(ApprovalDecision::Option("no".into())), "no");
         assert_eq!(
             selected(ApprovalDecision::Option("always".into())),
             "always"
@@ -3469,38 +3314,16 @@ mod tests {
             approval_outcome(&ApprovalDecision::Option("other".into()), &approval.options)
                 .is_none()
         );
-        // …and Cancel is the protocol's own `cancelled` outcome.
         assert!(matches!(
             approval_outcome(&ApprovalDecision::Cancel, &approval.options),
             Some(acp::RequestPermissionOutcome::Cancelled)
         ));
-
-        // The exact wire shape the agent expects back.
         let response = acp::RequestPermissionResponse::new(
-            approval_outcome(&ApprovalDecision::Approve, &approval.options).unwrap(),
+            approval_outcome(&ApprovalDecision::Option("yes".into()), &approval.options).unwrap(),
         );
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["outcome"]["outcome"], "selected");
         assert_eq!(value["outcome"]["optionId"], "yes");
-        // No fixed decision falls back to a persistent option.
-        let persistent_only: Vec<_> = [
-            ApprovalOptionKind::AllowAlways,
-            ApprovalOptionKind::RejectAlways,
-        ]
-        .into_iter()
-        .map(|kind| ApprovalOption {
-            id: format!("{kind:?}"),
-            label: format!("{kind:?}"),
-            kind,
-        })
-        .collect();
-        for decision in [
-            ApprovalDecision::Approve,
-            ApprovalDecision::ApproveForSession,
-            ApprovalDecision::Deny,
-        ] {
-            assert!(approval_outcome(&decision, &persistent_only).is_none());
-        }
     }
 
     #[test]

@@ -769,9 +769,6 @@ pub(crate) fn plain_text_as_markdown(text: &str) -> String {
     markdown
 }
 
-/// One virtualized timeline row: a segment of a turn, plus the turn's trailer
-/// (plan card, changed files, liveness, pending steers) on its last row.
-///
 /// The list virtualizes segments rather than turns, and an expanded Work Log's
 /// activities rather than its run, so a turn with hundreds of tool calls and
 /// interim messages costs the rows on screen, not the whole turn, every
@@ -873,13 +870,6 @@ impl TurnIndexMeta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProposedPlanIndex {
-    turn: usize,
-    item_id: String,
-    markdown: String,
-}
-
 /// How the timeline being synced relates to the previously indexed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TimelineContinuity {
@@ -898,7 +888,6 @@ pub(crate) enum TimelineContinuity {
 pub(crate) struct TurnIndexCache {
     entries: Vec<Arc<TimelineEntry>>,
     turns: Vec<TurnIndexMeta>,
-    proposed_plan: Option<ProposedPlanIndex>,
     expanded: HashSet<String>,
     #[cfg(test)]
     reindexed_turns: usize,
@@ -910,7 +899,6 @@ impl TurnIndexCache {
         items: &mut Vec<TimelineRow>,
         turns: &[TurnMeta],
         entries: &[Arc<TimelineEntry>],
-        proposed_plan: Option<(usize, &str, &str)>,
         expanded: &HashSet<String>,
         continuity: TimelineContinuity,
     ) -> ListSync {
@@ -927,14 +915,7 @@ impl TurnIndexCache {
         let tail_replace = entries.len() == self.entries.len()
             && entry_divergence.checked_add(1) == Some(entries.len());
         let append = entry_divergence == self.entries.len() && entries.len() >= self.entries.len();
-        let proposed_plan_changed = match (&self.proposed_plan, proposed_plan) {
-            (None, None) => false,
-            (Some(old), Some((turn, item_id, markdown))) => {
-                old.turn != turn || old.item_id != item_id || old.markdown != markdown
-            }
-            _ => true,
-        };
-        let settings_changed = proposed_plan_changed || self.expanded != *expanded;
+        let settings_changed = self.expanded != *expanded;
         let must_reset = reset
             || settings_changed
             || entries.len() < self.entries.len()
@@ -961,10 +942,10 @@ impl TurnIndexCache {
         }
 
         let suffix = if reindex_from == 0 {
-            index_rows(turns, entries, proposed_plan, expanded)
+            index_rows(turns, entries, expanded)
         } else {
             if reindex_from < turn_count {
-                index_rows_from(turns, entries, proposed_plan, expanded, reindex_from)
+                index_rows_from(turns, entries, expanded, reindex_from)
             } else {
                 Vec::new()
             }
@@ -992,13 +973,6 @@ impl TurnIndexCache {
         self.turns.truncate(turn_divergence);
         self.turns
             .extend(turns[turn_divergence..].iter().map(TurnIndexMeta::from));
-        if proposed_plan_changed {
-            self.proposed_plan = proposed_plan.map(|(turn, item_id, markdown)| ProposedPlanIndex {
-                turn,
-                item_id: item_id.to_owned(),
-                markdown: markdown.to_owned(),
-            });
-        }
         if self.expanded != *expanded {
             self.expanded.clone_from(expanded);
         }
@@ -1019,16 +993,14 @@ impl TurnIndexCache {
 pub(crate) fn index_rows(
     turns: &[TurnMeta],
     entries: &[Arc<TimelineEntry>],
-    proposed_plan: Option<(usize, &str, &str)>,
     expanded: &HashSet<String>,
 ) -> Vec<TimelineRow> {
-    index_rows_from(turns, entries, proposed_plan, expanded, 0)
+    index_rows_from(turns, entries, expanded, 0)
 }
 
 fn index_rows_from(
     turns: &[TurnMeta],
     entries: &[Arc<TimelineEntry>],
-    proposed_plan: Option<(usize, &str, &str)>,
     expanded: &HashSet<String>,
     first_turn: usize,
 ) -> Vec<TimelineRow> {
@@ -1151,12 +1123,6 @@ fn index_rows_from(
                             .as_ref()
                             .map(std::mem::discriminant)
                             .hash(&mut content);
-                    }
-                    if let Some((turn, item_id, markdown)) = proposed_plan
-                        && turn == index
-                    {
-                        item_id.hash(&mut content);
-                        markdown.len().hash(&mut content);
                     }
                 }
                 rows.push(TimelineRow {
@@ -1572,6 +1538,7 @@ mod tests {
             name: name.into(),
             root: PathBuf::from(format!("/{id}")),
             icon_path: None,
+            permission_defaults: Default::default(),
             created_at: 0,
         };
         let projects = vec![
@@ -2066,13 +2033,12 @@ mod tests {
                 &mut rows,
                 &initial.turns,
                 &initial.entries,
-                None,
                 &initial.expanded,
                 TimelineContinuity::Complete,
             );
             assert_eq!(
                 rows,
-                index_rows(&initial.turns, &initial.entries, None, &initial.expanded),
+                index_rows(&initial.turns, &initial.entries, &initial.expanded),
                 "{}: initial",
                 scenario.name
             );
@@ -2089,14 +2055,13 @@ mod tests {
                     &mut rows,
                     &input.turns,
                     &input.entries,
-                    None,
                     &input.expanded,
                     step.continuity,
                 );
                 assert_eq!(sync, step.expected, "{}: {}", scenario.name, step.name);
                 assert_eq!(
                     rows,
-                    index_rows(&input.turns, &input.entries, None, &input.expanded),
+                    index_rows(&input.turns, &input.entries, &input.expanded),
                     "{}: {}",
                     scenario.name,
                     step.name
@@ -2136,7 +2101,6 @@ mod tests {
             &mut incremental,
             &turns,
             &entries,
-            None,
             &expanded,
             TimelineContinuity::Complete,
         );
@@ -2146,12 +2110,11 @@ mod tests {
             &mut incremental,
             &turns,
             &entries,
-            None,
             &expanded,
             TimelineContinuity::Complete,
         );
 
-        assert_eq!(incremental, index_rows(&turns, &entries, None, &expanded));
+        assert_eq!(incremental, index_rows(&turns, &entries, &expanded));
         assert!(
             cache.reindexed_turns() <= 1,
             "tail replacement reindexed {} turns",
@@ -2298,7 +2261,6 @@ mod tests {
             &mut rows,
             &turns,
             &entries,
-            None,
             &HashSet::new(),
             TimelineContinuity::Complete,
         );
@@ -2331,7 +2293,6 @@ mod tests {
             &mut rows,
             &turns,
             &entries,
-            None,
             &HashSet::new(),
             TimelineContinuity::Complete,
         );
@@ -2406,7 +2367,6 @@ mod tests {
                     ..Default::default()
                 }],
                 entries,
-                None,
                 &HashSet::from([work_log_key(0, "cargo check")]),
                 TimelineContinuity::Complete,
             );
@@ -2441,7 +2401,6 @@ mod tests {
             &mut rows,
             &running,
             &entries,
-            None,
             &expanded,
             TimelineContinuity::Complete,
         );
@@ -2470,7 +2429,6 @@ mod tests {
             &mut rows,
             &running,
             &entries,
-            None,
             &expanded,
             TimelineContinuity::Complete,
         );
@@ -2485,7 +2443,6 @@ mod tests {
             &mut rows,
             &[TurnMeta::default()],
             &entries,
-            None,
             &expanded,
             TimelineContinuity::Complete,
         );
@@ -2501,7 +2458,6 @@ mod tests {
             &mut rows,
             &[TurnMeta::default()],
             &entries,
-            None,
             &HashSet::new(),
             TimelineContinuity::Complete,
         );

@@ -6,9 +6,7 @@ use tcode_core::{
     settings::Settings,
     ui::{RightTab, WorkspaceMode},
 };
-use tcode_protocol::{
-    ProvidersStatus, QueuedMessageStatus, SessionPlan, SessionStatus, TerminalContextStatus,
-};
+use tcode_protocol::{ProvidersStatus, QueuedMessageStatus, SessionStatus, TerminalContextStatus};
 
 use crate::conversation_ui::ConversationUiState;
 
@@ -52,20 +50,17 @@ pub struct ComposerState {
     pub active_model_spec: Option<agent::ModelSpec>,
     pub active_option_descriptors: Vec<agent::OptionDescriptor>,
     pub active_option_selections: Vec<agent::OptionSelection>,
+    pub requested_option_selections: Vec<agent::OptionSelection>,
     pub ultrathink_armed: bool,
     pub options_pending_restart: bool,
-    pub interaction_mode: agent::InteractionMode,
+
     pub token_usage: Option<agent::TokenUsage>,
     /// Account rate-limit windows for the profile driving this session.
     pub usage: Option<tcode_core::usage::ProviderUsage>,
     pub provider: Option<agent::ProviderKind>,
-    pub effective_approval_mode: agent::ApprovalMode,
-    pub native_approval_modes_enabled: bool,
-    pub approval_pending_restart: bool,
     pub queue: Option<ComposerQueue>,
     pub steering_supported: bool,
     pub preparing_worktree: bool,
-    pub plan_ready_markdown: Option<String>,
     pub checkout: Option<ComposerCheckoutState>,
     pub turn_running: bool,
     pub stopping: bool,
@@ -82,16 +77,10 @@ pub struct ComposerState {
 pub(crate) fn composer_state(
     status: Option<&SessionStatus>,
     _timeline: Option<&Timeline>,
-    plan: Option<&SessionPlan>,
     settings: &Settings,
     providers: &ProvidersStatus,
 ) -> ComposerState {
     let provider = status.map(|status| status.provider);
-    let native_approval_modes_enabled =
-        status.is_none_or(|status| status.native_approval_modes_enabled);
-    let approval_mode = status
-        .map(|status| status.effective_approval_mode)
-        .unwrap_or_default();
     let active_model_spec = status.and_then(|status| {
         let model = status.requested_model.as_deref()?;
         providers
@@ -166,17 +155,14 @@ pub(crate) fn composer_state(
         active_option_selections: status
             .map(|status| status.provider_option_selections.clone())
             .unwrap_or_default(),
+        requested_option_selections: status
+            .map(|status| status.provider_option_requested_selections.clone())
+            .unwrap_or_default(),
         ultrathink_armed: status.is_some_and(|status| status.ultrathink_armed),
         options_pending_restart: status.is_some_and(|status| status.options_pending_restart),
-        interaction_mode: status
-            .map(|status| status.interaction_mode)
-            .unwrap_or_default(),
         token_usage,
         usage,
         provider,
-        effective_approval_mode: approval_mode,
-        native_approval_modes_enabled,
-        approval_pending_restart: status.is_some_and(|status| status.approval_pending_restart),
         queue: status.map(|status| ComposerQueue {
             messages: status.queued_messages.clone(),
             can_steer: status.steering_supported,
@@ -184,10 +170,6 @@ pub(crate) fn composer_state(
         }),
         steering_supported: status.is_some_and(|status| status.steering_supported),
         preparing_worktree: status.is_some_and(|status| status.preparing_worktree),
-        plan_ready_markdown: plan
-            .and_then(|plan| plan.proposed.as_ref())
-            .filter(|plan| plan.ready && !plan.resolved)
-            .map(|plan| plan.markdown.clone()),
         checkout,
         turn_running: status.is_some_and(|status| status.activity.turn_running),
         stopping: status.is_some_and(|status| status.stopping),
@@ -209,14 +191,11 @@ pub(crate) struct PanelState {
     pub right_panel_expanded: bool,
     pub terminal_open: bool,
     pub terminal_height: f32,
-    pub plan_tab_active: bool,
 }
 
 pub(crate) fn panel_state(
     ui: Option<&ConversationUiState>,
-    status: Option<&SessionStatus>,
     _timeline: Option<&Timeline>,
-    plan: Option<&SessionPlan>,
 ) -> PanelState {
     PanelState {
         right_panel_open: ui.is_some_and(|ui| ui.right_panel_open),
@@ -224,8 +203,6 @@ pub(crate) fn panel_state(
         right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
         terminal_open: ui.is_some_and(|ui| ui.terminal_open),
         terminal_height: ui.map_or(240., |ui| ui.terminal_height),
-        plan_tab_active: plan.is_some_and(|plan| plan.proposed.is_some())
-            || status.is_some_and(|status| status.interaction_mode == agent::InteractionMode::Plan),
     }
 }
 
@@ -244,10 +221,6 @@ mod tests {
             requested_profile_id: None,
             acp_agent_id: None,
             project_id: Some("project-1".into()),
-            approval_mode: agent::ApprovalMode::Supervised,
-            effective_approval_mode: agent::ApprovalMode::Supervised,
-            native_approval_modes_enabled: true,
-            interaction_mode: agent::InteractionMode::Build,
             queued_messages: Vec::new(),
             review_comment_drafts: Vec::new(),
             terminals: Vec::new(),
@@ -280,6 +253,7 @@ mod tests {
             steering_supported: true,
             provider_option_descriptors: Vec::new(),
             provider_option_selections: Vec::new(),
+            provider_option_requested_selections: Vec::new(),
             provider_commands: Vec::new(),
             git_branch: Some("main".into()),
             branches: vec!["main".into()],
@@ -292,7 +266,6 @@ mod tests {
             native_rewind_prefill_available: false,
             model_pending_restart: false,
             options_pending_restart: false,
-            approval_pending_restart: false,
             ultrathink_armed: false,
         }
     }
@@ -321,7 +294,7 @@ mod tests {
             },
         );
         status.usage = timeline.usage;
-        let custom = composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
+        let custom = composer_state(Some(&status), Some(&timeline), &settings, &providers);
         assert_eq!(custom.token_usage.unwrap().used_tokens, Some(1234));
         assert!(custom.usage.is_none());
         settings
@@ -331,7 +304,7 @@ mod tests {
             .settings
             .env
             .clear();
-        let native = composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
+        let native = composer_state(Some(&status), Some(&timeline), &settings, &providers);
         assert_eq!(
             native.usage.unwrap().error.as_deref(),
             Some("temporarily unreachable")
@@ -386,9 +359,7 @@ mod tests {
                     }),
                     fork: false,
                     binary_path: Some(binary.clone()),
-                    approval_mode: agent::ApprovalMode::Supervised,
                     option_selections: vec![],
-                    interaction_mode: agent::InteractionMode::Build,
                     mcp_servers: vec![],
                     launch_env: agent::LaunchEnv {
                         home: Some(root.clone()),
@@ -436,7 +407,7 @@ mod tests {
                     status.usage = timeline.usage;
                     status.context_window = timeline.usage.and_then(|usage| usage.context_window);
                     let snapshot =
-                        composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
+                        composer_state(Some(&status), Some(&timeline), &settings, &providers);
                     if let agent::AgentEvent::ContextCompacted(c) = &event {
                         let u = snapshot.token_usage.unwrap();
                         if c.in_progress {
@@ -472,8 +443,7 @@ mod tests {
             });
             status.usage = timeline.usage;
             status.context_window = timeline.usage.and_then(|usage| usage.context_window);
-            let snapshot =
-                composer_state(Some(&status), Some(&timeline), None, &settings, &providers);
+            let snapshot = composer_state(Some(&status), Some(&timeline), &settings, &providers);
             let usage = snapshot.token_usage.unwrap();
             assert_eq!(usage.used_tokens, Some([500260, 60, 20764][index]));
             assert_eq!(
@@ -503,7 +473,7 @@ mod tests {
         replay.apply_at(None, &old);
         status.usage = replay.usage;
         status.context_window = replay.usage.and_then(|usage| usage.context_window);
-        let old = composer_state(Some(&status), Some(&replay), None, &settings, &providers)
+        let old = composer_state(Some(&status), Some(&replay), &settings, &providers)
             .token_usage
             .unwrap();
         assert_eq!(old.freshness, agent::ContextFreshness::Unknown);

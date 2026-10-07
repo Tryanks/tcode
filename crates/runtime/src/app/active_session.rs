@@ -174,16 +174,8 @@ pub struct ActiveSession {
     /// user picks a different model we compare against this to decide whether a
     /// restart is needed before the next turn.
     pub(super) live_model: Option<String>,
-    /// The approval mode the live provider process is actually running under.
-    /// Claude switches live (this is updated in lockstep, so no restart);
-    /// Codex binds the mode at thread start, so a mid-session change leaves this
-    /// stale and forces a resume-restart before the next turn.
-    pub(super) live_approval_mode: Option<ApprovalMode>,
-    /// The option selections the live provider was started with (reasoning
-    /// effort, context window, fast mode, …). Launch-time changes force a
-    /// resume-restart; live and per-turn options are excluded by
-    /// `options_changed_while_live`.
     pub(super) live_option_selections: Vec<OptionSelection>,
+    pub(super) confirmed_option_selections: Vec<OptionSelection>,
     /// A transient "the next send should be an Ultrathink turn" flag, set when
     /// the user picks Ultrathink in the traits picker. It is not persisted as
     /// a session option and is cleared after one send.
@@ -221,11 +213,6 @@ pub struct ActiveSession {
     /// `slash_commands` + `skills`; Codex `skills/list`).
     /// Seeded from the per-provider cache, then replaced by live updates.
     pub(super) provider_commands: Vec<ProviderCommand>,
-    /// The agent's self-described options (ACP `modes` / `models` /
-    /// `configOptions`), pushed over the wire at session start and on every
-    /// change. They render through the composer's existing traits picker; the
-    /// native providers describe their options through the model catalog
-    /// instead, so this stays empty for them. In-memory only.
     pub(super) provider_options: Vec<OptionDescriptor>,
     /// Lazily-spawned per-session PTYs and provider-bound terminal context.
     pub terminal_workspace: TerminalWorkspace,
@@ -257,8 +244,8 @@ impl ActiveSession {
             pending_relay: None,
             runtime: Runtime::Idle,
             live_model: None,
-            live_approval_mode: None,
             live_option_selections: Vec::new(),
+            confirmed_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
             draft_workspace: WorkspaceMode::LocalCheckout,
@@ -290,36 +277,77 @@ impl ActiveSession {
         matches!(self.runtime, Runtime::Live(_)) && self.meta.model != self.live_model
     }
 
-    /// Whether the live provider is running a different approval mode than the
-    /// one now selected in `meta.approval_mode`. Only providers that cannot
-    /// switch live (Codex) reach this state: Claude updates `live_approval_mode`
-    /// in lockstep when it applies the switch on the wire.
-    pub(super) fn approval_mode_changed_while_live(&self) -> bool {
-        matches!(self.runtime, Runtime::Live(_))
-            && Some(self.meta.approval_mode) != self.live_approval_mode
+    pub(super) fn permission_descriptor(&self) -> Option<OptionDescriptor> {
+        let descriptor = permission_control(self.meta.provider)?;
+        let id = match &descriptor {
+            OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
+        };
+        self.provider_options
+            .iter()
+            .find(|option| match option {
+                OptionDescriptor::Select { id: option_id, .. }
+                | OptionDescriptor::Boolean { id: option_id, .. } => option_id == id,
+            })
+            .cloned()
+            .or(Some(descriptor))
     }
 
-    /// Whether a launch-time option (reasoning effort for Claude, context
-    /// window, fast mode, thinking, …) changed while the provider is live, so
-    /// the next turn must restart it. Codex and OpenCode reasoning effort is
-    /// excluded: it is applied per turn via [`TurnOptions`] and needs no restart.
     pub(super) fn options_changed_while_live(&self) -> bool {
         if !matches!(self.runtime, Runtime::Live(_)) {
             return false;
         }
-        // ACP option changes use session/set_mode or session/set_config_option.
+        let permission = self.permission_descriptor();
+        let permission_id = permission.as_ref().map(|descriptor| match descriptor {
+            OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => {
+                id.as_str()
+            }
+        });
+        let permission_restart = permission.as_ref().is_some_and(|descriptor| {
+            let default = match descriptor {
+                OptionDescriptor::Select { default_value, .. } => {
+                    default_value.clone().map(serde_json::Value::String)
+                }
+                OptionDescriptor::Boolean { default_value, .. } => {
+                    Some(serde_json::Value::Bool(*default_value))
+                }
+            };
+            let value = |selections: &[OptionSelection]| {
+                selections
+                    .iter()
+                    .find(|selection| Some(selection.id.as_str()) == permission_id)
+                    .map(|selection| selection.value.clone())
+                    .or_else(|| default.clone())
+            };
+            matches!(
+                descriptor,
+                OptionDescriptor::Select {
+                    apply: ApplyTiming::Restart,
+                    ..
+                } | OptionDescriptor::Boolean {
+                    apply: ApplyTiming::Restart,
+                    ..
+                }
+            ) && value(&self.meta.option_selections) != value(&self.live_option_selections)
+        });
         if self.meta.provider.caps().options_apply_live {
-            return false;
+            return permission_restart;
         }
         let ignore_effort = self.meta.provider.caps().per_turn_effort;
-        normalized_selections(&self.meta.option_selections, ignore_effort)
-            != normalized_selections(&self.live_option_selections, ignore_effort)
+        let model_selections = |selections: &[OptionSelection]| {
+            let selections: Vec<_> = selections
+                .iter()
+                .filter(|selection| Some(selection.id.as_str()) != permission_id)
+                .cloned()
+                .collect();
+            normalized_selections(&selections, ignore_effort)
+        };
+        permission_restart
+            || model_selections(&self.meta.option_selections)
+                != model_selections(&self.live_option_selections)
     }
 
     pub(super) fn launch_settings_changed_while_live(&self) -> bool {
-        self.model_changed_while_live()
-            || self.approval_mode_changed_while_live()
-            || self.options_changed_while_live()
+        self.model_changed_while_live() || self.options_changed_while_live()
     }
 
     /// A settings restart must not kill Claude-owned background work or race a
@@ -329,18 +357,13 @@ impl ActiveSession {
             && (self.background_task_count > 0 || self.delivery_in_flight.is_some())
     }
 
-    /// Per-turn overrides derived from the session's persisted state: Codex and
-    /// OpenCode reasoning effort, plus the Build/Plan interaction mode.
     pub(super) fn turn_options(&self) -> TurnOptions {
         let effort = if self.meta.provider.caps().per_turn_effort {
             effort_selection(&self.meta.option_selections)
         } else {
             None
         };
-        TurnOptions {
-            effort,
-            interaction_mode: Some(self.meta.interaction_mode),
-        }
+        TurnOptions { effort }
     }
 
     /// Tear down the live provider and return to `Idle` so the next

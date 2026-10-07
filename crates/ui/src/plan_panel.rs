@@ -1,11 +1,4 @@
-//! Proposed-plan Markdown and structured task steps, hosted beside the diff view.
-
-use std::rc::Rc;
-use std::time::Duration;
-
 use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::widgets::menu::PopupMenu;
 use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
@@ -13,65 +6,16 @@ use crate::{
 };
 use agent::{PlanStep, PlanStepStatus};
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, px,
+    AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
-use serde::Deserialize;
 
-use tcode_core::session::plan_title;
-
-use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 use crate::material;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
-/// A proposed plan's context-menu action: the same three its buttons offer,
-/// here and on the chat's plan card.
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_plan, no_json)]
-pub(crate) struct PlanMenu {
-    pub(crate) markdown: String,
-    pub(crate) kind: PlanMenuKind,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
-pub(crate) enum PlanMenuKind {
-    Copy,
-    Download,
-    Save,
-}
-
-/// The plan's actions as menu items, for the Markdown that shows it and the
-/// margin around it.
-pub(crate) fn plan_menu_items(markdown: String) -> MenuExtension {
-    Rc::new(move |menu: PopupMenu, _: &mut Window, _: &mut App| {
-        [
-            ("plan.copy", PlanMenuKind::Copy),
-            ("plan.download", PlanMenuKind::Download),
-            ("plan.save_workspace", PlanMenuKind::Save),
-        ]
-        .into_iter()
-        .fold(menu, |menu, (key, kind)| {
-            menu.menu(
-                crate::tr!(key).into_owned(),
-                Box::new(PlanMenu {
-                    markdown: markdown.clone(),
-                    kind,
-                }),
-            )
-        })
-    })
-}
-
 pub struct PlanPanel {
     store: Entity<WorkspaceStore>,
-    /// Cached markdown state for the proposed-plan body (rebuilt when the text
-    /// changes) so streaming/replay reparses cheaply.
-    md: Option<(String, Entity<MarkdownState>)>,
-    /// Whether the "Copied!" confirmation is showing (2s).
-    copied: bool,
-    _copied_task: Option<Task<()>>,
     vscroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -90,164 +34,8 @@ impl PlanPanel {
         )];
         Self {
             store,
-            md: None,
-            copied: false,
-            _copied_task: None,
             vscroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
-        }
-    }
-
-    fn sync_markdown(&mut self, markdown: &str, cx: &mut Context<Self>) -> Entity<MarkdownState> {
-        if let Some((cached, state)) = &self.md
-            && cached == markdown
-        {
-            return state.clone();
-        }
-        let text = markdown.to_string();
-        let state = cx.new(|cx| MarkdownState::new(&text, cx));
-        self.md = Some((text, state.clone()));
-        state
-    }
-
-    fn mark_copied(&mut self, cx: &mut Context<Self>) {
-        self.copied = true;
-        self._copied_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            let _ = this.update(cx, |this, cx| {
-                this.copied = false;
-                cx.notify();
-            });
-        }));
-        cx.notify();
-    }
-
-    fn render_proposed_plan(&mut self, markdown: String, cx: &mut Context<Self>) -> AnyElement {
-        let title =
-            plan_title(&markdown).unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned());
-        let md_state = self.sync_markdown(&markdown, cx);
-        let copied = self.copied;
-        let menu_items = plan_menu_items(markdown.clone());
-
-        let md_copy = markdown.clone();
-        let md_download = markdown.clone();
-        let md_save = markdown;
-
-        v_flex()
-            .debug_selector(|| "panel-proposed-plan".into())
-            .w_full()
-            .gap_2()
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.))
-                            .line_height(px(20.))
-                            .font_medium()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("plan.badge")),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_size(px(15.))
-                            .line_height(px(20.))
-                            .font_medium()
-                            .child(title),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_size(px(13.))
-                    .line_height(px(20.))
-                    .child(
-                        MarkdownView::new(&md_state)
-                            .selectable(true)
-                            .menu_extension(menu_items),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_1()
-                    .flex_wrap()
-                    .child(
-                        Button::new("plan-copy")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Copy)
-                            .label(if copied {
-                                crate::tr!("plan.copied")
-                            } else {
-                                crate::tr!("plan.copy")
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let md = md_copy.clone();
-                                this.store.update(cx, |store, _cx| {
-                                    store.copy_plan(md);
-                                });
-                                this.mark_copied(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("plan-download")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::empty().path("icons/download.svg"))
-                            .label(crate::tr!("plan.download"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let md = md_download.clone();
-                                let fallback = crate::tr!("plan.proposed_plan").into_owned();
-                                this.store.update(cx, |store, _cx| {
-                                    store.download_plan(md, fallback);
-                                });
-                            })),
-                    )
-                    .child(
-                        Button::new("plan-save")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::HardDrive)
-                            .label(crate::tr!("plan.save_workspace"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let md = md_save.clone();
-                                this.store.update(cx, |store, _cx| {
-                                    store.save_plan_to_workspace(md);
-                                });
-                            })),
-                    ),
-            )
-            .child(material::faded_hairline(cx))
-            .into_any_element()
-    }
-
-    fn on_plan_menu(&mut self, action: &PlanMenu, _: &mut Window, cx: &mut Context<Self>) {
-        let markdown = action.markdown.clone();
-        match action.kind {
-            PlanMenuKind::Copy => {
-                self.store
-                    .update(cx, |store, _cx| store.copy_plan(markdown));
-                self.mark_copied(cx);
-            }
-            PlanMenuKind::Download => {
-                let fallback = crate::tr!("plan.proposed_plan").into_owned();
-                self.store
-                    .update(cx, |store, _cx| store.download_plan(markdown, fallback));
-            }
-            PlanMenuKind::Save => {
-                self.store
-                    .update(cx, |store, _cx| store.save_plan_to_workspace(markdown));
-            }
         }
     }
 
@@ -267,7 +55,7 @@ impl PlanPanel {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(crate::tr!("plan.steps")),
+                    .child(crate::tr!("tasks.steps")),
             )
             .child(steps_col)
             .into_any_element()
@@ -327,13 +115,13 @@ impl PlanPanel {
                 div()
                     .text_size(px(15.))
                     .font_medium()
-                    .child(crate::tr!("plan.empty_title")),
+                    .child(crate::tr!("tasks.empty_title")),
             )
             .child(
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("plan.empty_desc")),
+                    .child(crate::tr!("tasks.empty_desc")),
             )
             .into_any_element()
     }
@@ -341,19 +129,13 @@ impl PlanPanel {
 
 impl Render for PlanPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (markdown, steps) = self
+        let steps = self
             .store
             .read(cx)
             .session_plan()
-            .map(|plan| {
-                (
-                    plan.proposed.as_ref().map(|plan| plan.markdown.clone()),
-                    plan.steps.clone(),
-                )
-            })
+            .map(|plan| plan.steps.clone())
             .unwrap_or_default();
-
-        if markdown.is_none() && steps.is_empty() {
+        if steps.is_empty() {
             return v_flex().size_full().child(self.render_empty(cx));
         }
 
@@ -365,27 +147,21 @@ impl Render for PlanPanel {
             material::CARD_INSET
         };
         let mut column = v_flex().w_full().min_w_0().px(px(inset)).py_3().gap_3();
-        if let Some(markdown) = markdown {
-            column = column.child(self.render_proposed_plan(markdown, cx));
-        }
         if !steps.is_empty() {
             column = column.child(self.render_steps(&steps, cx));
         }
 
-        v_flex()
-            .size_full()
-            .on_action(cx.listener(Self::on_plan_menu))
-            .child(crate::scroll::page_viewport(
-                "plan-scroll-bounce",
-                crate::wheel_easing::Handle::Scroll(self.vscroll.clone()),
-                div()
-                    .id("plan-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .lock_scroll_axis()
-                    .track_scroll(&self.vscroll)
-                    .child(column),
-            ))
+        v_flex().size_full().child(crate::scroll::page_viewport(
+            "plan-scroll-bounce",
+            crate::wheel_easing::Handle::Scroll(self.vscroll.clone()),
+            div()
+                .id("plan-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .lock_scroll_axis()
+                .track_scroll(&self.vscroll)
+                .child(column),
+        ))
     }
 }

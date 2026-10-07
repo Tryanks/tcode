@@ -64,7 +64,7 @@ pub fn render_relay_transcript(
             .filter(|entry| entry.turn == turn)
             .map(AsRef::as_ref)
             .collect();
-        let block = render_turn(turn + 1, &entries, timeline);
+        let block = render_turn(turn + 1, &entries);
         if !block.is_empty() {
             turn_blocks.push(block);
         }
@@ -146,7 +146,7 @@ fn render_elided(
     out
 }
 
-fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -> String {
+fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
     let mut body = String::new();
     for entry in entries {
         match &entry.content {
@@ -275,15 +275,6 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
             ),
             EntryContent::Item(ItemContent::Reasoning { .. }) => {}
         }
-    }
-    if let Some(plan) = timeline
-        .proposed_plan
-        .as_ref()
-        .filter(|plan| plan.turn + 1 == number)
-    {
-        body.push_str("### Plan\n\n");
-        body.push_str(&plan.markdown);
-        body.push_str("\n\n");
     }
     if body.is_empty() {
         String::new()

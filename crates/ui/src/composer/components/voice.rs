@@ -371,7 +371,7 @@ mod tests {
                 .update(cx, |state, cx| state.toggle(cx));
         });
         let submitted = sink.borrow().clone().unwrap();
-        cx.update(|_, cx| submitted.hypothesis("/plan", cx));
+        cx.update(|_, cx| submitted.hypothesis("/model", cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_keystrokes("escape");
         assert_eq!(

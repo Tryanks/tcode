@@ -1020,27 +1020,6 @@ pub(super) fn session_provider_settings(
         .unwrap_or_else(|| settings.provider(meta.provider))
 }
 
-pub(super) fn session_approval_policy(
-    meta: &SessionMeta,
-    provider_settings: &tcode_core::settings::ProviderSettings,
-) -> (ApprovalMode, bool) {
-    let native_enabled = !meta
-        .provider
-        .caps()
-        .downgrade_approval_without_native_approvals
-        || provider_settings.pi.native_approvals;
-    let approval_mode = if !native_enabled {
-        match meta.approval_mode {
-            ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits => ApprovalMode::FullAccess,
-            ApprovalMode::ReadOnly => ApprovalMode::ReadOnly,
-            ApprovalMode::FullAccess => ApprovalMode::FullAccess,
-        }
-    } else {
-        meta.approval_mode
-    };
-    (approval_mode, native_enabled)
-}
-
 pub(super) fn session_options(
     meta: &SessionMeta,
     settings: &Settings,
@@ -1061,16 +1040,13 @@ pub(super) fn session_options(
         .as_deref()
         .and_then(|id| settings.acp_agent(id))
         .cloned();
-    let (approval_mode, _) = session_approval_policy(meta, &provider_settings);
     SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
         fork: meta.pending_fork,
         binary_path: provider_settings.binary_path.clone(),
-        approval_mode,
         option_selections: meta.option_selections.clone(),
-        interaction_mode: meta.interaction_mode,
         mcp_servers: [
             meta.provider
                 .caps()

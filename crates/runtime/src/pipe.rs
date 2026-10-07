@@ -643,37 +643,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             value,
         } => app.set_active_option(&session_id, &id, value, cx),
         Command::SelectUltrathink { session_id } => app.select_ultrathink(&session_id, cx),
-        Command::SetInteractionMode { session_id, mode } => {
-            app.set_interaction_mode(&session_id, mode, cx)
-        }
-        Command::ToggleInteractionMode { session_id } => {
-            app.toggle_interaction_mode(&session_id, cx)
-        }
-        Command::ImplementPlan { session_id } => app.implement_plan(&session_id, cx),
-        Command::DismissPlan { session_id } => app.dismiss_plan(&session_id, cx),
-        Command::ImplementPlanInNewThread { session_id, title } => {
-            response = CommandResponse::SessionId(app.implement_plan_in_new_thread(
-                &session_id,
-                title,
-                cx,
-            ));
-        }
-        Command::CopyPlan { markdown } => app.copy_plan(markdown, cx),
-        Command::SavePlanToWorkspace {
-            session_id,
-            markdown,
-        } => app.save_plan_to_workspace(&session_id, markdown, cx),
-        Command::DownloadPlan {
-            session_id,
-            markdown,
-            fallback_title,
-        } => app.download_plan(&session_id, markdown, fallback_title, cx),
         Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
         Command::CheckoutBranch { session_id, branch } => {
             app.checkout_branch(&session_id, branch, cx)
-        }
-        Command::SetActiveApprovalMode { session_id, mode } => {
-            app.set_active_approval_mode(&session_id, mode, cx)
         }
         Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
         Command::RewindTurn {
@@ -949,7 +921,7 @@ mod tests {
                 Command::RespondApproval {
                     session_id: id.clone(),
                     request_id: "gone".into(),
-                    decision: agent::ApprovalDecision::Approve,
+                    decision: agent::ApprovalDecision::Option("accept".into()),
                 },
                 "unknown_approval",
             ),
@@ -957,7 +929,7 @@ mod tests {
                 Command::RespondApproval {
                     session_id: id.clone(),
                     request_id: "gone".into(),
-                    decision: agent::ApprovalDecision::Deny,
+                    decision: agent::ApprovalDecision::Cancel,
                 },
                 "unknown_approval",
             ),
@@ -1013,18 +985,6 @@ mod tests {
                     index: 0,
                 },
                 "unknown_review_comment",
-            ),
-            (
-                Command::ImplementPlan {
-                    session_id: id.clone(),
-                },
-                "unknown_plan",
-            ),
-            (
-                Command::DismissPlan {
-                    session_id: id.clone(),
-                },
-                "unknown_plan",
             ),
             (
                 Command::DeleteProject {
