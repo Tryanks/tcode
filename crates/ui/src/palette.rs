@@ -836,17 +836,20 @@ impl Render for CommandPalette {
             // query input alike.
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            // Pressing the card must not move query focus or arm text selection.
             .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
             });
         let palette = cx.entity();
         gpui_base::Dialog::new(cx)
+            // gpui-base's backdrop parent dismisses but does not block; the scrim stops wheels without occluding it.
             .backdrop(
                 div()
                     .absolute()
                     .size_full()
-                    .bg(crate::material::scrim(1., cx)),
+                    .bg(crate::material::scrim(1., cx))
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
             )
             .popup(card)
             // Enter belongs to the query input, which runs the selected item.
@@ -880,6 +883,7 @@ mod tests {
     struct PaletteHarness {
         palette: Entity<CommandPalette>,
         window_state: Entity<WindowState>,
+        page_scroll: gpui::ScrollHandle,
     }
 
     impl PaletteHarness {
@@ -888,6 +892,7 @@ mod tests {
             Self {
                 palette: cx.new(|cx| CommandPalette::new(store, window_state.clone(), window, cx)),
                 window_state,
+                page_scroll: gpui::ScrollHandle::new(),
             }
         }
     }
@@ -896,7 +901,16 @@ mod tests {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let open = self.window_state.read(cx).palette_open;
             div()
+                .relative()
                 .size_full()
+                .child(
+                    div()
+                        .id("page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.page_scroll)
+                        .child(div().h(px(3000.)).w_full().flex_none()),
+                )
                 .when(open, |root| root.child(self.palette.clone()))
         }
     }
@@ -1062,7 +1076,30 @@ mod tests {
         assert!(!is_open(cx), "Escape reaches the dialog through the query");
         assert!(cx.debug_bounds("palette-card").is_none());
 
+        let page_scroll = harness.read_with(cx, |harness, _| harness.page_scroll.clone());
+        let wheel = gpui::ScrollWheelEvent {
+            position: gpui::point(px(10.), px(10.)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-60.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        };
+        cx.simulate_event(wheel.clone());
+        draw(cx);
+        assert!(
+            page_scroll.offset().y < px(0.),
+            "the page scrolls without a modal"
+        );
+        let before = page_scroll.offset();
+
         open(cx, false);
+        cx.simulate_event(wheel);
+        draw(cx);
+        assert_eq!(
+            page_scroll.offset(),
+            before,
+            "the modal scrim blocks the wheel"
+        );
+        assert!(is_open(cx), "the wheel leaves the palette open");
         cx.simulate_click(gpui::point(px(10.), px(10.)), gpui::Modifiers::default());
         assert!(!is_open(cx), "a backdrop press closes the palette");
 

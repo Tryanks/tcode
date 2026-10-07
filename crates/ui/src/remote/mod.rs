@@ -431,16 +431,11 @@ impl RemotePanel {
                 switch(AttachmentTarget::Remote(connect_host.clone()), window, cx);
             })
         })
-        // The menu lives *inside* the row rather than beside it, so the row's
-        // hover fill covers the whole row instead of stopping short of a seam
-        // next to the trigger. The trigger occludes, so it keeps its own hit
-        // region and opening it never also connects the row.
+        // The row must keep its hover fill while the child menu is hovered.
         .child(self.host_menu(host, current));
         row.into_any_element()
     }
 
-    /// The row's own overflow menu. It carries its own hit region, so opening
-    /// it can never also connect the row underneath.
     fn host_menu(&self, host: &PairedHost, current: bool) -> AnyElement {
         let host_id = host.host_id.clone();
         let label = crate::tr!("hosts.actions", name = host.name.clone()).into_owned();
@@ -450,7 +445,7 @@ impl RemotePanel {
             .flex()
             .items_center()
             .justify_center()
-            .occlude()
+            // The row must not arm a connection press before the menu opens.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 Button::new(SharedString::from(format!("host-menu-{host_id}")))

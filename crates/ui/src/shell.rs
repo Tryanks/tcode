@@ -1327,6 +1327,7 @@ fn nav_bar(
 /// Back control labelled with the parent destination's short fixed label.
 fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Stateful<Div> {
     crate::material::accessible_clickable(h_flex(), id, Role::Button, parent.clone(), cx)
+        // A control press must not arm the ancestor window drag region.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .flex_none()
         .h(px(44.))
@@ -1365,6 +1366,7 @@ fn nav_icon_button(
 ) -> gpui::Stateful<Div> {
     let theme = cx.theme();
     crate::material::accessible_clickable(div(), id, Role::Button, aria_label.into(), cx)
+        // A control press must not arm the ancestor window drag region.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .size(px(44.))
         .flex_none()
