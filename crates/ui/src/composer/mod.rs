@@ -1445,6 +1445,7 @@ mod replica_tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         store.update(cx, |store, _| {
             store.select_session(status.session_id.clone())
         });

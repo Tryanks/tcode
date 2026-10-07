@@ -1395,3 +1395,12 @@ spaces:
     show_qr: "Show QR"
     hide_qr: "Hide QR"
     resume: "Turn on link"
+
+member:
+  connection: "Space «%{space}» · %{machine}"
+  joined: "Joined space «%{space}» on %{machine}"
+  already_member: "This device is already paired with that machine. Ask the owner to move it to the space."
+  space_unavailable: "This link is paused or no longer valid. Ask the owner for a new one."
+  owner: "Machine owner"
+  empty_description: "Ask the owner to add a project to this space."
+  unavailable: "This action is unavailable in a shared space."

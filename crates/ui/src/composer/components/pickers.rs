@@ -1162,7 +1162,7 @@ fn render_model_row(
             .on_click(move |_, window, cx| {
                 crate::widgets::stop_click_propagation(window, cx);
                 let fav_id = fav_id.clone();
-                store_fav.update(cx, |store, _cx| store.toggle_favorite_model(fav_id));
+                store_fav.update(cx, |store, cx| store.toggle_favorite_model(fav_id, cx));
                 // Refresh the open popover so the star + ordering update.
                 popover_fav.update(cx, |_, cx| cx.notify());
             }),

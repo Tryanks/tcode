@@ -124,6 +124,12 @@ impl PairForm {
     }
 }
 
+pub fn joined_message(host: &PairedHost) -> Option<String> {
+    host.space_name
+        .as_ref()
+        .map(|space| crate::tr!("member.joined", space = space, machine = &host.name).into_owned())
+}
+
 /// Interpret the transport's pairing failures here, where the recovery
 /// advice can be localized. The wording is `PairError`'s `Display` in
 /// `crates/traverse/src/client.rs`; anything else is shown as it is.
@@ -131,6 +137,8 @@ pub fn pair_error(error: &str, address: &str) -> String {
     let lower = error.to_ascii_lowercase();
     match lower.trim() {
         "invalid or expired invitation" => crate::tr!("hosts.pair.rejected").into_owned(),
+        "already_member" => crate::tr!("member.already_member").into_owned(),
+        "space_unavailable" => crate::tr!("member.space_unavailable").into_owned(),
         "pairing_disabled" => crate::tr!("hosts.pair.disabled").into_owned(),
         _ if lower.starts_with("invalid pairing response") => {
             crate::tr!("hosts.pair.unconfirmed").into_owned()

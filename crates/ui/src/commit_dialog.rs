@@ -413,6 +413,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        let deferred: Vec<String> = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -431,7 +432,11 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         store.update(cx, |store, _| store.select_session("session".into()));
+        for line in deferred {
+            incoming.try_send(line).unwrap();
+        }
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         let (_dialog, cx) = cx.add_window_view(|window, cx| {
