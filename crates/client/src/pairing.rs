@@ -15,6 +15,10 @@ pub struct PairedHost {
     /// The machine's `EndpointId`.
     pub host_id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_name: Option<String>,
     /// Base URL of the Traverse instance the machine publishes to: `None`
     /// for the official service, [`TRAVERSE_OFF`] for none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,7 +49,7 @@ pub fn remember_host(hosts: &mut Vec<PairedHost>, host: PairedHost) {
 }
 
 /// What a `tcode://pair` link carries: the machine identity, where to reach
-/// it, and the single-use secret that admits the device. First contact is
+/// it, and the secret that admits the device. Space links are reusable. First contact is
 /// always by scanning or pasting the link, so the link itself is the secret;
 /// there is no separate code. A browser leaves `host_id` empty and pairs with
 /// the origin that served it.
@@ -55,6 +59,7 @@ pub struct PairInvite {
     pub name: String,
     /// [`SECRET_BYTES`] random bytes as unpadded base64url.
     pub secret: String,
+    pub space: Option<String>,
     /// See [`PairedHost::traverse`].
     pub traverse: Option<String>,
     pub relay: Option<String>,
@@ -68,6 +73,8 @@ impl PairInvite {
         PairedHost {
             host_id: self.host_id.clone(),
             name: host_name,
+            space_id: self.space.clone(),
+            space_name: None,
             traverse: self.traverse.clone(),
             relay: self.relay.clone(),
             addrs: self.addrs.clone(),
@@ -97,6 +104,10 @@ pub fn valid_invitation_secret(secret: &str) -> bool {
         && URL_SAFE_NO_PAD
             .decode(secret)
             .is_ok_and(|bytes| bytes.len() == SECRET_BYTES)
+}
+
+pub fn valid_space_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && !id.chars().any(char::is_control)
 }
 
 fn valid_addr(addr: &str) -> bool {
@@ -132,6 +143,10 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
     if !valid_invitation_secret(&secret) {
         return None;
     }
+    let space = field("space");
+    if space.as_deref().is_some_and(|id| !valid_space_id(id)) {
+        return None;
+    }
     let traverse = field("traverse");
     let relay = field("relay");
     if traverse
@@ -157,6 +172,7 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
         host_id,
         name: field("name")?,
         secret,
+        space,
         traverse,
         relay,
         addrs,
@@ -171,6 +187,9 @@ pub fn pair_url(invite: &PairInvite) -> String {
         .append_pair("id", &invite.host_id)
         .append_pair("secret", &invite.secret)
         .append_pair("name", &invite.name);
+    if let Some(space) = &invite.space {
+        query.append_pair("space", space);
+    }
     if let Some(traverse) = &invite.traverse {
         query.append_pair("traverse", traverse);
     }
@@ -195,6 +214,8 @@ mod tests {
         let host = |id: &str, name: &str| PairedHost {
             host_id: id.into(),
             name: name.into(),
+            space_id: None,
+            space_name: None,
             traverse: None,
             relay: None,
             addrs: vec!["192.168.1.2:47420".into()],
@@ -242,6 +263,7 @@ mod tests {
             PairInvite {
                 host_id: ID.into(),
                 name: "Desk".into(),
+                space: None,
                 secret: encode_secret(&std::array::from_fn(|i| i as u8)),
                 traverse: Some("https://traverse.example/".into()),
                 relay: Some("https://relay.example/".into()),
@@ -303,6 +325,13 @@ mod tests {
                 parse_pair_url(&wire.replace(field, replacement)).is_none(),
                 "{replacement}"
             );
+        }
+        let scoped = parse_pair_url(&format!("{wire}&space=shared")).unwrap();
+        assert_eq!(scoped.space.as_deref(), Some("shared"));
+        assert!(pair_url(&scoped).contains("&space=shared&"));
+        assert!(parse_pair_url(&format!("{wire}&space={}", "s".repeat(64))).is_some());
+        for space in ["".to_owned(), "s".repeat(65), "%00".into(), "%0A".into()] {
+            assert!(parse_pair_url(&format!("{wire}&space={space}")).is_none());
         }
         assert!(parse_pair_url(&format!("{wire}&padding={}", "x".repeat(4096))).is_none());
         let many: String = (0..MAX_ADDRS + 1)

@@ -202,6 +202,11 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             "Set a password on first open"
         }
     );
+    for space in traverse_host.spaces() {
+        if let Some(link) = space.link {
+            println!("Space {}: {link}", space.name);
+        }
+    }
     println!("Browser: http://{}/", server.local_addr());
     println!("Press Ctrl-C to stop");
     wait_for_interrupt();
