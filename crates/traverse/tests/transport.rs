@@ -759,7 +759,6 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     assert!(!restarted.pairing_enabled());
     let identity_path = host_dir.0.join("traverse.json");
     let stored: Value = serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
-    assert_eq!(stored["v"], 2);
     assert_eq!(stored["host_name"], "Renamed");
     assert_eq!(stored["pairing_enabled"], false);
     assert_eq!(stored["devices"][0]["id"], phone.endpoint_id().to_string());
@@ -782,4 +781,382 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     recv_type(&client, "ack", Some(2));
     client.to_host.close();
     restarted.shutdown();
+}
+
+fn space_invite(host: &TraverseHost, id: &str) -> PairInvite {
+    tcode_client::pairing::parse_pair_url(&host.space_link_url(id).unwrap()).unwrap()
+}
+
+fn scoped_ping(
+    client: &Transport,
+    host_rx: &async_channel::Receiver<String>,
+    host_tx: &async_channel::Sender<String>,
+    principal: &tcode_protocol::Principal,
+    id: u64,
+) {
+    client
+        .to_host
+        .send_blocking(
+            tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+                id,
+                key: None,
+                principal: Some(tcode_protocol::Principal::Full),
+                payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let line = tcode_traverse::block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), host_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    let request = tcode_protocol::decode_client_line(&line).unwrap();
+    assert_eq!(request.principal.as_ref(), Some(principal));
+    assert_eq!(
+        request.payload,
+        tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping)
+    );
+    host_tx
+        .send_blocking(
+            tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                id: request.id,
+                result: Ok(tcode_protocol::QueryResponse::Pong),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let reply = recv_type(client, "query_result", Some(id));
+    assert_eq!(reply["content"]["result"]["Ok"]["type"], "pong");
+}
+
+fn assert_stayed_connected(client: &Transport) {
+    while let Ok(state) = client.state.try_recv() {
+        assert!(
+            matches!(
+                state,
+                ConnectionState::Syncing { .. } | ConnectionState::Connected { .. }
+            ),
+            "member connection changed: {state:?}"
+        );
+    }
+}
+
+#[test]
+fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
+    use tcode_protocol::{DeviceAccess, HostingAction, Principal, SpaceAction};
+    use tcode_traverse::identity::{DeviceGrant, HostIdentity};
+
+    let host_dir = TestDir::new("spaces-host");
+    let (to_host, host_rx) = async_channel::unbounded();
+    let (host_tx, from_host) = async_channel::unbounded();
+    let host = start_host(HostMux::new(to_host, from_host), &host_dir, None);
+    host.new_invitation();
+    let id = host.create_space("Shared".into()).unwrap();
+    host.set_space_projects(&id, vec!["project-a".into(), "project-b".into()])
+        .unwrap();
+    let invite = space_invite(&host, &id);
+    assert_eq!(invite.space.as_deref(), Some(id.as_str()));
+    let member_dir = TestDir::new("spaces-member");
+    let member = device(&member_dir, "Collaborator");
+    let other_dir = TestDir::new("spaces-other");
+    let other = device(&other_dir, "Other");
+    let paired = tcode_traverse::pair_blocking(&invite, &member).unwrap();
+    assert!(host.invitation().is_some());
+    assert_eq!(paired.space_id.as_deref(), Some(id.as_str()));
+    assert_eq!(paired.space_name.as_deref(), Some("Shared"));
+    tcode_traverse::hosts::save_hosts(&member_dir.0, std::slice::from_ref(&paired)).unwrap();
+    let saved = tcode_traverse::hosts::load_hosts(&member_dir.0).unwrap();
+    assert_eq!(saved[0].space_id.as_deref(), Some(id.as_str()));
+    assert_eq!(saved[0].space_name.as_deref(), Some("Shared"));
+    let persisted = HostIdentity::load_or_create(&host_dir.0, "Test Host").unwrap();
+    assert_eq!(
+        persisted.devices[0].access,
+        DeviceGrant::Spaces(vec![id.clone()])
+    );
+    let client = tcode_traverse::connect(&paired, &member);
+    wait_state(&client, syncing_directly);
+    let mut principal = Principal::Space {
+        space_id: id.clone(),
+        space_name: "Shared".into(),
+        project_ids: vec!["project-a".into(), "project-b".into()],
+        device_id: member.endpoint_id().to_string(),
+        device_name: "Collaborator".into(),
+    };
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 1);
+    let state = host.hosting(HostingAction::State).unwrap();
+    assert_eq!(
+        state.devices[0].access,
+        DeviceAccess::Space {
+            space_id: id.clone()
+        }
+    );
+    assert!(state.spaces[0].members[0].path.is_some());
+    assert_eq!(
+        tcode_traverse::pair_blocking(&invite, &member),
+        Err(PairError::AlreadyMember)
+    );
+
+    client
+        .to_host
+        .send_blocking(
+            tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+                id: 2,
+                key: None,
+                principal: Some(Principal::Full),
+                payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
+                    action: HostingAction::Spaces(SpaceAction::Create {
+                        name: "forged".into(),
+                    }),
+                }),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let refusal = recv_type(&client, "query_result", Some(2));
+    assert_eq!(refusal["content"]["result"]["Err"]["code"], "out_of_scope");
+    assert_eq!(host.spaces().len(), 1);
+    let opener = client.current_host.as_ref().unwrap().tunnels().unwrap();
+    let refusal = tcode_traverse::block_on(opener.open("127.0.0.1", 1)).unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .contains("space members cannot open tunnels"),
+        "{refusal}"
+    );
+
+    host.set_space_link_enabled(&id, false).unwrap();
+    assert!(host.space_link_url(&id).is_none());
+    assert_eq!(
+        tcode_traverse::pair_blocking(&invite, &other),
+        Err(PairError::SpaceUnavailable)
+    );
+    host.set_space_link_enabled(&id, true).unwrap();
+    host.set_pairing_enabled(false);
+    assert_eq!(
+        tcode_traverse::pair_blocking(&invite, &other),
+        Err(PairError::Disabled)
+    );
+    host.set_pairing_enabled(true);
+    let one_shot = host.new_invitation();
+    let wrong = PairInvite {
+        secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        ..invite.clone()
+    };
+    let blocker = host_dir.0.join("traverse.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    assert_eq!(
+        tcode_traverse::pair_blocking(&wrong, &other),
+        Err(PairError::Busy)
+    );
+    assert_eq!(
+        tcode_traverse::pair_blocking(&invite, &other),
+        Err(PairError::Busy)
+    );
+    assert_eq!(host.devices().len(), 1);
+    assert_eq!(
+        HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .spaces[0]
+            .link_failures,
+        0
+    );
+    std::fs::remove_dir(blocker).unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            tcode_traverse::pair_blocking(&wrong, &other),
+            Err(PairError::Invalid)
+        );
+    }
+    assert!(host.spaces()[0].link_dead);
+    assert!(host.space_link_url(&id).is_none());
+    assert_eq!(
+        HostIdentity::load_or_create(&host_dir.0, "Test Host")
+            .unwrap()
+            .spaces[0]
+            .link_failures,
+        5
+    );
+    assert_eq!(
+        tcode_traverse::pair_blocking(&invite, &other),
+        Err(PairError::SpaceUnavailable)
+    );
+    let full_dir = TestDir::new("spaces-full");
+    let full = device(&full_dir, "Owner");
+    let full_paired = tcode_traverse::pair_blocking(&one_shot.invite, &full).unwrap();
+    assert!(full_paired.space_id.is_none());
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 3);
+    assert_stayed_connected(&client);
+
+    host.regenerate_space_link(&id).unwrap();
+    let regenerated = space_invite(&host, &id);
+    assert_eq!(
+        tcode_traverse::pair_blocking(&regenerated, &full),
+        Err(PairError::AlreadyMember)
+    );
+
+    assert_ne!(regenerated.secret, invite.secret);
+    assert_eq!(
+        tcode_traverse::pair_blocking(&invite, &other),
+        Err(PairError::Invalid)
+    );
+    let other_paired = tcode_traverse::pair_blocking(&regenerated, &other).unwrap();
+    let other_client = tcode_traverse::connect(&other_paired, &other);
+    wait_state(&other_client, syncing_directly);
+    let mut other_principal = principal.clone();
+    if let Principal::Space {
+        device_id,
+        device_name,
+        ..
+    } = &mut other_principal
+    {
+        *device_id = other.endpoint_id().to_string();
+        *device_name = "Other".into();
+    }
+    scoped_ping(&other_client, &host_rx, &host_tx, &other_principal, 10);
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 4);
+    assert_stayed_connected(&client);
+
+    host.remove_member(&member.endpoint_id().to_string())
+        .unwrap();
+    let unpaired = |state: &ConnectionState| {
+        state
+            == &ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected,
+            }
+    };
+    wait_state(&client, unpaired);
+    client.to_host.close();
+    let rejected = tcode_traverse::connect(&paired, &member);
+    wait_state(&rejected, unpaired);
+    rejected.to_host.close();
+    let repaired = tcode_traverse::pair_blocking(&regenerated, &member).unwrap();
+    let client = tcode_traverse::connect(&repaired, &member);
+    wait_state(&client, syncing_directly);
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 5);
+
+    let blocker = host_dir.0.join("traverse.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    assert!(
+        host.set_space_projects(&id, vec!["unpersisted".into()])
+            .is_err()
+    );
+    assert_eq!(host.spaces()[0].project_ids, ["project-a", "project-b"]);
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 6);
+    std::fs::remove_dir(blocker).unwrap();
+    host.hosting(HostingAction::Spaces(SpaceAction::SetProjects {
+        id: id.clone(),
+        project_ids: vec!["project-b".into()],
+    }))
+    .unwrap();
+    wait_state(&client, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
+    wait_state(&client, syncing_directly);
+    if let Principal::Space { project_ids, .. } = &mut principal {
+        *project_ids = vec!["project-b".into()];
+    }
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 7);
+    wait_state(&other_client, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
+    wait_state(&other_client, syncing_directly);
+    if let Principal::Space { project_ids, .. } = &mut other_principal {
+        *project_ids = vec!["project-b".into()];
+    }
+    scoped_ping(&other_client, &host_rx, &host_tx, &other_principal, 11);
+    host.rename_space(&id, "Renamed".into()).unwrap();
+    wait_state(&client, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
+    wait_state(&client, syncing_directly);
+    if let Principal::Space { space_name, .. } = &mut principal {
+        *space_name = "Renamed".into();
+    }
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 8);
+    let moved_space = host.create_space("Moved".into()).unwrap();
+    let moved_invite = space_invite(&host, &moved_space);
+    assert_eq!(
+        tcode_traverse::pair_blocking(&moved_invite, &member),
+        Err(PairError::AlreadyMember)
+    );
+    host.move_member(&member.endpoint_id().to_string(), &moved_space)
+        .unwrap();
+    wait_state(&client, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
+    wait_state(&client, syncing_directly);
+    if let Principal::Space {
+        space_id,
+        space_name,
+        project_ids,
+        ..
+    } = &mut principal
+    {
+        *space_id = moved_space.clone();
+        *space_name = "Moved".into();
+        project_ids.clear();
+    }
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 9);
+    host.delete_space(&id).unwrap();
+    wait_state(&other_client, unpaired);
+    other_client.to_host.close();
+    scoped_ping(&client, &host_rx, &host_tx, &principal, 12);
+    assert_stayed_connected(&client);
+    host.delete_space(&moved_space).unwrap();
+
+    wait_state(&client, unpaired);
+    assert_eq!(host.devices().len(), 1);
+    assert_eq!(host.devices()[0].access, DeviceAccess::Full);
+    assert_eq!(
+        tcode_traverse::pair_blocking(&regenerated, &member),
+        Err(PairError::SpaceUnavailable)
+    );
+    client.to_host.close();
+    host.shutdown();
+}
+
+#[test]
+fn legacy_devices_migrate_to_full_and_v3_missing_or_invalid_access_fails_closed() {
+    use tcode_traverse::identity::{DeviceGrant, HOST_FILE, HostIdentity};
+    let dir = TestDir::new("spaces-migration");
+    let key = iroh::SecretKey::generate();
+    let key_hex: String = key
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let legacy = format!(
+        r#"{{"v":2,"host_name":"Test Host","secret_key":"{key_hex}","devices":[{{"id":"{}","name":"Legacy","platform":"Android","created_unix":42}}],"pairing_enabled":false}}"#,
+        iroh::SecretKey::generate().public()
+    );
+    std::fs::write(dir.0.join(HOST_FILE), legacy).unwrap();
+    let identity = HostIdentity::load_or_create(&dir.0, "Test Host").unwrap();
+    assert_eq!(identity.endpoint_id(), key.public());
+    assert_eq!(identity.devices[0].access, DeviceGrant::Full);
+    assert!(identity.spaces.is_empty());
+    assert!(!identity.pairing_enabled);
+    let migrated = std::fs::read(dir.0.join(HOST_FILE)).unwrap();
+    let persisted: Value = serde_json::from_slice(&migrated).unwrap();
+    assert_eq!(persisted["v"], 3);
+    assert_eq!(persisted["devices"][0]["access"], json!({"type":"full"}));
+    for access in [
+        None,
+        Some(json!({"type":"unknown"})),
+        Some(json!({"type":"spaces","content":"wrong"})),
+        Some(json!({"type":"spaces","content":[]})),
+        Some(json!({"type":"spaces","content":[""]})),
+    ] {
+        let mut invalid = persisted.clone();
+        let record = invalid["devices"][0].as_object_mut().unwrap();
+        record.remove("access");
+        if let Some(access) = access {
+            record.insert("access".into(), access);
+        }
+        let bytes = serde_json::to_vec(&invalid).unwrap();
+        std::fs::write(dir.0.join(HOST_FILE), &bytes).unwrap();
+        assert!(HostIdentity::load_or_create(&dir.0, "Test Host").is_err());
+        assert_eq!(std::fs::read(dir.0.join(HOST_FILE)).unwrap(), bytes);
+    }
 }
