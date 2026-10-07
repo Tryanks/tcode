@@ -392,7 +392,9 @@ fn tool_item_state(content: &ItemContent) -> Option<ToolState> {
         | ItemContent::FileChange { status, .. }
         | ItemContent::ToolCall { status, .. }
         | ItemContent::Subagent { status, .. } => *status,
-        ItemContent::WebSearch { .. } | ItemContent::Other { .. } => {
+        ItemContent::ImageRead { .. }
+        | ItemContent::WebSearch { .. }
+        | ItemContent::Other { .. } => {
             return Some(ToolState::Unknown);
         }
         ItemContent::UserMessage { .. }

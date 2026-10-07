@@ -144,6 +144,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                             .and_then(|text| serde_json::from_str(text).ok())
                             .unwrap_or(arguments);
                         let content = ItemContent::ToolCall {
+                            image_reads: Vec::new(),
                             name: payload
                                 .get("name")
                                 .and_then(Value::as_str)
@@ -167,8 +168,25 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                             continue;
                         };
                         if let Some(ConvertedEntry::Item { item, .. }) = entries.get_mut(index)
-                            && let ItemContent::ToolCall { output, status, .. } = &mut item.content
+                            && let ItemContent::ToolCall {
+                                name,
+                                image_reads,
+                                output,
+                                status,
+                                ..
+                            } = &mut item.content
                         {
+                            let raw = payload.get("output").unwrap_or(&Value::Null);
+                            let parsed = raw
+                                .as_str()
+                                .and_then(|text| serde_json::from_str::<Value>(text).ok());
+                            let result = parsed.as_ref().unwrap_or(raw);
+                            if result.get("isError").and_then(Value::as_bool) != Some(true) {
+                                *image_reads = agent::tool_result_images(
+                                    name,
+                                    result.get("content").unwrap_or(result),
+                                );
+                            }
                             *output = Some(readable_output(
                                 payload.get("output").unwrap_or(&Value::Null),
                             ));

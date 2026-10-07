@@ -17,6 +17,11 @@ impl Global for HostImages {}
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImageRequest {
     File(PathBuf),
+    Item {
+        session_id: String,
+        item_id: String,
+        image_index: usize,
+    },
     Thumbnail(PathBuf),
     Project {
         id: String,
@@ -44,6 +49,15 @@ impl Asset for HostImage {
         async move {
             let query = match request {
                 ImageRequest::File(path) => Query::ReadFileBytes { path },
+                ImageRequest::Item {
+                    session_id,
+                    item_id,
+                    image_index,
+                } => Query::ReadItemImage {
+                    session_id,
+                    item_id,
+                    image_index,
+                },
                 ImageRequest::Thumbnail(path) => Query::ReadIconImage { path },
                 ImageRequest::Project { id, pixels, .. } => Query::ReadProjectIcon {
                     project_id: id,
@@ -88,6 +102,14 @@ fn source(request: impl Fn(&gpui::Window) -> ImageRequest + 'static) -> ImageSou
 
 pub(crate) fn host_image(path: PathBuf) -> ImageSource {
     source(move |_| ImageRequest::File(path.clone()))
+}
+
+pub(crate) fn item_image(session_id: String, item_id: String, image_index: usize) -> ImageSource {
+    source(move |_| ImageRequest::Item {
+        session_id: session_id.clone(),
+        item_id: item_id.clone(),
+        image_index,
+    })
 }
 
 pub(crate) fn icon_thumbnail(path: PathBuf) -> ImageSource {

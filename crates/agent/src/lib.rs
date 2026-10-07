@@ -18,6 +18,8 @@ mod claude_context;
 mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
+mod image_reads;
+pub use image_reads::tool_result_images;
 #[cfg(not(feature = "process"))]
 pub mod claude {
     pub use crate::claude_context::*;
@@ -1962,6 +1964,8 @@ pub enum ItemContent {
         status: ItemStatus,
     },
     ToolCall {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_reads: Vec<Attachment>,
         name: String,
         input: serde_json::Value,
         output: Option<String>,
@@ -1981,6 +1985,9 @@ pub enum ItemContent {
         effort: Option<String>,
     },
 
+    ImageRead {
+        path: String,
+    },
     WebSearch {
         query: String,
     },

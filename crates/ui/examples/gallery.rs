@@ -85,6 +85,7 @@ impl Render for Gallery {
         let tool = entry(
             "gallery-s03-activity-tool-call",
             ItemContent::ToolCall {
+                image_reads: Vec::new(),
                 name: "read_file".into(),
                 input: serde_json::json!({"path": "crates/ui/src/chat/components/activity.rs"}),
                 output: Some("Loaded 341 lines".into()),

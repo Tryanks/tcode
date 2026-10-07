@@ -2157,6 +2157,35 @@ fn command_of(tool: &ToolState) -> String {
 
 fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> ItemContent {
     ItemContent::ToolCall {
+        image_reads: if tool.kind == acp::ToolKind::Read && status == ItemStatus::Completed {
+            let images: Vec<_> = tool
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    acp::ToolCallContent::Content(block) => match &block.content {
+                        acp::ContentBlock::Image(image)
+                            if image.mime_type.starts_with("image/") && !image.data.is_empty() =>
+                        {
+                            Some(Attachment {
+                                media_type: image.mime_type.clone(),
+                                data_base64: image.data.clone(),
+                                source_path: None,
+                            })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            if images.is_empty() {
+                let raw = tool.raw_output.as_ref().unwrap_or(&Value::Null);
+                crate::image_reads::content_images(raw.get("content").unwrap_or(raw))
+            } else {
+                images
+            }
+        } else {
+            Vec::new()
+        },
         name: tool.title.clone(),
         input: tool.raw_input.clone().unwrap_or(Value::Null),
         output: (!output.is_empty()).then_some(output),
@@ -3018,9 +3047,34 @@ mod tests {
         })));
         assert!(
             matches!(events.as_slice(), [AgentEvent::ItemStarted(ThreadItem {
-            content:ItemContent::ToolCall { name, input, output:Some(output), status:ItemStatus::Completed }, ..
+            content:ItemContent::ToolCall {
+            image_reads: _, name, input, output:Some(output), status:ItemStatus::Completed }, ..
         })] if name == "Opaque edit" && input == &json!({"path":"file.rs"}) && output == "done")
         );
+    }
+
+    #[test]
+    fn image_read_results_follow_partial_updates_and_exclude_generation() {
+        for (kind, name, status, expected) in [
+            ("read", "file", "completed", 1),
+            ("read", "file", "failed", 0),
+            ("other", "generate_image", "completed", 0),
+        ] {
+            let mut mapper = state();
+            mapper.apply_update(update(json!({"sessionUpdate":"tool_call","toolCallId":"read","title":"Image operation","kind":kind,"name":name,"status":"in_progress"})));
+            let events = mapper.apply_update(update(json!({"sessionUpdate":"tool_call_update","toolCallId":"read","status":status,"content":[{"type":"content","content":{"type":"image","mimeType":"image/png","data":"AQID"}}]})));
+            let AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::ToolCall { image_reads, .. },
+                ..
+            }) = &events[0]
+            else {
+                panic!("tool completion: {events:?}")
+            };
+            assert_eq!(image_reads.len(), expected, "{kind}, {name}, {status}");
+            if expected != 0 {
+                assert_eq!(image_reads[0].data_base64, "AQID");
+            }
+        }
     }
 
     #[test]
@@ -3049,6 +3103,7 @@ mod tests {
                         input,
                         output,
                         status,
+                        ..
                     } => {
                         assert_eq!(name, "Read file");
                         assert_eq!(input["path"], "/repo/x.rs", "rawInput must ride along");

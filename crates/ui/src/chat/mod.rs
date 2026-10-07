@@ -1407,6 +1407,14 @@ impl ChatView {
                         cx,
                     ));
                 }
+                Segment::Images(images) => {
+                    column = column.child(components::images::image_tiles(
+                        images,
+                        cwd,
+                        self.session_key.as_deref().unwrap_or_default(),
+                        cx,
+                    ));
+                }
                 Segment::User(entry) => {
                     let (text, steering, context_len, attachments) =
                         user_content(&entry.content).expect("user segment");
@@ -3858,6 +3866,7 @@ mod tests {
             entry(
                 id,
                 EntryContent::Item(ItemContent::ToolCall {
+                    image_reads: Vec::new(),
                     name: "read".into(),
                     input: serde_json::json!({ "path": id }),
                     output: None,

