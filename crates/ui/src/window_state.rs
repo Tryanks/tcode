@@ -295,8 +295,8 @@ impl WindowState {
         cx: &mut Context<Self>,
     ) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
-        store.update(cx, |store, _cx| {
-            store.set_sidebar_collapsed(self.sidebar_collapsed)
+        store.update(cx, |store, cx| {
+            store.set_sidebar_collapsed(self.sidebar_collapsed, cx)
         });
         cx.notify();
     }

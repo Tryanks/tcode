@@ -968,6 +968,9 @@ impl SessionsSidebar {
 
     /// Prompt for a directory, then create a project rooted there.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         crate::add_project_dialog::open(self.store.clone(), window, cx);
     }
 
@@ -975,8 +978,8 @@ impl SessionsSidebar {
         if !self.store.read(cx).is_project_collapsed(project_id) {
             self.expanded_groups.remove(project_id);
         }
-        self.store.update(cx, |store, _| {
-            store.toggle_project_collapsed(project_id.to_string());
+        self.store.update(cx, |store, cx| {
+            store.toggle_project_collapsed(project_id.to_string(), cx);
         });
         cx.notify();
     }
@@ -1201,8 +1204,8 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         let id = action.0.clone();
-        self.store.update(cx, |store, _cx| {
-            store.mark_session_unread(id);
+        self.store.update(cx, |store, cx| {
+            store.mark_session_unread(id, cx);
         });
     }
 
@@ -1313,8 +1316,8 @@ impl SessionsSidebar {
                 self.expanded_settled.insert(project_id.clone());
                 self.expanded_groups.insert(project_id.clone());
                 if self.store.read(cx).is_project_collapsed(project_id) {
-                    self.store.update(cx, |store, _| {
-                        store.toggle_project_collapsed(project_id.clone())
+                    self.store.update(cx, |store, cx| {
+                        store.toggle_project_collapsed(project_id.clone(), cx)
                     });
                 }
             }
@@ -1329,8 +1332,9 @@ impl SessionsSidebar {
                 break;
             }
             if collapsed.contains(id) {
-                self.store
-                    .update(cx, |store, _| store.set_thread_collapsed(id.clone(), false));
+                self.store.update(cx, |store, cx| {
+                    store.set_thread_collapsed(id.clone(), false, cx)
+                });
             }
             parent = sessions
                 .iter()
@@ -1398,6 +1402,9 @@ impl SessionsSidebar {
     }
 
     fn on_delete(&mut self, action: &ThreadDelete, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         let id = action.0.clone();
         let title = self
             .store
@@ -1462,6 +1469,9 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         let project = self.store.read(cx).project(&action.0).cloned();
         if let Some(project) = project {
             crate::project_icon::open(self.store.clone(), project, window, cx);
@@ -1474,6 +1484,9 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         let store = self.store.clone();
         let project_id = action.0.clone();
         let Some((project_name, count)) = store.read(cx).project_summary(&project_id) else {
@@ -1723,10 +1736,10 @@ impl SessionsSidebar {
         // says whether the link is up, hovering says how it is carried. The
         // window that is the host itself has neither, so its row is the
         // entry alone.
-        let remote = store.remote_host_name().map(|name| {
+        let remote = store.remote_host_name().map(|_| {
             let connection_state = store.connection_state();
             (
-                SharedString::from(name.to_owned()),
+                SharedString::from(store.machine_label()),
                 cx.theme().connection_color(&connection_state),
                 SharedString::from(crate::remote::connection_label(&connection_state)),
             )
@@ -1859,27 +1872,29 @@ impl SessionsSidebar {
                             .icon(IconName::SortAscending)
                             .tooltip(crate::tr!("sidebar.sort", mode = sort_label))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.store.update(cx, |store, _cx| {
-                                    store.cycle_project_sort();
+                                this.store.update(cx, |store, cx| {
+                                    store.cycle_project_sort(cx);
                                 });
                             })),
                     )
                     .child(self.render_layout_toggle(SidebarLayout::Grouped, cx))
-                    .child(
-                        Button::new("add-project")
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(
-                                Icon::empty()
-                                    .path("icons/folder-plus.svg")
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .tooltip(crate::tr!("sidebar.add_project"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.add_project(window, cx);
-                            })),
-                    ),
+                    .when(self.store.read(cx).scope().is_full(), |row| {
+                        row.child(
+                            Button::new("add-project")
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .icon(
+                                    Icon::empty()
+                                        .path("icons/folder-plus.svg")
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .tooltip(crate::tr!("sidebar.add_project"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_project(window, cx);
+                                })),
+                        )
+                    }),
             )
     }
 
@@ -1977,21 +1992,23 @@ impl SessionsSidebar {
                     .child(filter_button)
                     .child(self.render_layout_toggle(SidebarLayout::Flat, cx))
                     .child(new_thread)
-                    .child(
-                        Button::new("add-project")
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(
-                                Icon::empty()
-                                    .path("icons/folder-plus.svg")
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .tooltip(crate::tr!("sidebar.add_project"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.add_project(window, cx);
-                            })),
-                    ),
+                    .when(self.store.read(cx).scope().is_full(), |row| {
+                        row.child(
+                            Button::new("add-project")
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .icon(
+                                    Icon::empty()
+                                        .path("icons/folder-plus.svg")
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .tooltip(crate::tr!("sidebar.add_project"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_project(window, cx);
+                                })),
+                        )
+                    }),
             )
     }
 
@@ -2112,24 +2129,29 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground),
             ),
         );
+        let scope = self.store.read(cx).scope().clone();
         header
             .context_menu(move |menu, _window, cx| {
                 let id = menu_project_id.clone();
                 let delete_label = crate::tr!("sidebar.remove_project").into_owned();
-                menu.menu(
-                    crate::tr!("project_icon.title"),
-                    Box::new(ChangeProjectIcon(id.clone())),
-                )
+                menu.when(scope.is_full(), |menu| {
+                    menu.menu(
+                        crate::tr!("project_icon.title"),
+                        Box::new(ChangeProjectIcon(id.clone())),
+                    )
+                })
                 .menu_with_enable(
                     crate::tr!("sidebar.archive_all").into_owned(),
                     Box::new(ProjectArchiveAll(id.clone())),
                     can_archive,
                 )
-                .menu_element(Box::new(ProjectDelete(id.clone())), move |_window, cx| {
-                    div()
-                        .flex_1()
-                        .text_color(cx.theme().danger)
-                        .child(delete_label.clone())
+                .when(scope.is_full(), |menu| {
+                    menu.menu_element(Box::new(ProjectDelete(id.clone())), move |_window, cx| {
+                        div()
+                            .flex_1()
+                            .text_color(cx.theme().danger)
+                            .child(delete_label.clone())
+                    })
                 })
                 .menu(
                     crate::tr!("sidebar.reveal_project").into_owned(),
@@ -2355,7 +2377,7 @@ impl SessionsSidebar {
             );
             this.store.update(cx, |store, cx| {
                 if let Some(collapsed) = fold {
-                    store.set_thread_collapsed(session_id.clone(), collapsed);
+                    store.set_thread_collapsed(session_id.clone(), collapsed, cx);
                 }
                 store.select_session(session_id.clone());
                 cx.notify();
@@ -2474,7 +2496,9 @@ impl SessionsSidebar {
         settled: bool,
         compact: bool,
         share: Option<ShareTarget>,
+        scope: &crate::store::WorkspaceScope,
     ) -> gpui::AnyElement {
+        let scope = scope.clone();
         let session_id = state.session_id.clone();
         let can_fork = state.menu_can_fork;
         let is_worktree = state.is_worktree;
@@ -2547,10 +2571,12 @@ impl SessionsSidebar {
                 Box::new(ThreadArchive(id.clone())),
                 !running,
             )
-            .menu(
-                crate::tr!("sidebar.ctx_delete").into_owned(),
-                Box::new(ThreadDelete(id.clone())),
-            )
+            .when(scope.is_full(), |menu| {
+                menu.menu(
+                    crate::tr!("sidebar.ctx_delete").into_owned(),
+                    Box::new(ThreadDelete(id.clone())),
+                )
+            })
             .when_some(share.as_ref(), |menu, share| {
                 spaces::share_items(menu, share, true, cx)
             })
@@ -2668,6 +2694,7 @@ impl SessionsSidebar {
             meta.settled_at.is_some(),
             false,
             share,
+            self.store.read(cx).scope(),
         )
     }
 
@@ -2937,6 +2964,7 @@ impl SessionsSidebar {
             meta.settled_at.is_some(),
             false,
             share,
+            self.store.read(cx).scope(),
         )
     }
 
@@ -3771,8 +3799,12 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         crate::widgets::stop_click_propagation(window, cx);
-                        this.store.update(cx, |store, _| {
-                            store.set_thread_collapsed(disclosure_id.clone(), !children_collapsed)
+                        this.store.update(cx, |store, cx| {
+                            store.set_thread_collapsed(
+                                disclosure_id.clone(),
+                                !children_collapsed,
+                                cx,
+                            )
                         });
                         this.compact_model_dirty = true;
                         cx.notify();
@@ -3782,7 +3814,15 @@ impl SessionsSidebar {
                 )
             });
         let share = self.share_target(meta.project_id.as_deref(), cx);
-        Self::thread_context_menu(row, state, working, meta.settled_at.is_some(), true, share)
+        Self::thread_context_menu(
+            row,
+            state,
+            working,
+            meta.settled_at.is_some(),
+            true,
+            share,
+            self.store.read(cx).scope(),
+        )
     }
 }
 
@@ -4378,6 +4418,7 @@ mod tests {
                 summary: summary(true),
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -4396,6 +4437,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("background".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
@@ -4478,6 +4520,7 @@ mod tests {
                 projects: vec![project.clone()],
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -4496,6 +4539,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -5768,6 +5812,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -5786,6 +5831,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("virtual-0".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
@@ -5902,6 +5948,7 @@ mod tests {
             }),
         );
         send(Topic::Index, snapshot(&sessions));
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -5920,6 +5967,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("virtual-0".into()));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) =
@@ -6083,6 +6131,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -6101,6 +6150,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("beta-0".into()));
         let window_state = cx.new(|cx| {
             let mut state = WindowState::new(false).with_compact(true);
@@ -6285,6 +6335,7 @@ mod tests {
                 projects: vec![project],
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -6303,6 +6354,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // A selection keeps the store from opening a draft against a host
         // this fake transport never answers.
         store.update(cx, |store, _| store.select_session("other".into()));
@@ -6396,6 +6448,7 @@ mod tests {
                 projects: vec![project],
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -6414,6 +6467,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("parent".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx

@@ -16,7 +16,137 @@ use tcode_protocol::{Command, CommandResponse, ProtocolError, RuntimeOperationId
 use super::{ArchivedDeletion, KEPT_THREADS, StoreChange, TopicKind, WorkspaceStore};
 
 impl WorkspaceStore {
+    pub(crate) fn local_settings_changed(&self, cx: &mut Context<Self>) {
+        if !self.scope.is_full() {
+            cx.emit(StoreChange {
+                topic: TopicKind::Settings,
+            });
+            cx.notify();
+        }
+    }
+
+    fn host_global_command(command: &Command) -> bool {
+        matches!(
+            command,
+            Command::DeleteSession { .. }
+                | Command::DeleteProject { .. }
+                | Command::CreateProject { .. }
+                | Command::SetProjectIcon { .. }
+                | Command::StartExternalImport { .. }
+                | Command::OpenLatestSession
+                | Command::ShutdownAllAndFlush
+                | Command::ApplyPendingRelaunch
+                | Command::PatchSettings { .. }
+                | Command::ResetSettings
+                | Command::SetSidebarCollapsed { .. }
+                | Command::CycleProjectSort
+                | Command::ToggleFavoriteModel { .. }
+                | Command::ToggleProjectCollapsed { .. }
+                | Command::SetThreadCollapsed { .. }
+                | Command::AutoArchiveSweep { .. }
+                | Command::PreviewReply { .. }
+                | Command::ReloadProvider
+                | Command::SetProfileSecret { .. }
+                | Command::UpdateProfileSettings { .. }
+                | Command::CreateThirdPartyProfile { .. }
+                | Command::DeleteProfile { .. }
+                | Command::RefreshProviderStatus
+                | Command::RefreshProviderUsage
+                | Command::CheckProviderVersions
+                | Command::UpdateProviders { .. }
+                | Command::RefreshAcpRegistry
+                | Command::InstallAcpAgent { .. }
+                | Command::RemoveAcpAgent { .. }
+                | Command::AddCustomAcpAgent { .. }
+                | Command::UpdateAcpAgent { .. }
+                | Command::RefreshProviderPlugins { .. }
+                | Command::InstallProviderPlugin { .. }
+                | Command::UninstallProviderPlugin { .. }
+                | Command::SetProviderPluginEnabled { .. }
+                | Command::UpdateProviderPlugin { .. }
+                | Command::AddProviderMarketplace { .. }
+                | Command::RemoveProviderMarketplace { .. }
+                | Command::ResolvePluginChallenge { .. }
+        )
+    }
+
     pub(super) fn dispatch(&mut self, command: Command) {
+        if !self.scope.is_full() {
+            match &command {
+                Command::SetSidebarCollapsed { collapsed } => {
+                    self.settings_replica.sidebar_collapsed = *collapsed
+                }
+                Command::ToggleProjectCollapsed { project_id } => {
+                    if self
+                        .settings_replica
+                        .collapsed_projects
+                        .contains(project_id)
+                    {
+                        self.settings_replica
+                            .collapsed_projects
+                            .retain(|id| id != project_id);
+                    } else {
+                        self.settings_replica
+                            .collapsed_projects
+                            .push(project_id.clone());
+                    }
+                }
+                Command::SetThreadCollapsed {
+                    session_id,
+                    collapsed,
+                } => {
+                    self.settings_replica
+                        .collapsed_threads
+                        .retain(|id| id != session_id);
+                    if *collapsed {
+                        self.settings_replica
+                            .collapsed_threads
+                            .push(session_id.clone());
+                    }
+                }
+                Command::CycleProjectSort => {
+                    self.settings_replica.project_sort = self.settings_replica.project_sort.next()
+                }
+                Command::ToggleFavoriteModel { model } => {
+                    if self.settings_replica.favorite_models.contains(model) {
+                        self.settings_replica
+                            .favorite_models
+                            .retain(|id| id != model);
+                    } else {
+                        self.settings_replica.favorite_models.push(model.clone());
+                    }
+                }
+                Command::MarkSessionRead {
+                    session_id,
+                    through,
+                } => {
+                    self.settings_replica
+                        .last_visited
+                        .insert(session_id.clone(), *through);
+                }
+                Command::MarkSessionUnread { session_id } => {
+                    self.settings_replica
+                        .last_visited
+                        .insert(session_id.clone(), 0);
+                }
+                _ => {
+                    if Self::host_global_command(&command) {
+                        return;
+                    }
+                    if let Err(error) = self.host.dispatch(command) {
+                        log::error!("failed to dispatch host command: {}", error.message);
+                    }
+                    return;
+                }
+            }
+            self.save_member_settings();
+            return;
+        }
+        if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope)
+            && Self::host_global_command(&command)
+        {
+            return;
+        }
         if let Err(error) = self.host.dispatch(command) {
             log::error!("failed to dispatch host command: {}", error.message);
         }
@@ -27,6 +157,13 @@ impl WorkspaceStore {
         command: Command,
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
+        if (!self.scope.is_full() || !self.baseline_topics.contains(&tcode_protocol::Topic::Scope))
+            && Self::host_global_command(&command)
+        {
+            return cx.spawn(async |_| {
+                Err(ProtocolError::out_of_scope("command is outside this space"))
+            });
+        }
         let host = self.host.clone();
         #[cfg(test)]
         {
@@ -42,6 +179,32 @@ impl WorkspaceStore {
 
 impl WorkspaceStore {
     fn patch_settings(&mut self, patch: SettingsPatch) {
+        if !self.scope.is_full() {
+            match patch {
+                SettingsPatch::LastProject(id) => self.settings_replica.last_project_id = id,
+                SettingsPatch::SidebarLayout(layout) => {
+                    self.settings_replica.sidebar_layout = layout
+                }
+                SettingsPatch::WordWrapDiffs(value) => {
+                    self.settings_replica.word_wrap_diffs = value
+                }
+                SettingsPatch::AutoOpenTaskPanel(value) => {
+                    self.settings_replica.auto_open_task_panel = value
+                }
+                SettingsPatch::LiveCommandPanelDisabled(value) => {
+                    self.settings_replica.live_command_panel_disabled = value
+                }
+                SettingsPatch::SidebarProviderMarks(value) => {
+                    self.settings_replica.sidebar_provider_marks = value
+                }
+                SettingsPatch::InactiveFrameThrottleDisabled(value) => {
+                    self.settings_replica.inactive_frame_throttle_disabled = value
+                }
+                _ => return,
+            }
+            self.save_member_settings();
+            return;
+        }
         self.dispatch(Command::PatchSettings { patch });
     }
 
@@ -173,8 +336,9 @@ impl WorkspaceStore {
     pub fn clear_relaunch_marker(&mut self) {
         self.dispatch(Command::ClearRelaunchMarker);
     }
-    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.dispatch(Command::SetSidebarCollapsed { collapsed });
+        self.local_settings_changed(cx);
     }
 }
 
@@ -224,8 +388,9 @@ impl WorkspaceStore {
             self.delete_session(session_id, false);
         }
     }
-    pub fn mark_session_unread(&mut self, session_id: String) {
+    pub fn mark_session_unread(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.dispatch(Command::MarkSessionUnread { session_id });
+        self.local_settings_changed(cx);
     }
     pub(crate) fn leave_session(&mut self) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
@@ -319,6 +484,9 @@ impl WorkspaceStore {
         self.git_status_replica = thread.git.clone().unwrap_or_default();
         self.session_replica = None;
         let after = thread.history.as_ref().map(|held| held.end);
+        if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope) {
+            return;
+        }
         for topic in [
             tcode_protocol::Topic::SessionStatus {
                 session_id: session_id.clone(),
@@ -339,7 +507,7 @@ impl WorkspaceStore {
             // refuse. It still answers `unsupported` for anything that reaches
             // it through an already-open subscription.
             if matches!(topic, tcode_protocol::Topic::Preview { .. })
-                && !crate::preview_panel::PREVIEW_BACKEND
+                && (!crate::preview_panel::PREVIEW_BACKEND || !self.scope.is_full())
             {
                 continue;
             }
@@ -467,14 +635,21 @@ impl WorkspaceStore {
     ) -> Task<Result<CommandResponse, ProtocolError>> {
         self.command(Command::CreateProject { root }, cx)
     }
-    pub fn toggle_project_collapsed(&mut self, project_id: String) {
+    pub fn toggle_project_collapsed(&mut self, project_id: String, cx: &mut Context<Self>) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });
+        self.local_settings_changed(cx);
     }
-    pub fn set_thread_collapsed(&mut self, session_id: String, collapsed: bool) {
+    pub fn set_thread_collapsed(
+        &mut self,
+        session_id: String,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.dispatch(Command::SetThreadCollapsed {
             session_id,
             collapsed,
         });
+        self.local_settings_changed(cx);
     }
     pub fn delete_project(&mut self, project_id: String) {
         self.dispatch(Command::DeleteProject { project_id });
@@ -541,8 +716,9 @@ impl WorkspaceStore {
             branch,
         });
     }
-    pub fn cycle_project_sort(&mut self) {
+    pub fn cycle_project_sort(&mut self, cx: &mut Context<Self>) {
         self.dispatch(Command::CycleProjectSort);
+        self.local_settings_changed(cx);
     }
 }
 
@@ -711,8 +887,9 @@ impl WorkspaceStore {
             profile_id,
         });
     }
-    pub fn toggle_favorite_model(&mut self, model: String) {
+    pub fn toggle_favorite_model(&mut self, model: String, cx: &mut Context<Self>) {
         self.dispatch(Command::ToggleFavoriteModel { model });
+        self.local_settings_changed(cx);
     }
     pub fn set_active_option(&mut self, id: String, value: Option<serde_json::Value>) {
         self.dispatch(Command::SetActiveOption {

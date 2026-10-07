@@ -1388,3 +1388,12 @@ spaces:
     show_qr: "显示二维码"
     hide_qr: "隐藏二维码"
     resume: "开启链接"
+
+member:
+  connection: "共享空间「%{space}」· %{machine}"
+  joined: "已加入 %{machine} 的共享空间「%{space}」"
+  already_member: "此设备已与该机器配对。请让所有者将它移入共享空间。"
+  space_unavailable: "此链接已暂停或失效。请向所有者索取新链接。"
+  owner: "机器所有者"
+  empty_description: "请让所有者为此共享空间添加项目。"
+  unavailable: "共享空间中无法执行此操作。"
