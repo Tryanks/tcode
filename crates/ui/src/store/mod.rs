@@ -1390,8 +1390,7 @@ impl WorkspaceStore {
                 else {
                     return;
                 };
-                held.records.push(record.clone());
-                held.end += 1;
+                held.extend(std::slice::from_ref(record), held.end + 1);
                 let after = held.end;
                 let _ = self.host.update_after(&envelope.topic, after);
                 // A new turn means the user moved on; the recovery card for the
@@ -3008,53 +3007,20 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn message_byline(&self, entry_id: &str) -> Option<String> {
-        let records = &self
+        let held = self
             .threads
             .get(self.selected_session_id.as_ref()?)?
             .history
-            .as_ref()?
-            .records;
-        let user_record = |record: &&StoredEvent| match &record.event {
-            agent::AgentEvent::ItemStarted(item)
-            | agent::AgentEvent::ItemUpdated(item)
-            | agent::AgentEvent::ItemCompleted(item) => {
-                matches!(item.content, agent::ItemContent::UserMessage { .. })
-            }
-            agent::AgentEvent::SteerRequested { .. } => true,
-            _ => false,
-        };
-        let authors: HashSet<Option<&str>> = records
-            .iter()
-            .filter(user_record)
-            .map(|record| {
-                record
-                    .author
-                    .as_ref()
-                    .map(|author| author.device_id.as_str())
-            })
-            .collect();
-        let record = records
-            .iter()
-            .filter(user_record)
-            .find(|record| match &record.event {
-                agent::AgentEvent::ItemStarted(item)
-                | agent::AgentEvent::ItemUpdated(item)
-                | agent::AgentEvent::ItemCompleted(item) => item.id == entry_id,
-                agent::AgentEvent::SteerRequested { request_id, .. } => request_id == entry_id,
-                _ => false,
-            })?;
+            .as_ref()?;
+        let author = held.authors.get(entry_id)?;
         let own_id = self.client_host.as_ref().map(|host| host.device_id());
         // The host attributes only space members' messages. An unattributed
         // one is the owner's, which is someone else only from inside a space.
-        let other = record
-            .author
-            .as_ref()
-            .map_or(!self.scope.is_full(), |author| {
-                own_id.as_deref() != Some(author.device_id.as_str())
-            });
-        (authors.len() > 1 || other).then(|| {
-            record
-                .author
+        let other = author.as_ref().map_or(!self.scope.is_full(), |author| {
+            own_id.as_deref() != Some(author.device_id.as_str())
+        });
+        (held.distinct_authors.len() > 1 || other).then(|| {
+            author
                 .as_ref()
                 .map(|author| author.name.clone())
                 .unwrap_or_else(|| crate::tr!("member.owner").into_owned())
@@ -5061,6 +5027,24 @@ pub(crate) mod tests {
                 name: "Alex's laptop".into(),
             };
             store.apply_domain_event(&snapshot(vec![message("member", Some(member))]), cx);
+            assert_eq!(
+                store.message_byline("member").as_deref(),
+                Some("Alex's laptop")
+            );
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "shared".into(),
+                    },
+                    event: ServerEvent::SessionEvent(message("owner", None)),
+                },
+                cx,
+            );
+            assert_eq!(
+                store.message_byline("owner").as_deref(),
+                Some(crate::tr!("member.owner").as_ref())
+            );
             assert_eq!(
                 store.message_byline("member").as_deref(),
                 Some("Alex's laptop")
