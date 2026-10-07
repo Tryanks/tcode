@@ -106,6 +106,7 @@ impl SpaceHost {
 
     fn member(&self, device: &str) -> Principal {
         Principal::Space {
+            policy_revision: 1,
             space_id: "space-a".into(),
             space_name: "Team A".into(),
             project_ids: vec![self.a.id.clone()],
@@ -287,6 +288,45 @@ fn space_index_and_scope_project_only_the_members_projects() {
     assert!(!wire.contains("secrets"));
 
     host.events.clear();
+    let mut stale = member.clone();
+    if let Principal::Space {
+        project_ids,
+        policy_revision,
+        ..
+    } = &mut stale
+    {
+        project_ids.push(host.b.id.clone());
+        *policy_revision = 0;
+    }
+    host.query(stale.clone(), Query::Ping);
+    if let Principal::Space {
+        policy_revision, ..
+    } = &mut stale
+    {
+        *policy_revision = 2;
+    }
+    host.request(
+        stale,
+        ClientPayload::Unsubscribe(Subscription {
+            topic: Topic::SessionStatus {
+                session_id: "b".into(),
+            },
+            after: None,
+        }),
+    );
+    host.command(
+        Principal::Full,
+        Command::RenameSession {
+            session_id: "b".into(),
+            title: "Private B".into(),
+        },
+    );
+    let extra = host.b.root.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    host.command(Principal::Full, Command::CreateProject { root: extra });
+    host.query(Principal::Full, Query::Ping);
+    assert!(!host.events.iter().any(|event| event.topic == topic));
+    assert!(!host.events.iter().any(|event| event.topic == Topic::Scope));
     let b = host.draft(Principal::Full, host.b.clone(), host.b.root.clone());
     host.command(
         Principal::Full,
@@ -358,6 +398,22 @@ fn space_index_and_scope_project_only_the_members_projects() {
         };
         assert_eq!(archive.revision, revision);
     }
+    host.request(
+        host.member("one"),
+        ClientPayload::Unsubscribe(Subscription {
+            topic: topic.clone(),
+            after: None,
+        }),
+    );
+    host.subscribe(host.member("one"), topic.clone());
+    let ServerEvent::IndexSnapshot(index) = host
+        .event(|event| event.topic == topic && event.request_id.is_some())
+        .event
+    else {
+        panic!("reconnected index")
+    };
+    assert!(index.summary.archived_revision >= revision);
+    assert_eq!(index.projects, [host.a.clone()]);
     host.finish();
 }
 

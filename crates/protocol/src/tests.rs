@@ -1052,6 +1052,7 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
     assert_eq!(
         scoped.principal,
         Some(Principal::Space {
+            policy_revision: 0,
             space_id: "s".into(),
             space_name: "Shared".into(),
             project_ids: vec!["p".into()],
@@ -1061,7 +1062,7 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
     );
     assert_eq!(
         serde_json::to_value(&scoped).unwrap()["principal"],
-        json!({"type":"space","content":{"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone"}})
+        json!({"type":"space","content":{"policy_revision":0,"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone"}})
     );
     let keyed = decode_client_line(r#"{"id":9,"key":"951925af-31f3-4f1c-a57b-dac199d82ad7","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
     assert_eq!(
@@ -1088,6 +1089,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     }))
     .unwrap();
     assert_eq!(older.invite, None);
+    assert_eq!(older.created_space_id, None);
     assert_eq!(older.devices[0].path, None);
     assert_eq!(
         serde_json::from_value::<HostingAction>(json!({"type": "new_code"})).unwrap(),
@@ -1146,8 +1148,9 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
         (
             SpaceAction::RemoveMember {
                 device_id: "d".into(),
+                regenerate_link: true,
             },
-            json!({"type":"remove_member","content":{"device_id":"d"}}),
+            json!({"type":"remove_member","content":{"device_id":"d","regenerate_link":true}}),
         ),
     ] {
         let action = HostingAction::Spaces(action);
@@ -1159,6 +1162,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
         );
     }
     let mut state = HostingState {
+        created_space_id: None,
         spaces: Vec::new(),
         enabled: true,
         expires_in_secs: 280,
@@ -1434,10 +1438,6 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
         (
             ServerEvent::ScopeSnapshot(scope.clone()),
             json!({"type":"scope_snapshot","content":scope_wire.clone()}),
-        ),
-        (
-            ServerEvent::ScopeReplaced(scope),
-            json!({"type":"scope_replaced","content":scope_wire}),
         ),
     ] {
         let response = HostMessage::Event(EventEnvelope {

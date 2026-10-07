@@ -12,11 +12,23 @@ impl AppState {
         if let Principal::Space {
             space_id,
             project_ids,
+            policy_revision,
             ..
         } = principal
         {
-            self.space_scopes
-                .insert(space_id.clone(), project_ids.iter().cloned().collect());
+            let revision = self
+                .space_policy_revisions
+                .entry(space_id.clone())
+                .or_default();
+            if *policy_revision < *revision {
+                return;
+            }
+            *revision = *policy_revision;
+            let projects = project_ids.iter().cloned().collect();
+            if self.space_scopes.get(space_id) != Some(&projects) {
+                self.space_scopes.insert(space_id.clone(), projects);
+                self.space_archives_revision = None;
+            }
             self.refresh_space_archives();
         }
     }

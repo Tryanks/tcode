@@ -328,6 +328,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
     config.hosting = Some(Arc::new(move |action| {
         seen.lock().unwrap().push(format!("{action:?}"));
         Ok(tcode_protocol::HostingState {
+            created_space_id: None,
             spaces: Vec::new(),
             enabled: true,
             invite: Some(

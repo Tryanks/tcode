@@ -337,8 +337,11 @@ pub struct AppState {
     pub sessions: Vec<SessionMeta>,
     archived_revision: u64,
     space_scopes: HashMap<String, BTreeSet<String>>,
-    // Archive replies are ordered by revision, including across unsubscribe/reconnect.
+    space_policy_revisions: HashMap<String, u64>,
+    space_archives_revision: Option<u64>,
     space_archives: HashMap<String, ArchivedSessions>,
+    // Archive replies remain ordered after the last subscriber releases a projection.
+    space_archive_revisions: HashMap<String, u64>,
     decision_authors: HashMap<(String, String), Author>,
     pub projects: Vec<Project>,
     pub residents: ResidentSessions,
@@ -537,7 +540,10 @@ impl AppState {
             projects,
             archived_revision: 0,
             space_scopes: HashMap::new(),
+            space_policy_revisions: HashMap::new(),
+            space_archives_revision: None,
             space_archives: HashMap::new(),
+            space_archive_revisions: HashMap::new(),
             decision_authors: HashMap::new(),
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),

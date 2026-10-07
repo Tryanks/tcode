@@ -137,7 +137,6 @@ pub enum ServerEvent {
     SessionHistoryError(crate::ProtocolError),
     IndexSnapshot(IndexSnapshot),
     ScopeSnapshot(Scope),
-    ScopeReplaced(Scope),
     SettingsSnapshot(Settings),
     /// The current (or latest) external-import run for one project. `None`
     /// means no run has ever started, or the project is gone. Only the latest

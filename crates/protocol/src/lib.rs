@@ -66,7 +66,11 @@ pub use wire::{
 // peer sending a removed command is rejected. Adds transport principals, scope and
 // space-index topics, scope snapshots, space hosting actions and device access,
 // optional stored-event authors, a space id on pairing with a space name in the
-// paired reply and two pairing rejections for Shared Spaces.
+// paired reply and two pairing rejections for Shared Spaces. Space principals
+// carry a default-zero policy_revision; RemoveMember carries regenerate_link
+// for atomic revocation and rotation; HostingState optionally returns
+// created_space_id for Create. Scope is a correlated snapshot only; removes
+// ScopeReplaced broadcasts.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]

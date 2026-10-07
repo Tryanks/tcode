@@ -8,7 +8,7 @@
 //! the sidebar's share items — reads and changes spaces through it, so a
 //! change made on one repaints the others.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -168,7 +168,11 @@ impl Spaces {
                 self.set_state(state, cx);
             }
             SpacesHost::Remote(store) => {
-                if self.refreshing {
+                if self.refreshing
+                    || !store
+                        .upgrade()
+                        .is_some_and(|store| store.read(cx).can_manage_host())
+                {
                     return;
                 }
                 let Ok(task) =
@@ -234,6 +238,12 @@ impl Spaces {
                 Task::ready(result)
             }
             SpacesHost::Remote(store) => {
+                if !store
+                    .upgrade()
+                    .is_some_and(|store| store.read(cx).can_manage_host())
+                {
+                    return Task::ready(Err(crate::tr!("spaces.detached").into_owned()));
+                }
                 let store = store.clone();
                 cx.spawn(async move |this, cx| {
                     let mut result = Err(String::new());
@@ -275,17 +285,13 @@ impl Spaces {
         share: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SpaceInfo, String>> {
-        let known: HashSet<String> = self.spaces().iter().map(|space| space.id.clone()).collect();
         let created = self.act(vec![SpaceAction::Create { name }], cx);
         cx.spawn(async move |this, cx| {
             let state = created.await?;
-            // A new space is appended; one created elsewhere meanwhile is
-            // told apart by not having been known before.
             let space = state
                 .spaces
                 .into_iter()
-                .rev()
-                .find(|space| !known.contains(&space.id))
+                .find(|space| Some(&space.id) == state.created_space_id.as_ref())
                 .ok_or_else(|| crate::tr!("spaces.missing").into_owned())?;
             let Some(project_id) = share else {
                 return Ok(space);
@@ -340,15 +346,16 @@ impl Spaces {
     pub(crate) fn remove_member(
         &mut self,
         device_id: String,
-        space_id: String,
         regenerate: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<HostingState, String>> {
-        let mut actions = vec![SpaceAction::RemoveMember { device_id }];
-        if regenerate {
-            actions.push(SpaceAction::RegenerateLink { id: space_id });
-        }
-        self.act(actions, cx)
+        self.act(
+            vec![SpaceAction::RemoveMember {
+                device_id,
+                regenerate_link: regenerate,
+            }],
+            cx,
+        )
     }
 }
 
@@ -363,8 +370,8 @@ fn local_hosting(action: HostingAction, cx: &App) -> Result<HostingState, String
 struct Registry {
     #[cfg(feature = "remote-hosting")]
     local: Option<Entity<Spaces>>,
-    /// Per remote attachment; `None` where it is not a full device.
-    remote: HashMap<EntityId, Option<Entity<Spaces>>>,
+    /// Managers live only while their attachment has a known Full scope.
+    remote: HashMap<EntityId, (Entity<Spaces>, Subscription)>,
 }
 
 impl Global for Registry {}
@@ -411,21 +418,24 @@ pub(crate) fn for_store(store: &Entity<WorkspaceStore>, cx: &mut App) -> Option<
         #[cfg(not(feature = "remote-hosting"))]
         return None;
     }
-    let id = store.entity_id();
-    if let Some(spaces) = cx.default_global::<Registry>().remote.get(&id) {
-        return spaces.clone();
+    if !store.read(cx).can_manage_host() {
+        return None;
     }
-    let host_id = store.read(cx).remote_host_id().map(str::to_owned);
-    let full = cx
-        .try_global::<super::ClientAttachment>()
-        .map(super::ClientAttachment::hosts)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|host| Some(&host.host_id) == host_id.as_ref())
-        .is_some_and(|host| host.space_id.is_none());
-    let spaces = full.then(|| {
-        let weak = store.downgrade();
-        cx.new(|cx| Spaces::new(SpacesHost::Remote(weak), cx))
+    let id = store.entity_id();
+    if let Some((spaces, _)) = cx.default_global::<Registry>().remote.get(&id) {
+        return Some(spaces.clone());
+    }
+    let weak = store.downgrade();
+    let spaces = cx.new(|cx| Spaces::new(SpacesHost::Remote(weak), cx));
+    let observation = cx.observe(store, move |store, cx| {
+        if !store.read(cx).can_manage_host()
+            && let Some((spaces, _)) = cx.default_global::<Registry>().remote.remove(&id)
+        {
+            spaces.update(cx, |spaces, cx| {
+                spaces.generation = spaces.generation.wrapping_add(1);
+                spaces.set_state(None, cx);
+            });
+        }
     });
     cx.observe_release(store, move |_, cx| {
         cx.default_global::<Registry>().remote.remove(&id);
@@ -433,8 +443,8 @@ pub(crate) fn for_store(store: &Entity<WorkspaceStore>, cx: &mut App) -> Option<
     .detach();
     cx.default_global::<Registry>()
         .remote
-        .insert(id, spaces.clone());
-    spaces
+        .insert(id, (spaces.clone(), observation));
+    Some(spaces)
 }
 
 /// Repaint a view whenever the spaces it shows change.
@@ -1007,7 +1017,6 @@ mod section {
             };
             open_remove_member(
                 spaces,
-                space.id.clone(),
                 space.name.clone(),
                 member.id.clone(),
                 member.name.clone(),
@@ -1616,7 +1625,6 @@ mod section {
     /// works for anyone holding it, so retiring that link is the default.
     pub(crate) fn open_remove_member(
         spaces: Entity<Spaces>,
-        space_id: String,
         space_name: String,
         device_id: String,
         device_name: String,
@@ -1629,7 +1637,6 @@ mod section {
             let toggle = regenerate.clone();
             let confirm = regenerate.clone();
             let spaces = spaces.clone();
-            let space_id = space_id.clone();
             let device_id = device_id.clone();
             dialog
                 .w(px(420.))
@@ -1681,12 +1688,7 @@ mod section {
                                 .label(crate::tr!("spaces.members.remove"))
                                 .on_click(move |_, window, cx| {
                                     let task = spaces.update(cx, |spaces, cx| {
-                                        spaces.remove_member(
-                                            device_id.clone(),
-                                            space_id.clone(),
-                                            confirm.get(),
-                                            cx,
-                                        )
+                                        spaces.remove_member(device_id.clone(), confirm.get(), cx)
                                     });
                                     report(task, window, cx);
                                     window.close_dialog(cx);
@@ -1998,6 +2000,10 @@ mod tests {
             tcode_client::pairing::parse_pair_url(&link).unwrap().secret,
             invite.secret,
             "the link the member joined by is retired"
+        );
+        assert_eq!(
+            tcode_traverse::pair_blocking(&invite, &device),
+            Err(tcode_traverse::PairError::Invalid)
         );
         cx.update(|_, cx| {
             cx.update_global::<crate::remote::RemoteController, _>(|controller, _| {

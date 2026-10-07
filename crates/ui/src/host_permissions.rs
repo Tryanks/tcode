@@ -282,7 +282,26 @@ mod tests {
         });
         link.set_connection_state(ConnectionState::Connected { path: None });
         cx.run_until_parked();
-        crate::store::tests::seed_full_scope(&store, &replies, Vec::new(), cx);
+        let mut scope_request = None;
+        while let Ok(line) = requests.try_recv() {
+            let message = decode_client_line(&line).unwrap();
+            if matches!(
+                message.payload,
+                ClientPayload::Subscribe(tcode_protocol::Subscription {
+                    topic: Topic::Scope,
+                    ..
+                })
+            ) {
+                scope_request = Some(message.id);
+            }
+        }
+        crate::store::tests::seed_full_scope_reply(
+            &store,
+            &replies,
+            scope_request.expect("reconnected Scope subscription"),
+            Vec::new(),
+            cx,
+        );
         baseline();
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
