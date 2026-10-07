@@ -477,6 +477,7 @@ impl AppState {
         store.open()?;
         let file = store.read_file()?;
         let mut sessions = file.sessions;
+        Self::repair_auto_archived_mirrors(&store, &mut sessions)?;
         sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
