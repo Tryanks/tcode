@@ -7,8 +7,6 @@ use super::*;
 pub(crate) struct DomainDiff {
     index: IndexSnapshot,
     space_indexes: HashMap<String, IndexSnapshot>,
-    scope_projects: Vec<Project>,
-    scope_providers: Vec<tcode_protocol::ScopedProviderChoice>,
     settings: Settings,
     providers: ProvidersStatus,
     git_status: HashMap<String, GitStatusStatus>,
@@ -21,8 +19,6 @@ impl DomainDiff {
         Self {
             index: state.index_snapshot(),
             space_indexes: HashMap::new(),
-            scope_projects: state.projects.clone(),
-            scope_providers: state.scoped_provider_choices(),
             settings: state.settings_snapshot(),
             providers: state.providers_status_snapshot(),
             git_status: HashMap::new(),
@@ -32,6 +28,9 @@ impl DomainDiff {
     }
 
     pub(crate) fn emit_changes(&mut self, state: &mut AppState, cx: &mut HostCx) {
+        if self.index.projects != state.projects {
+            state.space_archives_revision = None;
+        }
         state.refresh_space_archives();
         let index = state.index_snapshot();
         if self.index != index {
@@ -61,19 +60,6 @@ impl DomainDiff {
             }
             self.space_indexes.insert(id.clone(), index);
         }
-        let scope_providers = state.scoped_provider_choices();
-        if self.scope_projects != state.projects || self.scope_providers != scope_providers {
-            // Scope has no connection address. Space snapshots stay correlated to
-            // their requester; broadcasting them would expose projects across spaces.
-            emit_replacement(
-                Topic::Scope,
-                ServerEvent::ScopeReplaced(tcode_protocol::Scope::Full),
-                cx,
-            );
-            self.scope_projects = state.projects.clone();
-            self.scope_providers = scope_providers;
-        }
-
         if self.settings != state.settings {
             let settings = state.settings_snapshot();
             emit_replacement(
@@ -345,6 +331,10 @@ impl AppState {
     }
 
     pub(crate) fn refresh_space_archives(&mut self) {
+        if self.space_archives_revision == Some(self.archived_revision) {
+            return;
+        }
+        self.space_archives_revision = Some(self.archived_revision);
         for (id, projects) in &self.space_scopes {
             let mut archive = self.space_archived_snapshot(projects);
             if let Some(old) = self.space_archives.get(id) {
@@ -353,6 +343,11 @@ impl AppState {
                         old.sessions != archive.sessions
                             || old.worktree_shared != archive.worktree_shared,
                     );
+            } else {
+                archive.revision = self
+                    .space_archive_revisions
+                    .get(id)
+                    .map_or(0, |revision| revision + 1);
             }
             self.space_archives.insert(id.clone(), archive);
         }

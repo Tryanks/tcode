@@ -12,11 +12,23 @@ impl AppState {
         if let Principal::Space {
             space_id,
             project_ids,
+            policy_revision,
             ..
         } = principal
         {
-            self.space_scopes
-                .insert(space_id.clone(), project_ids.iter().cloned().collect());
+            let revision = self
+                .space_policy_revisions
+                .entry(space_id.clone())
+                .or_default();
+            if *policy_revision < *revision {
+                return;
+            }
+            *revision = *policy_revision;
+            let projects = project_ids.iter().cloned().collect();
+            if self.space_scopes.get(space_id) != Some(&projects) {
+                self.space_scopes.insert(space_id.clone(), projects);
+                self.space_archives_revision = None;
+            }
             self.refresh_space_archives();
         }
     }
@@ -118,7 +130,11 @@ impl AppState {
                         .find(|p| &p.id == project_id && project_ids.contains(&p.id))
                         .ok_or_else(|| refusal("project"))?;
                     if cwd == &project.root
-                        || self.scoped_metas(project_ids).any(|meta| &meta.cwd == cwd)
+                        || self.scoped_metas(project_ids).any(|meta| {
+                            meta.project_id.as_ref() == Some(project_id)
+                                && meta.worktree.is_some()
+                                && &meta.cwd == cwd
+                        })
                     {
                         Ok(())
                     } else {

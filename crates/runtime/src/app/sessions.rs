@@ -59,6 +59,13 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         self.subscriptions.remove(&subscription.topic);
+        if let Topic::SpaceIndex { space_id } = &subscription.topic {
+            self.space_scopes.remove(space_id);
+            if let Some(archive) = self.space_archives.remove(space_id) {
+                self.space_archive_revisions
+                    .insert(space_id.clone(), archive.revision);
+            }
+        }
         let session_id = match &subscription.topic {
             Topic::SessionStatus { session_id }
             | Topic::SessionPlan { session_id }
@@ -1012,6 +1019,7 @@ impl AppState {
         // generated worktree or offer to delete it.
 
         let fork_id = fork.id.clone();
+        self.upsert_session_in_memory(fork.clone());
         let (completion, completed) = smol::channel::bounded(1);
         self.enqueue_store_write(
             StoreWrite::Fork {
@@ -1029,7 +1037,6 @@ impl AppState {
                 .unwrap_or_else(|_| Err("session store writer stopped".into()));
             host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
-                    state.upsert_session_in_memory(fork.clone());
                     state.select_session(&fork.id, cx);
                     state.reply_to_subscription(
                         None,
