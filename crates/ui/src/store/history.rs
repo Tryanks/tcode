@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::session::Author;
 
 pub(crate) const HISTORY_WINDOW_SCREENS: f32 = 6.;
 
@@ -13,6 +14,8 @@ pub(super) struct HeldHistory {
     pub(super) from: u64,
     pub(super) end: u64,
     pub(super) records: Vec<StoredEvent>,
+    pub(super) authors: HashMap<String, Option<Author>>,
+    pub(super) distinct_authors: HashSet<Option<String>>,
     /// The earlier pages put in front of the window since it arrived, in the
     /// order they were fetched, so the oldest records come from the last.
     pages: Vec<HeldPage>,
@@ -29,16 +32,23 @@ struct HeldPage {
 
 impl HeldHistory {
     pub(super) fn new(from: u64, end: u64, records: &[StoredEvent]) -> Self {
-        Self {
+        let mut held = Self {
             from,
             end,
             records: records.to_vec(),
             pages: Vec::new(),
-        }
+            authors: HashMap::new(),
+            distinct_authors: HashSet::new(),
+        };
+        held.rebuild_attribution();
+        held
     }
 
     /// Records that continue the held cursor up to `end`.
     pub(super) fn extend(&mut self, records: &[StoredEvent], end: u64) {
+        for record in records {
+            Self::index_author(&mut self.authors, &mut self.distinct_authors, record);
+        }
         self.records.extend(records.iter().cloned());
         self.end = end;
     }
@@ -51,6 +61,44 @@ impl HeldHistory {
         });
         self.records.splice(0..0, records);
         self.from = from;
+        self.rebuild_attribution();
+    }
+
+    fn index_author(
+        authors: &mut HashMap<String, Option<Author>>,
+        distinct_authors: &mut HashSet<Option<String>>,
+        record: &StoredEvent,
+    ) {
+        let entry_id = match &record.event {
+            agent::AgentEvent::ItemStarted(item)
+            | agent::AgentEvent::ItemUpdated(item)
+            | agent::AgentEvent::ItemCompleted(item)
+                if matches!(item.content, agent::ItemContent::UserMessage { .. }) =>
+            {
+                &item.id
+            }
+            agent::AgentEvent::SteerRequested { request_id, .. } => request_id,
+            _ => return,
+        };
+        distinct_authors.insert(
+            record
+                .author
+                .as_ref()
+                .map(|author| author.device_id.clone()),
+        );
+        // A bubble uses the first matching record, even if later item updates
+        // carry a different author.
+        authors
+            .entry(entry_id.clone())
+            .or_insert_with(|| record.author.clone());
+    }
+
+    fn rebuild_attribution(&mut self) {
+        self.authors.clear();
+        self.distinct_authors.clear();
+        for record in &self.records {
+            Self::index_author(&mut self.authors, &mut self.distinct_authors, record);
+        }
     }
 
     fn holds_pages_above_tail(&self) -> bool {
@@ -68,7 +116,10 @@ impl HeldHistory {
             dropped += page.records;
             self.from = page.end;
         }
-        self.records.drain(..dropped);
+        if dropped > 0 {
+            self.records.drain(..dropped);
+            self.rebuild_attribution();
+        }
         dropped > 0
     }
 }
