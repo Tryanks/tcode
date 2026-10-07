@@ -417,9 +417,11 @@ impl Dialect for Grok {
         if let Some(model) = &opts.model {
             args.extend(["--model".to_string(), model.clone()]);
         }
-        if let Some(effort) =
-            acp_session::config_selection(&opts.option_selections, "reasoning_effort")
-        {
+        if let Some(effort) = acp_session::config_selection(
+            &opts.option_selections,
+            "reasoning_effort",
+            Some(&acp::SessionConfigOptionCategory::ThoughtLevel),
+        ) {
             args.extend(["--reasoning-effort".to_string(), effort.to_string()]);
         }
         args.extend(opts.extra_args.iter().cloned());
@@ -1207,7 +1209,7 @@ mod tests {
                 json!({ "session_id": "01a10095-e65c-7983-a817-6884b010f1ae" }),
             )),
             option_selections: vec![OptionSelection {
-                id: "acp:cfg:reasoning_effort".into(),
+                id: "reasoningEffort".into(),
                 value: json!("low"),
             }],
             mcp_servers: vec![McpRegistration {
