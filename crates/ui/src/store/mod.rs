@@ -2672,7 +2672,6 @@ impl WorkspaceStore {
         )
     }
 
-    #[cfg(target_family = "wasm")]
     pub fn hosting(
         &self,
         action: tcode_protocol::HostingAction,
