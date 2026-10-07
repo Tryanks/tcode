@@ -122,7 +122,7 @@ impl TestAppContext {
                     self.domain_diff
                         .as_mut()
                         .expect("test domain diff must be initialized")
-                        .emit_changes(&state.borrow(), &mut host_cx);
+                        .emit_changes(&mut state.borrow_mut(), &mut host_cx);
                     return;
                 }
             }

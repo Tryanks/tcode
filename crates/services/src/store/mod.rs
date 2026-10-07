@@ -244,12 +244,17 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
-        let mut line = serde_json::to_vec(&EventEnvelopeRef {
-            ts,
-            event,
-            author: None,
-        })
-        .map_err(invalid_data)?;
+        Self::append_authored_event(session_id, ts, event, None)
+    }
+
+    pub fn append_authored_event(
+        session_id: &str,
+        ts: u64,
+        event: &AgentEvent,
+        author: Option<&Author>,
+    ) -> io::Result<Self> {
+        let mut line =
+            serde_json::to_vec(&EventEnvelopeRef { ts, event, author }).map_err(invalid_data)?;
         line.push(b'\n');
         Ok(Self(Op::AppendEvent {
             session_id: session_id.to_owned(),
@@ -547,7 +552,8 @@ impl SessionStore {
         let mut state = self.shared.lock_state()?;
         loop {
             match std::mem::replace(&mut *state, State::Closed) {
-                State::Unopened | State::Closed | State::Owned(_) => return Ok(()),
+                State::Unopened | State::Closed => return Ok(()),
+                State::Owned(ownership) => return ownership.unlock(),
                 State::Migrating => {
                     *state = State::Migrating;
                     state = self
@@ -566,7 +572,6 @@ impl SessionStore {
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
                 State::Closing(live) => {
-                    drop(state);
                     let Live { db, ownership, .. } = live;
                     let result = match Arc::try_unwrap(db) {
                         Ok(db) => catch_unwind(AssertUnwindSafe(|| db.checkpoint()))
@@ -580,6 +585,9 @@ impl SessionStore {
                             "session store is still referenced after its last operation",
                         )),
                     };
+                    // A concurrently launching child can inherit the lock descriptor
+                    // until exec. Closing our copy alone leaves that child holding it.
+                    let result = result.and(ownership.unlock());
                     drop(ownership);
                     return result;
                 }

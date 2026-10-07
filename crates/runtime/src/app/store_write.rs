@@ -14,6 +14,7 @@ pub(super) enum StoreWrite {
     AppendEvent {
         id: String,
         ts: u64,
+        author: Option<Author>,
         event: Box<AgentEvent>,
         joined: Joined,
     },
@@ -104,13 +105,15 @@ impl StoreWrite {
             StoreWrite::AppendEvent {
                 id,
                 ts,
+                author,
                 event,
                 joined,
             } => {
-                let mut mutations = match Mutation::append_event(id, *ts, event) {
-                    Ok(mutation) => vec![mutation],
-                    Err(error) => return Some(Err(error.to_string())),
-                };
+                let mut mutations =
+                    match Mutation::append_authored_event(id, *ts, event, author.as_ref()) {
+                        Ok(mutation) => vec![mutation],
+                        Err(error) => return Some(Err(error.to_string())),
+                    };
                 match joined {
                     Joined::Folded {
                         superseded,

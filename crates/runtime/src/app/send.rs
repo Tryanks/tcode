@@ -46,6 +46,7 @@ impl AppState {
         active.push_scheduled(text, attachments, not_before);
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
+            message.author = cx.author.clone();
         }
         let should_start = matches!(active.runtime, Runtime::Idle)
             && !(active.draft
@@ -122,7 +123,11 @@ impl AppState {
             else {
                 continue;
             };
+            let author = std::mem::replace(&mut cx.author, message.author);
+            let key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
             self.send_turn_assembled(&session_id, message.text, message.attachments, cx);
+            cx.author = author;
+            cx.delivery_key = key;
         }
 
         let parked_ids: Vec<String> = self.residents.parked.keys().cloned().collect();
@@ -232,6 +237,7 @@ impl AppState {
         active.push_queued(text, attachments);
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
+            message.author = cx.author.clone();
         }
 
         let model_changed = active.model_changed_while_live();
@@ -351,6 +357,7 @@ impl AppState {
         active.push_queued(text, attachments);
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
+            message.author = cx.author.clone();
         }
         if let Some(message) = active.queue.last_mut() {
             message.relay_transcript = Some(transcript);
@@ -394,6 +401,7 @@ impl AppState {
             );
             return;
         };
+        let author = std::mem::replace(&mut cx.author, message.author.clone());
         self.record_user_message(
             session_id,
             &message.text,
@@ -402,6 +410,7 @@ impl AppState {
             message.delivery_key.as_deref(),
             cx,
         );
+        cx.author = author;
         if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
         }
@@ -603,8 +612,10 @@ impl AppState {
             return;
         };
         let command_key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
+        let author = std::mem::replace(&mut cx.author, message.author);
         self.steer_assembled(target_id, message.text, message.attachments, cx);
         cx.delivery_key = command_key;
+        cx.author = author;
         self.reschedule_scheduled_wake(cx);
     }
 
@@ -645,10 +656,17 @@ impl AppState {
         target_id: &str,
         request_id: String,
         decision: ApprovalDecision,
-        _cx: &mut HostCx,
+        cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
-        self.respond_session_approval(target_id, request_id, decision)
-            .map_err(provider_command_error)
+        self.respond_session_approval(target_id, request_id.clone(), decision)
+            .map_err(provider_command_error)?;
+        self.decision_authors
+            .remove(&(target_id.to_string(), request_id.clone()));
+        if let Some(author) = &cx.author {
+            self.decision_authors
+                .insert((target_id.to_string(), request_id), author.clone());
+        }
+        Ok(())
     }
 
     /// Answer the host's pending user-input request, acknowledging only after
@@ -658,7 +676,7 @@ impl AppState {
         target_id: &str,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
-        _cx: &mut HostCx,
+        cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
         let Some(ActiveSession {
             runtime: Runtime::Live(commands),
@@ -669,10 +687,17 @@ impl AppState {
         };
         commands
             .try_send(SessionCommand::RespondUserInput {
-                request_id,
+                request_id: request_id.clone(),
                 answers,
             })
-            .map_err(provider_command_error)
+            .map_err(provider_command_error)?;
+        self.decision_authors
+            .remove(&(target_id.to_string(), request_id.clone()));
+        if let Some(author) = &cx.author {
+            self.decision_authors
+                .insert((target_id.to_string(), request_id), author.clone());
+        }
+        Ok(())
     }
 }
 
