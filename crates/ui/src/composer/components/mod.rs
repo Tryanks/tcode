@@ -1,5 +1,6 @@
 mod approval;
 mod checkout;
+mod context_window;
 mod fallback;
 pub(super) mod images;
 mod pickers;

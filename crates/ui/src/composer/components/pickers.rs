@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::scroll::ScrollableElement as _;
+use gpui_base::slider::{SliderEvent, SliderState};
 
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
@@ -278,8 +279,9 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The traits chip ("High · 200k") + descriptor popover. Empty element when
-    /// the current model has no descriptors.
+    /// The traits chip ("High · Fast") + descriptor popover. Empty element when
+    /// the current model has no descriptors. The context window is the context
+    /// meter's, so it is neither listed nor named here.
     pub(in super::super) fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
         let composer = store.composer_state();
@@ -296,6 +298,9 @@ impl Composer {
                         role: agent::OptionRole::Model,
                         ..
                     }
+                ) && !matches!(
+                    descriptor,
+                    OptionDescriptor::Select { id, .. } if id == "contextWindow"
                 )
             })
             .cloned()
@@ -382,29 +387,22 @@ impl Composer {
 
         let store_entity = self.workspace_store.clone();
         let composer_entity = cx.entity();
-        let context_window_custom = self.context_window_custom.clone();
         crate::material::overlay_popover("traits-popover", cx)
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))
             })
             .trigger(trigger)
-            .content(move |_, _, cx| {
+            .content(move |_, window, cx| {
                 let popover = cx.entity();
-                composer_entity.update(cx, |composer, _cx| {
-                    composer.traits_popover = Some(popover.clone());
-                });
-                let context_window_custom_error =
-                    composer_entity.read(cx).context_window_custom_error;
                 render_traits_pane(
                     &spec,
                     &selections,
                     composer_entity.read(cx).compact,
                     pending_restart,
                     &store_entity,
-                    &context_window_custom,
-                    context_window_custom_error,
                     &popover,
+                    window,
                     cx,
                 )
             })
@@ -418,6 +416,10 @@ impl Composer {
         let usage = composer.token_usage;
         let account_usage = composer.usage.clone();
         let provider = composer.provider;
+        let window_editable = !composer.conversation_read_only
+            && self.interactive(cx)
+            && super::context_window::context_window_descriptor(&composer).is_some();
+        let store_entity = self.workspace_store.clone();
         let pct = usage.and_then(|u| context_meter::used_percentage(&u));
         let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
         let ring_color: Hsla = if overloaded {
@@ -451,7 +453,16 @@ impl Composer {
             .trigger(trigger)
             .content(move |_, window, cx| {
                 let compact = crate::window_seam::window_is_compact(window, cx);
-                render_context_meter_pane(usage, account_usage.clone(), provider, pct, compact, cx)
+                let edit_window = window_editable.then(|| store_entity.clone());
+                render_context_meter_pane(
+                    usage,
+                    account_usage.clone(),
+                    provider,
+                    pct,
+                    compact,
+                    edit_window,
+                    cx,
+                )
             })
             .into_any_element()
     }
@@ -881,7 +892,7 @@ fn render_compact_model_footer(
                 ..
             } if id == "reasoningEffort" => Some((
                 // Use the localized shared label instead of provider-specific copy.
-                crate::tr!("mobile.effort").into_owned(),
+                crate::tr!("composer.effort").into_owned(),
                 options.clone(),
                 resolved_select_value(id, options, default_value, &selections),
             )),
@@ -1427,6 +1438,122 @@ fn render_permission_pane(
     .into_any_element()
 }
 
+/// The traits pane's effort control, in Codex's model-picker style: the
+/// resolved level centered over a stepped slider of the active model's
+/// `reasoningEffort` levels. Each step applies as it is reached and leaves the
+/// pane open. `None` when the model describes fewer than two levels.
+fn render_effort_slider(
+    store_entity: &Entity<WorkspaceStore>,
+    window: &mut Window,
+    cx: &mut Context<PopoverState>,
+) -> Option<AnyElement> {
+    let composer_state = store_entity.read(cx).composer_state();
+    let (levels, current) = composer_state.active_option_descriptors.iter().find_map(
+        |descriptor| match descriptor {
+            OptionDescriptor::Select {
+                id,
+                options,
+                default_value,
+                ..
+            } if id == "reasoningEffort" => Some((
+                options.clone(),
+                resolved_select_value(
+                    id,
+                    options,
+                    default_value,
+                    &composer_state.active_option_selections,
+                ),
+            )),
+            _ => None,
+        },
+    )?;
+    if levels.len() < 2 {
+        return None;
+    }
+    let current = current
+        .and_then(|value| levels.iter().position(|level| level.value == value))
+        .unwrap_or(0);
+    let key = levels
+        .iter()
+        .map(|level| level.value.as_str())
+        .collect::<Vec<_>>()
+        .join("|");
+    let state = window.use_keyed_state(
+        gpui::SharedString::from(format!("effort-slider-{key}")),
+        cx,
+        |_, cx| {
+            let store = store_entity.clone();
+            let values: Vec<String> = levels.iter().map(|level| level.value.clone()).collect();
+            let mut applied = current;
+            cx.subscribe_self(move |_, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let index = value.end().round() as usize;
+                if index == applied {
+                    return;
+                }
+                let Some(value) = values.get(index) else {
+                    return;
+                };
+                applied = index;
+                let value = value.clone();
+                store.update(cx, |store, _cx| {
+                    store.set_active_option(
+                        "reasoningEffort".to_string(),
+                        Some(serde_json::Value::String(value)),
+                    );
+                });
+            })
+            .detach();
+            SliderState::new()
+                .min(0.)
+                .max((levels.len() - 1) as f32)
+                .step(1.)
+                .default_value(current as f32)
+        },
+    );
+    let shown = (state.read(cx).value().end().round() as usize).min(levels.len() - 1);
+    let accent = if shown == levels.len() - 1 {
+        cx.theme().max_effort_accent()
+    } else {
+        cx.theme().primary
+    };
+    Some(
+        v_flex()
+            .w_full()
+            .child(
+                h_flex()
+                    .min_h(px(36.))
+                    .justify_center()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(13.))
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::tr!("composer.effort")),
+                    )
+                    .child(
+                        div()
+                            .font_medium()
+                            .text_color(accent)
+                            .child(levels[shown].label.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(32.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .flex()
+                    .items_center()
+                    .child(crate::widgets::Slider::new(&state).fill(accent)),
+            )
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_traits_pane(
     spec: &ModelSpec,
@@ -1434,9 +1561,8 @@ fn render_traits_pane(
     compact: bool,
     pending_restart: bool,
     store_entity: &Entity<WorkspaceStore>,
-    context_window_custom: &Entity<InputState>,
-    context_window_custom_error: bool,
     popover: &Entity<PopoverState>,
+    window: &mut Window,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -1489,33 +1615,18 @@ fn render_traits_pane(
                     continue;
                 }
                 let options = &options;
+                // The slider carries its own label and replaces the rows.
+                if id == "reasoningEffort"
+                    && let Some(slider) = render_effort_slider(store_entity, window, cx)
+                {
+                    pane = pane.child(slider);
+                    continue;
+                }
                 pane = pane.child(section_header(label, cx));
                 let resolved = resolved_select_value(id, options, default_value, selections);
-                let resolved_window = (id == "contextWindow")
-                    .then(|| {
-                        selections
-                            .iter()
-                            .find(|selection| selection.id == *id)
-                            .and_then(|selection| {
-                                agent::claude::parse_context_window_tokens(&selection.value)
-                            })
-                            .or_else(|| {
-                                default_value.as_ref().and_then(|value| {
-                                    agent::claude::parse_context_window_tokens(&serde_json::json!(
-                                        value
-                                    ))
-                                })
-                            })
-                    })
-                    .flatten();
                 for (index, opt) in options.iter().enumerate() {
                     let is_default = default_value.as_deref() == Some(opt.value.as_str());
-                    let is_selected = if let Some(window) = resolved_window {
-                        agent::claude::parse_context_window_tokens(&serde_json::json!(opt.value))
-                            == Some(window)
-                    } else {
-                        resolved.as_deref() == Some(opt.value.as_str())
-                    };
+                    let is_selected = resolved.as_deref() == Some(opt.value.as_str());
                     let mut text = opt.label.clone();
                     if is_default {
                         text.push_str(&default_suffix);
@@ -1554,63 +1665,6 @@ fn render_traits_pane(
                                 pop.update(cx, |st, cx| st.dismiss(window, cx));
                             }),
                     );
-                }
-                if id == "contextWindow" {
-                    let custom_selected = resolved_window.is_some_and(|window| {
-                        !options.iter().any(|opt| {
-                            agent::claude::parse_context_window_tokens(&serde_json::json!(
-                                opt.value
-                            )) == Some(window)
-                        })
-                    });
-                    let mut label = crate::tr!("composer.context_window_custom").into_owned();
-                    if custom_selected {
-                        label.push_str(&format!(
-                            " ({})",
-                            agent::claude::format_context_window(resolved_window.unwrap())
-                        ));
-                    }
-                    let input = context_window_custom.clone();
-                    pane = pane
-                        .child(
-                            h_flex()
-                                .id("trait-opt-context-window-custom")
-                                .when(compact, |row| row.min_h(px(44.)))
-                                .flex_none()
-                                .w_full()
-                                .px_2()
-                                .py_1p5()
-                                .gap_2()
-                                .items_center()
-                                .rounded(cx.theme().tokens.radius.sm)
-                                .cursor_pointer()
-                                .text_size(px(13.))
-                                .hover(|s| s.bg(cx.theme().muted))
-                                .child(div().flex_1().min_w_0().child(label))
-                                .when(custom_selected, |this| {
-                                    this.child(
-                                        Icon::new(IconName::Check).xsmall().text_color(primary),
-                                    )
-                                })
-                                .on_click(move |_, window, cx| {
-                                    input.update(cx, |state, cx| state.focus(window, cx));
-                                }),
-                        )
-                        .child(
-                            v_flex()
-                                .px_2()
-                                .pb_1()
-                                .gap_1()
-                                .child(Input::new(context_window_custom).appearance(false))
-                                .when(context_window_custom_error, |this| {
-                                    this.child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().danger)
-                                            .child(crate::tr!("composer.context_window_invalid")),
-                                    )
-                                }),
-                        );
                 }
             }
             OptionDescriptor::Boolean {
@@ -1704,11 +1758,7 @@ fn render_traits_pane(
         .into_any_element()
 }
 
-/// The fast-mode bolt pinned to the traits pane's top-right corner: filled
-/// amber when on, an outline when off, dimmed and inert when the model has no
-/// fast mode. Toggling keeps the pane open so the new state is visible. The
-/// wrapper occludes the list scrolling beneath it so hovering or clicking the
-/// bolt never reaches an option row under it.
+// Wheel input over the bolt must still reach the options list beneath it.
 fn render_fast_mode_bolt(
     fast: Option<&FastMode>,
     selections: &[agent::OptionSelection],
@@ -1823,6 +1873,8 @@ fn render_context_meter_pane(
     provider: Option<ProviderKind>,
     pct: Option<f32>,
     compact: bool,
+    // Present when the active model's context window can be changed here.
+    edit_window: Option<Entity<WorkspaceStore>>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -1868,11 +1920,34 @@ fn render_context_meter_pane(
             .items_center()
             .gap_3()
             .child(
-                div()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
-                    .child(crate::tr!("composer.context_window_title")),
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_medium()
+                            .text_color(muted)
+                            .child(crate::tr!("composer.context_window_title")),
+                    )
+                    .when_some(edit_window, |title, store| {
+                        let popover = cx.entity();
+                        let label = crate::tr!("composer.context_window_edit").into_owned();
+                        title.child(
+                            Button::new("context-window-edit")
+                                .debug_selector(|| "context-window-edit".into())
+                                .ghost()
+                                .xsmall()
+                                .when(compact, |button| button.min_h(px(44.)).min_w(px(44.)))
+                                .aria_label(label.clone())
+                                .tooltip(label)
+                                .icon(Icon::empty().path("icons/pencil.svg"))
+                                .on_click(move |_, window, cx| {
+                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                    super::context_window::open(store.clone(), window, cx);
+                                }),
+                        )
+                    }),
             )
             .child(stat),
     );
@@ -2049,7 +2124,7 @@ mod sheet_tests {
                     )
                     .content(move |_, _, cx| {
                         if context {
-                            render_context_meter_pane(None, None, None, None, compact, cx)
+                            render_context_meter_pane(None, None, None, None, compact, None, cx)
                         } else {
                             let mut composer = store.read(cx).composer_state();
                             composer.provider = Some(ProviderKind::ClaudeCode);
