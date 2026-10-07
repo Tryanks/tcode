@@ -3403,8 +3403,16 @@ impl SessionsSidebar {
                 .size_full()
                 .child(crate::material::empty_state(
                     Icon::new(IconName::Folder),
-                    crate::tr!("mobile.projects_empty"),
-                    crate::tr!("mobile.projects_help"),
+                    if self.store.read(cx).scope().is_full() {
+                        crate::tr!("mobile.projects_empty")
+                    } else {
+                        crate::tr!("member.empty_title")
+                    },
+                    if self.store.read(cx).scope().is_full() {
+                        crate::tr!("mobile.projects_help")
+                    } else {
+                        crate::tr!("member.empty_description")
+                    },
                     cx,
                 ))
                 .into_any_element()
@@ -3989,7 +3997,11 @@ impl Render for SessionsSidebar {
                                         .py_3()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(crate::tr!("sidebar.empty")),
+                                        .child(if self.store.read(cx).scope().is_full() {
+                                            crate::tr!("sidebar.empty")
+                                        } else {
+                                            crate::tr!("member.empty_description")
+                                        }),
                                 ),
                             ),
                         )
@@ -4065,7 +4077,14 @@ impl Render for SessionsSidebar {
                 if visible.is_empty() && settled_count == 0 {
                     // An active project filter can empty the list while threads
                     // exist; that state gets its own hint, not the no-projects one.
-                    let hint = if flat_sessions.is_empty() {
+                    let hint = if !self.store.read(cx).scope().is_full() && flat_sessions.is_empty()
+                    {
+                        if self.store.read(cx).projects().is_empty() {
+                            crate::tr!("member.empty_description")
+                        } else {
+                            crate::tr!("member.threads_empty")
+                        }
+                    } else if flat_sessions.is_empty() {
                         crate::tr!("sidebar.empty")
                     } else {
                         crate::tr!("sidebar.filter_empty")

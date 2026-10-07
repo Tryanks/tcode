@@ -598,6 +598,7 @@ impl WorkspaceStore {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     fn seed_ready(&self) -> bool {
         self.baseline_topics.contains(&Topic::Scope)
             && self.baseline_topics.contains(&self.index_topic())
