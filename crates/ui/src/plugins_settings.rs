@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use agent::{
-    ApplyNote, DeclaredComponents, MarketplaceAction, PluginAction, PluginActionKind,
-    PluginManagement, PluginScope, PluginSourceKind, ProviderPluginEntry, Tri,
+    DeclaredComponents, MarketplaceAction, PluginAction, PluginActionKind, PluginManagement,
+    PluginScope, PluginSourceKind, ProviderPluginEntry, Tri,
 };
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Entity, Hsla, InteractiveElement as _,
@@ -659,17 +659,7 @@ impl PluginsSettingsPanel {
             View::Marketplaces => self.marketplaces(&profile_id, &catalog, busy, cx),
         };
 
-        section
-            .children(track)
-            .child(content)
-            .child(
-                div()
-                    .px_3()
-                    .text_size(px(12.))
-                    .text_color(muted)
-                    .child(apply_note(management.apply)),
-            )
-            .into_any_element()
+        section.children(track).child(content).into_any_element()
     }
 
     fn status_rows(
@@ -1327,22 +1317,12 @@ impl PluginsSettingsPanel {
                     .gap_3()
                     .items_center()
                     .child(
-                        v_flex()
+                        div()
                             .flex_1()
                             .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_medium()
-                                    .child(crate::tr!("providers.plugins.management")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!("providers.plugins.management_description")),
-                            ),
+                            .text_size(px(13.))
+                            .font_medium()
+                            .child(crate::tr!("providers.plugins.management")),
                     )
                     .child(
                         div()
@@ -1723,18 +1703,6 @@ fn verbatim(text: String, cx: &App) -> AnyElement {
         .font_family(cx.theme().mono_font_family.clone())
         .child(text)
         .into_any_element()
-}
-
-fn apply_note(apply: ApplyNote) -> String {
-    match apply {
-        ApplyNote::ReloadOrRestart => crate::tr!("providers.plugins.apply_reload_or_restart"),
-        ApplyNote::ReloadOrNextSession => {
-            crate::tr!("providers.plugins.apply_reload_or_next_session")
-        }
-        ApplyNote::NextSession => crate::tr!("providers.plugins.apply_next_session"),
-        ApplyNote::Unverified => crate::tr!("providers.plugins.apply_unverified"),
-    }
-    .into_owned()
 }
 
 fn scope_key(scope: PluginScope) -> &'static str {
