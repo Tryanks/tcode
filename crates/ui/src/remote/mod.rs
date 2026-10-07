@@ -1061,6 +1061,8 @@ mod tests {
                     relay: None,
                     addrs: Vec::new(),
                     last_connected_unix: None,
+                    space_id: None,
+                    space_name: None,
                 }]
             }
             fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
@@ -1254,6 +1256,8 @@ mod tests {
             relay: None,
             addrs: vec!["192.168.1.10:47420".into()],
             last_connected_unix: None,
+            space_id: None,
+            space_name: None,
         };
         probe.update_in(cx, |probe, window, cx| {
             probe.0.update(cx, |panel, cx| {

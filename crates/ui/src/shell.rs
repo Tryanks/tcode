@@ -2552,6 +2552,8 @@ mod tests {
                 relay: None,
                 addrs: vec!["127.0.0.1:47503".into()],
                 last_connected_unix: Some(1),
+                space_id: None,
+                space_name: None,
             },
             transport: RefCell::new(Some(Transport {
                 to_host: to_host.into(),
@@ -2640,6 +2642,8 @@ mod tests {
                 relay: None,
                 addrs: vec!["127.0.0.1:48442".into()],
                 last_connected_unix: None,
+                space_id: None,
+                space_name: None,
             },
             transport: RefCell::new(Some(Transport {
                 to_host: to_host.into(),
