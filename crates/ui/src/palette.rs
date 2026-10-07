@@ -335,12 +335,14 @@ impl CommandPalette {
                     project_id: group.project.id.clone(),
                 },
             );
-            push_action(
-                crate::tr!("project_icon.action", project = group.project.name.clone())
-                    .into_owned(),
-                IconName::Folder,
-                Action::ChangeProjectIcon(group.project),
-            );
+            if store.scope().is_full() {
+                push_action(
+                    crate::tr!("project_icon.action", project = group.project.name.clone())
+                        .into_owned(),
+                    IconName::Folder,
+                    Action::ChangeProjectIcon(group.project),
+                );
+            }
         }
         push_action(
             crate::tr!("palette.open_settings").into_owned(),
@@ -362,16 +364,20 @@ impl CommandPalette {
             IconName::SquareTerminal,
             Action::ToggleTerminal,
         );
-        push_action(
-            crate::tr!("palette.open_preview").into_owned(),
-            IconName::Globe,
-            Action::OpenPreview,
-        );
-        push_action(
-            crate::tr!("palette.check_updates").into_owned(),
-            IconName::Inbox,
-            Action::CheckUpdates,
-        );
+        if store.scope().is_full() {
+            push_action(
+                crate::tr!("palette.open_preview").into_owned(),
+                IconName::Globe,
+                Action::OpenPreview,
+            );
+        }
+        if store.scope().is_full() {
+            push_action(
+                crate::tr!("palette.check_updates").into_owned(),
+                IconName::Inbox,
+                Action::CheckUpdates,
+            );
+        }
         if let Some(session_id) = store.active_session_id()
             && let Some(meta) = store
                 .sidebar_sessions()
@@ -1167,6 +1173,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -1185,6 +1192,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("thread-0".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {

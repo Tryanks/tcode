@@ -169,6 +169,7 @@ mod tests {
     fn host_grants_refresh_and_never_survive_disconnect_or_failed_recheck(cx: &mut TestAppContext) {
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -183,6 +184,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
@@ -280,6 +282,7 @@ mod tests {
         });
         link.set_connection_state(ConnectionState::Connected { path: None });
         cx.run_until_parked();
+        crate::store::tests::seed_full_scope(&store, &replies, Vec::new(), cx);
         baseline();
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
