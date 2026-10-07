@@ -585,6 +585,10 @@ impl WorkspaceStore {
             .ok_or_else(|| "remote preview requires a paired machine connection".into())
     }
 
+    pub(crate) fn can_manage_host(&self) -> bool {
+        self.scope.is_full() && self.baseline_topics.contains(&Topic::Scope)
+    }
+
     pub fn scope(&self) -> &WorkspaceScope {
         &self.scope
     }
@@ -1046,10 +1050,9 @@ impl WorkspaceStore {
             return;
         }
         if envelope.topic == Topic::Scope {
-            if let ServerEvent::ScopeSnapshot(scope) | ServerEvent::ScopeReplaced(scope) =
-                &envelope.event
-                && (!self.baseline_topics.contains(&Topic::Scope)
-                    || matches!(envelope.event, ServerEvent::ScopeReplaced(_)))
+            if let ServerEvent::ScopeSnapshot(scope) = &envelope.event
+                && envelope.request_id.is_some()
+                && !self.baseline_topics.contains(&Topic::Scope)
             {
                 self.apply_scope(scope, cx);
             }
@@ -2623,7 +2626,7 @@ impl WorkspaceStore {
     /// than logged away: an empty list and a broken host look identical to the
     /// user otherwise.
     pub fn scan_external_history(&self, cx: &mut App) -> Task<Result<Vec<RecentDir>, String>> {
-        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+        if !self.can_manage_host() {
             return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
         }
         let host = self.host.clone();
@@ -3542,10 +3545,20 @@ pub(crate) mod tests {
         deferred: Vec<String>,
         cx: &mut TestAppContext,
     ) {
+        seed_full_scope_reply(store, incoming, 1, deferred, cx);
+    }
+
+    pub(crate) fn seed_full_scope_reply(
+        store: &gpui::Entity<WorkspaceStore>,
+        incoming: &async_channel::Sender<String>,
+        request_id: u64,
+        deferred: Vec<String>,
+        cx: &mut TestAppContext,
+    ) {
         incoming
             .try_send(
                 tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(EventEnvelope {
-                    request_id: None,
+                    request_id: Some(request_id),
                     topic: Topic::Scope,
                     event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
                 }))
@@ -3567,6 +3580,11 @@ pub(crate) mod tests {
         scope: std::sync::Arc<std::sync::Mutex<tcode_protocol::Scope>>,
         requests: std::sync::Arc<std::sync::Mutex<Vec<tcode_protocol::ClientMessage>>>,
         worker: Option<std::thread::JoinHandle<()>>,
+        pump_thread: Option<(async_channel::Sender<()>, std::thread::JoinHandle<()>)>,
+        scheduled_pump: Option<gpui::Task<()>>,
+        scheduled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        pending_replies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        replies: async_channel::Sender<String>,
     }
 
     impl ScriptedSpace {
@@ -3595,14 +3613,34 @@ pub(crate) mod tests {
             let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let worker_scope = scope.clone();
             let worker_recorded = recorded.clone();
+            let scheduled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let pending_replies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let worker_scheduled = scheduled.clone();
+            let worker_replies = pending_replies.clone();
+            let fixture_replies = replies.clone();
             let pump = link.clone();
-            let worker = std::thread::spawn(move || {
+            let (stop_pump, stopped) = async_channel::bounded(1);
+            let pump_thread = std::thread::spawn(move || {
                 smol::block_on(futures_lite::future::race(pump.pump(), async move {
+                    let _ = stopped.recv().await;
+                }));
+            });
+            let worker = std::thread::spawn(move || {
+                smol::block_on(async move {
                     while let Ok(line) = requests.recv().await {
                         let request = tcode_protocol::decode_client_line(&line).unwrap();
                         worker_recorded.lock().unwrap().push(request.clone());
                         let scope = worker_scope.lock().unwrap().clone();
                         let response = match request.payload {
+                            ClientPayload::Subscribe(subscription)
+                                if subscription.topic == Topic::RuntimeEvents
+                                    && scope == Scope::Full =>
+                            {
+                                HostMessage::Ack {
+                                    id: request.id,
+                                    result: Ok(CommandResponse::Unit),
+                                }
+                            }
                             ClientPayload::Subscribe(subscription) => {
                                 let event = match (&subscription.topic, &scope) {
                                     (Topic::Scope, _) => ServerEvent::ScopeSnapshot(scope.clone()),
@@ -3614,18 +3652,40 @@ pub(crate) mod tests {
                                             ..
                                         },
                                     ) if space_id == scoped_id => {
-                                        let mut session = thread(
-                                            &projects[0].root,
-                                            "shared-thread",
-                                            &projects[0].id,
-                                            None,
-                                        );
-                                        session.updated_at = 100;
+                                        let sessions = projects
+                                            .first()
+                                            .map(|project| {
+                                                let mut session = thread(
+                                                    &project.root,
+                                                    "shared-thread",
+                                                    &project.id,
+                                                    None,
+                                                );
+                                                session.updated_at = 100;
+                                                session
+                                            })
+                                            .into_iter()
+                                            .collect();
                                         ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
                                             projects: projects.clone(),
-                                            sessions: vec![session],
+                                            sessions,
                                             summary: Default::default(),
                                         })
+                                    }
+                                    (Topic::Index, Scope::Full) => {
+                                        ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                                            projects: vec![],
+                                            sessions: vec![],
+                                            summary: Default::default(),
+                                        })
+                                    }
+                                    (Topic::Settings, Scope::Full) => {
+                                        ServerEvent::SettingsSnapshot(Settings::default())
+                                    }
+                                    (Topic::Providers, Scope::Full) => {
+                                        ServerEvent::ProvidersReplaced(
+                                            tcode_protocol::ProvidersStatus::default(),
+                                        )
                                     }
                                     _ => panic!(
                                         "unexpected member subscription: {:?}",
@@ -3648,6 +3708,59 @@ pub(crate) mod tests {
                                 id: request.id,
                                 result: Ok(CommandResponse::Unit),
                             },
+                            ClientPayload::Query(tcode_protocol::Query::Hosting { action }) => {
+                                let created = matches!(
+                                    action,
+                                    tcode_protocol::HostingAction::Spaces(
+                                        tcode_protocol::SpaceAction::Create { .. }
+                                    )
+                                );
+                                let shared = matches!(
+                                    action,
+                                    tcode_protocol::HostingAction::Spaces(
+                                        tcode_protocol::SpaceAction::SetProjects { .. }
+                                    )
+                                );
+                                let spaces = ["created", "concurrent"]
+                                    .into_iter()
+                                    .map(|id| tcode_protocol::SpaceInfo {
+                                        id: id.into(),
+                                        name: id.into(),
+                                        created_unix: 1,
+                                        project_ids: if shared && id == "created" {
+                                            vec!["shared".into()]
+                                        } else {
+                                            vec![]
+                                        },
+                                        link: None,
+                                        link_enabled: true,
+                                        link_dead: false,
+                                        members: vec![],
+                                    })
+                                    .collect();
+                                HostMessage::QueryResult {
+                                    id: request.id,
+                                    result: Ok(tcode_protocol::QueryResponse::Hosting(
+                                        tcode_protocol::HostingState {
+                                            created_space_id: created.then(|| "created".into()),
+                                            spaces: if matches!(
+                                                action,
+                                                tcode_protocol::HostingAction::State
+                                            ) {
+                                                vec![]
+                                            } else {
+                                                spaces
+                                            },
+                                            enabled: true,
+                                            expires_in_secs: 0,
+                                            host_id: "machine".into(),
+                                            host_name: "Studio".into(),
+                                            invite: None,
+                                            devices: vec![],
+                                        },
+                                    )),
+                                }
+                            }
                             ClientPayload::Query(tcode_protocol::Query::Ping) => {
                                 HostMessage::QueryResult {
                                     id: request.id,
@@ -3666,21 +3779,25 @@ pub(crate) mod tests {
                             ClientPayload::Unsubscribe(_) => continue,
                             other => panic!("unexpected member request: {other:?}"),
                         };
-                        if replies
-                            .send(tcode_protocol::encode_line(&response).unwrap())
-                            .await
-                            .is_err()
-                        {
+                        let line = tcode_protocol::encode_line(&response).unwrap();
+                        if worker_scheduled.load(std::sync::atomic::Ordering::Acquire) {
+                            worker_replies.lock().unwrap().push(line);
+                        } else if replies.send(line).await.is_err() {
                             break;
                         }
                     }
-                }));
+                });
             });
             Self {
                 link,
                 scope,
                 requests: recorded,
                 worker: Some(worker),
+                pump_thread: Some((stop_pump, pump_thread)),
+                scheduled_pump: None,
+                scheduled,
+                pending_replies,
+                replies: fixture_replies,
             }
         }
 
@@ -3700,6 +3817,28 @@ pub(crate) mod tests {
             })
         }
 
+        // GPUI's test scheduler rejects wakes from OS threads; synchronous
+        // command fixtures need that thread until management queries begin.
+        fn schedule_pump(&mut self, cx: &TestAppContext) {
+            self.scheduled
+                .store(true, std::sync::atomic::Ordering::Release);
+            let (stop, pump) = self.pump_thread.take().unwrap();
+            stop.send_blocking(()).unwrap();
+            pump.join().unwrap();
+            let link = self.link.clone();
+            let executor = cx.executor();
+            self.scheduled_pump = Some(cx.executor().spawn(async move {
+                link.pump_with_timer(move || executor.timer(std::time::Duration::from_secs(1)))
+                    .await;
+            }));
+        }
+
+        fn flush_replies(&self) {
+            for line in self.pending_replies.lock().unwrap().drain(..) {
+                self.replies.try_send(line).unwrap();
+            }
+        }
+
         fn barrier(&self) {
             smol::block_on(self.link.query(tcode_protocol::Query::Ping)).unwrap();
         }
@@ -3708,6 +3847,10 @@ pub(crate) mod tests {
     impl Drop for ScriptedSpace {
         fn drop(&mut self) {
             self.link.close();
+            if let Some((stop, pump)) = self.pump_thread.take() {
+                let _ = stop.try_send(());
+                pump.join().unwrap();
+            }
             self.worker.take().unwrap().join().unwrap();
         }
     }
@@ -3716,8 +3859,11 @@ pub(crate) mod tests {
     fn member_scope_seeds_only_the_space_index_and_reseeds_on_reconnect(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let host = ScriptedSpace::new();
+        let mut host = ScriptedSpace::new();
         let workspace = host.store(cx);
+        wait_until(cx, &workspace, "member baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
         host.barrier();
         workspace.read_with(cx, |store, _| {
             assert_eq!(
@@ -3822,12 +3968,122 @@ pub(crate) mod tests {
                     })
                 ))
         );
+        assert!(
+            cx.update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
+                .is_none()
+        );
+        host.schedule_pump(cx);
+        *host.scope.lock().unwrap() = tcode_protocol::Scope::Full;
+        workspace.update(cx, |store, _| {
+            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            });
+            store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
+        });
+        wait_until(cx, &workspace, "full scope baseline", |cx| {
+            host.flush_replies();
+            workspace.read_with(cx, |store, _| {
+                store.scope().is_full() && store.baseline_ready()
+            })
+        });
+
+        let spaces = cx
+            .update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
+            .expect("Full may manage its host without pair-time metadata");
+        let created = spaces.update(cx, |spaces, cx| {
+            spaces.create("Created".into(), Some("shared".into()), cx)
+        });
+        let result = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let captured = result.clone();
+        cx.spawn(async move |_| {
+            *captured.borrow_mut() = Some(created.await);
+        })
+        .detach();
+        wait_until(cx, &workspace, "created space and project share", |_| {
+            host.flush_replies();
+            result.borrow().is_some()
+        });
+        assert_eq!(
+            result.borrow().as_ref().unwrap().as_ref().unwrap().id,
+            "created"
+        );
+        assert!(host.requests.lock().unwrap().iter().any(|request| matches!(&request.payload,
+            tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
+                action: tcode_protocol::HostingAction::Spaces(tcode_protocol::SpaceAction::SetProjects { id, .. })
+            }) if id == "created")));
+        assert_eq!(
+            spaces.read_with(cx, |spaces, _| spaces.sharing("shared")),
+            ["created"]
+        );
+        *host.scope.lock().unwrap() = tcode_protocol::Scope::Space {
+            space_id: "space-one".into(),
+            space_name: "Current".into(),
+            projects: vec![],
+            providers: vec![],
+        };
+        workspace.update(cx, |store, cx| {
+            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            });
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Scope,
+                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                },
+                cx,
+            );
+            assert!(
+                !store.can_manage_host(),
+                "an uncorrelated scope cannot establish a role while pending"
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
+                .is_none()
+        );
+        assert!(
+            spaces.read_with(cx, |spaces, _| spaces.spaces().is_empty()),
+            "the cached share badges are invalidated"
+        );
+        workspace.update(cx, |store, _| {
+            store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None })
+        });
+        wait_until(cx, &workspace, "moved member baseline", |cx| {
+            host.flush_replies();
+            workspace.read_with(cx, |store, _| {
+                !store.scope().is_full() && store.baseline_ready()
+            })
+        });
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Scope,
+                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                },
+                cx,
+            );
+            assert!(!store.scope().is_full());
+            assert!(store.machine_label().contains("Current"));
+        });
+        assert!(
+            cx.update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
+                .is_none()
+        );
     }
 
     #[gpui::test]
     fn member_sidebar_and_read_preferences_change_without_host_commands(cx: &mut TestAppContext) {
         let host = ScriptedSpace::new();
         let workspace = host.store(cx);
+        wait_until(cx, &workspace, "member baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
         host.barrier();
         host.requests.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
@@ -5288,85 +5544,26 @@ pub(crate) mod tests {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
         workspace.update(cx, |store, cx| {
-            let status = store.session_status_replica.clone().unwrap();
-            let snapshots = [
-                (
-                    Topic::Scope,
-                    ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
-                ),
-                (
-                    Topic::Index,
-                    ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
-                        summary: Default::default(),
-                        sessions: store.index_replica.0.clone(),
-                        projects: store.index_replica.1.clone(),
-                    }),
-                ),
-                (
-                    Topic::Settings,
-                    ServerEvent::SettingsSnapshot(store.settings_replica.clone()),
-                ),
-                (
-                    Topic::SessionStatus {
-                        session_id: "one".into(),
-                    },
-                    ServerEvent::SessionStatusReplaced(Box::new(status)),
-                ),
-                (
-                    Topic::SessionPlan {
-                        session_id: "one".into(),
-                    },
-                    ServerEvent::SessionPlanReplaced(store.session_plan().unwrap().clone()),
-                ),
-                (
-                    Topic::SessionEvents {
-                        session_id: "one".into(),
-                    },
-                    ServerEvent::SessionSnapshot {
-                        from: 0,
-                        end: 0,
-                        records: vec![],
-                        total: 0,
-                        total_turns: 0,
-                        truncated: false,
-                    },
-                ),
-            ];
             store.apply_connection_state(ConnectionState::Reconnecting {
                 attempt: 2,
                 reason: None,
             });
-            // Old socket events can already be queued when loss is published.
-            for (topic, event) in &snapshots {
-                store.apply_domain_event(
-                    &EventEnvelope {
-                        request_id: None,
-                        topic: topic.clone(),
-                        event: event.clone(),
-                    },
-                    cx,
-                );
-            }
-            assert!(store.baseline_ready());
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Scope,
+                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                },
+                cx,
+            );
+            assert!(!store.baseline_ready());
             store.apply_connection_state(ConnectionState::Syncing { path: None });
             assert!(!store.threads_loading(), "cached list remains visible");
             assert!(!store.chat_loading(), "cached thread remains visible");
             assert_eq!(store.active_session_id().as_deref(), Some("one"));
-            for (topic, event) in snapshots {
-                assert_eq!(
-                    store.connection_state(),
-                    ConnectionState::Syncing { path: None }
-                );
-                store.apply_domain_event(
-                    &EventEnvelope {
-                        request_id: None,
-                        topic,
-                        event,
-                    },
-                    cx,
-                );
-            }
-            assert!(store.connection_state().is_connected());
+        });
+        wait_until(cx, &workspace, "correlated reconnect baselines", |cx| {
+            workspace.read_with(cx, |store, _| store.connection_state().is_connected())
         });
         host.shutdown_blocking().unwrap();
         let _ = std::fs::remove_dir_all(root);

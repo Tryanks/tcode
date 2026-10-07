@@ -400,8 +400,13 @@ impl TraverseHost {
             .map(|_| ())
     }
 
-    pub fn remove_member(&self, device_id: &str) -> io::Result<()> {
-        self.revoke(device_id)
+    pub fn remove_member(&self, device_id: &str, regenerate_link: bool) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::RemoveMember {
+                device_id: device_id.into(),
+                regenerate_link,
+            })
+            .map(|_| ())
     }
 
     /// Answer a hosting query from a client of any transport.
@@ -573,10 +578,11 @@ impl Shared {
 
     fn set_pairing_enabled(&self, enabled: bool) {
         let mut state = self.state.lock().unwrap();
-        let previous = state.identity.pairing_enabled;
+        let previous = state.identity.clone();
         state.identity.pairing_enabled = enabled;
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
-            state.identity.pairing_enabled = previous;
+            state.identity = previous;
             log::error!("could not persist the pairing switch: {error}");
             return;
         }
@@ -650,10 +656,6 @@ impl Shared {
     }
 
     fn space_action(&self, action: SpaceAction) -> io::Result<Option<String>> {
-        if let SpaceAction::RemoveMember { device_id } = action {
-            self.revoke(&device_id)?;
-            return Ok(None);
-        }
         let mut state = self.state.lock().unwrap();
         let previous = state.identity.clone();
         let mut affected = Vec::new();
@@ -694,7 +696,32 @@ impl Shared {
                 device.access = DeviceGrant::Spaces(vec![space_id]);
                 affected.push(device_id);
             }
-            SpaceAction::RemoveMember { .. } => unreachable!(),
+            SpaceAction::RemoveMember {
+                device_id,
+                regenerate_link,
+            } => {
+                if regenerate_link {
+                    let device = state
+                        .identity
+                        .devices
+                        .iter()
+                        .find(|device| device.id == device_id)
+                        .ok_or_else(|| missing("device"))?;
+                    let DeviceGrant::Spaces(ids) = &device.access else {
+                        return Err(missing("member space"));
+                    };
+                    let ids = ids.clone();
+                    for space in &mut state.identity.spaces {
+                        if ids.contains(&space.id) {
+                            space.secret = new_secret();
+                            space.link_failures = 0;
+                            space.link_enabled = true;
+                        }
+                    }
+                }
+                state.identity.remove(&device_id);
+                affected.push(device_id);
+            }
             action => {
                 let id = match &action {
                     SpaceAction::Rename { id, .. }
@@ -755,6 +782,7 @@ impl Shared {
                 }
             }
         }
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
             state.identity = previous;
             return Err(error);
@@ -785,6 +813,7 @@ impl Shared {
                 };
                 let space = state.identity.spaces.iter().find(|space| &space.id == id)?;
                 Some(Principal::Space {
+                    policy_revision: state.identity.policy_revision,
                     space_id: space.id.clone(),
                     space_name: space.name.clone(),
                     project_ids: space.project_ids.clone(),
@@ -801,6 +830,7 @@ impl Shared {
         if !state.identity.remove(id) {
             return Ok(());
         }
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
             log::error!("could not persist the revocation: {error}");
             state.identity = previous;
@@ -811,9 +841,10 @@ impl Shared {
     }
 
     fn hosting(self: &Arc<Self>, action: HostingAction) -> Result<HostingState, ProtocolError> {
+        let mut created_space_id = None;
         match action {
             HostingAction::Spaces(action) => {
-                self.space_action(action).map_err(|error| ProtocolError {
+                created_space_id = self.space_action(action).map_err(|error| ProtocolError {
                     code: "space_update_failed".into(),
                     message: error.to_string(),
                 })?;
@@ -840,6 +871,7 @@ impl Shared {
             .map(|(invitation, remaining)| (Some(invitation.url()), remaining.as_secs()))
             .unwrap_or((None, 0));
         Ok(HostingState {
+            created_space_id,
             spaces: self.spaces(&state, &addr),
             enabled,
             expires_in_secs,
@@ -897,6 +929,7 @@ impl Shared {
             let previous = state.identity.clone();
             if !constant_time_eq(space.secret.as_bytes(), secret.as_bytes()) {
                 state.identity.spaces[index].link_failures += 1;
+                state.identity.policy_revision += 1;
                 if let Err(error) = state.identity.save() {
                     log::error!("could not record the space link failure: {error}");
                     state.identity = previous;
@@ -918,6 +951,7 @@ impl Shared {
                 .find(|device| device.id == remote.to_string())
                 .unwrap()
                 .access = DeviceGrant::Spaces(vec![space_id.into()]);
+            state.identity.policy_revision += 1;
             if let Err(error) = state.identity.save() {
                 log::error!("could not record the space member: {error}");
                 state.identity = previous;
@@ -963,6 +997,7 @@ impl Shared {
         let (name, platform) = device.normalized();
         let previous = state.identity.clone();
         state.identity.admit(&remote, name, platform);
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
             log::error!("could not record the paired device: {error}");
             state.identity = previous;
@@ -1022,6 +1057,7 @@ impl Shared {
         }
         let previous = state.identity.clone();
         state.identity.admit(&remote, name, platform);
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
             state.identity = previous;
             log::warn!("could not record the connecting device's details: {error}");

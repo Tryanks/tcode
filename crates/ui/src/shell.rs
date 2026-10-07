@@ -2452,6 +2452,7 @@ mod tests {
     /// about the link can be dictated.
     struct MountedShell {
         outgoing: async_channel::Receiver<String>,
+        observed: RefCell<Vec<tcode_protocol::ClientMessage>>,
         incoming: async_channel::Sender<String>,
         states: async_channel::Sender<tcode_client::ConnectionState>,
     }
@@ -2612,6 +2613,7 @@ mod tests {
             shell,
             MountedShell {
                 outgoing,
+                observed: RefCell::new(Vec::new()),
                 incoming,
                 states,
             },
@@ -2743,7 +2745,34 @@ mod tests {
         present: bool,
         cx: &mut VisualTestContext,
     ) {
-        crate::store::tests::seed_full_scope(&store_of(shell, cx), &host.incoming, Vec::new(), cx);
+        while let Ok(line) = host.outgoing.try_recv() {
+            host.observed
+                .borrow_mut()
+                .push(decode_client_line(&line).unwrap());
+        }
+        let scope_request = host
+            .observed
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|message| {
+                matches!(
+                    message.payload,
+                    ClientPayload::Subscribe(tcode_protocol::Subscription {
+                        topic: Topic::Scope,
+                        ..
+                    })
+                )
+                .then_some(message.id)
+            })
+            .expect("Scope subscription");
+        crate::store::tests::seed_full_scope_reply(
+            &store_of(shell, cx),
+            &host.incoming,
+            scope_request,
+            Vec::new(),
+            cx,
+        );
         let mut meta = tcode_core::project::SessionMeta::new(
             agent::ProviderKind::Codex,
             "/project".into(),
@@ -4057,6 +4086,7 @@ mod tests {
             shell,
             MountedShell {
                 outgoing,
+                observed: RefCell::new(Vec::new()),
                 incoming,
                 states,
             },
@@ -4254,7 +4284,12 @@ mod tests {
 
     /// Every line the client has sent since the last drain.
     fn sent(host: &MountedShell) -> Vec<ClientPayload> {
-        let mut payloads = Vec::new();
+        let mut payloads: Vec<_> = host
+            .observed
+            .borrow_mut()
+            .drain(..)
+            .map(|message| message.payload)
+            .collect();
         while let Ok(line) = host.outgoing.try_recv() {
             payloads.push(decode_client_line(&line).expect("client line").payload);
         }

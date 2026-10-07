@@ -46,6 +46,8 @@ pub struct ClientMessage {
 pub enum Principal {
     Full,
     Space {
+        #[serde(default)]
+        policy_revision: u64,
         space_id: String,
         space_name: String,
         project_ids: Vec<String>,

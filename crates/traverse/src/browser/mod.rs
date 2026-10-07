@@ -694,6 +694,7 @@ impl Shared {
             None => {
                 let auth = self.auth.lock().unwrap();
                 HostingState {
+                    created_space_id: None,
                     spaces: Vec::new(),
                     enabled: false,
                     expires_in_secs: 0,
