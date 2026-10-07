@@ -1,6 +1,6 @@
 //! Application state: session registry, active session runtime, event pump.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ use tcode_core::relay::{
     render_relay_transcript,
 };
 use tcode_core::session::{
-    EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt,
+    Author, EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
@@ -241,6 +241,7 @@ enum TerminalSpawnAction {
 mod acp;
 mod active_session;
 mod approvals;
+mod authorization;
 mod command_validation;
 mod diff_pass;
 mod events;
@@ -335,6 +336,10 @@ pub struct AppState {
     store_failed: bool,
     pub sessions: Vec<SessionMeta>,
     archived_revision: u64,
+    space_scopes: HashMap<String, BTreeSet<String>>,
+    // Archive replies are ordered by revision, including across unsubscribe/reconnect.
+    space_archives: HashMap<String, ArchivedSessions>,
+    decision_authors: HashMap<(String, String), Author>,
     pub projects: Vec<Project>,
     pub residents: ResidentSessions,
     /// Terminal resources parked by conversation destination. Drawer chrome is
@@ -530,6 +535,9 @@ impl AppState {
             sessions,
             projects,
             archived_revision: 0,
+            space_scopes: HashMap::new(),
+            space_archives: HashMap::new(),
+            decision_authors: HashMap::new(),
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
             terminal_registry: TerminalRegistry::default(),
