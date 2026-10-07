@@ -16,12 +16,74 @@ The plan behind this model is [#376](https://github.com/Tryanks/tcode/issues/376
 | Machine | The computer where Tcode runs providers and terminals and stores projects and threads. It is the desktop app with **Let other devices connect to this machine** on, or `tcode-headless serve`. A machine is identified by a key it generates once and keeps in `traverse.json` in its data directory; the public half is its **machine id** (64 hex characters). |
 | Device | A desktop, phone or tablet running the Tcode app that opens a machine. A device also has its own key, kept in `device.json` in its data directory. The machine keeps an allow list of device ids; every connection is authenticated by that key, so a device that is not on the list is refused before any application data flows. |
 | Invitation | A `tcode://pair?…` link, shown as a QR code and copyable as text. It carries the machine id, its name, where it is reachable right now and a random 16-byte secret. Scanning or pasting the link is the whole pairing: an invitation lasts five minutes, admits one device, is replaced by the next one and is invalidated after five wrong secrets. The machine enforces all of this; Traverse never sees an invitation. |
+| Space | A named set of projects on one machine, with a reusable pairing link. A device paired through that link becomes a member and sees only the space's projects and threads. The owner manages the projects and members. |
 | Traverse | The relay and lookup service a machine publishes to so devices off its network can find and reach it. **Official** (the default) uses the relays and lookup service listed in the manifest bundled with Tcode; **Self-hosted** uses your own `tcode-traverse` instance; **Off** uses no service at all. Traverse sees only encrypted traffic; the machine authenticates devices itself. |
 | Direct / Relay | How one live connection is carried. Direct means the two ends exchange UDP packets with each other; Relay means the packets go through a Traverse relay because no direct path was found. The connection banner and the machine's device list show which one is in use, and it can change while connected. |
 
 Pair each device separately. Project files, provider processes and terminal
 processes stay on the machine; devices receive the thread content and other
 data they need to show and operate that work.
+
+## Shared spaces
+
+A space shares selected projects with trusted collaborators. Members run
+commands with this machine's agents and permissions. This is scoped visibility
+and control, not isolation: provider turns and terminals run under the machine's
+account and can access what that account permits.
+
+### Owner
+
+1. Open **Settings → Remote → Shared spaces** on the machine, or from a
+   full-access device connected to it, and create a named space.
+2. Add existing projects in that section, or right-click a project or thread
+   in the sidebar and choose **Share to «X»** for the space. Sharing a thread
+   shares its project. Choose the checked item again to remove the project.
+3. Copy the space link or let the member scan its QR code. The **Machines**
+   page also shows the machine's spaces. A headless `serve` prints available
+   space links at startup.
+4. Turn off **Link enabled** to pause new joins, or regenerate the link to replace
+   its secret. Manage members in the space's expanded row: move a device to
+   another space or remove it. Removing a member offers to regenerate the
+   link as well, with that option selected by default.
+
+Adding or removing a project, moving or removing a member, or deleting a space
+closes affected member connections. Devices reconnect with their current access;
+a removed member has to pair again.
+
+### Member
+
+Pair with the space link by scanning or pasting it like any invitation. The
+connection banner shows **Space «X» · machine name**. The sidebar contains only
+the space's projects and threads, with no **Add project** action. Members can
+create threads, send turns, and use terminals and git in those projects. They
+can archive threads, but cannot delete threads or projects, change host
+settings, providers, plugins or hosting, or use the preview tunnel. Settings
+contains device-local pages and **Archived Threads**. Sidebar preferences and
+read state stay on the device.
+
+Each device belongs to at most one space in this version. A device already
+paired with the machine is refused as **already a member**; the owner moves it
+to the desired space. The pairing screen says **This device is already paired
+with that machine. Ask the owner to move it to the space.** A paused, dead or
+missing space link says **This link is paused or no longer valid. Ask the owner
+for a new one.** A wrong secret says **The machine rejected this invitation.
+Check that Accept new devices is on and use a new invitation.** A connection
+failure says **Could not reach ‹address›.** A malformed link says **That is not
+a Tcode invitation link.** Pairing errors leave the device without new access.
+
+### Link lifecycle and stored access
+
+A space link is reusable and does not expire after one join. It dies after
+five cumulative wrong secrets; the owner regenerates it to accept new members.
+Pausing or regenerating the link, including after it dies, affects only new
+joins. Existing members keep access until the owner removes them, deletes the
+space or revokes their device. A removed member can join again with the old
+link if it remains enabled and valid.
+
+`traverse.json` uses version 3 to store spaces and device access. Loading a
+version 2 file migrates existing paired devices to explicit full access and
+starts with no spaces. Existing devices do not become space members as part of
+the migration.
 
 ## Use the desktop app as the machine
 
