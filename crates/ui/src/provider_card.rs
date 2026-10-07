@@ -174,12 +174,6 @@ impl ProviderCard {
                                 .text_color(muted)
                                 .child(crate::tr!("providers.mcp_unavailable")),
                         )
-                    })
-                    .when(provider.caps().native_computer_use, |this| {
-                        this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
-                            "providers.native_computer_use",
-                            name = name.clone()
-                        )))
                     }),
             )
             .tooltip({
