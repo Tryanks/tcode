@@ -383,7 +383,18 @@ impl AppState {
         executor: &HostCx,
     ) -> HostTask<Vec<SessionSearchHit>> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(50);
-        let sessions = self.sessions.clone();
+        let sessions = self
+            .sessions
+            .iter()
+            .filter(|meta| match &executor.principal {
+                tcode_protocol::Principal::Full => true,
+                tcode_protocol::Principal::Space { project_ids, .. } => meta
+                    .project_id
+                    .as_ref()
+                    .is_some_and(|id| project_ids.contains(id)),
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let search = self.session_search.clone();
         executor.unblock(move || {
             search
@@ -1253,6 +1264,7 @@ impl AppState {
         let data_dir = self.store.root().clone();
         let target_id = target_id.to_string();
         let delivery_key = cx.delivery_key.clone();
+        let author = cx.author.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
@@ -1293,9 +1305,11 @@ impl AppState {
                             );
                         }
                         // Now that the worktree exists, run the deferred send.
-                        cx.delivery_key = delivery_key;
+                        let previous_key = std::mem::replace(&mut cx.delivery_key, delivery_key);
+                        let previous_author = std::mem::replace(&mut cx.author, author);
                         state.send_turn_assembled(&target_id, text, attachments, cx);
-                        cx.delivery_key = None;
+                        cx.delivery_key = previous_key;
+                        cx.author = previous_author;
                     }
                     Err(err) => {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
@@ -1436,13 +1450,11 @@ impl AppState {
     /// Switch the main area into a draft for `project_id` (rooted at `cwd`): an
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
-    ///
-    /// A New thread surface keeps at most one unsent draft: reopening the same
-    /// project at the same root returns the draft already standing, because the
-    /// composer's attachments and the draft's terminal follow that session id.
-    /// A second root (another client viewing the same project elsewhere) is a
-    /// different surface and gets its own draft.
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) -> String {
+        let device_id = match &cx.principal {
+            tcode_protocol::Principal::Full => None,
+            tcode_protocol::Principal::Space { device_id, .. } => Some(device_id.clone()),
+        };
         let standing = self
             .residents
             .live
@@ -1450,6 +1462,7 @@ impl AppState {
             .chain(self.residents.parked.values())
             .find(|active| {
                 active.draft
+                    && active.draft_device_id == device_id
                     && active.meta.project_id.as_deref() == Some(project_id.as_str())
                     && active.meta.cwd == cwd
             })
@@ -1478,6 +1491,7 @@ impl AppState {
             acp_agent_id,
             provider_commands,
         );
+        draft.draft_device_id = device_id;
         draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
         if let Some(selection) =

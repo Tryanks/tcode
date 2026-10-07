@@ -552,8 +552,24 @@ impl AppState {
     }
 
     fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
+        let author = match event {
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::UserMessage { .. },
+                ..
+            })
+            | AgentEvent::SteerRequested { .. } => cx.author.clone(),
+            AgentEvent::ApprovalResolved { request_id, .. }
+            | AgentEvent::UserInputResolved { request_id, .. } => self
+                .decision_authors
+                .remove(&(session_id.to_string(), request_id.clone())),
+            AgentEvent::TurnCompleted { .. } => {
+                self.decision_authors.retain(|(id, _), _| id != session_id);
+                None
+            }
+            _ => None,
+        };
         let record = SessionEventRecord {
-            author: None,
+            author: author.clone(),
             ts: Some(ts),
             event: event.clone(),
             elided: None,
@@ -587,6 +603,7 @@ impl AppState {
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
                 ts,
+                author,
                 event: Box::new(event.clone()),
                 joined,
             },

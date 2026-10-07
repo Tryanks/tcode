@@ -213,7 +213,7 @@ async fn host_loop(
         }
         state.sync_terminal_handles();
         state.reap_terminal_projections();
-        domain_diff.emit_changes(&state, &mut cx);
+        domain_diff.emit_changes(&mut state, &mut cx);
     }
     state
 }
@@ -233,6 +233,35 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         principal,
     } = message;
     cx.principal = principal.unwrap_or(Principal::Full);
+    cx.author = match &cx.principal {
+        Principal::Full => None,
+        Principal::Space {
+            device_id,
+            device_name,
+            ..
+        } => Some(tcode_core::session::Author {
+            device_id: device_id.clone(),
+            name: device_name.clone(),
+        }),
+    };
+    state.observe_principal(&cx.principal);
+    if let Err(error) = state.authorize(&cx.principal, &payload, cx) {
+        let reply = if matches!(payload, ClientPayload::Query(_)) {
+            HostMessage::QueryResult {
+                id,
+                result: Err(error),
+            }
+        } else {
+            HostMessage::Ack {
+                id,
+                result: Err(error),
+            }
+        };
+        cx.send_message(reply);
+        cx.principal = Principal::Full;
+        cx.author = None;
+        return;
+    }
     match payload {
         ClientPayload::Command(command) => {
             let scoped_key = key.filter(|_| command.requires_delivery_key()).map(|key| {
@@ -249,6 +278,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
                     cache.push_back(cached);
                     cx.send_message(HostMessage::Ack { id, result });
                     cx.principal = Principal::Full;
+                    cx.author = None;
                     return;
                 }
             }
@@ -309,6 +339,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         }
     }
     cx.principal = Principal::Full;
+    cx.author = None;
 }
 
 enum CommandOutcome {
@@ -319,6 +350,14 @@ enum CommandOutcome {
 fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
     if let Err(error) = app.validate_command_target(&command) {
         return CommandOutcome::Immediate(Err(error));
+    }
+    if matches!(cx.principal, Principal::Space { .. })
+        && matches!(
+            command,
+            Command::MarkSessionRead { .. } | Command::MarkSessionUnread { .. }
+        )
+    {
+        return CommandOutcome::Immediate(Ok(CommandResponse::Unit));
     }
     let mut response = CommandResponse::Unit;
     match command {
@@ -805,7 +844,7 @@ fn dispatch_query(
             item_id,
         } => app.item_output(&session_id, item_id, cx),
         Query::ArchivedSessions => {
-            let archived = app.archived_sessions();
+            let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
         }
         Query::RenderStoredOutput {
@@ -814,6 +853,11 @@ fn dispatch_query(
             cols,
         } => {
             let Some(output) = app.stored_command_output(&session_id, &item_id) else {
+                if matches!(cx.principal, Principal::Space { .. }) {
+                    return cx.spawn_background(async {
+                        Err(ProtocolError::out_of_scope("item is outside this session"))
+                    });
+                }
                 return cx.spawn_background(async move {
                     Err(ProtocolError {
                         code: "unknown_stored_output".into(),
@@ -1785,3 +1829,7 @@ mod p4b_tests;
 #[path = "terminal_replication_tests.rs"]
 #[cfg(unix)]
 mod terminal_replication_tests;
+
+#[cfg(test)]
+#[path = "pipe_spaces_tests.rs"]
+mod spaces_tests;

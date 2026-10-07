@@ -244,12 +244,17 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
-        let mut line = serde_json::to_vec(&EventEnvelopeRef {
-            ts,
-            event,
-            author: None,
-        })
-        .map_err(invalid_data)?;
+        Self::append_authored_event(session_id, ts, event, None)
+    }
+
+    pub fn append_authored_event(
+        session_id: &str,
+        ts: u64,
+        event: &AgentEvent,
+        author: Option<&Author>,
+    ) -> io::Result<Self> {
+        let mut line =
+            serde_json::to_vec(&EventEnvelopeRef { ts, event, author }).map_err(invalid_data)?;
         line.push(b'\n');
         Ok(Self(Op::AppendEvent {
             session_id: session_id.to_owned(),
