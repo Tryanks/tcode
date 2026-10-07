@@ -15,6 +15,13 @@ pub struct ProtocolError {
 }
 
 impl ProtocolError {
+    pub fn out_of_scope(message: impl Into<String>) -> Self {
+        Self {
+            code: "out_of_scope".to_string(),
+            message: message.into(),
+        }
+    }
+
     pub fn decode(message: impl Into<String>) -> Self {
         Self {
             code: "decode_error".to_string(),
@@ -29,6 +36,24 @@ pub struct ClientMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     pub payload: ClientPayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<Principal>,
+}
+
+/// Host-internal: set by transport bridges; absent means the local in-process pipe (Full).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum Principal {
+    Full,
+    Space {
+        #[serde(default)]
+        policy_revision: u64,
+        space_id: String,
+        space_name: String,
+        project_ids: Vec<String>,
+        device_id: String,
+        device_name: String,
+    },
 }
 
 #[allow(clippy::large_enum_variant)] // Boxing would complicate the public contract.

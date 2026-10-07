@@ -9,8 +9,8 @@ use crate::{
     },
 };
 use gpui::{
-    AnyElement, Context, Entity, IntoElement as _, ParentElement as _, Render, SharedString,
-    Styled as _, Task, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, IntoElement as _, ParentElement as _, Render,
+    SharedString, Styled as _, Task, Window, div, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{HostingAction, HostingState};
@@ -22,6 +22,7 @@ pub(crate) struct HostedPanel {
     pending: bool,
     refreshing: bool,
     generation: u64,
+    spaces: Entity<super::spaces::SpacesSection>,
     _ticker: Task<()>,
 }
 
@@ -41,6 +42,9 @@ impl HostedPanel {
             }
         });
         Self {
+            spaces: cx.new(|_| {
+                super::spaces::SpacesSection::new(store.clone(), super::spaces::for_store)
+            }),
             store,
             state: None,
             error: None,
@@ -187,6 +191,14 @@ impl HostedPanel {
             devices = devices.child(div().p_3().child(crate::tr!("remote.devices.empty")));
         }
         for device in state.devices {
+            let space = match &device.access {
+                tcode_protocol::DeviceAccess::Space { space_id } => state
+                    .spaces
+                    .iter()
+                    .find(|space| &space.id == space_id)
+                    .map(|space| space.name.clone()),
+                tcode_protocol::DeviceAccess::Full => None,
+            };
             let status_color = match &device.path {
                 Some(_) => cx.theme().success,
                 None => cx.theme().muted_foreground,
@@ -195,10 +207,18 @@ impl HostedPanel {
                 h_flex()
                     .p_3()
                     .gap_3()
-                    .child(div().flex_1().min_w_0().child(super::device_label(
-                        &device.name,
-                        device.platform.as_deref(),
-                    )))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .items_center()
+                            .child(div().min_w_0().child(super::device_label(
+                                &device.name,
+                                device.platform.as_deref(),
+                            )))
+                            .children(space.map(|name| super::spaces::member_badge(&name, cx))),
+                    )
                     .child(
                         div()
                             .flex_none()
@@ -217,7 +237,10 @@ impl HostedPanel {
                     ),
             );
         }
-        column.child(devices).into_any_element()
+        column
+            .child(devices)
+            .child(self.spaces.clone())
+            .into_any_element()
     }
 }
 impl Render for HostedPanel {

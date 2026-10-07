@@ -7,7 +7,7 @@
 use std::future::Future;
 
 use tcode_protocol::{
-    EventEnvelope, HostMessage, RuntimeNotification, ServerEvent, Topic, encode_line,
+    EventEnvelope, HostMessage, Principal, RuntimeNotification, ServerEvent, Topic, encode_line,
 };
 
 use crate::app::AppState;
@@ -41,6 +41,8 @@ type CompletedCommands = std::collections::HashMap<
 pub struct HostCx {
     mailbox: smol::channel::Sender<HostFn>,
     events: smol::channel::Sender<String>,
+    pub(crate) principal: Principal,
+    pub(crate) author: Option<tcode_core::session::Author>,
     pub(crate) delivery_key: Option<String>,
     pub(crate) completed: std::sync::Arc<std::sync::Mutex<CompletedCommands>>,
 }
@@ -55,6 +57,8 @@ impl HostCx {
             events,
             completed: Default::default(),
             delivery_key: None,
+            principal: Principal::Full,
+            author: None,
         }
     }
 

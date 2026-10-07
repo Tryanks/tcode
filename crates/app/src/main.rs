@@ -323,7 +323,7 @@ struct LocalKernel {
 impl LocalKernel {
     fn start(store: SessionStore) -> std::io::Result<Self> {
         let (host, mux) = start_local(store)?;
-        let connection = mux.attach();
+        let connection = mux.attach(tcode_protocol::Principal::Full);
         let control_link = HostLink::new(connection.to_host, connection.from_host);
         let pump_link = control_link.clone();
         let control_pump = smol::spawn(async move { pump_link.pump().await });
@@ -338,7 +338,7 @@ impl LocalKernel {
     /// A window's link to the local kernel. The mux keeps the kernel alive
     /// independently, so this is an ordinary client connection like any other.
     fn transport(&self) -> Transport {
-        let connection = self.mux.attach();
+        let connection = self.mux.attach(tcode_protocol::Principal::Full);
         // Nothing reports connection state for an in-process host; the closed
         // receiver simply ends the forwarder on its first poll.
         let (_, state) = async_channel::unbounded();

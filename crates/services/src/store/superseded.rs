@@ -227,7 +227,11 @@ fn without_diffs(line: &[u8]) -> io::Result<Option<(Vec<u8>, StoredEvent)>> {
         return Ok(None);
     }
     let mut rewritten = match stored.ts {
-        Some(ts) => serde_json::to_vec(&EventEnvelopeRef::new(ts, &stored.event)),
+        Some(ts) => serde_json::to_vec(&EventEnvelopeRef::new(
+            ts,
+            &stored.event,
+            stored.author.as_ref(),
+        )),
         None => serde_json::to_vec(&stored.event),
     }
     .map_err(invalid_data)?;

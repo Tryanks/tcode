@@ -82,6 +82,7 @@ fn provider_update_status_accepts_older_hosts_and_preserves_terminal_requirement
 #[test]
 fn client_ndjson_preserves_ids_text_and_record_boundaries() {
     let message = ClientMessage {
+        principal: None,
         key: None,
         id: u64::MAX,
         payload: ClientPayload::Command(Command::SendTurn {
@@ -158,6 +159,7 @@ fn event_envelopes_keep_stored_record_shape_and_optional_request_id() {
             session_id: "session-1".into(),
         },
         event: ServerEvent::SessionEvent(SessionEventRecord {
+            author: None,
             ts: Some(123),
             event: AgentEvent::TurnStarted {
                 turn_id: "turn-1".into(),
@@ -178,6 +180,16 @@ fn event_envelopes_keep_stored_record_shape_and_optional_request_id() {
         envelope
     );
 
+    if let ServerEvent::SessionEvent(record) = &mut envelope.event {
+        record.author = Some(tcode_core::session::Author {
+            device_id: "d".into(),
+            name: "Alice".into(),
+        });
+    }
+    assert_eq!(
+        serde_json::to_value(&envelope).unwrap()["event"]["content"]["author"],
+        json!({"device_id":"d","name":"Alice"})
+    );
     envelope.request_id = Some(42);
     let message = HostMessage::Event(envelope);
     let line = encode_line(&message).unwrap();
@@ -255,6 +267,7 @@ fn omitted_optional_subscription_index_and_queue_fields_default() {
 #[test]
 fn import_status_and_content_search_use_their_documented_wire_shapes() {
     let start = ClientMessage {
+        principal: None,
         key: None,
         id: 3,
         payload: ClientPayload::Command(Command::StartExternalImport {
@@ -361,6 +374,7 @@ fn import_status_and_content_search_use_their_documented_wire_shapes() {
     }
 
     let search = ClientMessage {
+        principal: None,
         key: None,
         id: 9,
         payload: ClientPayload::Query(Query::SearchSessionContent {
@@ -696,6 +710,7 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
     use crate::terminal::{TerminalCell, TerminalFrame, TerminalRow, TerminalStyle};
 
     let request = ClientMessage {
+        principal: None,
         key: None,
         id: 11,
         payload: ClientPayload::Query(Query::RenderStoredOutput {
@@ -785,6 +800,7 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
 #[test]
 fn thread_export_and_project_creation_use_their_documented_wire_shapes() {
     let request = ClientMessage {
+        principal: None,
         key: None,
         id: 7,
         payload: ClientPayload::Query(Query::RenderThreadExport {
@@ -1009,6 +1025,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         turn_id: "t".into(),
     };
     let record = SessionEventRecord {
+        author: None,
         ts: Some(1),
         event: turn_started.clone(),
         elided: Some(9000),
@@ -1030,6 +1047,23 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
     )
     .unwrap();
     assert_eq!(legacy.key, None);
+    assert_eq!(legacy.principal, None);
+    let scoped = decode_client_line(r#"{"id":9,"principal":{"type":"space","content":{"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone"}},"payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
+    assert_eq!(
+        scoped.principal,
+        Some(Principal::Space {
+            policy_revision: 0,
+            space_id: "s".into(),
+            space_name: "Shared".into(),
+            project_ids: vec!["p".into()],
+            device_id: "d".into(),
+            device_name: "Phone".into(),
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&scoped).unwrap()["principal"],
+        json!({"type":"space","content":{"policy_revision":0,"space_id":"s","space_name":"Shared","project_ids":["p"],"device_id":"d","device_name":"Phone"}})
+    );
     let keyed = decode_client_line(r#"{"id":9,"key":"951925af-31f3-4f1c-a57b-dac199d82ad7","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
     assert_eq!(
         keyed.key.as_deref(),
@@ -1055,6 +1089,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     }))
     .unwrap();
     assert_eq!(older.invite, None);
+    assert_eq!(older.created_space_id, None);
     assert_eq!(older.devices[0].path, None);
     assert_eq!(
         serde_json::from_value::<HostingAction>(json!({"type": "new_code"})).unwrap(),
@@ -1065,7 +1100,70 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
         json!({"type": "new_invitation"})
     );
 
-    let state = HostingState {
+    assert!(older.spaces.is_empty());
+    assert_eq!(older.devices[0].access, DeviceAccess::Full);
+    for (action, wire) in [
+        (
+            SpaceAction::Create {
+                name: "Shared".into(),
+            },
+            json!({"type":"create","content":{"name":"Shared"}}),
+        ),
+        (
+            SpaceAction::Rename {
+                id: "s".into(),
+                name: "Renamed".into(),
+            },
+            json!({"type":"rename","content":{"id":"s","name":"Renamed"}}),
+        ),
+        (
+            SpaceAction::Delete { id: "s".into() },
+            json!({"type":"delete","content":{"id":"s"}}),
+        ),
+        (
+            SpaceAction::SetProjects {
+                id: "s".into(),
+                project_ids: vec!["p".into()],
+            },
+            json!({"type":"set_projects","content":{"id":"s","project_ids":["p"]}}),
+        ),
+        (
+            SpaceAction::RegenerateLink { id: "s".into() },
+            json!({"type":"regenerate_link","content":{"id":"s"}}),
+        ),
+        (
+            SpaceAction::SetLinkEnabled {
+                id: "s".into(),
+                enabled: false,
+            },
+            json!({"type":"set_link_enabled","content":{"id":"s","enabled":false}}),
+        ),
+        (
+            SpaceAction::MoveMember {
+                device_id: "d".into(),
+                space_id: "s".into(),
+            },
+            json!({"type":"move_member","content":{"device_id":"d","space_id":"s"}}),
+        ),
+        (
+            SpaceAction::RemoveMember {
+                device_id: "d".into(),
+                regenerate_link: true,
+            },
+            json!({"type":"remove_member","content":{"device_id":"d","regenerate_link":true}}),
+        ),
+    ] {
+        let action = HostingAction::Spaces(action);
+        let wire = json!({"type":"spaces","content":wire});
+        assert_eq!(serde_json::to_value(&action).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<HostingAction>(wire).unwrap(),
+            action
+        );
+    }
+    let mut state = HostingState {
+        created_space_id: None,
+        spaces: Vec::new(),
         enabled: true,
         expires_in_secs: 280,
         host_id: "ab".repeat(32),
@@ -1073,6 +1171,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
         invite: Some("tcode://pair?v=2&id=abab".into()),
         devices: vec![
             HostedDevice {
+                access: DeviceAccess::Full,
                 id: "cd".repeat(32),
                 name: "Phone".into(),
                 created_unix: 1,
@@ -1085,6 +1184,9 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                 }),
             },
             HostedDevice {
+                access: DeviceAccess::Space {
+                    space_id: "s".into(),
+                },
                 id: "ef".repeat(32),
                 name: "Laptop".into(),
                 created_unix: 2,
@@ -1093,6 +1195,16 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
             },
         ],
     };
+    state.spaces.push(SpaceInfo {
+        id: "s".into(),
+        name: "Shared".into(),
+        created_unix: 3,
+        project_ids: vec!["p".into()],
+        link: Some("tcode://pair?v=2&id=abab&space=s".into()),
+        link_enabled: true,
+        link_dead: false,
+        members: vec![state.devices[1].clone()],
+    });
     assert_eq!(
         serde_json::to_value(&state).unwrap(),
         json!({
@@ -1106,11 +1218,15 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                     "id": "cd".repeat(32),
                     "name": "Phone",
                     "created_unix": 1,
+                    "access": {"type":"full"},
                     "platform": "iOS 26",
                     "path": {"direct": false, "relay": "https://relay.example/", "probing_direct": true}
                 },
-                {"id": "ef".repeat(32), "name": "Laptop", "created_unix": 2}
-            ]
+                {"id": "ef".repeat(32), "name": "Laptop", "created_unix": 2, "access":{"type":"space","content":{"space_id":"s"}}}
+            ],
+            "spaces": [{"id":"s","name":"Shared","created_unix":3,"project_ids":["p"],
+                "link":"tcode://pair?v=2&id=abab&space=s","link_enabled":true,"link_dead":false,
+                "members":[{"id":"ef".repeat(32),"name":"Laptop","created_unix":2,"access":{"type":"space","content":{"space_id":"s"}}}]}]
         })
     );
 }
@@ -1274,4 +1390,63 @@ fn provider_plugin_catalog_and_commands_use_their_documented_wire_shapes() {
             accept: true,
         })
     );
+}
+
+#[test]
+fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
+    for (topic, wire) in [
+        (Topic::Scope, json!({"type":"scope"})),
+        (
+            Topic::SpaceIndex {
+                space_id: "s".into(),
+            },
+            json!({"type":"space_index","content":{"space_id":"s"}}),
+        ),
+    ] {
+        let wire = json!({"id":1,"principal":{"type":"full"},"payload":{"type":"subscribe","content":{"topic":wire,"after":null}}});
+        let request = ClientMessage {
+            id: 1,
+            key: None,
+            principal: Some(Principal::Full),
+            payload: ClientPayload::Subscribe(Subscription { topic, after: None }),
+        };
+        assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+        assert_eq!(decode_client_line(&wire.to_string()).unwrap(), request);
+    }
+    let scope = Scope::Space {
+        space_id: "s".into(),
+        space_name: "Shared".into(),
+        projects: vec![],
+        providers: vec![ScopedProviderChoice {
+            provider: agent::ProviderKind::Codex,
+            profile_id: Some("codex".into()),
+            name: "Codex".into(),
+            models: vec![agent::ModelSpec {
+                id: "model".into(),
+                display_name: "Model".into(),
+                is_default: true,
+                options: vec![],
+            }],
+        }],
+    };
+    let scope_wire = json!({"type":"space","content":{"space_id":"s","space_name":"Shared","projects":[],"providers":[{"provider":"codex","profile_id":"codex","name":"Codex","models":[{"id":"model","display_name":"Model","is_default":true,"options":[]}]}]}});
+    for (event, wire) in [
+        (
+            ServerEvent::ScopeSnapshot(Scope::Full),
+            json!({"type":"scope_snapshot","content":{"type":"full"}}),
+        ),
+        (
+            ServerEvent::ScopeSnapshot(scope.clone()),
+            json!({"type":"scope_snapshot","content":scope_wire.clone()}),
+        ),
+    ] {
+        let response = HostMessage::Event(EventEnvelope {
+            request_id: Some(1),
+            topic: Topic::Scope,
+            event,
+        });
+        let wire = json!({"type":"event","content":{"request_id":1,"topic":{"type":"scope"},"event":wire}});
+        assert_eq!(serde_json::to_value(&response).unwrap(), wire);
+        assert_eq!(decode_host_line(&wire.to_string()).unwrap(), response);
+    }
 }

@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
 use tcode_protocol::{
-    ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, ProtocolError, Query,
-    QueryResponse, decode_client_line,
+    ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
+    Query, QueryResponse, decode_client_line,
 };
 #[cfg(test)]
 use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
@@ -213,7 +213,7 @@ async fn host_loop(
         }
         state.sync_terminal_handles();
         state.reap_terminal_projections();
-        domain_diff.emit_changes(&state, &mut cx);
+        domain_diff.emit_changes(&mut state, &mut cx);
     }
     state
 }
@@ -226,7 +226,44 @@ fn malformed_message_id(line: &str) -> Option<u64> {
 }
 
 pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, message: ClientMessage) {
-    let ClientMessage { id, payload, key } = message;
+    let ClientMessage {
+        id,
+        payload,
+        key,
+        principal,
+    } = message;
+    cx.principal = principal.unwrap_or(Principal::Full);
+    cx.author = match &cx.principal {
+        Principal::Full => None,
+        Principal::Space {
+            device_id,
+            device_name,
+            ..
+        } => Some(tcode_core::session::Author {
+            device_id: device_id.clone(),
+            name: device_name.clone(),
+        }),
+    };
+    if !matches!(payload, ClientPayload::Unsubscribe(_)) {
+        state.observe_principal(&cx.principal);
+    }
+    if let Err(error) = state.authorize(&cx.principal, &payload, cx) {
+        let reply = if matches!(payload, ClientPayload::Query(_)) {
+            HostMessage::QueryResult {
+                id,
+                result: Err(error),
+            }
+        } else {
+            HostMessage::Ack {
+                id,
+                result: Err(error),
+            }
+        };
+        cx.send_message(reply);
+        cx.principal = Principal::Full;
+        cx.author = None;
+        return;
+    }
     match payload {
         ClientPayload::Command(command) => {
             let scoped_key = key.filter(|_| command.requires_delivery_key()).map(|key| {
@@ -242,6 +279,8 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
                     let result = cached.1.clone();
                     cache.push_back(cached);
                     cx.send_message(HostMessage::Ack { id, result });
+                    cx.principal = Principal::Full;
+                    cx.author = None;
                     return;
                 }
             }
@@ -301,6 +340,8 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
             });
         }
     }
+    cx.principal = Principal::Full;
+    cx.author = None;
 }
 
 enum CommandOutcome {
@@ -311,6 +352,14 @@ enum CommandOutcome {
 fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
     if let Err(error) = app.validate_command_target(&command) {
         return CommandOutcome::Immediate(Err(error));
+    }
+    if matches!(cx.principal, Principal::Space { .. })
+        && matches!(
+            command,
+            Command::MarkSessionRead { .. } | Command::MarkSessionUnread { .. }
+        )
+    {
+        return CommandOutcome::Immediate(Ok(CommandResponse::Unit));
     }
     let mut response = CommandResponse::Unit;
     match command {
@@ -797,7 +846,7 @@ fn dispatch_query(
             item_id,
         } => app.item_output(&session_id, item_id, cx),
         Query::ArchivedSessions => {
-            let archived = app.archived_sessions();
+            let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
         }
         Query::RenderStoredOutput {
@@ -806,6 +855,11 @@ fn dispatch_query(
             cols,
         } => {
             let Some(output) = app.stored_command_output(&session_id, &item_id) else {
+                if matches!(cx.principal, Principal::Space { .. }) {
+                    return cx.spawn_background(async {
+                        Err(ProtocolError::out_of_scope("item is outside this session"))
+                    });
+                }
                 return cx.spawn_background(async move {
                     Err(ProtocolError {
                         code: "unknown_stored_output".into(),
@@ -1309,6 +1363,47 @@ mod tests {
     }
 
     #[test]
+    fn scope_and_space_index_subscriptions_reply_over_the_host_pipe() {
+        let root = std::env::temp_dir().join(format!("tcode-scope-{}", uuid::Uuid::new_v4()));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let link = host.link();
+        let events = link.events();
+        for (topic, expected) in [
+            (
+                Topic::Scope,
+                ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+            ),
+            (
+                Topic::SpaceIndex {
+                    space_id: "shared".into(),
+                },
+                ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    summary: tcode_protocol::IndexSummary::default(),
+                    projects: vec![],
+                    sessions: vec![],
+                }),
+            ),
+        ] {
+            link.subscribe(Subscription {
+                topic: topic.clone(),
+                after: None,
+            })
+            .unwrap();
+            let snapshot = next_event(&events, |event| event.topic == topic);
+            assert_eq!(snapshot.event, expected);
+            assert!(snapshot.request_id.is_some());
+        }
+        link.shutdown_blocking().unwrap();
+        host.stopped.recv_blocking().unwrap();
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn project_icons_replicate_persist_and_reset_to_t3_config() {
         let root =
             std::env::temp_dir().join(format!("tcode-project-icons-{}", uuid::Uuid::new_v4()));
@@ -1620,6 +1715,7 @@ mod tests {
                 "{:?}",
                 Timeline::fold_events(legacy_events().into_iter().map(|(ts, event)| {
                     StoredEvent {
+                        author: None,
                         ts,
                         event,
                         elided: None,
@@ -1735,3 +1831,7 @@ mod p4b_tests;
 #[path = "terminal_replication_tests.rs"]
 #[cfg(unix)]
 mod terminal_replication_tests;
+
+#[cfg(test)]
+#[path = "pipe_spaces_tests.rs"]
+mod spaces_tests;

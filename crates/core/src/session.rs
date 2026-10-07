@@ -135,11 +135,19 @@ pub fn append_review_comments_to_prompt(prompt: &str, comments: &[ReviewComment]
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Author {
+    pub device_id: String,
+    pub name: String,
+}
+
 /// One persisted event, optionally tagged with the wall-clock time (unix ms)
 /// at which it was recorded. Legacy `.jsonl` lines replay with `ts == None`;
 /// envelope lines carry the recorded timestamp.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Author>,
     pub ts: Option<u64>,
     pub event: AgentEvent,
     /// The byte length of an item output that a host shortened before sending
@@ -165,6 +173,7 @@ impl StoredEvent {
 impl From<AgentEvent> for StoredEvent {
     fn from(event: AgentEvent) -> Self {
         StoredEvent {
+            author: None,
             ts: None,
             event,
             elided: None,
@@ -2695,6 +2704,7 @@ mod tests {
 
     fn at(ts: u64, event: AgentEvent) -> StoredEvent {
         StoredEvent {
+            author: None,
             ts: Some(ts),
             event,
             elided: None,
@@ -3058,6 +3068,7 @@ mod tests {
                 started(1_000, running("a")),
                 completed(2_000, ran("a")),
                 StoredEvent {
+                    author: None,
                     ts: first_end,
                     event: turn_completed(),
                     elided: None,
@@ -3149,11 +3160,13 @@ mod tests {
         let turn = |n: u64| {
             [
                 StoredEvent {
+                    author: None,
                     ts: Some(n * 10),
                     event: user_msg(&format!("user-{n}"), "go"),
                     elided: None,
                 },
                 StoredEvent {
+                    author: None,
                     ts: Some(n * 10 + 1),
                     event: AgentEvent::TurnStarted {
                         turn_id: format!("turn-{n}"),
@@ -3161,11 +3174,13 @@ mod tests {
                     elided: None,
                 },
                 StoredEvent {
+                    author: None,
                     ts: Some(n * 10 + 2),
                     event: assistant_delta("pi-assistant-0:0", &format!("text {n}")),
                     elided: None,
                 },
                 StoredEvent {
+                    author: None,
                     ts: Some(n * 10 + 3),
                     event: AgentEvent::TurnCompleted {
                         turn_id: format!("turn-{n}"),
@@ -3215,6 +3230,7 @@ mod tests {
     #[test]
     fn synthetic_entry_ids_do_not_depend_on_how_much_earlier_history_is_folded() {
         let error = |ts: u64| StoredEvent {
+            author: None,
             ts: Some(ts),
             event: AgentEvent::Error {
                 message: format!("boom {ts}"),
@@ -3224,12 +3240,14 @@ mod tests {
         };
         let log = [
             StoredEvent {
+                author: None,
                 ts: Some(1),
                 event: user_msg("user-1", "go"),
                 elided: None,
             },
             error(2),
             StoredEvent {
+                author: None,
                 ts: Some(3),
                 event: AgentEvent::TurnCompleted {
                     turn_id: "turn-1".into(),
@@ -3239,6 +3257,7 @@ mod tests {
                 elided: None,
             },
             StoredEvent {
+                author: None,
                 ts: Some(4),
                 event: user_msg("user-2", "again"),
                 elided: None,

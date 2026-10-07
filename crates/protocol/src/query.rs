@@ -285,10 +285,69 @@ pub enum HostingAction {
     #[serde(alias = "new_code")]
     NewInvitation,
     RevokeDevice(String),
+    Spaces(SpaceAction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum SpaceAction {
+    Create {
+        name: String,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    Delete {
+        id: String,
+    },
+    SetProjects {
+        id: String,
+        project_ids: Vec<String>,
+    },
+    RegenerateLink {
+        id: String,
+    },
+    SetLinkEnabled {
+        id: String,
+        enabled: bool,
+    },
+    MoveMember {
+        device_id: String,
+        space_id: String,
+    },
+    RemoveMember {
+        device_id: String,
+        regenerate_link: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceInfo {
+    pub id: String,
+    pub name: String,
+    pub created_unix: u64,
+    pub project_ids: Vec<String>,
+    pub link: Option<String>,
+    pub link_enabled: bool,
+    pub link_dead: bool,
+    pub members: Vec<HostedDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum DeviceAccess {
+    #[default]
+    Full,
+    Space {
+        space_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostingState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_space_id: Option<String>,
     pub enabled: bool,
     /// Seconds until `invite` expires; `0` without one.
     #[serde(default)]
@@ -302,10 +361,14 @@ pub struct HostingState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite: Option<String>,
     pub devices: Vec<HostedDevice>,
+    #[serde(default)]
+    pub spaces: Vec<SpaceInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostedDevice {
+    #[serde(default)]
+    pub access: DeviceAccess,
     pub id: String,
     pub name: String,
     pub created_unix: u64,
