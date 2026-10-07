@@ -3562,6 +3562,62 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
 }
 
 #[test]
+fn startup_repairs_native_mirrors_left_by_auto_archived_parents() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-archived-parent-mirror-repair");
+    for (id, parent, native, updated_at, archived_at) in [
+        ("parent", None, false, 99, Some(100)),
+        ("mirror", Some("parent"), true, 90, None),
+        ("nested", Some("mirror"), true, 95, None),
+        ("restored", Some("parent"), true, 101, None),
+        ("already-archived", Some("parent"), true, 70, Some(80)),
+        ("other", None, false, 90, None),
+    ] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_owned);
+        meta.native_subagent = native.then(|| format!("spawn-{id}"));
+        meta.archive_on_complete = id == "parent";
+        meta.updated_at = updated_at;
+        meta.archived_at = archived_at;
+        test_store.upsert_meta(&meta).unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.read(|state| {
+        for id in ["mirror", "nested"] {
+            assert_eq!(
+                state.find_meta(id).unwrap().archived_at,
+                Some(100),
+                "a legacy mirror must not become a root row when its parent was auto-archived"
+            );
+        }
+        assert_eq!(state.find_meta("restored").unwrap().archived_at, None);
+        assert_eq!(state.find_meta("other").unwrap().archived_at, None);
+        assert_eq!(
+            state.find_meta("already-archived").unwrap().archived_at,
+            Some(80)
+        );
+    });
+    let saved = test_store.load_index().unwrap();
+    for id in ["mirror", "nested"] {
+        assert_eq!(
+            saved.iter().find(|meta| meta.id == id).unwrap().archived_at,
+            Some(100)
+        );
+    }
+    state.update(cx, |state, cx| state.unarchive_session("parent", cx));
+    state.read(|state| {
+        for id in ["parent", "mirror", "nested"] {
+            assert_eq!(state.find_meta(id).unwrap().archived_at, None);
+        }
+        assert_eq!(
+            state.find_meta("already-archived").unwrap().archived_at,
+            Some(80)
+        );
+    });
+}
+
+#[test]
 fn terminal_callback_archives_only_when_requested() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-callback-archive-test");
@@ -3592,6 +3648,8 @@ fn terminal_callback_archives_only_when_requested() {
             state.sessions.push(child.meta.clone());
             state.residents.parked.insert(child.meta.id.clone(), child);
 
+            state.on_event(id, native_mirror_parent_item(ItemStatus::InProgress), cx);
+            state.on_event(id, native_mirror_parent_item(ItemStatus::Completed), cx);
             state.on_event(id, persisted_assistant_event("done"), cx);
             state.on_event(
                 id,
@@ -3612,6 +3670,14 @@ fn terminal_callback_archives_only_when_requested() {
     });
 
     state.read(|state| {
+        for id in ["auto", "keep", "retry"] {
+            let child = state.find_meta(id).unwrap();
+            let mirror = state.sessions.iter().find(|meta| {
+                meta.parent_session_id.as_deref() == Some(id) && meta.native_subagent.is_some()
+            }).unwrap();
+            assert_eq!(mirror.archived_at, child.archived_at,
+                "a native mirror must follow its parent's archive state instead of leaking into the root list");
+        }
         assert!(
             state.find_meta("auto").unwrap().archived_at.is_some(),
             "archive_on_complete child should be archived after callback delivery"
