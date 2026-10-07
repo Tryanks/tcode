@@ -23,7 +23,6 @@ browser = [
     "dep:base64",
     "dep:pbkdf2",
     "dep:sha2",
-    "dep:uuid",
 ]
 
 [dependencies]
@@ -47,7 +46,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-ut
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 url = "2"
-uuid = { version = "1", features = ["v4", "serde"], optional = true }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }

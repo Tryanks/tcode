@@ -381,6 +381,8 @@ pub enum PairError {
     Invalid,
     Disabled,
     Busy,
+    AlreadyMember,
+    SpaceUnavailable,
     Unreachable(String),
     /// The machine answered with something other than a pairing reply.
     Protocol(String),
@@ -391,6 +393,8 @@ impl std::fmt::Display for PairError {
         match self {
             Self::Invalid => f.write_str("invalid or expired invitation"),
             Self::Disabled => f.write_str("pairing_disabled"),
+            Self::AlreadyMember => f.write_str("already_member"),
+            Self::SpaceUnavailable => f.write_str("space_unavailable"),
             Self::Busy => f.write_str("the machine could not record the pairing; try again"),
             Self::Unreachable(error) => write!(f, "could not connect to the machine: {error}"),
             Self::Protocol(error) => write!(f, "invalid pairing response: {error}"),
@@ -464,6 +468,7 @@ async fn pair_exchange(
             &mut send,
             &ClientLine::Pair {
                 secret: invite.secret.clone(),
+                space: invite.space.clone(),
                 device: device.claim(),
             },
         )
@@ -478,11 +483,20 @@ async fn pair_exchange(
             .await
             .map_err(|error| PairError::Protocol(error.to_string()))?
         {
-            HostLine::Paired { host_name } => Ok(invite.paired(host_name)),
+            HostLine::Paired {
+                host_name,
+                space_name,
+            } => {
+                let mut host = invite.paired(host_name);
+                host.space_name = space_name;
+                Ok(host)
+            }
             HostLine::PairRejected { reason } => Err(match reason {
                 PairRejection::Invalid => PairError::Invalid,
                 PairRejection::Disabled => PairError::Disabled,
                 PairRejection::Busy => PairError::Busy,
+                PairRejection::AlreadyMember => PairError::AlreadyMember,
+                PairRejection::SpaceUnavailable => PairError::SpaceUnavailable,
             }),
             HostLine::Refused { reason } => Err(PairError::Protocol(reason)),
             other => Err(PairError::Protocol(format!("unexpected reply {other:?}"))),

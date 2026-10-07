@@ -19,6 +19,25 @@ pub struct DeviceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
     pub created_unix: u64,
+    pub access: DeviceGrant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum DeviceGrant {
+    Full,
+    Spaces(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceRecord {
+    pub id: String,
+    pub name: String,
+    pub created_unix: u64,
+    pub project_ids: Vec<String>,
+    pub secret: String,
+    pub link_enabled: bool,
+    pub link_failures: u8,
 }
 
 /// `traverse.json`: this machine's key, name, allow list and pairing switch.
@@ -27,6 +46,7 @@ pub struct HostIdentity {
     pub host_name: String,
     secret_key: SecretKey,
     pub devices: Vec<DeviceRecord>,
+    pub spaces: Vec<SpaceRecord>,
     pub pairing_enabled: bool,
     path: PathBuf,
 }
@@ -38,6 +58,8 @@ struct HostFile {
     secret_key: String,
     #[serde(default)]
     devices: Vec<DeviceRecord>,
+    #[serde(default)]
+    spaces: Vec<SpaceRecord>,
     #[serde(default = "enabled")]
     pairing_enabled: bool,
 }
@@ -55,21 +77,40 @@ impl HostIdentity {
         let path = data_dir.join(HOST_FILE);
         match fs::read(&path) {
             Ok(bytes) => {
-                let file: HostFile = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                if file.v != 2 {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                let migrated = value["v"] == 2;
+                if migrated {
+                    if let Some(devices) = value["devices"].as_array_mut() {
+                        for device in devices {
+                            let record = device.as_object_mut().ok_or_else(|| {
+                                io::Error::new(io::ErrorKind::InvalidData, "invalid device record")
+                            })?;
+                            record.insert("access".into(), serde_json::json!({"type": "full"}));
+                        }
+                    }
+                    value["spaces"] = serde_json::json!([]);
+                    value["v"] = 3.into();
+                }
+                let file: HostFile = serde_json::from_value(value).map_err(io::Error::other)?;
+                if file.v != 3 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{HOST_FILE} has unsupported version {}", file.v),
                     ));
                 }
+                if file.devices.iter().any(|device| matches!(&device.access, DeviceGrant::Spaces(ids) if ids.is_empty() || ids.iter().any(|id| !tcode_client::pairing::valid_space_id(id)))) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid device access"));
+                }
                 let mut identity = Self {
                     host_name: file.host_name,
                     secret_key: parse_secret_key(&file.secret_key)?,
                     devices: file.devices,
+                    spaces: file.spaces,
                     pairing_enabled: file.pairing_enabled,
                     path,
                 };
-                if identity.host_name != host_name {
+                if migrated || identity.host_name != host_name {
                     identity.host_name = host_name.to_owned();
                     identity.save()?;
                 }
@@ -80,6 +121,7 @@ impl HostIdentity {
                     host_name: host_name.to_owned(),
                     secret_key: SecretKey::generate(),
                     devices: Vec::new(),
+                    spaces: Vec::new(),
                     pairing_enabled: true,
                     path,
                 };
@@ -100,10 +142,11 @@ impl HostIdentity {
 
     pub fn save(&self) -> io::Result<()> {
         let file = HostFile {
-            v: 2,
+            v: 3,
             host_name: self.host_name.clone(),
             secret_key: encode_hex(&self.secret_key.to_bytes()),
             devices: self.devices.clone(),
+            spaces: self.spaces.clone(),
             pairing_enabled: self.pairing_enabled,
         };
         write_private(&self.path, &serde_json::to_vec_pretty(&file)?)
@@ -127,6 +170,7 @@ impl HostIdentity {
                 name,
                 platform,
                 created_unix: now_unix(),
+                access: DeviceGrant::Full,
             }),
         }
     }

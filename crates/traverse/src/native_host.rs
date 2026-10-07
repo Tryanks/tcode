@@ -599,6 +599,8 @@ mod tests {
         let dir = TestDir::new();
         let client = NativeClientHost::new(dir.0.clone(), "phone");
         client.remember_host(PairedHost {
+            space_id: None,
+            space_name: None,
             host_id: "machine".into(),
             name: "Machine".into(),
             traverse: None,
