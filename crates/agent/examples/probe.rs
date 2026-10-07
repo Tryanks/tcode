@@ -388,13 +388,8 @@ async fn run_probe(
     binary_path: Option<PathBuf>,
     model: Option<String>,
 ) -> i32 {
-    // Grok's effort is its wire config option, persisted under its option id.
-    let effort_id = match provider {
-        ProviderKind::Grok => "acp:cfg:reasoning_effort",
-        _ => "reasoningEffort",
-    };
     option_selections.extend(effort.iter().map(|value| OptionSelection {
-        id: effort_id.into(),
+        id: "reasoningEffort".into(),
         value: serde_json::Value::String(value.clone()),
     }));
     let model = model.or_else(|| match (provider, effort.is_some()) {

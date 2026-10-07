@@ -377,7 +377,7 @@ fn the_composers_model_and_the_sessions_parameters_are_selected_at_start() {
         let mut agent = Agent::new().await;
         let mut opts = agent.options();
         opts.model = Some("gpt-5".into());
-        opts.option_selections = [("acp:cfg:reasoning", "high"), ("acp:cfg:fast", "true")]
+        opts.option_selections = [("reasoningEffort", "high"), ("acp:cfg:fast", "true")]
             .map(|(id, value)| OptionSelection {
                 id: id.into(),
                 value: json!(value),
@@ -438,7 +438,7 @@ fn the_composers_model_and_the_sessions_parameters_are_selected_at_start() {
             .collect();
         assert_eq!(
             selections,
-            [("acp:mode", "agent"), ("acp:cfg:reasoning", "high")],
+            [("acp:mode", "agent"), ("reasoningEffort", "high")],
             "the model is the composer's, and the last model's parameter is gone"
         );
         agent.finish(Some(handle)).await;

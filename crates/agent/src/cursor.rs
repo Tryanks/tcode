@@ -498,7 +498,11 @@ async fn restore_parameters(
         let acp::SessionConfigKind::Select(select) = &option.kind else {
             continue;
         };
-        let Some(chosen) = acp_session::config_selection(&setup.opts.option_selections, id) else {
+        let Some(chosen) = acp_session::config_selection(
+            &setup.opts.option_selections,
+            id,
+            option.category.as_ref(),
+        ) else {
             continue;
         };
         let offered = match &select.options {
