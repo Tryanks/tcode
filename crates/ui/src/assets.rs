@@ -54,6 +54,10 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../../../assets/icons/puzzle.svg"),
     ),
     (
+        "icons/users.svg",
+        include_bytes!("../../../assets/icons/users.svg"),
+    ),
+    (
         "icons/ruler.svg",
         include_bytes!("../../../assets/icons/ruler.svg"),
     ),

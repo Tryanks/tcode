@@ -505,7 +505,8 @@ impl SettingsPage {
         });
         #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
         #[cfg(not(target_family = "wasm"))]
-        let hosting_panel = cx.new(|cx| crate::remote::HostingPanel::new(window, cx));
+        let hosting_panel =
+            cx.new(|cx| crate::remote::HostingPanel::new(store.clone(), window, cx));
         #[cfg(target_family = "wasm")]
         let hosting_panel = cx.new(|cx| crate::remote::hosted::HostedPanel::new(store.clone(), cx));
         // Editable fields start empty and are seeded by `hydrate_inputs` once
