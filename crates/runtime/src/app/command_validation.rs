@@ -448,6 +448,7 @@ mod tests {
                 &mut state,
                 &mut cx,
                 ClientMessage {
+                    principal: None,
                     id: 42,
                     key: Some(format!("write-{index}")),
                     payload: ClientPayload::Command(command),
@@ -566,6 +567,7 @@ mod tests {
                 &mut state,
                 &mut cx,
                 ClientMessage {
+                    principal: None,
                     id: 42,
                     key: Some(format!("blocked-{index}")),
                     payload: ClientPayload::Command(command),

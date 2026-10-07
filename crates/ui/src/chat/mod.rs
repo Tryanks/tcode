@@ -1751,6 +1751,23 @@ impl ChatView {
             cx,
         );
 
+        let bubble = if let Some(author) = self.workspace_store.read(cx).message_byline(entry_id) {
+            v_flex()
+                .w_full()
+                .items_end()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(author),
+                )
+                .child(bubble)
+                .into_any_element()
+        } else {
+            bubble
+        };
+
         let Some(context) = context else {
             return bubble;
         };
@@ -2249,6 +2266,8 @@ impl ChatView {
             div()
                 .flex_1()
                 .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
                 .text_size(px(15.))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
@@ -2269,6 +2288,8 @@ impl ChatView {
                 None => div()
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .text_size(px(15.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
@@ -2348,22 +2369,25 @@ impl ChatView {
                             // The Preview tab is a product view now: it always
                             // offers open-externally and copy-URL, and says so
                             // where there is no embedded browser to drive.
-                            .child(
-                                Button::new("preview-panel")
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::Globe)
-                                    .selected(preview_showing)
-                                    .tooltip(crate::tr!("chat.toggle_preview"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_preview_panel(cx));
-                                    })),
-                            )
+                            .when(self.workspace_store.read(cx).scope().is_full(), |row| {
+                                row.child(
+                                    Button::new("preview-panel")
+                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::Globe)
+                                        .selected(preview_showing)
+                                        .tooltip(crate::tr!("chat.toggle_preview"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.workspace_store.update(cx, |store, cx| {
+                                                store.toggle_preview_panel(cx)
+                                            });
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("diff-panel")
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
@@ -2732,6 +2756,15 @@ impl ChatView {
     fn render_empty_state(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // A phone reaches this state when the host has no threads. Project
         // creation and desktop shortcut hints belong to the desktop launcher.
+        if !self.workspace_store.read(cx).scope().is_full() {
+            return crate::material::empty_state(
+                Icon::new(IconName::Folder),
+                crate::tr!("member.empty_title"),
+                crate::tr!("member.empty_description"),
+                cx,
+            )
+            .into_any_element();
+        }
         if self.window_state.read(cx).compact {
             return crate::material::empty_state(
                 Icon::new(IconName::Folder),
@@ -5612,7 +5645,17 @@ mod tests {
                 event,
             }));
         };
-        let store = cx.new(|cx| WorkspaceStore::new(link, cx));
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         store.update(cx, |store, _| store.select_session("long".into()));
         event(
             Topic::Settings,

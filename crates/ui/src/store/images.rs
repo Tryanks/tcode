@@ -160,6 +160,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &replies, Vec::new(), cx);
         store.update(cx, |store, _| {
             // Keep navigation out of this cache test when its Index baseline arrives.
             store.selected_session_id = Some("selected".into());

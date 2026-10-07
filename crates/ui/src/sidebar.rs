@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
+use crate::remote::spaces::{self, ShareTarget, SpacesObserver};
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -648,6 +649,7 @@ pub struct SessionsSidebar {
     compact_reveal_active: bool,
     #[cfg(test)]
     compact_rows_rendered: std::cell::Cell<usize>,
+    spaces_observer: SpacesObserver,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -959,12 +961,16 @@ impl SessionsSidebar {
             compact_reveal_active: false,
             #[cfg(test)]
             compact_rows_rendered: std::cell::Cell::new(0),
+            spaces_observer: SpacesObserver::default(),
             _subscriptions: subscriptions,
         }
     }
 
     /// Prompt for a directory, then create a project rooted there.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         crate::add_project_dialog::open(self.store.clone(), window, cx);
     }
 
@@ -972,8 +978,8 @@ impl SessionsSidebar {
         if !self.store.read(cx).is_project_collapsed(project_id) {
             self.expanded_groups.remove(project_id);
         }
-        self.store.update(cx, |store, _| {
-            store.toggle_project_collapsed(project_id.to_string());
+        self.store.update(cx, |store, cx| {
+            store.toggle_project_collapsed(project_id.to_string(), cx);
         });
         cx.notify();
     }
@@ -1198,8 +1204,8 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         let id = action.0.clone();
-        self.store.update(cx, |store, _cx| {
-            store.mark_session_unread(id);
+        self.store.update(cx, |store, cx| {
+            store.mark_session_unread(id, cx);
         });
     }
 
@@ -1310,8 +1316,8 @@ impl SessionsSidebar {
                 self.expanded_settled.insert(project_id.clone());
                 self.expanded_groups.insert(project_id.clone());
                 if self.store.read(cx).is_project_collapsed(project_id) {
-                    self.store.update(cx, |store, _| {
-                        store.toggle_project_collapsed(project_id.clone())
+                    self.store.update(cx, |store, cx| {
+                        store.toggle_project_collapsed(project_id.clone(), cx)
                     });
                 }
             }
@@ -1326,8 +1332,9 @@ impl SessionsSidebar {
                 break;
             }
             if collapsed.contains(id) {
-                self.store
-                    .update(cx, |store, _| store.set_thread_collapsed(id.clone(), false));
+                self.store.update(cx, |store, cx| {
+                    store.set_thread_collapsed(id.clone(), false, cx)
+                });
             }
             parent = sessions
                 .iter()
@@ -1395,6 +1402,9 @@ impl SessionsSidebar {
     }
 
     fn on_delete(&mut self, action: &ThreadDelete, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         let id = action.0.clone();
         let title = self
             .store
@@ -1459,6 +1469,9 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         let project = self.store.read(cx).project(&action.0).cloned();
         if let Some(project) = project {
             crate::project_icon::open(self.store.clone(), project, window, cx);
@@ -1471,6 +1484,9 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
         let store = self.store.clone();
         let project_id = action.0.clone();
         let Some((project_name, count)) = store.read(cx).project_summary(&project_id) else {
@@ -1503,6 +1519,57 @@ impl SessionsSidebar {
                     true
                 })
         });
+    }
+
+    /// A project's share items, where the machine this window shows has
+    /// spaces this client may manage.
+    fn share_target(
+        &self,
+        project_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<ShareTarget> {
+        let project_id = project_id?;
+        let project_name = self.store.read(cx).project(project_id)?.name.clone();
+        Some(ShareTarget {
+            spaces: spaces::for_store(&self.store, cx)?,
+            project_id: project_id.to_owned(),
+            project_name,
+        })
+    }
+
+    /// The mark on a project header shared in at least one space.
+    fn shared_badge(&self, project_id: &str, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let spaces = spaces::for_store(&self.store, cx)?;
+        let names = spaces.read(cx).sharing(project_id);
+        (!names.is_empty()).then(|| spaces::shared_badge(project_id, &names, cx))
+    }
+
+    fn on_toggle_share(
+        &mut self,
+        action: &spaces::ToggleShare,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(spaces) = spaces::for_store(&self.store, cx) {
+            spaces::toggle_share(&spaces, action, window, cx);
+        }
+    }
+
+    fn on_new_space_and_share(
+        &mut self,
+        action: &spaces::NewSpaceAndShare,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(share) = self.share_target(Some(&action.0), cx) {
+            spaces::new_space_and_share(
+                share.spaces,
+                share.project_id,
+                share.project_name,
+                window,
+                cx,
+            );
+        }
     }
 
     fn on_project_reveal(
@@ -1669,10 +1736,10 @@ impl SessionsSidebar {
         // says whether the link is up, hovering says how it is carried. The
         // window that is the host itself has neither, so its row is the
         // entry alone.
-        let remote = store.remote_host_name().map(|name| {
+        let remote = store.remote_host_name().map(|_| {
             let connection_state = store.connection_state();
             (
-                SharedString::from(name.to_owned()),
+                SharedString::from(store.machine_label()),
                 cx.theme().connection_color(&connection_state),
                 SharedString::from(crate::remote::connection_label(&connection_state)),
             )
@@ -1805,27 +1872,29 @@ impl SessionsSidebar {
                             .icon(IconName::SortAscending)
                             .tooltip(crate::tr!("sidebar.sort", mode = sort_label))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.store.update(cx, |store, _cx| {
-                                    store.cycle_project_sort();
+                                this.store.update(cx, |store, cx| {
+                                    store.cycle_project_sort(cx);
                                 });
                             })),
                     )
                     .child(self.render_layout_toggle(SidebarLayout::Grouped, cx))
-                    .child(
-                        Button::new("add-project")
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(
-                                Icon::empty()
-                                    .path("icons/folder-plus.svg")
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .tooltip(crate::tr!("sidebar.add_project"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.add_project(window, cx);
-                            })),
-                    ),
+                    .when(self.store.read(cx).scope().is_full(), |row| {
+                        row.child(
+                            Button::new("add-project")
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .icon(
+                                    Icon::empty()
+                                        .path("icons/folder-plus.svg")
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .tooltip(crate::tr!("sidebar.add_project"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_project(window, cx);
+                                })),
+                        )
+                    }),
             )
     }
 
@@ -1923,21 +1992,23 @@ impl SessionsSidebar {
                     .child(filter_button)
                     .child(self.render_layout_toggle(SidebarLayout::Flat, cx))
                     .child(new_thread)
-                    .child(
-                        Button::new("add-project")
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(
-                                Icon::empty()
-                                    .path("icons/folder-plus.svg")
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .tooltip(crate::tr!("sidebar.add_project"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.add_project(window, cx);
-                            })),
-                    ),
+                    .when(self.store.read(cx).scope().is_full(), |row| {
+                        row.child(
+                            Button::new("add-project")
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .icon(
+                                    Icon::empty()
+                                        .path("icons/folder-plus.svg")
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .tooltip(crate::tr!("sidebar.add_project"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_project(window, cx);
+                                })),
+                        )
+                    }),
             )
     }
 
@@ -1955,6 +2026,7 @@ impl SessionsSidebar {
         });
         let group_key = format!("group-{project_id}");
 
+        let share = self.share_target(Some(&project_id), cx);
         let header_toggle_id = project_id.clone();
         let plus_cwd = group.project.root.clone();
         let plus_project_id = project_id.clone();
@@ -2006,6 +2078,7 @@ impl SessionsSidebar {
                 .text_color(cx.theme().sidebar_foreground)
                 .child(group.project.name.clone()),
         )
+        .children(self.shared_badge(&project_id, cx))
         // Unread dot when any child thread is unread (hidden on hover so
         // the "+" can take the slot).
         .when(has_unread, |row| {
@@ -2056,29 +2129,37 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground),
             ),
         );
+        let scope = self.store.read(cx).scope().clone();
         header
-            .context_menu(move |menu, _window, _cx| {
+            .context_menu(move |menu, _window, cx| {
                 let id = menu_project_id.clone();
                 let delete_label = crate::tr!("sidebar.remove_project").into_owned();
-                menu.menu(
-                    crate::tr!("project_icon.title"),
-                    Box::new(ChangeProjectIcon(id.clone())),
-                )
+                menu.when(scope.is_full(), |menu| {
+                    menu.menu(
+                        crate::tr!("project_icon.title"),
+                        Box::new(ChangeProjectIcon(id.clone())),
+                    )
+                })
                 .menu_with_enable(
                     crate::tr!("sidebar.archive_all").into_owned(),
                     Box::new(ProjectArchiveAll(id.clone())),
                     can_archive,
                 )
-                .menu_element(Box::new(ProjectDelete(id.clone())), move |_window, cx| {
-                    div()
-                        .flex_1()
-                        .text_color(cx.theme().danger)
-                        .child(delete_label.clone())
+                .when(scope.is_full(), |menu| {
+                    menu.menu_element(Box::new(ProjectDelete(id.clone())), move |_window, cx| {
+                        div()
+                            .flex_1()
+                            .text_color(cx.theme().danger)
+                            .child(delete_label.clone())
+                    })
                 })
                 .menu(
                     crate::tr!("sidebar.reveal_project").into_owned(),
                     Box::new(ProjectReveal(id)),
                 )
+                .when_some(share.as_ref(), |menu, share| {
+                    spaces::share_items(menu, share, false, cx)
+                })
             })
             .touch(false)
             .into_any_element()
@@ -2296,7 +2377,7 @@ impl SessionsSidebar {
             );
             this.store.update(cx, |store, cx| {
                 if let Some(collapsed) = fold {
-                    store.set_thread_collapsed(session_id.clone(), collapsed);
+                    store.set_thread_collapsed(session_id.clone(), collapsed, cx);
                 }
                 store.select_session(session_id.clone());
                 cx.notify();
@@ -2414,12 +2495,15 @@ impl SessionsSidebar {
         running: bool,
         settled: bool,
         compact: bool,
+        share: Option<ShareTarget>,
+        scope: &crate::store::WorkspaceScope,
     ) -> gpui::AnyElement {
+        let scope = scope.clone();
         let session_id = state.session_id.clone();
         let can_fork = state.menu_can_fork;
         let is_worktree = state.is_worktree;
         let title_generating = state.title_generating;
-        row.context_menu(move |menu, _window, _cx| {
+        row.context_menu(move |menu, _window, cx| {
             let id = session_id.clone();
             menu.menu(
                 crate::tr!("sidebar.ctx_rename").into_owned(),
@@ -2487,10 +2571,15 @@ impl SessionsSidebar {
                 Box::new(ThreadArchive(id.clone())),
                 !running,
             )
-            .menu(
-                crate::tr!("sidebar.ctx_delete").into_owned(),
-                Box::new(ThreadDelete(id.clone())),
-            )
+            .when(scope.is_full(), |menu| {
+                menu.menu(
+                    crate::tr!("sidebar.ctx_delete").into_owned(),
+                    Box::new(ThreadDelete(id.clone())),
+                )
+            })
+            .when_some(share.as_ref(), |menu, share| {
+                spaces::share_items(menu, share, true, cx)
+            })
         })
         .touch(compact)
         .into_any_element()
@@ -2597,7 +2686,16 @@ impl SessionsSidebar {
             })
         };
 
-        Self::thread_context_menu(row, &state, working, meta.settled_at.is_some(), false)
+        let share = self.share_target(meta.project_id.as_deref(), cx);
+        Self::thread_context_menu(
+            row,
+            &state,
+            working,
+            meta.settled_at.is_some(),
+            false,
+            share,
+            self.store.read(cx).scope(),
+        )
     }
 
     fn render_flat_thread_right_slot(
@@ -2858,7 +2956,16 @@ impl SessionsSidebar {
             row.child(line_one).child(line_two)
         };
 
-        Self::thread_context_menu(row, &state, working, meta.settled_at.is_some(), false)
+        let share = self.share_target(meta.project_id.as_deref(), cx);
+        Self::thread_context_menu(
+            row,
+            &state,
+            working,
+            meta.settled_at.is_some(),
+            false,
+            share,
+            self.store.read(cx).scope(),
+        )
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3296,8 +3403,16 @@ impl SessionsSidebar {
                 .size_full()
                 .child(crate::material::empty_state(
                     Icon::new(IconName::Folder),
-                    crate::tr!("mobile.projects_empty"),
-                    crate::tr!("mobile.projects_help"),
+                    if self.store.read(cx).scope().is_full() {
+                        crate::tr!("mobile.projects_empty")
+                    } else {
+                        crate::tr!("member.empty_title")
+                    },
+                    if self.store.read(cx).scope().is_full() {
+                        crate::tr!("mobile.projects_help")
+                    } else {
+                        crate::tr!("member.empty_description")
+                    },
                     cx,
                 ))
                 .into_any_element()
@@ -3519,6 +3634,7 @@ impl SessionsSidebar {
                 .font_medium()
                 .child(row.name.clone()),
         )
+        .children(self.shared_badge(&row.project_id, cx))
         .child(div().flex_none().child(row.count.clone()))
         .child(
             Icon::new(if collapsed {
@@ -3691,8 +3807,12 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         crate::widgets::stop_click_propagation(window, cx);
-                        this.store.update(cx, |store, _| {
-                            store.set_thread_collapsed(disclosure_id.clone(), !children_collapsed)
+                        this.store.update(cx, |store, cx| {
+                            store.set_thread_collapsed(
+                                disclosure_id.clone(),
+                                !children_collapsed,
+                                cx,
+                            )
                         });
                         this.compact_model_dirty = true;
                         cx.notify();
@@ -3701,7 +3821,16 @@ impl SessionsSidebar {
                     .child(cached.children_count.clone()),
                 )
             });
-        Self::thread_context_menu(row, state, working, meta.settled_at.is_some(), true)
+        let share = self.share_target(meta.project_id.as_deref(), cx);
+        Self::thread_context_menu(
+            row,
+            state,
+            working,
+            meta.settled_at.is_some(),
+            true,
+            share,
+            self.store.read(cx).scope(),
+        )
     }
 }
 
@@ -3814,6 +3943,8 @@ fn compact_status_line(
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.reveal_selected_settled(cx);
+        let spaces = spaces::for_store(&self.store, cx);
+        self.spaces_observer.watch(spaces.as_ref(), cx);
         if self.compact(cx) {
             return self.render_compact(window, cx);
         }
@@ -3866,7 +3997,11 @@ impl Render for SessionsSidebar {
                                         .py_3()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(crate::tr!("sidebar.empty")),
+                                        .child(if self.store.read(cx).scope().is_full() {
+                                            crate::tr!("sidebar.empty")
+                                        } else {
+                                            crate::tr!("member.empty_description")
+                                        }),
                                 ),
                             ),
                         )
@@ -3942,7 +4077,14 @@ impl Render for SessionsSidebar {
                 if visible.is_empty() && settled_count == 0 {
                     // An active project filter can empty the list while threads
                     // exist; that state gets its own hint, not the no-projects one.
-                    let hint = if flat_sessions.is_empty() {
+                    let hint = if !self.store.read(cx).scope().is_full() && flat_sessions.is_empty()
+                    {
+                        if self.store.read(cx).projects().is_empty() {
+                            crate::tr!("member.empty_description")
+                        } else {
+                            crate::tr!("member.threads_empty")
+                        }
+                    } else if flat_sessions.is_empty() {
                         crate::tr!("sidebar.empty")
                     } else {
                         crate::tr!("sidebar.filter_empty")
@@ -4084,6 +4226,8 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_project_reveal))
             .on_action(cx.listener(Self::on_filter_project))
             .on_action(cx.listener(Self::on_start_draft_for_project))
+            .on_action(cx.listener(Self::on_toggle_share))
+            .on_action(cx.listener(Self::on_new_space_and_share))
             .child(self.render_app_row(window, cx))
             .child(self.render_search_row(cx))
             .child(self.render_feature_rows(cx))
@@ -4293,6 +4437,7 @@ mod tests {
                 summary: summary(true),
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -4311,6 +4456,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("background".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
@@ -4393,6 +4539,7 @@ mod tests {
                 projects: vec![project.clone()],
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -4411,6 +4558,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -5683,6 +5831,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -5701,6 +5850,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("virtual-0".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
@@ -5817,6 +5967,7 @@ mod tests {
             }),
         );
         send(Topic::Index, snapshot(&sessions));
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -5835,6 +5986,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("virtual-0".into()));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) =
@@ -5998,6 +6150,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -6016,6 +6169,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("beta-0".into()));
         let window_state = cx.new(|cx| {
             let mut state = WindowState::new(false).with_compact(true);
@@ -6200,6 +6354,7 @@ mod tests {
                 projects: vec![project],
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -6218,6 +6373,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // A selection keeps the store from opening a draft against a host
         // this fake transport never answers.
         store.update(cx, |store, _| store.select_session("other".into()));
@@ -6311,6 +6467,7 @@ mod tests {
                 projects: vec![project],
             }),
         );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -6329,6 +6486,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("parent".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
@@ -6601,6 +6759,111 @@ mod tests {
             );
         });
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// While this machine hosts, a project's menu shares it into a space and,
+    /// chosen again, takes it back out; the header carries the shared mark
+    /// exactly while the project is in a space.
+    #[cfg(feature = "remote-hosting")]
+    #[gpui::test]
+    fn the_share_item_toggles_the_project_in_a_space_on_this_machine(cx: &mut TestAppContext) {
+        use gpui::BorrowAppContext as _;
+        use tcode_traverse::{HostConfig, HostMux, TraverseHost, TraverseMode};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-share-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.join("store")).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let mut project = Project::from_root(root.join("a"));
+        project.id = "a".into();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.settings.sidebar_layout = SidebarLayout::Grouped;
+            let mut meta = session("thread", None);
+            meta.project_id = Some(project.id.clone());
+            state.sessions.push(meta);
+            state.projects = vec![project];
+        }))
+        .unwrap();
+        // Idle pipes: no remote client attaches through the mux here.
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let mux = HostMux::new(to_host.clone(), from_host.clone());
+        // A random port: the desktop's fixed one may be taken on this machine.
+        let traverse = TraverseHost::start(
+            mux.clone(),
+            HostConfig {
+                host_name: "Studio".into(),
+                data_dir: root.join("traverse"),
+                traverse: TraverseMode::Off,
+                pairing_enabled: true,
+                bind_port: None,
+            },
+        )
+        .unwrap();
+        let space_id = traverse.create_space("Design".into()).unwrap();
+        cx.update(|cx| {
+            let mut controller = crate::remote::RemoteController::new(
+                mux,
+                root.clone(),
+                tcode_client::HostLink::new(to_host, from_host),
+                Default::default(),
+            );
+            controller.adopt_host(traverse);
+            cx.set_global(controller);
+        });
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        cx.simulate_resize(size(px(320.), px(900.)));
+        draw(cx);
+        assert!(cx.debug_bounds("project-header-a").is_some());
+        assert!(cx.debug_bounds("project-shared-a").is_none());
+
+        let share = spaces::ToggleShare {
+            space_id,
+            project_id: "a".into(),
+        };
+        let shared = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                cx.global::<crate::remote::RemoteController>()
+                    .hosting(tcode_protocol::HostingAction::State)
+                    .unwrap()
+                    .spaces[0]
+                    .project_ids
+                    .clone()
+            })
+        };
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_toggle_share(&share, window, cx)
+        });
+        draw(cx);
+        assert_eq!(shared(cx), ["a"]);
+        assert!(
+            cx.debug_bounds("project-shared-a").is_some(),
+            "a shared project is marked"
+        );
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_toggle_share(&share, window, cx)
+        });
+        draw(cx);
+        assert!(shared(cx).is_empty());
+        assert!(cx.debug_bounds("project-shared-a").is_none());
+
+        cx.update(|_, cx| {
+            cx.update_global::<crate::remote::RemoteController, _>(|controller, _| {
+                controller.stop_hosting()
+            });
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 }

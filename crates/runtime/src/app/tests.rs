@@ -7533,7 +7533,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
     .unwrap();
     let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
     let connect = || {
-        let connection = mux.attach();
+        let connection = mux.attach(tcode_protocol::Principal::Full);
         let link = HostLink::new(connection.to_host, connection.from_host);
         smol::spawn({
             let link = link.clone();
@@ -7806,6 +7806,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
     state.update(cx, |state, _| {
         let records: Vec<SessionEventRecord> = (0..2000)
             .map(|index| SessionEventRecord {
+                author: None,
                 ts: Some(index),
                 event: AgentEvent::Warning {
                     message: format!("event {index}"),
@@ -7900,6 +7901,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         for turn in 0..5u64 {
             turn_starts.push(records.len());
             records.push(SessionEventRecord {
+                author: None,
                 ts: Some(turn * 1000),
                 event: AgentEvent::ItemCompleted(ThreadItem {
                     id: format!("user-{turn}"),
@@ -7913,6 +7915,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 elided: None,
             });
             records.push(SessionEventRecord {
+                author: None,
                 ts: Some(turn * 1000 + 1),
                 event: AgentEvent::TurnStarted {
                     turn_id: format!("turn-{turn}"),
@@ -7921,6 +7924,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             });
             for delta in 0..300u64 {
                 records.push(SessionEventRecord {
+                    author: None,
                     ts: Some(turn * 1000 + 2 + delta),
                     event: AgentEvent::Delta {
                         item_id: "pi-assistant-0:0".into(),
@@ -7931,6 +7935,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 });
             }
             records.push(SessionEventRecord {
+                author: None,
                 ts: Some(turn * 1000 + 400),
                 event: AgentEvent::TurnCompleted {
                     turn_id: format!("turn-{turn}"),
@@ -8184,6 +8189,7 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
     state.update(cx, |state, _| {
         let records: Vec<SessionEventRecord> = (0..10)
             .map(|index| SessionEventRecord {
+                author: None,
                 ts: Some(index),
                 event: AgentEvent::Warning {
                     message: "x".repeat(1024 * 1024),
@@ -8798,6 +8804,7 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
             state,
             cx,
             tcode_protocol::ClientMessage {
+                principal: None,
                 id: 3,
                 key: None,
                 payload: tcode_protocol::ClientPayload::Query(
@@ -8853,6 +8860,7 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
 
 fn tool_call(id: &str, output: String) -> SessionEventRecord {
     SessionEventRecord {
+        author: None,
         ts: Some(1),
         event: AgentEvent::ItemCompleted(ThreadItem {
             id: id.into(),
@@ -8881,6 +8889,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     let records = vec![
         tool_call("tool", tool_output.clone()),
         SessionEventRecord {
+            author: None,
             ts: Some(2),
             event: AgentEvent::ItemCompleted(ThreadItem {
                 id: "command".into(),
@@ -8982,6 +8991,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         .unwrap()
     };
     let update = |diff: &str| SessionEventRecord {
+        author: None,
         ts: Some(1),
         event: AgentEvent::TurnChangesUpdated {
             turn_id: "turn".into(),
@@ -8992,6 +9002,7 @@ fn superseded_turn_changes_cross_without_diffs() {
     };
     let records = vec![
         SessionEventRecord {
+            author: None,
             ts: Some(0),
             event: AgentEvent::TurnStarted {
                 turn_id: "turn".into(),
@@ -9073,6 +9084,7 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
             for (ts, diff) in [(3, "-a\n+c\n"), (4, "-a\n+d\n")] {
                 state.record_event_for_replica_test("thread", ts, &snapshot(diff), cx);
                 conversation.push(SessionEventRecord {
+                    author: None,
                     ts: Some(ts),
                     event: snapshot(diff),
                     elided: None,
@@ -9184,6 +9196,7 @@ fn history_windows_are_byte_budgeted() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let records: Vec<SessionEventRecord> = (0..200)
         .map(|index| SessionEventRecord {
+            author: None,
             ts: Some(index),
             event: AgentEvent::Warning {
                 message: "w".repeat(10 * 1024),
@@ -10086,7 +10099,7 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
     let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
     let clients: Vec<HostLink> = (0..2)
         .map(|_| {
-            let connection = mux.attach();
+            let connection = mux.attach(tcode_protocol::Principal::Full);
             let link = HostLink::new(connection.to_host, connection.from_host);
             smol::spawn({
                 let link = link.clone();

@@ -511,7 +511,15 @@ impl AppShell {
                 .timer(Duration::from_millis(150))
                 .await;
             let mut preferences = host.load_preferences();
+            let member_settings = preferences
+                .navigation
+                .as_ref()
+                .and_then(|navigation| navigation.get("member_settings"))
+                .cloned();
             preferences.navigation = serde_json::to_value(snapshot).ok();
+            if let Some(member_settings) = member_settings {
+                preferences.navigation.as_mut().unwrap()["member_settings"] = member_settings;
+            }
             host.save_preferences(&preferences);
         }));
     }
@@ -806,7 +814,7 @@ impl AppShell {
             return;
         };
         let store = attachment.link.store.read(cx);
-        if attachment.adopted || !store.settings_hydrated() {
+        if (attachment.adopted && store.scope().is_full()) || !store.settings_hydrated() {
             return;
         }
         attachment.adopted = true;
@@ -903,8 +911,8 @@ impl AppShell {
             state.route() == Route::Chat
         };
         if let Some(attachment) = &self.attachment {
-            attachment.link.store.update(cx, |store, _| {
-                store.set_conversation_on_screen(on_screen);
+            attachment.link.store.update(cx, |store, cx| {
+                store.set_conversation_on_screen(on_screen, cx);
             });
         }
     }
@@ -1531,8 +1539,8 @@ impl AppShell {
         // just Threads: the Hosts row below already names this machine.
         let (title, subtitle): (SharedString, Option<SharedString>) = match store.remote_host_name()
         {
-            Some(host) => (
-                host.to_owned().into(),
+            Some(_) => (
+                store.machine_label().into(),
                 Some(crate::remote::connection_label(&store.connection_state()).into()),
             ),
             None => (crate::tr!("mobile.threads").into_owned().into(), None),
@@ -1624,13 +1632,17 @@ impl AppShell {
             })
             .map(|project| project.name);
         // Over a remote link the project shares its line with the link's state.
-        let subtitle = match (project, store.remote_host_name()) {
-            (Some(project), Some(_)) => Some(format!(
-                "{project} · {}",
-                crate::remote::connection_label(&store.connection_state())
-            )),
-            (None, Some(_)) => Some(crate::remote::connection_label(&store.connection_state())),
-            (project, None) => project,
+        let subtitle = if !store.scope().is_full() {
+            Some(store.machine_label())
+        } else {
+            match (project, store.remote_host_name()) {
+                (Some(project), Some(_)) => Some(format!(
+                    "{project} · {}",
+                    crate::remote::connection_label(&store.connection_state())
+                )),
+                (None, Some(_)) => Some(crate::remote::connection_label(&store.connection_state())),
+                (project, None) => project,
+            }
         };
         let title = active
             .map(|(title, _, draft)| {
@@ -1734,6 +1746,7 @@ impl AppShell {
             ),
         ]
         .into_iter()
+        .filter(|(id, _, _)| *id != "preview" || attachment.link.store.read(cx).scope().is_full())
         .map(|(id, label, selected)| {
             let shell = shell.clone();
             crate::material::segment(
@@ -2439,6 +2452,7 @@ mod tests {
     /// about the link can be dictated.
     struct MountedShell {
         outgoing: async_channel::Receiver<String>,
+        observed: RefCell<Vec<tcode_protocol::ClientMessage>>,
         incoming: async_channel::Sender<String>,
         states: async_channel::Sender<tcode_client::ConnectionState>,
     }
@@ -2552,6 +2566,8 @@ mod tests {
                 relay: None,
                 addrs: vec!["127.0.0.1:47503".into()],
                 last_connected_unix: Some(1),
+                space_id: None,
+                space_name: None,
             },
             transport: RefCell::new(Some(Transport {
                 to_host: to_host.into(),
@@ -2589,11 +2605,15 @@ mod tests {
         });
         let shell = window.root(cx).unwrap();
         let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+        if let Some(store) = shell.read_with(cx, |shell, _| shell.store()) {
+            crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
+        }
         draw(cx);
         (
             shell,
             MountedShell {
                 outgoing,
+                observed: RefCell::new(Vec::new()),
                 incoming,
                 states,
             },
@@ -2640,6 +2660,8 @@ mod tests {
                 relay: None,
                 addrs: vec!["127.0.0.1:48442".into()],
                 last_connected_unix: None,
+                space_id: None,
+                space_name: None,
             },
             transport: RefCell::new(Some(Transport {
                 to_host: to_host.into(),
@@ -2723,6 +2745,34 @@ mod tests {
         present: bool,
         cx: &mut VisualTestContext,
     ) {
+        while let Ok(line) = host.outgoing.try_recv() {
+            host.observed
+                .borrow_mut()
+                .push(decode_client_line(&line).unwrap());
+        }
+        let scope_request = host
+            .observed
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|message| {
+                matches!(
+                    message.payload,
+                    ClientPayload::Subscribe(tcode_protocol::Subscription {
+                        topic: Topic::Scope,
+                        ..
+                    })
+                )
+                .then_some(message.id)
+            })
+            .expect("Scope subscription");
+        crate::store::tests::seed_full_scope_reply(
+            &store_of(shell, cx),
+            &host.incoming,
+            scope_request,
+            Vec::new(),
+            cx,
+        );
         let mut meta = tcode_core::project::SessionMeta::new(
             agent::ProviderKind::Codex,
             "/project".into(),
@@ -4029,10 +4079,14 @@ mod tests {
                 cx,
             )
         });
+        if let Some(store) = shell.read_with(cx, |shell, _| shell.store()) {
+            crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
+        }
         (
             shell,
             MountedShell {
                 outgoing,
+                observed: RefCell::new(Vec::new()),
                 incoming,
                 states,
             },
@@ -4230,7 +4284,12 @@ mod tests {
 
     /// Every line the client has sent since the last drain.
     fn sent(host: &MountedShell) -> Vec<ClientPayload> {
-        let mut payloads = Vec::new();
+        let mut payloads: Vec<_> = host
+            .observed
+            .borrow_mut()
+            .drain(..)
+            .map(|message| message.payload)
+            .collect();
         while let Ok(line) = host.outgoing.try_recv() {
             payloads.push(decode_client_line(&line).expect("client line").payload);
         }

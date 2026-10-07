@@ -19,21 +19,22 @@ pub use event::{
     MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
     PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable,
     ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect,
-    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast,
-    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
+    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
+    ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
+    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    Topic,
 };
 pub use query::{
-    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
-    HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES,
-    OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query, QueryResponse, RecentDir,
-    SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS,
-    SessionSearchHit, SourceTool,
+    DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice,
+    HostingAction, HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES,
+    MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query,
+    QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_COLS,
+    STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
-    ClientMessage, ClientPayload, HostMessage, MAX_LINE_BYTES, ProtocolError, Subscription,
-    decode_client_line, decode_host_line, encode_line,
+    ClientMessage, ClientPayload, HostMessage, MAX_LINE_BYTES, Principal, ProtocolError,
+    Subscription, decode_client_line, decode_host_line, encode_line,
 };
 
 // The number changes once per release whose wire differs from the previous
@@ -62,7 +63,14 @@ pub use wire::{
 // snapshots; replaces approval modes with native permission options and
 // requested selections; adds Orchestrate child approval Auto as the default;
 // removes SelectUltrathink and ultrathink_armed from session status. An older
-// peer sending a removed command is rejected.
+// peer sending a removed command is rejected. Adds transport principals, scope and
+// space-index topics, scope snapshots, space hosting actions and device access,
+// optional stored-event authors, a space id on pairing with a space name in the
+// paired reply and two pairing rejections for Shared Spaces. Space principals
+// carry a default-zero policy_revision; RemoveMember carries regenerate_link
+// for atomic revocation and rotation; HostingState optionally returns
+// created_space_id for Create. Scope is a correlated snapshot only; removes
+// ScopeReplaced broadcasts.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]

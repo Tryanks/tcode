@@ -1849,6 +1849,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         send_settings(&incoming, settings);
         send_providers(&incoming, catalog);
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -1860,6 +1861,7 @@ mod tests {
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         let window_state = cx.new(|_| {
             let mut state = WindowState::new(false);
             state.pending_settings_section = Some("plugins".into());

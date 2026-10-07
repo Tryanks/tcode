@@ -202,13 +202,19 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             "Set a password on first open"
         }
     );
+    for space in traverse_host.spaces() {
+        if let Some(link) = space.link {
+            println!("Space {}: {link}", space.name);
+        }
+    }
     println!("Browser: http://{}/", server.local_addr());
     println!("Press Ctrl-C to stop");
     wait_for_interrupt();
 
-    let shutdown_connection = mux.attach();
+    let shutdown_connection = mux.attach(tcode_protocol::Principal::Full);
     let shutdown_id = 1_u64;
     let shutdown_line = serde_json::to_string(&tcode_protocol::ClientMessage {
+        principal: None,
         key: None,
         id: shutdown_id,
         payload: tcode_protocol::ClientPayload::Command(

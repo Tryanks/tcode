@@ -98,7 +98,12 @@ impl DeviceClaim {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientLine {
     /// Present an invitation's secret to join the allow list.
-    Pair { secret: String, device: DeviceClaim },
+    Pair {
+        secret: String,
+        device: DeviceClaim,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+    },
     Hello {
         protocol_version: u32,
         device: DeviceClaim,
@@ -127,6 +132,8 @@ pub enum PairRejection {
     Disabled,
     /// The machine could not record the pairing; try again.
     Busy,
+    AlreadyMember,
+    SpaceUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +149,8 @@ pub enum HelloRejection {
 pub enum HostLine {
     Paired {
         host_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space_name: Option<String>,
     },
     PairRejected {
         reason: PairRejection,
@@ -368,6 +377,7 @@ mod tests {
     #[test]
     fn control_lines_use_the_documented_shapes() {
         let pair = ClientLine::Pair {
+            space: None,
             secret: "AAECAwQFBgcICQoLDA0ODw".into(),
             device: DeviceClaim {
                 name: "Phone".into(),

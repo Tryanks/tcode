@@ -45,7 +45,7 @@ use agent::{AgentEvent, ModelSpec, ProviderCommand, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 use tcode_core::project::{IndexFile, Project, SessionMeta};
-use tcode_core::session::StoredEvent;
+use tcode_core::session::{Author, StoredEvent};
 
 use db::{Broken, Db, KEPT_WORKTREES, SCHEMA_VERSION, blob, integer, is_broken};
 
@@ -64,6 +64,8 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 /// callers deal in [`StoredEvent`] (which tolerates the legacy bare form).
 #[derive(Serialize, Deserialize)]
 struct EventEnvelope {
+    #[serde(default)]
+    author: Option<Author>,
     ts: u64,
     event: AgentEvent,
     #[serde(default)]
@@ -72,6 +74,8 @@ struct EventEnvelope {
 
 #[derive(Serialize)]
 struct EventEnvelopeRef<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<&'a Author>,
     ts: u64,
     event: &'a AgentEvent,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +83,7 @@ struct EventEnvelopeRef<'a> {
 }
 
 impl<'a> EventEnvelopeRef<'a> {
-    fn new(ts: u64, event: &'a AgentEvent) -> Self {
+    fn new(ts: u64, event: &'a AgentEvent, author: Option<&'a Author>) -> Self {
         let file_change = match event {
             AgentEvent::ItemStarted(item)
             | AgentEvent::ItemUpdated(item)
@@ -92,6 +96,7 @@ impl<'a> EventEnvelopeRef<'a> {
             _ => false,
         };
         Self {
+            author,
             ts,
             event,
             file_diff_version: file_change.then_some(1),
@@ -265,8 +270,17 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
+        Self::append_authored_event(session_id, ts, event, None)
+    }
+
+    pub fn append_authored_event(
+        session_id: &str,
+        ts: u64,
+        event: &AgentEvent,
+        author: Option<&Author>,
+    ) -> io::Result<Self> {
         let mut line =
-            serde_json::to_vec(&EventEnvelopeRef::new(ts, event)).map_err(invalid_data)?;
+            serde_json::to_vec(&EventEnvelopeRef::new(ts, event, author)).map_err(invalid_data)?;
         line.push(b'\n');
         Ok(Self(Op::AppendEvent {
             session_id: session_id.to_owned(),
@@ -564,7 +578,8 @@ impl SessionStore {
         let mut state = self.shared.lock_state()?;
         loop {
             match std::mem::replace(&mut *state, State::Closed) {
-                State::Unopened | State::Closed | State::Owned(_) => return Ok(()),
+                State::Unopened | State::Closed => return Ok(()),
+                State::Owned(ownership) => return ownership.unlock(),
                 State::Migrating => {
                     *state = State::Migrating;
                     state = self
@@ -583,7 +598,6 @@ impl SessionStore {
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
                 State::Closing(live) => {
-                    drop(state);
                     let Live { db, ownership, .. } = live;
                     let result = match Arc::try_unwrap(db) {
                         Ok(db) => catch_unwind(AssertUnwindSafe(|| db.checkpoint()))
@@ -597,6 +611,9 @@ impl SessionStore {
                             "session store is still referenced after its last operation",
                         )),
                     };
+                    // A concurrently launching child can inherit the lock descriptor
+                    // until exec. Closing our copy alone leaves that child holding it.
+                    let result = result.and(ownership.unlock());
                     drop(ownership);
                     return result;
                 }
@@ -1454,6 +1471,7 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
     let (stored, version) = match serde_json::from_str::<EventEnvelope>(line) {
         Ok(envelope) => (
             StoredEvent {
+                author: envelope.author,
                 ts: Some(envelope.ts),
                 event: envelope.event,
                 elided: None,
@@ -1462,6 +1480,7 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
         ),
         Err(_) => (
             StoredEvent {
+                author: None,
                 ts: None,
                 event: serde_json::from_str::<AgentEvent>(line)?,
                 elided: None,

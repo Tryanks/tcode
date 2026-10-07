@@ -361,6 +361,11 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
+    fn section_applies(&self, section: &Section, cx: &App) -> bool {
+        section.applies(&self.capabilities)
+            && (self.store.read(cx).scope().is_full()
+                || matches!(section, Section::General | Section::Archived))
+    }
     fn take_requested_section(
         window_state: &Entity<WindowState>,
         cx: &mut Context<Self>,
@@ -485,9 +490,17 @@ impl SettingsPage {
         // channel used by in-app Settings links.
         let requested_section = Self::take_requested_section(&window_state, cx);
         let section = requested_section
-            .filter(|section| section.applies(&capabilities))
+            .filter(|section| {
+                section.applies(&capabilities)
+                    && (store.read(cx).scope().is_full()
+                        || matches!(section, Section::General | Section::Archived))
+            })
             .unwrap_or(Section::General);
-        if requested_section.is_some_and(|section| !section.applies(&capabilities)) {
+        if requested_section.is_some_and(|section| {
+            !section.applies(&capabilities)
+                || (!store.read(cx).scope().is_full()
+                    && !matches!(section, Section::General | Section::Archived))
+        }) {
             Self::return_to_settings_root(&window_state, cx);
         }
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
@@ -505,7 +518,8 @@ impl SettingsPage {
         });
         #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
         #[cfg(not(target_family = "wasm"))]
-        let hosting_panel = cx.new(|cx| crate::remote::HostingPanel::new(window, cx));
+        let hosting_panel =
+            cx.new(|cx| crate::remote::HostingPanel::new(store.clone(), window, cx));
         #[cfg(target_family = "wasm")]
         let hosting_panel = cx.new(|cx| crate::remote::hosted::HostedPanel::new(store.clone(), cx));
         // Editable fields start empty and are seeded by `hydrate_inputs` once
@@ -806,7 +820,10 @@ impl SettingsPage {
     }
 
     fn dispatch_settings(&self, intent: impl FnOnce(&mut WorkspaceStore), cx: &mut Context<Self>) {
-        self.store.update(cx, |store, _cx| intent(store));
+        self.store.update(cx, |store, cx| {
+            intent(store);
+            store.local_settings_changed(cx);
+        });
     }
 
     /// The index leaves archived threads out; the Archived section holds
@@ -824,7 +841,7 @@ impl SettingsPage {
 
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
         self.host_permissions = None;
-        if !section.applies(&self.capabilities) {
+        if !self.section_applies(&section, cx) {
             self.section = Section::General;
             Self::return_to_settings_root(&self.window_state, cx);
             cx.notify();
@@ -1015,7 +1032,8 @@ impl SettingsPage {
         let advanced_expanded = self.advanced_expanded();
         for section in SECTIONS
             .into_iter()
-            .filter(|section| section.applies(&self.capabilities))
+            .filter(|section| self.section_applies(section, cx))
+            .collect::<Vec<_>>()
         {
             if group != Some(section.group()) {
                 let next = section.group();
@@ -1077,8 +1095,10 @@ impl SettingsPage {
                     .filter(|section| {
                         section.group() == group
                             && section.advanced() == advanced
-                            && section.applies(&self.capabilities)
+                            && self.section_applies(section, cx)
                     })
+                    .collect::<Vec<_>>()
+                    .into_iter()
                     .map(|section| self.compact_section_row(section, cx))
                     .collect::<Vec<_>>()
             };
@@ -1269,6 +1289,9 @@ impl SettingsPage {
     }
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !self.section_applies(&self.section, cx) {
+            self.section = Section::General;
+        }
         // Usage is fetched on demand: kick one refresh off on the transition
         // into the section (any entry path — nav click, route key, restore),
         // not on every frame it renders.
@@ -1354,6 +1377,13 @@ impl SettingsPage {
             self.device_name_row(device_name_overridden, cx),
             self.remote_attachment_limit_row(attachment_limit_overridden, cx),
         ];
+        if !self.store.read(cx).scope().is_full() {
+            return v_flex().gap(px(24.)).child(
+                v_flex()
+                    .child(self.section_label(crate::tr!("settings.appearance_section"), cx))
+                    .child(self.grouped_plain(appearance, cx)),
+            );
+        }
         let delete_confirm_reset = self.reset_action(
             "reset-delete-confirm",
             settings.skip_delete_confirmation,
@@ -2078,6 +2108,7 @@ impl SettingsPage {
 
     /// Archived sessions grouped by project with restore and permanent-delete actions.
     fn render_archived(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let full = self.store.read(cx).scope().is_full();
         let groups = self.store.read(cx).archived_groups();
         let settings = self.store.read(cx).settings();
         let days = settings.auto_archive_max_idle_days.max(1);
@@ -2173,7 +2204,7 @@ impl SettingsPage {
             let loading = self.store.read(cx).archived_loading();
             return v_flex()
                 .gap(px(20.))
-                .child(controls)
+                .when(full, |column| column.child(controls))
                 .child(self.section_label(crate::tr!("settings.archived_section"), cx))
                 .child(
                     v_flex()
@@ -2223,7 +2254,7 @@ impl SettingsPage {
         let now = now_secs();
         let mut col = v_flex()
             .gap(px(20.))
-            .child(controls)
+            .when(full, |column| column.child(controls))
             .child(
                 gpui_base::h_flex()
                     .items_center()
@@ -2262,15 +2293,17 @@ impl SettingsPage {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        Button::new("archived-delete-all")
-                            .danger()
-                            .small()
-                            .label(crate::tr!("settings.archived_delete_all"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_delete_all_archived(window, cx);
-                            })),
-                    ),
+                    .when(full, |row| {
+                        row.child(
+                            Button::new("archived-delete-all")
+                                .danger()
+                                .small()
+                                .label(crate::tr!("settings.archived_delete_all"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_delete_all_archived(window, cx);
+                                })),
+                        )
+                    }),
             )
             .child(self.section_label(crate::tr!("settings.archived_section"), cx));
         {
@@ -2317,17 +2350,19 @@ impl SettingsPage {
                                             });
                                         })),
                                 )
-                                .child(
-                                    Button::new(("delete-perm", key))
-                                        .danger()
-                                        .small()
-                                        .label(crate::tr!("settings.delete_permanently"))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.confirm_delete_archived(
-                                                &id_delete, &title, window, cx,
-                                            );
-                                        })),
-                                ),
+                                .when(full, |row| {
+                                    row.child(
+                                        Button::new(("delete-perm", key))
+                                            .danger()
+                                            .small()
+                                            .label(crate::tr!("settings.delete_permanently"))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.confirm_delete_archived(
+                                                    &id_delete, &title, window, cx,
+                                                );
+                                            })),
+                                    )
+                                }),
                         )
                         .into_any_element(),
                 );
@@ -3147,6 +3182,7 @@ mod tests {
         cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -3158,6 +3194,7 @@ mod tests {
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, _| store.select_session("live".into()));
         let window_state = cx.new(|_| WindowState::new(false));
         let mut page = None;

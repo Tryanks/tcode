@@ -6,6 +6,7 @@ use super::*;
 /// appends and one-shot events deliberately remain on their existing paths.
 pub(crate) struct DomainDiff {
     index: IndexSnapshot,
+    space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
     providers: ProvidersStatus,
     git_status: HashMap<String, GitStatusStatus>,
@@ -17,6 +18,7 @@ impl DomainDiff {
     pub(crate) fn new(state: &AppState) -> Self {
         Self {
             index: state.index_snapshot(),
+            space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
             providers: state.providers_status_snapshot(),
             git_status: HashMap::new(),
@@ -25,7 +27,11 @@ impl DomainDiff {
         }
     }
 
-    pub(crate) fn emit_changes(&mut self, state: &AppState, cx: &mut HostCx) {
+    pub(crate) fn emit_changes(&mut self, state: &mut AppState, cx: &mut HostCx) {
+        if self.index.projects != state.projects {
+            state.space_archives_revision = None;
+        }
+        state.refresh_space_archives();
         let index = state.index_snapshot();
         if self.index != index {
             for event in index_changes(&self.index, &index) {
@@ -34,6 +40,26 @@ impl DomainDiff {
             self.index = index;
         }
 
+        self.space_indexes.retain(|id, _| {
+            state.subscriptions.contains(&Topic::SpaceIndex {
+                space_id: id.clone(),
+            })
+        });
+        for (id, projects) in &state.space_scopes {
+            let topic = Topic::SpaceIndex {
+                space_id: id.clone(),
+            };
+            if !state.subscriptions.contains(&topic) {
+                continue;
+            }
+            let index = state.space_index_snapshot(id, projects);
+            if let Some(old) = self.space_indexes.get(id) {
+                for event in index_changes(old, &index) {
+                    emit_replacement(topic.clone(), event, cx);
+                }
+            }
+            self.space_indexes.insert(id.clone(), index);
+        }
         if self.settings != state.settings {
             let settings = state.settings_snapshot();
             emit_replacement(
@@ -231,6 +257,223 @@ impl AppState {
         }
     }
 
+    fn space_projects(&self, ids: &BTreeSet<String>) -> Vec<Project> {
+        self.projects
+            .iter()
+            .filter(|p| ids.contains(&p.id))
+            .cloned()
+            .collect()
+    }
+
+    fn space_index_snapshot(&self, space_id: &str, ids: &BTreeSet<String>) -> IndexSnapshot {
+        let projects = self.space_projects(ids);
+        let ids: HashSet<_> = projects.iter().map(|p| p.id.as_str()).collect();
+        let in_scope = |meta: &&SessionMeta| {
+            meta.project_id
+                .as_deref()
+                .is_some_and(|id| ids.contains(id))
+        };
+        let metas: Vec<_> = self.sessions.iter().filter(in_scope).collect();
+        let residents: Vec<_> = self
+            .residents
+            .ids()
+            .filter_map(|id| self.resident(id))
+            .filter(|s| in_scope(&&s.meta))
+            .collect();
+        let sharing = WorktreeSharing::new(
+            metas
+                .iter()
+                .copied()
+                .chain(residents.iter().map(|s| &s.meta)),
+        );
+        let mut summary = IndexSummary::default();
+        for meta in &metas {
+            if meta.archived_at.is_some() {
+                *summary
+                    .archived_counts
+                    .entry(meta.project_id.clone().expect("scoped project"))
+                    .or_default() += 1;
+            }
+        }
+        for meta in metas
+            .iter()
+            .copied()
+            .chain(residents.iter().map(|s| &s.meta))
+        {
+            if meta.archived_at.is_some() {
+                continue;
+            }
+            let resident = self.resident(&meta.id);
+            summary.activity.insert(
+                meta.id.clone(),
+                self.session_activity(resident.map_or(meta, |s| &s.meta), resident),
+            );
+            if self.title_generating.contains(&meta.id) {
+                summary.title_generating.insert(meta.id.clone());
+            }
+            if sharing.is_shared(meta) {
+                summary.worktree_shared.insert(meta.id.clone());
+            }
+        }
+        summary.archived_revision = self
+            .space_archives
+            .get(space_id)
+            .map_or(0, |archive| archive.revision);
+        IndexSnapshot {
+            projects,
+            sessions: metas
+                .into_iter()
+                .filter(|m| m.archived_at.is_none())
+                .cloned()
+                .collect(),
+            summary,
+        }
+    }
+
+    pub(crate) fn refresh_space_archives(&mut self) {
+        if self.space_archives_revision == Some(self.archived_revision) {
+            return;
+        }
+        self.space_archives_revision = Some(self.archived_revision);
+        for (id, projects) in &self.space_scopes {
+            let mut archive = self.space_archived_snapshot(projects);
+            if let Some(old) = self.space_archives.get(id) {
+                archive.revision = old.revision
+                    + u64::from(
+                        old.sessions != archive.sessions
+                            || old.worktree_shared != archive.worktree_shared,
+                    );
+            } else {
+                archive.revision = self
+                    .space_archive_revisions
+                    .get(id)
+                    .map_or(0, |revision| revision + 1);
+            }
+            self.space_archives.insert(id.clone(), archive);
+        }
+    }
+
+    pub(crate) fn scoped_archived_sessions(
+        &self,
+        principal: &tcode_protocol::Principal,
+    ) -> ArchivedSessions {
+        match principal {
+            tcode_protocol::Principal::Full => self.archived_sessions(),
+            tcode_protocol::Principal::Space {
+                space_id,
+                project_ids,
+                ..
+            } => self
+                .space_archives
+                .get(space_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.space_archived_snapshot(&project_ids.iter().cloned().collect())
+                }),
+        }
+    }
+
+    fn space_archived_snapshot(&self, project_ids: &BTreeSet<String>) -> ArchivedSessions {
+        let projects = self.space_projects(project_ids);
+        let ids: HashSet<_> = projects.iter().map(|p| p.id.as_str()).collect();
+        let metas: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.project_id
+                    .as_deref()
+                    .is_some_and(|id| ids.contains(id))
+            })
+            .collect();
+        let residents = self
+            .residents
+            .ids()
+            .filter_map(|id| self.resident(id))
+            .filter(|s| {
+                s.meta
+                    .project_id
+                    .as_deref()
+                    .is_some_and(|id| ids.contains(id))
+            });
+        let sharing = WorktreeSharing::new(metas.iter().copied().chain(residents.map(|s| &s.meta)));
+        let mut sessions: Vec<_> = metas
+            .into_iter()
+            .filter(|m| m.archived_at.is_some())
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| {
+            b.archived_at
+                .cmp(&a.archived_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let worktree_shared = sessions
+            .iter()
+            .filter(|m| sharing.is_shared(m))
+            .map(|m| m.id.clone())
+            .collect();
+        ArchivedSessions {
+            sessions,
+            worktree_shared,
+            revision: 0,
+        }
+    }
+
+    fn scoped_provider_choices(&self) -> Vec<tcode_protocol::ScopedProviderChoice> {
+        ProviderKind::NATIVE
+            .into_iter()
+            .chain([ProviderKind::Acp])
+            .flat_map(|kind| {
+                self.settings
+                    .profiles_for_kind(kind)
+                    .into_iter()
+                    .filter(|profile| profile.settings.enabled)
+                    .map(move |profile| {
+                        let mut models: Vec<_> = self
+                            .models_for(kind)
+                            .iter()
+                            .filter(|m| !profile.settings.hidden_models.contains(&m.id))
+                            .cloned()
+                            .collect();
+                        for id in &profile.settings.custom_models {
+                            if !models.iter().any(|m| &m.id == id)
+                                && !profile.settings.hidden_models.contains(id)
+                            {
+                                models.push(ModelSpec {
+                                    id: id.clone(),
+                                    display_name: id.clone(),
+                                    is_default: false,
+                                    options: Vec::new(),
+                                });
+                            }
+                        }
+                        tcode_protocol::ScopedProviderChoice {
+                            provider: kind,
+                            name: self.settings.profile_display_name(&profile.id),
+                            profile_id: Some(profile.id),
+                            models,
+                        }
+                    })
+            })
+            .collect()
+    }
+
+    fn scope_snapshot(&self, principal: &tcode_protocol::Principal) -> tcode_protocol::Scope {
+        match principal {
+            tcode_protocol::Principal::Full => tcode_protocol::Scope::Full,
+            tcode_protocol::Principal::Space {
+                space_id,
+                space_name,
+                project_ids,
+                ..
+            } => tcode_protocol::Scope::Space {
+                space_id: space_id.clone(),
+                space_name: space_name.clone(),
+                projects: self.space_projects(&project_ids.iter().cloned().collect()),
+                providers: self.scoped_provider_choices(),
+            },
+        }
+    }
+
     pub fn archived_sessions(&self) -> ArchivedSessions {
         let sharing = self.worktree_sharing();
         let mut sessions: Vec<_> = self
@@ -313,9 +556,17 @@ impl AppState {
     pub(crate) fn subscription_snapshot(
         &mut self,
         subscription: &tcode_protocol::Subscription,
+        principal: &tcode_protocol::Principal,
     ) -> Option<EventEnvelope> {
         let topic = &subscription.topic;
         let event = match topic {
+            Topic::Scope => ServerEvent::ScopeSnapshot(self.scope_snapshot(principal)),
+            Topic::SpaceIndex { space_id } => {
+                ServerEvent::IndexSnapshot(self.space_index_snapshot(
+                    space_id,
+                    self.space_scopes.get(space_id).unwrap_or(&BTreeSet::new()),
+                ))
+            }
             Topic::Index => ServerEvent::IndexSnapshot(self.index_snapshot()),
             Topic::Settings => ServerEvent::SettingsSnapshot(self.settings_snapshot()),
             Topic::Providers => ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),

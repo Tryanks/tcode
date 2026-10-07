@@ -18,11 +18,14 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, encode_secret, pair_url};
-use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo, ProtocolError};
+use tcode_protocol::{
+    DeviceAccess, HostedDevice, HostingAction, HostingState, PathInfo, Principal, ProtocolError,
+    SpaceAction, SpaceInfo,
+};
 use url::Url;
 
 use crate::{
-    identity::HostIdentity,
+    identity::{DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, now_unix},
     lan,
     manifest::{Manifest, ManifestLoader, ManifestSource, live},
     mux::HostMux,
@@ -87,6 +90,7 @@ pub struct DeviceInfo {
     pub name: String,
     pub platform: Option<String>,
     pub created_unix: u64,
+    pub access: DeviceAccess,
     /// How the device reaches this machine while connected; `None` offline.
     pub live: Option<PathInfo>,
 }
@@ -332,6 +336,79 @@ impl TraverseHost {
         self.shared.revoke(id)
     }
 
+    pub fn spaces(&self) -> Vec<SpaceInfo> {
+        let addr = self.shared.snapshot();
+        let state = self.shared.state.lock().unwrap();
+        self.shared.spaces(&state, &addr)
+    }
+
+    pub fn create_space(&self, name: String) -> io::Result<String> {
+        self.shared
+            .space_action(SpaceAction::Create { name })
+            .map(|id| id.unwrap())
+    }
+
+    pub fn rename_space(&self, id: &str, name: String) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::Rename {
+                id: id.into(),
+                name,
+            })
+            .map(|_| ())
+    }
+
+    pub fn delete_space(&self, id: &str) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::Delete { id: id.into() })
+            .map(|_| ())
+    }
+
+    pub fn set_space_projects(&self, id: &str, project_ids: Vec<String>) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::SetProjects {
+                id: id.into(),
+                project_ids,
+            })
+            .map(|_| ())
+    }
+
+    pub fn regenerate_space_link(&self, id: &str) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::RegenerateLink { id: id.into() })
+            .map(|_| ())
+    }
+
+    pub fn set_space_link_enabled(&self, id: &str, enabled: bool) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::SetLinkEnabled {
+                id: id.into(),
+                enabled,
+            })
+            .map(|_| ())
+    }
+
+    pub fn space_link_url(&self, id: &str) -> Option<String> {
+        self.spaces().into_iter().find(|space| space.id == id)?.link
+    }
+
+    pub fn move_member(&self, device_id: &str, space_id: &str) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::MoveMember {
+                device_id: device_id.into(),
+                space_id: space_id.into(),
+            })
+            .map(|_| ())
+    }
+
+    pub fn remove_member(&self, device_id: &str, regenerate_link: bool) -> io::Result<()> {
+        self.shared
+            .space_action(SpaceAction::RemoveMember {
+                device_id: device_id.into(),
+                regenerate_link,
+            })
+            .map(|_| ())
+    }
+
     /// Answer a hosting query from a client of any transport.
     pub fn hosting(&self, action: HostingAction) -> Result<HostingState, ProtocolError> {
         self.shared.hosting(action)
@@ -396,6 +473,7 @@ impl Shared {
                 host_id: addr.id,
                 name: state.identity.host_name.clone(),
                 secret: encode_secret(&random),
+                space: None,
                 traverse: self.traverse.clone(),
                 relay: addr.relays.first().cloned(),
                 addrs: addr.addrs,
@@ -500,9 +578,13 @@ impl Shared {
 
     fn set_pairing_enabled(&self, enabled: bool) {
         let mut state = self.state.lock().unwrap();
+        let previous = state.identity.clone();
         state.identity.pairing_enabled = enabled;
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
+            state.identity = previous;
             log::error!("could not persist the pairing switch: {error}");
+            return;
         }
         if !enabled && state.invitation.take().is_some() {
             self.notify(None);
@@ -528,10 +610,218 @@ impl Shared {
                     name: device.name.clone(),
                     platform: device.platform.clone(),
                     created_unix: device.created_unix,
+                    access: device_access(device),
                     live,
                 }
             })
             .collect()
+    }
+
+    fn spaces(&self, state: &State, addr: &EndpointAddrSnapshot) -> Vec<SpaceInfo> {
+        state
+            .identity
+            .spaces
+            .iter()
+            .map(|space| SpaceInfo {
+                id: space.id.clone(),
+                name: space.name.clone(),
+                created_unix: space.created_unix,
+                project_ids: space.project_ids.clone(),
+                link: (self.allow_pairing
+                    && state.identity.pairing_enabled
+                    && space.link_enabled
+                    && space.link_failures < MAX_PAIRING_FAILURES)
+                    .then(|| {
+                        pair_url(&PairInvite {
+                            host_id: addr.id.clone(),
+                            name: state.identity.host_name.clone(),
+                            secret: space.secret.clone(),
+                            space: Some(space.id.clone()),
+                            traverse: self.traverse.clone(),
+                            relay: addr.relays.first().cloned(),
+                            addrs: addr.addrs.clone(),
+                        })
+                    }),
+                link_enabled: space.link_enabled,
+                link_dead: space.link_failures >= MAX_PAIRING_FAILURES,
+                members: state
+                    .identity
+                    .devices
+                    .iter()
+                    .filter(|device| member_of(device, &space.id))
+                    .map(|device| hosted_device(state, device))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn space_action(&self, action: SpaceAction) -> io::Result<Option<String>> {
+        let mut state = self.state.lock().unwrap();
+        let previous = state.identity.clone();
+        let mut affected = Vec::new();
+        let mut created = None;
+        match action {
+            SpaceAction::Create { name } => {
+                let name = space_name(name)?;
+                let id = uuid::Uuid::new_v4().to_string();
+                state.identity.spaces.push(SpaceRecord {
+                    id: id.clone(),
+                    name,
+                    created_unix: now_unix(),
+                    project_ids: Vec::new(),
+                    secret: new_secret(),
+                    link_enabled: true,
+                    link_failures: 0,
+                });
+                created = Some(id);
+            }
+            SpaceAction::MoveMember {
+                device_id,
+                space_id,
+            } => {
+                if !state
+                    .identity
+                    .spaces
+                    .iter()
+                    .any(|space| space.id == space_id)
+                {
+                    return Err(missing("space"));
+                }
+                let device = state
+                    .identity
+                    .devices
+                    .iter_mut()
+                    .find(|device| device.id == device_id)
+                    .ok_or_else(|| missing("device"))?;
+                device.access = DeviceGrant::Spaces(vec![space_id]);
+                affected.push(device_id);
+            }
+            SpaceAction::RemoveMember {
+                device_id,
+                regenerate_link,
+            } => {
+                if regenerate_link {
+                    let device = state
+                        .identity
+                        .devices
+                        .iter()
+                        .find(|device| device.id == device_id)
+                        .ok_or_else(|| missing("device"))?;
+                    let DeviceGrant::Spaces(ids) = &device.access else {
+                        return Err(missing("member space"));
+                    };
+                    let ids = ids.clone();
+                    for space in &mut state.identity.spaces {
+                        if ids.contains(&space.id) {
+                            space.secret = new_secret();
+                            space.link_failures = 0;
+                            space.link_enabled = true;
+                        }
+                    }
+                }
+                state.identity.remove(&device_id);
+                affected.push(device_id);
+            }
+            action => {
+                let id = match &action {
+                    SpaceAction::Rename { id, .. }
+                    | SpaceAction::Delete { id }
+                    | SpaceAction::SetProjects { id, .. }
+                    | SpaceAction::RegenerateLink { id }
+                    | SpaceAction::SetLinkEnabled { id, .. } => id,
+                    _ => unreachable!(),
+                };
+                let index = state
+                    .identity
+                    .spaces
+                    .iter()
+                    .position(|space| &space.id == id)
+                    .ok_or_else(|| missing("space"))?;
+                if matches!(
+                    action,
+                    SpaceAction::Rename { .. }
+                        | SpaceAction::Delete { .. }
+                        | SpaceAction::SetProjects { .. }
+                ) {
+                    affected = state
+                        .identity
+                        .devices
+                        .iter()
+                        .filter(|device| member_of(device, id))
+                        .map(|device| device.id.clone())
+                        .collect();
+                }
+                match action {
+                    SpaceAction::Rename { name, .. } => {
+                        state.identity.spaces[index].name = space_name(name)?
+                    }
+                    SpaceAction::Delete { id } => {
+                        state.identity.spaces.remove(index);
+                        state.identity.devices.retain_mut(|device| {
+                            if let DeviceGrant::Spaces(ids) = &mut device.access {
+                                ids.retain(|space| space != &id);
+                                !ids.is_empty()
+                            } else {
+                                true
+                            }
+                        });
+                    }
+                    SpaceAction::SetProjects { project_ids, .. } => {
+                        state.identity.spaces[index].project_ids = project_ids
+                    }
+                    SpaceAction::RegenerateLink { .. } => {
+                        let space = &mut state.identity.spaces[index];
+                        space.secret = new_secret();
+                        space.link_failures = 0;
+                        space.link_enabled = true;
+                    }
+                    SpaceAction::SetLinkEnabled { enabled, .. } => {
+                        state.identity.spaces[index].link_enabled = enabled
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        state.identity.policy_revision += 1;
+        if let Err(error) = state.identity.save() {
+            state.identity = previous;
+            return Err(error);
+        }
+        for id in affected {
+            let code = if state.identity.devices.iter().any(|device| device.id == id) {
+                4
+            } else {
+                3
+            };
+            close_device(&mut state, &id, code, b"space changed");
+        }
+        Ok(created)
+    }
+
+    fn principal(&self, remote: EndpointId) -> Option<Principal> {
+        let state = self.state.lock().unwrap();
+        let device = state
+            .identity
+            .devices
+            .iter()
+            .find(|device| device.id == remote.to_string())?;
+        match &device.access {
+            DeviceGrant::Full => Some(Principal::Full),
+            DeviceGrant::Spaces(ids) => {
+                let [id] = ids.as_slice() else {
+                    return None;
+                };
+                let space = state.identity.spaces.iter().find(|space| &space.id == id)?;
+                Some(Principal::Space {
+                    policy_revision: state.identity.policy_revision,
+                    space_id: space.id.clone(),
+                    space_name: space.name.clone(),
+                    project_ids: space.project_ids.clone(),
+                    device_id: device.id.clone(),
+                    device_name: device.name.clone(),
+                })
+            }
+        }
     }
 
     fn revoke(&self, id: &str) -> io::Result<()> {
@@ -540,24 +830,25 @@ impl Shared {
         if !state.identity.remove(id) {
             return Ok(());
         }
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
             log::error!("could not persist the revocation: {error}");
             state.identity = previous;
             return Err(error);
         }
-        let closed = id
-            .parse::<EndpointId>()
-            .ok()
-            .and_then(|id| state.live.remove(&id))
-            .unwrap_or_default();
-        for connection in closed {
-            connection.close(3_u32.into(), b"revoked");
-        }
+        close_device(&mut state, id, 3, b"revoked");
         Ok(())
     }
 
     fn hosting(self: &Arc<Self>, action: HostingAction) -> Result<HostingState, ProtocolError> {
+        let mut created_space_id = None;
         match action {
+            HostingAction::Spaces(action) => {
+                created_space_id = self.space_action(action).map_err(|error| ProtocolError {
+                    code: "space_update_failed".into(),
+                    message: error.to_string(),
+                })?;
+            }
             HostingAction::State => {}
             HostingAction::SetEnabled(enabled) => {
                 self.set_pairing_enabled(enabled);
@@ -580,6 +871,8 @@ impl Shared {
             .map(|(invitation, remaining)| (Some(invitation.url()), remaining.as_secs()))
             .unwrap_or((None, 0));
         Ok(HostingState {
+            created_space_id,
+            spaces: self.spaces(&state, &addr),
             enabled,
             expires_in_secs,
             host_id: addr.id,
@@ -589,19 +882,7 @@ impl Shared {
                 .identity
                 .devices
                 .iter()
-                .map(|device| HostedDevice {
-                    id: device.id.clone(),
-                    name: device.name.clone(),
-                    created_unix: device.created_unix,
-                    platform: device.platform.clone(),
-                    path: device
-                        .id
-                        .parse::<EndpointId>()
-                        .ok()
-                        .and_then(|id| state.live.get(&id))
-                        .and_then(|connections| connections.first())
-                        .map(path_info),
-                })
+                .map(|device| hosted_device(&state, device))
                 .collect(),
         })
     }
@@ -610,11 +891,77 @@ impl Shared {
     /// Expiry, single use and the failure budget are judged under the one
     /// lock every requester shares, and the device is on disk before it is
     /// told so.
-    fn pair(&self, remote: EndpointId, secret: &str, device: &DeviceClaim) -> HostLine {
+    fn pair(
+        &self,
+        remote: EndpointId,
+        secret: &str,
+        device: &DeviceClaim,
+        space: Option<&str>,
+    ) -> HostLine {
         let mut state = self.state.lock().unwrap();
         if !self.allow_pairing || !state.identity.pairing_enabled {
             return HostLine::PairRejected {
                 reason: PairRejection::Disabled,
+            };
+        }
+        if let Some(space_id) = space {
+            let Some(index) = state
+                .identity
+                .spaces
+                .iter()
+                .position(|space| space.id == space_id)
+            else {
+                return HostLine::PairRejected {
+                    reason: PairRejection::SpaceUnavailable,
+                };
+            };
+            let space = &state.identity.spaces[index];
+            if !space.link_enabled || space.link_failures >= MAX_PAIRING_FAILURES {
+                return HostLine::PairRejected {
+                    reason: PairRejection::SpaceUnavailable,
+                };
+            }
+            if state.identity.is_paired(&remote) {
+                return HostLine::PairRejected {
+                    reason: PairRejection::AlreadyMember,
+                };
+            }
+            let previous = state.identity.clone();
+            if !constant_time_eq(space.secret.as_bytes(), secret.as_bytes()) {
+                state.identity.spaces[index].link_failures += 1;
+                state.identity.policy_revision += 1;
+                if let Err(error) = state.identity.save() {
+                    log::error!("could not record the space link failure: {error}");
+                    state.identity = previous;
+                    return HostLine::PairRejected {
+                        reason: PairRejection::Busy,
+                    };
+                }
+                return HostLine::PairRejected {
+                    reason: PairRejection::Invalid,
+                };
+            }
+            let space_name = space.name.clone();
+            let (name, platform) = device.normalized();
+            state.identity.admit(&remote, name, platform);
+            state
+                .identity
+                .devices
+                .iter_mut()
+                .find(|device| device.id == remote.to_string())
+                .unwrap()
+                .access = DeviceGrant::Spaces(vec![space_id.into()]);
+            state.identity.policy_revision += 1;
+            if let Err(error) = state.identity.save() {
+                log::error!("could not record the space member: {error}");
+                state.identity = previous;
+                return HostLine::PairRejected {
+                    reason: PairRejection::Busy,
+                };
+            }
+            return HostLine::Paired {
+                host_name: state.identity.host_name.clone(),
+                space_name: Some(space_name),
             };
         }
         let accepted = match state.invitation.as_mut() {
@@ -650,6 +997,7 @@ impl Shared {
         let (name, platform) = device.normalized();
         let previous = state.identity.clone();
         state.identity.admit(&remote, name, platform);
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
             log::error!("could not record the paired device: {error}");
             state.identity = previous;
@@ -659,6 +1007,7 @@ impl Shared {
         }
         HostLine::Paired {
             host_name: state.identity.host_name.clone(),
+            space_name: None,
         }
     }
 
@@ -706,14 +1055,78 @@ impl Shared {
         if !changed {
             return;
         }
+        let previous = state.identity.clone();
         state.identity.admit(&remote, name, platform);
+        state.identity.policy_revision += 1;
         if let Err(error) = state.identity.save() {
+            state.identity = previous;
             log::warn!("could not record the connecting device's details: {error}");
         }
     }
 
     fn host_name(&self) -> String {
         self.state.lock().unwrap().identity.host_name.clone()
+    }
+}
+
+fn new_secret() -> String {
+    let mut random = [0_u8; tcode_client::pairing::SECRET_BYTES];
+    getrandom::fill(&mut random).expect("the OS random source is available");
+    encode_secret(&random)
+}
+
+fn space_name(name: String) -> io::Result<String> {
+    if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid space name",
+        ));
+    }
+    Ok(name.trim().into())
+}
+
+fn missing(kind: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, format!("unknown {kind}"))
+}
+
+fn member_of(device: &DeviceRecord, space: &str) -> bool {
+    matches!(&device.access, DeviceGrant::Spaces(ids) if ids.iter().any(|id| id == space))
+}
+
+fn device_access(device: &DeviceRecord) -> DeviceAccess {
+    match &device.access {
+        DeviceGrant::Full => DeviceAccess::Full,
+        DeviceGrant::Spaces(ids) => DeviceAccess::Space {
+            space_id: ids.first().cloned().unwrap_or_default(),
+        },
+    }
+}
+
+fn hosted_device(state: &State, device: &DeviceRecord) -> HostedDevice {
+    HostedDevice {
+        access: device_access(device),
+        id: device.id.clone(),
+        name: device.name.clone(),
+        created_unix: device.created_unix,
+        platform: device.platform.clone(),
+        path: device
+            .id
+            .parse::<EndpointId>()
+            .ok()
+            .and_then(|id| state.live.get(&id))
+            .and_then(|connections| connections.first())
+            .map(path_info),
+    }
+}
+
+fn close_device(state: &mut State, id: &str, code: u32, reason: &[u8]) {
+    let connections = id
+        .parse::<EndpointId>()
+        .ok()
+        .and_then(|id| state.live.remove(&id))
+        .unwrap_or_default();
+    for connection in connections {
+        connection.close(code.into(), reason);
     }
 }
 
@@ -797,10 +1210,17 @@ impl ProtocolHandler for PairHandler {
             .map_err(|_| AcceptError::from_err(timed_out("pairing stream")))??;
         let mut reader = wire::reader(recv);
         let reply = match wire::read_control::<ClientLine>(&mut reader).await {
-            Ok(ClientLine::Pair { secret, device })
-                if device.is_valid() && secret.len() <= wire::MAX_CONTROL_LINE =>
+            Ok(ClientLine::Pair {
+                secret,
+                device,
+                space,
+            }) if device.is_valid()
+                && secret.len() <= wire::MAX_CONTROL_LINE
+                && space
+                    .as_deref()
+                    .is_none_or(tcode_client::pairing::valid_space_id) =>
             {
-                self.0.pair(remote, &secret, &device)
+                self.0.pair(remote, &secret, &device, space.as_deref())
             }
             Ok(_) => HostLine::Refused {
                 reason: "expected a pair line".into(),
@@ -858,6 +1278,7 @@ impl ProtocolHandler for MainHandler {
             connection: connection.clone(),
         };
         let hello_done = Arc::new(AtomicBool::new(false));
+        let principal = Arc::new(Mutex::new(None));
         let open_streams = Arc::new(AtomicUsize::new(0));
         let tunnels = Arc::new(AtomicUsize::new(0));
         loop {
@@ -877,6 +1298,7 @@ impl ProtocolHandler for MainHandler {
                 shared: shared.clone(),
                 connection: connection.clone(),
                 hello_done: hello_done.clone(),
+                principal: principal.clone(),
                 open_streams: open_streams.clone(),
                 tunnels: tunnels.clone(),
             };
@@ -908,6 +1330,7 @@ struct StreamTask {
     shared: Arc<Shared>,
     connection: Connection,
     hello_done: Arc<AtomicBool>,
+    principal: Arc<Mutex<Option<Principal>>>,
     open_streams: Arc<AtomicUsize>,
     tunnels: Arc<AtomicUsize>,
 }
@@ -962,6 +1385,18 @@ impl StreamTask {
                 }
                 self.shared
                     .refresh_device(self.connection.remote_id(), &device);
+                let Some(principal) = self.shared.principal(self.connection.remote_id()) else {
+                    wire::write_line(
+                        &mut send,
+                        &HostLine::HelloRejected {
+                            reason: HelloRejection::Unpaired,
+                        },
+                    )
+                    .await?;
+                    send.finish()?;
+                    return Ok(());
+                };
+                *self.principal.lock().unwrap() = Some(principal.clone());
                 wire::write_line(
                     &mut send,
                     &HostLine::HelloOk {
@@ -970,11 +1405,14 @@ impl StreamTask {
                     },
                 )
                 .await?;
-                self.bridge(send, reader).await
+                self.bridge(send, reader, principal).await
             }
             ClientLine::Connect { host, port } => {
                 if !self.hello_done.load(Ordering::Acquire) {
                     return refuse(send, "hello required").await;
+                }
+                if !matches!(*self.principal.lock().unwrap(), Some(Principal::Full)) {
+                    return refuse(send, "space members cannot open tunnels").await;
                 }
                 if !wire::valid_tunnel_target(&host, port) {
                     return refuse(send, "invalid tunnel target").await;
@@ -991,10 +1429,16 @@ impl StreamTask {
     /// Pump NDJSON between the stream and one mux attachment until either
     /// side ends. Retained-command keys are scoped to the device so its
     /// dedup cache cannot be shared with or spoofed by another device.
-    async fn bridge(&self, send: SendStream, reader: LineReader) -> io::Result<()> {
+    async fn bridge(
+        &self,
+        send: SendStream,
+        reader: LineReader,
+        principal: Principal,
+    ) -> io::Result<()> {
         let mut send = wire::LineWriter::new(send);
         let mut reader = wire::LineStream::new(reader);
-        let attachment = self.shared.mux.attach();
+        let full = matches!(principal, Principal::Full);
+        let attachment = self.shared.mux.attach(principal);
         let scope = self.connection.remote_id().to_string();
         let (outbound, outbound_rx) = async_channel::unbounded::<String>();
         let from_host = attachment.from_host.clone();
@@ -1027,6 +1471,7 @@ impl StreamTask {
                         ));
                     };
                     if let Ok(tcode_protocol::ClientMessage {
+                        principal: _,
                         id,
                         payload:
                             tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
@@ -1037,10 +1482,15 @@ impl StreamTask {
                     {
                         let reply = tcode_protocol::HostMessage::QueryResult {
                             id,
-                            result: self
-                                .shared
-                                .hosting(action)
-                                .map(tcode_protocol::QueryResponse::Hosting),
+                            result: if full {
+                                self.shared
+                                    .hosting(action)
+                                    .map(tcode_protocol::QueryResponse::Hosting)
+                            } else {
+                                Err(ProtocolError::out_of_scope(
+                                    "hosting is available only to full devices",
+                                ))
+                            },
                         };
                         let reply = tcode_protocol::encode_line(&reply)
                             .map_err(|error| io::Error::other(error.message))?;

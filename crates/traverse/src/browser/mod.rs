@@ -552,7 +552,7 @@ where
         .await
         .map_err(io::Error::other)?;
     let _live = Live::new(shared.clone(), device);
-    let connection = shared.mux.attach();
+    let connection = shared.mux.attach(tcode_protocol::Principal::Full);
     // The token scopes retained-command keys across socket lifetimes, as the
     // device id does on Traverse, so no two devices can share a dedup cache.
     let scope = auth::hex_hash(token.as_bytes());
@@ -583,6 +583,7 @@ where
                     break;
                 };
                 if let Ok(tcode_protocol::ClientMessage {
+                    principal: _,
                     id,
                     key: _,
                     payload:
@@ -693,6 +694,8 @@ impl Shared {
             None => {
                 let auth = self.auth.lock().unwrap();
                 HostingState {
+                    created_space_id: None,
+                    spaces: Vec::new(),
                     enabled: false,
                     expires_in_secs: 0,
                     host_id: auth.host_id.to_string(),
@@ -707,6 +710,7 @@ impl Shared {
         state
             .devices
             .extend(auth.devices.iter().map(|device| HostedDevice {
+                access: tcode_protocol::DeviceAccess::Full,
                 id: device.id.to_string(),
                 name: device.name.clone(),
                 created_unix: device.created_unix,

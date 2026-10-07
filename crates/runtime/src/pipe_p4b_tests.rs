@@ -8,7 +8,7 @@ use tcode_protocol::{
 use tcode_traverse::HostMux;
 
 pub(super) fn linked(mux: &HostMux) -> HostLink {
-    let connection = mux.attach();
+    let connection = mux.attach(tcode_protocol::Principal::Full);
     let link = HostLink::new(connection.to_host, connection.from_host);
     let pump = link.clone();
     smol::spawn(async move { pump.pump().await }).detach();
@@ -452,11 +452,12 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
 
     // The initiator is a raw mux connection so the test can genuinely drop it
     // mid-run; completion must not depend on it still being attached.
-    let initiator = mux.attach();
+    let initiator = mux.attach(tcode_protocol::Principal::Full);
     initiator
         .to_host
         .send_blocking(
             tcode_protocol::encode_line(&ClientMessage {
+                principal: None,
                 key: None,
                 id: 1,
                 payload: ClientPayload::Command(Command::StartExternalImport {

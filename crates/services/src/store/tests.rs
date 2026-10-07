@@ -601,17 +601,34 @@ fn session_index_upserts_orders_and_removes_only_the_selected_session() {
 fn a_cloned_or_imported_log_keeps_its_exact_bytes() {
     let dir = DataDir::new();
     let store = dir.store();
+    let authored = b"{\"ts\":3000,\"author\":{\"device_id\":\"phone\",\"name\":\"Alice\"},\"event\":{\"type\":\"turn_started\",\"turn_id\":\"shared\"}}\n";
+    let mut log = MIXED_LOG.to_vec();
+    log.push(b'\n');
+    log.extend_from_slice(authored);
     let fork = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
     store
         .apply(&[
-            Mutation::replace_event_log("source", MIXED_LOG.to_vec()),
+            Mutation::replace_event_log("source", log.clone()),
             Mutation::clone_events("source", &fork.id),
             Mutation::upsert_meta(fork.clone()),
             Mutation::clone_events("missing", "empty-fork"),
         ])
         .unwrap();
-    assert_eq!(store.read_event_log("source").unwrap(), MIXED_LOG);
-    assert_eq!(store.read_event_log(&fork.id).unwrap(), MIXED_LOG);
+    assert_eq!(store.read_event_log("source").unwrap(), log);
+    assert_eq!(store.read_event_log(&fork.id).unwrap(), log);
+    let records = store.read_events(&fork.id).unwrap();
+    assert_eq!(
+        records.last().unwrap().author,
+        Some(Author {
+            device_id: "phone".into(),
+            name: "Alice".into()
+        })
+    );
+    assert!(
+        records[..records.len() - 1]
+            .iter()
+            .all(|record| record.author.is_none())
+    );
     assert!(store.read_event_log("empty-fork").unwrap().is_empty());
     assert_eq!(store.load_index().unwrap(), [fork]);
 }
@@ -1064,7 +1081,7 @@ const SNAPSHOT_LOG: &[u8] = b"{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"t
 {\"ts\":3,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":\"-a\\n+c\\n\"}],\"completeness\":\"exact\"}}\n\
 {\"ts\":4,\"event\":{\"type\":\"turn_completed\",\"turn_id\":\"t1\",\"status\":\"completed\",\"usage\":null}}\n\
 {\"ts\":5,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"t2\"}}\n\
-{\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+d\\n\"}],\"completeness\":\"exact\"}}\n\
+{\"author\":{\"device_id\":\"phone\",\"name\":\"Alice\"},\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+d\\n\"}],\"completeness\":\"exact\"}}\n\
 {\"ts\":7,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+e\\n\"}],\"completeness\":\"exact\"}}\n";
 
 fn rows(store: &SessionStore, id: &str) -> Vec<Vec<u8>> {
@@ -1106,7 +1123,7 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
     let after = rows(&store, "codex");
     let mut expected = before.clone();
     expected[1] = b"{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":null}],\"completeness\":\"exact\"}\n".to_vec();
-    expected[6] = b"{\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":null}],\"completeness\":\"exact\"}}\n".to_vec();
+    expected[6] = b"{\"author\":{\"device_id\":\"phone\",\"name\":\"Alice\"},\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":null}],\"completeness\":\"exact\"}}\n".to_vec();
     assert_eq!(after, expected);
     assert_eq!(
         tcode_core::session::Timeline::fold_events(store.read_events("codex").unwrap()),
