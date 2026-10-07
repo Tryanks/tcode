@@ -44,8 +44,8 @@ mod hosting;
 
 #[cfg(target_family = "wasm")]
 pub(crate) mod hosted;
-#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 mod qr;
+pub(crate) mod spaces;
 
 #[cfg(feature = "remote-hosting")]
 pub use hosting::{HostingPanel, RemoteController, machine_name};
@@ -156,6 +156,11 @@ pub struct RemotePanel {
     /// Repaints the invitation's countdown while this machine offers one.
     #[cfg(feature = "remote-hosting")]
     invitation_ticker: Option<gpui::Task<()>>,
+    /// The space whose QR is open under this machine's invitation.
+    #[cfg(feature = "remote-hosting")]
+    space_qr: Option<String>,
+    #[cfg(feature = "remote-hosting")]
+    spaces_observer: spaces::SpacesObserver,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -198,6 +203,10 @@ impl RemotePanel {
             page_scroll: ScrollHandle::new(),
             #[cfg(feature = "remote-hosting")]
             invitation_ticker: None,
+            #[cfg(feature = "remote-hosting")]
+            space_qr: None,
+            #[cfg(feature = "remote-hosting")]
+            spaces_observer: spaces::SpacesObserver::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -590,14 +599,34 @@ impl RemotePanel {
                     .into_any_element()
             }
         };
+        let spaces = spaces::local(cx);
+        self.spaces_observer.watch(spaces.as_ref(), cx);
+        let space_links = spaces.and_then(|spaces| {
+            spaces::machine_links(
+                &spaces,
+                self.space_qr.as_deref(),
+                |panel: &mut Self, id, cx| {
+                    panel.space_qr = (panel.space_qr.as_deref() != Some(id.as_str())).then_some(id);
+                    cx.notify();
+                },
+                compact,
+                PAGE_PADDING,
+                cx,
+            )
+        });
         v_flex()
             .w_full()
-            .debug_selector(|| "hosts-invitation".into())
-            .child(list_caption(
-                crate::tr!("hosts.invite.section").into_owned().into(),
-                cx,
-            ))
-            .child(body)
+            .child(
+                v_flex()
+                    .w_full()
+                    .debug_selector(|| "hosts-invitation".into())
+                    .child(list_caption(
+                        crate::tr!("hosts.invite.section").into_owned().into(),
+                        cx,
+                    ))
+                    .child(body),
+            )
+            .children(space_links)
             .into_any_element()
     }
 

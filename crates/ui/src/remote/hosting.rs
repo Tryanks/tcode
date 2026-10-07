@@ -7,6 +7,7 @@
 //! the window is currently attached to, so **Connect** and **Back to local**
 //! never stop it and never disturb another attached client.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -20,13 +21,15 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_client::HostLink;
 use tcode_core::settings::{Settings, TraverseSetting};
-use tcode_protocol::{Command, SettingsPatch};
+use tcode_protocol::{Command, DeviceAccess, HostingAction, HostingState, SettingsPatch};
 use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
 
-use super::qr::qr_element;
+use super::qr::beside_qr;
+use super::spaces::SpacesSection;
 use crate::icon::{Icon, IconName};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::sizing::Sizable as _;
+use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
@@ -168,7 +171,7 @@ impl RemoteController {
     /// Adopt a host started elsewhere: tests bind a random port, since the
     /// desktop's fixed one may be taken on the machine running them.
     #[cfg(test)]
-    pub(super) fn adopt_host(&mut self, host: TraverseHost) {
+    pub(crate) fn adopt_host(&mut self, host: TraverseHost) {
         self.host = Some(host);
     }
 
@@ -236,6 +239,16 @@ impl RemoteController {
             .as_ref()
             .map(TraverseHost::devices)
             .unwrap_or_default()
+    }
+
+    /// Run a hosting action against this machine, as a remote client's
+    /// `Query::Hosting` would.
+    pub fn hosting(&self, action: HostingAction) -> Result<HostingState, String> {
+        self.host
+            .as_ref()
+            .ok_or_else(|| crate::tr!("spaces.not_hosting").into_owned())?
+            .hosting(action)
+            .map_err(|error| error.message)
     }
 
     /// Remove a device. When the allow list cannot be written the device
@@ -358,11 +371,14 @@ pub struct HostingPanel {
     traverse_url_input: Entity<InputState>,
     /// Repaint while hosting, every [`DEVICE_REFRESH`], for the devices' paths.
     ticker: Option<Task<()>>,
+    spaces: Entity<SpacesSection>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl HostingPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `store` is the window's attachment: it names this machine's projects
+    /// while the window shows this machine.
+    pub fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = cx
             .try_global::<RemoteController>()
             .map(RemoteController::local_settings)
@@ -405,6 +421,7 @@ impl HostingPanel {
             traverse_choice,
             traverse_url_input,
             ticker: None,
+            spaces: cx.new(|_| SpacesSection::new(store, super::spaces::this_machine)),
             _subscriptions: subscriptions,
         }
     }
@@ -708,7 +725,9 @@ impl HostingPanel {
                 ),
         );
         if hosting {
-            column = column.child(self.render_devices(compact, cx));
+            column = column
+                .child(self.render_devices(compact, cx))
+                .child(self.spaces.clone());
         }
         column.into_any_element()
     }
@@ -717,6 +736,16 @@ impl HostingPanel {
         let devices = cx
             .try_global::<RemoteController>()
             .map(RemoteController::devices)
+            .unwrap_or_default();
+        let space_names: HashMap<String, String> = super::spaces::local(cx)
+            .map(|spaces| {
+                spaces
+                    .read(cx)
+                    .spaces()
+                    .iter()
+                    .map(|space| (space.id.clone(), space.name.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let mut group = crate::material::group(cx);
         if devices.is_empty() {
@@ -732,13 +761,26 @@ impl HostingPanel {
                 Some(_) => cx.theme().success,
                 None => cx.theme().muted_foreground,
             };
+            let space = match &device.access {
+                DeviceAccess::Space { space_id } => space_names.get(space_id),
+                DeviceAccess::Full => None,
+            };
             group = group.child(
                 row(compact)
-                    .child(labels(
-                        super::device_label(&device.name, device.platform.as_deref()).into(),
-                        None,
-                        cx,
-                    ))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .items_center()
+                            .child(labels(
+                                super::device_label(&device.name, device.platform.as_deref())
+                                    .into(),
+                                None,
+                                cx,
+                            ))
+                            .children(space.map(|name| super::spaces::member_badge(name, cx))),
+                    )
                     .child(
                         h_flex()
                             .gap_3()
@@ -813,7 +855,6 @@ pub(super) fn invitation_card<V: 'static>(
     cx: &mut Context<V>,
 ) -> AnyElement {
     let link = invitation.url();
-    let qr = qr_element(&link, cx);
     let text = v_flex()
         .flex_1()
         .min_w_0()
@@ -843,12 +884,17 @@ pub(super) fn invitation_card<V: 'static>(
                         .outline()
                         .compact()
                         .label(crate::tr!("remote.invite.copy"))
-                        .on_click(cx.listener(move |_, _, window, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
-                            window.push_notification(
-                                Notification::info(crate::tr!("remote.invite.copied").into_owned()),
-                                cx,
-                            );
+                        .on_click(cx.listener({
+                            let link = link.clone();
+                            move |_, _, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                                window.push_notification(
+                                    Notification::info(
+                                        crate::tr!("remote.invite.copied").into_owned(),
+                                    ),
+                                    cx,
+                                );
+                            }
                         })),
                 )
                 .child(
@@ -857,17 +903,9 @@ pub(super) fn invitation_card<V: 'static>(
                         .outline(),
                 ),
         );
-    // Compact stacks the QR over the text rather than putting a fixed-size
-    // image beside text that then has nowhere to wrap.
-    let card = if compact {
-        v_flex().items_center().children(qr).child(text)
-    } else {
-        h_flex().items_start().child(text).children(qr)
-    };
-    card.w_full()
+    beside_qr(text, &link, compact, cx)
         .px(px(inset))
         .py(px(8.))
-        .gap_4()
         .debug_selector(|| "remote-invitation".into())
         .into_any_element()
 }
@@ -942,12 +980,22 @@ mod tests {
             cx.set_global(RemoteController::new(
                 mux.clone(),
                 root.clone(),
-                HostLink::new(to_host, from_host),
+                HostLink::new(to_host.clone(), from_host.clone()),
                 Settings::default(),
             ))
         });
         let window = cx.open_window(gpui::size(px(900.), px(700.)), |window, cx| {
-            Probe(cx.new(|cx| HostingPanel::new(window, cx)))
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    HostLink::new(to_host.clone(), from_host.clone()),
+                    crate::store::WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            Probe(cx.new(|cx| HostingPanel::new(store, window, cx)))
         });
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
         let draw = |cx: &mut gpui::VisualTestContext| {

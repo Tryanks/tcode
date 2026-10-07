@@ -12,6 +12,28 @@ fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
     Some((width, modules))
 }
 
+/// A link's QR next to the text about it. Compact stacks the QR over the
+/// text rather than putting a fixed-size image beside text that then has
+/// nowhere to wrap; a wide layout too narrow for both wraps the QR under it.
+pub(super) fn beside_qr(
+    text: impl gpui::IntoElement,
+    payload: &str,
+    compact: bool,
+    cx: &App,
+) -> gpui::Div {
+    let qr = qr_element(payload, cx);
+    let layout = if compact {
+        v_flex().items_center().children(qr).child(text)
+    } else {
+        h_flex()
+            .flex_wrap()
+            .items_start()
+            .child(div().flex_1().min_w(px(200.)).child(text))
+            .children(qr)
+    };
+    layout.w_full().gap_4()
+}
+
 /// Paint the matrix as one flex row per module row, collapsing consecutive
 /// same-colour modules into a single box — a per-module element would be
 /// thousands of nodes repainting every countdown tick.
