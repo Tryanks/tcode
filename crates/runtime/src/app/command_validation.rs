@@ -467,32 +467,33 @@ mod tests {
     }
     #[test]
     fn checkout_is_admitted_after_provider_death_with_an_unclosed_timeline_turn() {
+        use crate::app::test_support::TestClientState;
         let store = TestStore::new("checkout-after-death");
-        let mut state = AppState::new((*store).clone()).unwrap();
         let mut context = TestAppContext::default();
-        let mut cx = context.host_cx();
-        let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
-        let active = state.resident_mut(&id).unwrap();
-        active.timeline.apply_at(
-            None,
-            &AgentEvent::TurnStarted {
-                turn_id: "unclosed".into(),
-            },
-        );
-        active.turn_in_flight = true;
-        active.mark_dead();
-        assert!(active.timeline.turn_running);
-        assert!(!state.session_status_snapshot(&id).unwrap().checkout_blocked);
-        crate::pipe::handle_client_message(
-            &mut state,
-            &mut cx,
-            ClientMessage {
-                id: 43,
-                key: Some("checkout".into()),
-                payload: ClientPayload::Command(Command::CheckoutBranch {
-                    session_id: id,
-                    branch: "main".into(),
-                }),
+        let state = context.new_entity(TestClientState::new((*store).clone()));
+        let id = state.update(&mut context, |state, _| {
+            let meta = SessionMeta::new(ProviderKind::Codex, store.root().to_path_buf(), None);
+            let id = meta.id.clone();
+            let mut active = ActiveSession::new(meta, false, Vec::new());
+            active.timeline.apply_at(
+                None,
+                &AgentEvent::TurnStarted {
+                    turn_id: "unclosed".into(),
+                },
+            );
+            active.turn_in_flight = true;
+            active.mark_dead();
+            assert!(active.timeline.turn_running);
+            state.install_selected(active);
+            assert!(!state.session_status_snapshot(&id).unwrap().checkout_blocked);
+            id
+        });
+        state.dispatch_command(
+            &mut context,
+            43,
+            Command::CheckoutBranch {
+                session_id: id,
+                branch: "main".into(),
             },
         );
         assert!(context.drain_outgoing().iter().any(|message| matches!(
@@ -501,6 +502,15 @@ mod tests {
                 id: 43,
                 result: Ok(_)
             }
+        )));
+        // Admission starts a real git child. Drive its completion before the test exits.
+        context.run_next();
+        assert!(context.drain_outgoing().iter().any(|message| matches!(
+            message,
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::External(_))),
+                ..
+            })
         )));
     }
 
