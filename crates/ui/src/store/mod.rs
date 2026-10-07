@@ -3208,6 +3208,8 @@ mod tests {
             relay: None,
             addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,
+            space_id: None,
+            space_name: None,
         };
         client.remember_host(host.clone());
         struct NoTunnels;

@@ -193,6 +193,7 @@ mod tests {
             traverse: Some("https://traverse.example/".into()),
             relay: Some("https://relay.example/".into()),
             addrs: vec!["10.0.0.4:47420".into()],
+            space: None,
         }
     }
 
