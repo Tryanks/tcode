@@ -759,6 +759,47 @@ impl AppState {
         self.persist_meta(&meta, cx);
     }
 
+    pub(super) fn repair_auto_archived_mirrors(
+        store: &SessionStore,
+        sessions: &mut [SessionMeta],
+    ) -> std::io::Result<()> {
+        // Older completion callbacks archived only the orchestrated thread,
+        // leaving its native mirrors visible as roots. Later activity can be
+        // an explicit restore, so it must not be overwritten by this repair.
+        let mut repairs = Vec::new();
+        for (index, meta) in sessions.iter().enumerate() {
+            if meta.native_subagent.is_none() || meta.archived_at.is_some() {
+                continue;
+            }
+            let mut parent = meta.parent_session_id.as_deref();
+            let mut visited = HashSet::from([meta.id.as_str()]);
+            while let Some(id) = parent {
+                if !visited.insert(id) {
+                    break;
+                }
+                let Some(ancestor) = sessions.iter().find(|meta| meta.id == id) else {
+                    break;
+                };
+                if let Some(archived_at) = ancestor.archived_at {
+                    if ancestor.archive_on_complete && meta.updated_at <= archived_at {
+                        repairs.push((index, archived_at));
+                    }
+                    break;
+                }
+                parent = ancestor.parent_session_id.as_deref();
+            }
+        }
+        let repairs: Vec<_> = repairs
+            .into_iter()
+            .map(|(index, archived_at)| {
+                let meta = &mut sessions[index];
+                meta.archived_at = Some(archived_at);
+                tcode_services::store::Mutation::upsert_meta(meta.clone())
+            })
+            .collect();
+        store.apply(&repairs)
+    }
+
     /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
     /// its turn is running (returns without changing anything so the caller's
     /// tooltip stands). The active thread is closed back to the empty state.
@@ -772,8 +813,7 @@ impl AppState {
         {
             return;
         }
-        let ids = descendant_session_ids(&self.sessions, session_id);
-        self.archive_session_ids(&ids, now_secs(), cx);
+        self.archive_session_ids(&[session_id.to_owned()], now_secs(), cx);
     }
 
     /// Restore an archived thread (Settings → Archived Threads → Unarchive).
@@ -860,9 +900,12 @@ impl AppState {
         archived_at: u64,
         cx: &mut HostCx,
     ) {
-        let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let ids: HashSet<String> = ids
+            .iter()
+            .flat_map(|id| descendant_session_ids(&self.sessions, id))
+            .collect();
 
-        for id in ids.iter().copied() {
+        for id in &ids {
             self.shutdown_active(id, cx);
             // An archived conversation must not leave an off-screen PTY running.
             self.terminal_workspaces
@@ -871,9 +914,8 @@ impl AppState {
             self.revoke_preview_registration(id);
             self.revoke_orchestrate_child_registration(id);
         }
-        let orchestrators: Vec<_> = ids.iter().map(|id| (*id).to_string()).collect();
-        for id in orchestrators {
-            self.close_orchestrator_children(&id, cx);
+        for id in &ids {
+            self.close_orchestrator_children(id, cx);
         }
         let changed: Vec<_> = self
             .sessions

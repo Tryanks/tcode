@@ -544,7 +544,7 @@ async fn actor_loop(
             }
             Sel::Line(Some(line)) => {
                 let events = match serde_json::from_str::<Value>(&line) {
-                    Ok(msg) => mapper.on_message(msg),
+                    Ok(msg) => mapper.on_wire_message(msg, claude_dir.as_deref()).await,
                     Err(e) => {
                         log::debug!("claude: non-JSON stdout line ({e}): {line}");
                         Vec::new()
@@ -1099,7 +1099,7 @@ fn served_model_changed(expected: &str, served: &str) -> bool {
 }
 
 pub(crate) struct Mapper {
-    session_started: bool,
+    session_id: Option<String>,
     current_message_id: Option<String>,
     /// How many content blocks of each streamed message we have already seen in
     /// an `assistant` line. The CLI splits one message across several `assistant`
@@ -1191,7 +1191,7 @@ impl Mapper {
         expected_model: Option<String>,
     ) -> Self {
         Mapper {
-            session_started: false,
+            session_id: None,
             current_message_id: None,
             assistant_blocks_seen: HashMap::new(),
             turn_counter: 0,
@@ -1401,6 +1401,54 @@ impl Mapper {
             .collect()
     }
 
+    async fn on_wire_message(&mut self, msg: Value, claude_dir: Option<&Path>) -> Vec<AgentEvent> {
+        let resumed = msg
+            .pointer("/tool_use_result/resumedAgentId")
+            .and_then(Value::as_str);
+        let task_id = resumed.or_else(|| {
+            (msg.get("type").and_then(Value::as_str) == Some("system"))
+                .then(|| msg.get("task_id").and_then(Value::as_str))
+                .flatten()
+        });
+        let session_id = msg
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .or(self.session_id.as_deref())
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(task_id) = task_id
+            && self.task_tools.get(task_id).is_none_or(|id| {
+                !matches!(self.tool_items.get(id), Some(ToolItem::Subagent { .. }))
+            })
+            && let Some(root) = claude_dir
+            && !session_id.is_empty()
+        {
+            // A resumed child's notification names SendMessage, while its
+            // transcript still names the original Agent call, even after a
+            // parent process restart. Claude's metadata preserves that identity.
+            let root = root.to_owned();
+            let session = session_id.clone();
+            let task = task_id.to_owned();
+            if let Some(item) = crate::process::unblock(move || {
+                crate::subagent_tail::read_subagent_spawn(&root, &session, &task)
+            })
+            .await
+            {
+                self.task_tools.insert(task_id.to_owned(), item.id.clone());
+                if let Some(tool) = ToolItem::subagent(&item.content, item.parent_item_id) {
+                    self.tool_items.entry(item.id).or_insert(tool);
+                }
+            }
+        }
+        let resumed = resumed.and_then(|task_id| self.task_tools.get(task_id).cloned());
+        let mut events = self.on_message(msg);
+        if let Some(parent_id) = resumed {
+            events.extend(self.update_subagent(&parent_id, ItemStatus::InProgress, None));
+        }
+        events
+    }
+
     /// Map one CLI stdout message to zero or more outcomes.
     pub(crate) fn on_message(&mut self, msg: Value) -> Vec<AgentEvent> {
         if let Some(parent_id) = msg
@@ -1492,7 +1540,7 @@ impl Mapper {
     }
 
     fn synthesized_turn_started(&mut self) -> Vec<AgentEvent> {
-        if self.session_started && self.current_turn_id.is_none() {
+        if self.session_id.is_some() && self.current_turn_id.is_none() {
             let turn_id = self.start_turn();
             self.awaiting_turn_checkpoint = false;
             vec![AgentEvent::TurnStarted { turn_id }]
@@ -1563,20 +1611,20 @@ impl Mapper {
         if let Some(mode) = msg.get("permissionMode").and_then(Value::as_str) {
             if mode == "auto" {
                 self.auto_unavailable = None;
-            } else if !self.session_started && self.applied_permission_mode == "auto" {
+            } else if self.session_id.is_none() && self.applied_permission_mode == "auto" {
                 self.auto_unavailable =
                     Some("Not available: the session started in another mode".into());
             }
             self.applied_permission_mode = mode.to_owned();
         }
-        if self.session_started {
+        if self.session_id.is_some() {
             return vec![self.permission_options()];
         }
         let session_id = match msg.get("session_id").and_then(Value::as_str) {
             Some(id) => id.to_string(),
             None => return Vec::new(),
         };
-        self.session_started = true;
+        self.session_id = Some(session_id.clone());
         let model = msg.get("model").and_then(Value::as_str).map(str::to_string);
         let mut events = vec![
             AgentEvent::SessionStarted {
@@ -1636,13 +1684,17 @@ impl Mapper {
         let Some(tool_use_id) = msg.get("tool_use_id").and_then(Value::as_str) else {
             return Vec::new();
         };
+        let mut parent_id = tool_use_id.to_owned();
         if let Some(task_id) = msg.get("task_id").and_then(Value::as_str) {
-            self.task_tools
-                .insert(task_id.to_owned(), tool_use_id.to_owned());
+            parent_id = self
+                .task_tools
+                .entry(task_id.to_owned())
+                .or_insert(parent_id)
+                .clone();
             if msg.get("task_type").and_then(Value::as_str) != Some("local_bash") {
-                self.tailed.insert(tool_use_id.to_owned());
+                self.tailed.insert(parent_id.clone());
                 self.tail_requests.push(TailRequest::Start {
-                    parent_id: tool_use_id.to_owned(),
+                    parent_id: parent_id.clone(),
                     task_id: task_id.to_owned(),
                     session_id: msg
                         .get("session_id")
@@ -1652,7 +1704,7 @@ impl Mapper {
                 });
             }
         }
-        self.update_subagent(tool_use_id, ItemStatus::InProgress, None)
+        self.update_subagent(&parent_id, ItemStatus::InProgress, None)
     }
 
     fn on_background_tasks_changed(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1705,14 +1757,13 @@ impl Mapper {
             .get("task_id")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let tool_use_id = msg
-            .get("tool_use_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
+        let tool_use_id = task_id
+            .as_ref()
+            .and_then(|task_id| self.task_tools.get(task_id).cloned())
             .or_else(|| {
-                msg.get("task_id")
+                msg.get("tool_use_id")
                     .and_then(Value::as_str)
-                    .and_then(|task_id| self.task_tools.get(task_id).cloned())
+                    .map(str::to_owned)
             });
         let Some(tool_use_id) = tool_use_id else {
             return Vec::new();
@@ -2342,6 +2393,13 @@ impl Mapper {
                     .and_then(Value::as_str)
                     == Some("async_launched")
             {
+                if let Some(agent_id) = msg
+                    .pointer("/tool_use_result/agentId")
+                    .and_then(Value::as_str)
+                {
+                    self.task_tools
+                        .insert(agent_id.to_owned(), tool_use_id.clone());
+                }
                 self.tool_items.insert(tool_use_id.clone(), item);
                 out.extend(self.update_subagent(&tool_use_id, ItemStatus::InProgress, None));
                 continue;
@@ -5295,6 +5353,59 @@ mod tests {
                 if id == "toolu_spawn_bg:msg-child-2:0" && text == "done"
         ));
         assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    #[test]
+    fn resumed_subagent_keeps_its_spawn_identity_across_parent_restart() {
+        smol::block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("tcode-resumed-agent-{}", uuid::Uuid::new_v4()));
+            let dir = root.join("projects/project/session/subagents");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("agent-child.meta.json"),
+                r#"{"agentType":"general-purpose","description":"Audit routing","toolUseId":"spawn","spawnDepth":1,"requestShape":"background","requestNonInteractive":true}"#
+            ).unwrap();
+            for restart in [true, false] {
+                let mut mapper = Mapper::new();
+                if !restart {
+                    feed(
+                        &mut mapper,
+                        r#"{"type":"assistant","message":{"id":"initial","content":[{"type":"tool_use","id":"spawn","name":"Agent","input":{"description":"Audit routing","subagent_type":"general-purpose"}}]}}"#,
+                    );
+                    feed(
+                        &mut mapper,
+                        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"spawn","content":"Launched"}]},"tool_use_result":{"status":"async_launched","agentId":"child"}}"#,
+                    );
+                    feed(
+                        &mut mapper,
+                        r#"{"type":"system","subtype":"task_notification","task_id":"child","tool_use_id":"spawn","status":"completed"}"#,
+                    );
+                }
+                let mut events = Vec::new();
+                for msg in [
+                    json!({"type":"assistant","message":{"id":"resume-message","content":[{"type":"tool_use","id":"send","name":"SendMessage","input":{"to":"child","message":"Continue the audit"}}]}}),
+                    json!({"type":"user","session_id":"session","message":{"content":[{"type":"tool_result","tool_use_id":"send","content":[{"type":"text","text":"{\"success\":true,\"resumedAgentId\":\"child\"}"}]}]},"tool_use_result":{"success":true,"resumedAgentId":"child"}}),
+                ] {
+                    events.extend(
+                        mapper
+                            .on_wire_message(msg, restart.then_some(root.as_path()))
+                            .await,
+                    );
+                }
+                events.extend(mapper.on_wire_message(json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"child","tool_use_id":"send","status":"completed","summary":"Audit complete"}), restart.then_some(root.as_path())).await);
+
+                assert!(events.iter().any(|event| matches!(event,
+                    AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent {status: ItemStatus::Completed, ..}, .. }) if id == "spawn"
+                )), "completion must settle the original mirror (restart={restart})");
+                assert!(events.iter().any(|event| matches!(event,
+                    AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent {status: ItemStatus::InProgress, ..}, .. }) if id == "spawn"
+                )), "resuming must reopen the original mirror (restart={restart})");
+                assert!(events.iter().any(|event| matches!(event,
+                    AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall {status: ItemStatus::Completed, ..}, .. }) if id == "send"
+                )), "SendMessage must retain its own tool result");
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        });
     }
 
     /// A background subagent that itself spawns a background Agent: the
