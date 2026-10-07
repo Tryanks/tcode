@@ -196,12 +196,37 @@ impl AppState {
                         .then_some(())
                         .ok_or_else(|| refusal("terminal context"))
                 }
-                Command::SendTurn { session_id, .. }
-                | Command::ScheduleTurn { session_id, .. }
-                | Command::ConfirmRelayAndSend { session_id, .. }
-                | Command::OrchestrateTurn { session_id, .. }
-                | Command::Steer { session_id, .. }
-                | Command::Interrupt { session_id }
+                Command::SendTurn {
+                    session_id,
+                    attachment_paths,
+                    ..
+                }
+                | Command::ScheduleTurn {
+                    session_id,
+                    attachment_paths,
+                    ..
+                }
+                | Command::ConfirmRelayAndSend {
+                    session_id,
+                    attachment_paths,
+                    ..
+                }
+                | Command::OrchestrateTurn {
+                    session_id,
+                    attachment_paths,
+                    ..
+                }
+                | Command::Steer {
+                    session_id,
+                    attachment_paths,
+                    ..
+                } => {
+                    session(session_id)?;
+                    attachment_paths.iter().try_for_each(|path| {
+                        self.authorize_path(path, project_ids, PathAccess::AttachmentDescendant, cx)
+                    })
+                }
+                Command::Interrupt { session_id }
                 | Command::SetActiveModel { session_id, .. }
                 | Command::SetActiveOption { session_id, .. }
                 | Command::SetActiveAcpAgent { session_id, .. }
@@ -288,10 +313,11 @@ impl AppState {
                 Query::LoadGitDiff { cwd, .. } => {
                     self.authorize_path(cwd, project_ids, PathAccess::Workspace, cx)
                 }
-                Query::ReadFileBytes { path }
-                | Query::ReadIconImage { path }
-                | Query::RemoveUserFile { path } => {
+                Query::ReadFileBytes { path } | Query::ReadIconImage { path } => {
                     self.authorize_path(path, project_ids, PathAccess::Descendant, cx)
+                }
+                Query::RemoveUserFile { path } => {
+                    self.authorize_path(path, project_ids, PathAccess::AttachmentDescendant, cx)
                 }
                 Query::BrowseIconImages { directory } => {
                     self.authorize_path(directory, project_ids, PathAccess::Descendant, cx)
@@ -313,17 +339,18 @@ impl AppState {
         access: PathAccess,
         cx: &HostCx,
     ) -> Result<(), ProtocolError> {
-        let mut roots: Vec<PathBuf> = if matches!(access, PathAccess::Attachment) {
-            Vec::new()
-        } else {
-            self.projects
-                .iter()
-                .filter(|p| projects.contains(&p.id))
-                .map(|p| p.root.clone())
-                .collect()
-        };
+        let mut roots: Vec<PathBuf> =
+            if matches!(access, PathAccess::Descendant | PathAccess::Workspace) {
+                self.projects
+                    .iter()
+                    .filter(|p| projects.contains(&p.id))
+                    .map(|p| p.root.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
         for meta in self.scoped_metas(projects) {
-            if !matches!(access, PathAccess::Attachment) {
+            if matches!(access, PathAccess::Descendant | PathAccess::Workspace) {
                 roots.push(meta.cwd.clone());
             }
             if !matches!(access, PathAccess::Workspace) {
@@ -346,6 +373,7 @@ impl AppState {
                     };
                     root.is_some_and(|root| match access {
                         PathAccess::Descendant => path.starts_with(root),
+                        PathAccess::AttachmentDescendant => path != root && path.starts_with(root),
                         PathAccess::Workspace | PathAccess::Attachment => path == root,
                     })
                 })
@@ -360,6 +388,7 @@ enum PathAccess {
     Descendant,
     Workspace,
     Attachment,
+    AttachmentDescendant,
 }
 
 fn canonical_destination(path: &Path) -> Option<PathBuf> {
