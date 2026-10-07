@@ -102,4 +102,3 @@ registry rebuilt: 4 plugin(s), 1 hook(s) reloaded, MCP refreshed, 6 skill(s)
 refreshed.`, listed `zeta-note`, and connected zeta's MCP server (`zeta-http`
 ready, with its bearer header). After `grok plugin update beta` added a skill,
 `/reload-plugins` listed `beta-extra`. A session started afterwards had both.
-Hence `ApplyNote::ReloadOrNextSession`.

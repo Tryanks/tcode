@@ -393,9 +393,6 @@ pub enum Command {
         id: String,
         value: Option<serde_json::Value>,
     },
-    SelectUltrathink {
-        session_id: String,
-    },
     LoadBranches {
         session_id: String,
     },
@@ -473,7 +470,6 @@ impl Command {
             | Self::RespondUserInput { session_id, .. }
             | Self::SetActiveModel { session_id, .. }
             | Self::SetActiveOption { session_id, .. }
-            | Self::SelectUltrathink { session_id, .. }
             | Self::LoadBranches { session_id, .. }
             | Self::CheckoutBranch { session_id, .. }
             | Self::RewindTurn { session_id, .. } => Some(session_id),

@@ -222,7 +222,7 @@ quit:
   startup_failed: "Tcode could not start"
 migration:
   title: "Upgrading Tcode's data"
-  description: "Tcode keeps its data in %{path} and is moving it there, then copying older threads into one database, tcode.db. Every copy is verified before the originals are removed."
+  description: "Storage location: %{path}"
   relocating: "Moving the data folder to %{path}…"
   relocating_copy: "Copying the data folder to %{path}: %{bytes} of %{total_bytes}"
   scanning: "Looking for threads…"
@@ -627,9 +627,8 @@ providers:
   # Native provider plugins (claude plugin …), managed on the host.
   plugins:
     management: "Plugin management"
-    management_description: "Tcode manages each provider's native plugins through that provider's own CLI or protocol. Off, Tcode never touches them."
-    management_off: "Plugin management is off; Tcode does not touch this provider's plugins."
-    provider_off: "Off: Tcode does not touch %{name} plugins."
+    management_off: "Plugin management is off"
+    provider_off: "%{name} plugin management is off"
     provider_switch: "Manage %{name} plugins from Tcode"
     no_providers: "No enabled provider has plugins Tcode can manage."
     installed: "Installed (%{count})"
@@ -702,10 +701,6 @@ providers:
     marketplace_source_placeholder: "owner/repo, https://… or /path/to/marketplace"
     add: "Add"
     remove: "Remove"
-    apply_reload_or_restart: "Skills, commands and hooks apply after /reload-plugins in a running session or in the next session; MCP servers apply in the next session; updates need a restart."
-    apply_reload_or_next_session: "Changes, MCP servers and updates included, apply after /reload-plugins in a running session or in the next session."
-    apply_next_session: "Changes apply to sessions started afterwards; whether a running session picks them up is not verified."
-    apply_unverified: "Whether a running session picks up changes is not verified; start a new session."
     manage: "Manage plugins"
     challenge:
       accept_command_title: "Accept the command for %{name}?"
@@ -809,7 +804,6 @@ composer:
   context_window_custom: "Custom"
   context_window_custom_placeholder: "e.g. 500k (100k–1M)"
   context_window_invalid: "Enter 100k–1M tokens, e.g. 500k"
-  ultrathink_locked: 'Your prompt contains "ultrathink" in the text. Remove it to change this option.'
   context: "Context"
   context_heading: "CONTEXT"
   used: "Used"

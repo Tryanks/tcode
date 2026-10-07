@@ -2219,6 +2219,7 @@ impl ChatView {
         // control mounted inside it would have nowhere to be.
         let sidebar_toggle = Button::new("toggle-sidebar")
             .debug_selector(|| "toggle-sidebar".into())
+            // A control press must not arm the header window drag region.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .ghost()
             .small()
@@ -2313,6 +2314,7 @@ impl ChatView {
                             .gap_1()
                             .child(
                                 Button::new("panel-layout")
+                                    // These panel controls must not arm the header window drag region.
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
@@ -2510,6 +2512,7 @@ impl ChatView {
                 .border_color(border)
                 .overflow_hidden()
                 .child(main)
+                // A control press must not arm the header window drag region.
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().w_px().h(px(16.)).bg(border))
                 .child(chevron)
@@ -2643,6 +2646,7 @@ impl ChatView {
         h_flex()
             .flex_none()
             .h(px(28.))
+            // A control press must not arm the header window drag region.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .items_center()
             .rounded(cx.theme().tokens.radius.md)
@@ -2882,6 +2886,7 @@ impl ChatView {
                 // The outline button's bg is ~transparent; an opaque popover
                 // backing keeps the pill readable over the chat text below.
                 div()
+                    .block_mouse_except_scroll()
                     .rounded(cx.theme().tokens.radius.md)
                     .bg(cx.theme().popover)
                     .shadow_md()
@@ -5080,6 +5085,74 @@ mod tests {
             assert!(list.is_following_tail());
             assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
         }
+    }
+
+    #[gpui::test]
+    fn scroll_pill_over_inline_image_does_not_open_lightbox(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
+
+        let path = std::env::temp_dir().join(format!(
+            "tcode-pill-image-{}-{}.png",
+            std::process::id(),
+            NEXT_RESIDENCY_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        image::RgbaImage::from_pixel(400, 1000, image::Rgba([40, 80, 120, 255]))
+            .save(&path)
+            .unwrap();
+        let mut timeline = synthetic_markdown_timeline(30);
+        Arc::make_mut(timeline.entries.last_mut().unwrap()).content = assistant(&format!(
+            "![shot]({})\n\n{}",
+            path.display(),
+            "Text after the screenshot.\n\n".repeat(80)
+        ));
+        let (store, window_state, _) = seed_chat(cx, timeline);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let chat = cx.new(|cx| ChatView::new(store, window_state, window, cx));
+            gpui_base::Root::new(chat, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<ChatView>().unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(600.)));
+        draw(cx);
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        let row = cx
+            .debug_bounds("timeline-row-89")
+            .expect("last assistant row");
+        cx.simulate_event(ScrollWheelEvent {
+            position: list.viewport_bounds().center(),
+            delta: ScrollDelta::Pixels(point(px(0.), list.viewport_bounds().top() - row.top())),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        });
+        draw(cx);
+        let pill = cx
+            .debug_bounds("scroll-to-end")
+            .expect("pill above the image");
+        let click = |position, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_mouse_move(position, None, Modifiers::default());
+            cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+            draw(cx);
+        };
+        click(point(pill.center().x, pill.top() - px(40.)), cx);
+        assert!(
+            cx.debug_bounds("image-viewer-image").is_some(),
+            "exposed image opens the lightbox"
+        );
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(cx.debug_bounds("image-viewer-image").is_none());
+        assert!(!list.is_following_tail());
+
+        let pill = cx.debug_bounds("scroll-to-end").unwrap();
+        click(pill.center(), cx);
+        assert!(list.is_following_tail(), "pill click must reach the tail");
+        assert!(
+            cx.debug_bounds("image-viewer-image").is_none(),
+            "pill click opened the image underneath"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[gpui::test]

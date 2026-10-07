@@ -25,11 +25,6 @@ pub struct QueuedMessage {
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
     pub(super) options: TurnOptions,
-    /// Ultrathink was armed when this message was written. It is a per-send
-    /// prompt-prefix mode, so it rides with the message rather than with the
-    /// session, and is applied only to the text sent on the wire (the user
-    /// message recorded in the transcript stays clean).
-    pub(super) ultrathink: bool,
     /// Byte length of an injected context prefix folded into `text` (set only for
     /// an `/orchestrate` send). Threaded into the recorded user-message event so
     /// the timeline can split the prefix from the user's own words; `None` for
@@ -50,8 +45,8 @@ pub(super) enum QueuedMessageKind {
 }
 
 impl QueuedMessage {
-    /// The text actually sent to the provider (image-only placeholder, native
-    /// skill invocation and Ultrathink keyword applied). The recorded user
+    /// The text actually sent to the provider (image-only placeholder and native
+    /// skill invocation applied). The recorded user
     /// message keeps `text` verbatim, so an image-only bubble renders as just
     /// its thumbnails.
     pub(super) fn wire_text(&self, provider_commands: &[ProviderCommand]) -> String {
@@ -61,12 +56,7 @@ impl QueuedMessage {
             self.text.clone()
         };
         let text = wire_text_with_placeholder(text, &self.attachments);
-        let text = native_skill_invocation(text, provider_commands);
-        if self.ultrathink {
-            ultrathink_text(text)
-        } else {
-            text
-        }
+        native_skill_invocation(text, provider_commands)
     }
 }
 
@@ -96,17 +86,6 @@ pub(super) fn native_skill_invocation(
         return text;
     }
     format!("/{rest}")
-}
-
-/// Add the `ultrathink` keyword, which Claude Code honours anywhere in the
-/// prompt. A message that starts with `/` is a slash command, and the CLI
-/// expands one only at byte 0, so there the keyword trails the text instead.
-pub(super) fn ultrathink_text(text: String) -> String {
-    if text.starts_with('/') {
-        format!("{text}\n\nultrathink")
-    } else {
-        format!("Ultrathink:\n{text}")
-    }
 }
 
 /// Providers require non-empty turn text: an image-only message uses a
@@ -176,13 +155,9 @@ pub struct ActiveSession {
     pub(super) live_model: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
-    /// A transient "the next send should be an Ultrathink turn" flag, set when
-    /// the user picks Ultrathink in the traits picker. It is not persisted as
-    /// a session option and is cleared after one send.
-    pub(super) pending_ultrathink: bool,
     /// A transient "the next queued send carries an injected context prefix of
     /// this many bytes" flag, set by [`AppState::orchestrate_turn`] right before
-    /// it hands the composed text to `steer`. Like `pending_ultrathink` it is a
+    /// it hands the composed text to `steer`. It is a
     /// per-send annotation, consumed by the next `push_queued`, and never
     /// persisted on the session.
     pub(super) pending_context_len: Option<usize>,
@@ -246,7 +221,6 @@ impl ActiveSession {
             live_model: None,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
-            pending_ultrathink: false,
             pending_context_len: None,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -458,14 +432,12 @@ impl ActiveSession {
             .map_err(|_| ())
     }
 
-    /// Append a message to the queue, consuming the armed Ultrathink flag (it is
-    /// per-send, so it belongs to this message, not to whatever is sent later).
+    /// Append a message to the queue, consuming the staged context prefix.
     pub(super) fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
         self.idle_since = None;
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let options = self.turn_options();
-        let ultrathink = std::mem::take(&mut self.pending_ultrathink);
         let context_len = std::mem::take(&mut self.pending_context_len);
         let context_window_changed = self.context_window_change();
         self.queue.push(QueuedMessage {
@@ -476,7 +448,6 @@ impl ActiveSession {
             attachments,
             not_before: None,
             options,
-            ultrathink,
             context_len,
             context_window_changed,
             kind: QueuedMessageKind::User,
@@ -523,7 +494,6 @@ impl ActiveSession {
             attachments: Vec::new(),
             not_before: None,
             options,
-            ultrathink: false,
             context_len: None,
             context_window_changed: None,
             kind: QueuedMessageKind::OrchestrateCallback,

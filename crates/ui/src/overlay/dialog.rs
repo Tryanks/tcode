@@ -380,10 +380,12 @@ impl RenderOnce for Dialog {
         let content = self
             .content
             .map(|builder| builder(DialogContent::new(), window, cx));
+        // gpui-base's backdrop parent dismisses but does not block; the scrim stops wheels without occluding it.
         let backdrop = div()
             .absolute()
             .size_full()
-            .when(self.overlay, |el| el.bg(crate::material::scrim(1., cx)));
+            .when(self.overlay, |el| el.bg(crate::material::scrim(1., cx)))
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         let popup = div()
             .id(("tcode-dialog", self.layer))
             .absolute()

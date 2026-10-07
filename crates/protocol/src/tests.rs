@@ -968,6 +968,25 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         serde_json::from_str::<Query>(r#"{"type":"archived_sessions"}"#).unwrap(),
         Query::ArchivedSessions
     );
+    let status_wire: serde_json::Value = serde_json::from_str(r#"{"type":"session_status_replaced", "content": {
+        "session_id":"s", "title":"Thread", "cwd":"/workspace", "attachments_dir":"/attachments",
+        "provider":"codex", "requested_model":null, "requested_profile_id":null,
+        "acp_agent_id":null, "project_id":null,
+        "queued_messages":[{"id":3,"delivery_key":"send-key","text":"Next","fire_at_unix_secs":null,"editable":false}],
+        "review_comment_drafts":[], "terminals":[], "active_terminal_id":null, "terminal_splits":[],
+        "terminal_contexts":[], "terminal_open":false, "terminal_height":240.0, "delivery_in_flight":3,
+        "activity":{"working":true,"turn_running":false,"background_only":false,"waiting_for_approval":false,
+            "waiting_for_input":false,"unread":false,"fork":"available"},
+        "stopping":false,"native_rewind_blocked":true,"checkout_blocked":false,"conversation_read_only":false,
+        "terminal_limit_reached":false,"terminal_split_available":false,"usage":null,"context_window":200000,
+        "running_turn":null,"pending_approvals":[],"pending_user_input":null,"supports_steering":true,
+        "provider_option_descriptors":[],"provider_option_selections":[],"provider_option_requested_selections":[],"provider_commands":[],
+        "git_branch":null,"branches":[],"draft":false,"draft_workspace":{"kind":"local_checkout"},"worktree":null,
+        "preparing_worktree":false,"relay_confirmation":null,"native_rewind_pending":false,
+        "native_rewind_prefill_available":false,"model_pending_restart":false,"options_pending_restart":false
+    }}"#).unwrap();
+    let status = serde_json::from_value::<ServerEvent>(status_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(status).unwrap(), status_wire);
     let archive_wire = json!({"type":"archived_sessions", "content": {"sessions":[], "worktree_shared":["owner"], "revision":7}});
     let archived = QueryResponse::ArchivedSessions(ArchivedSessions {
         sessions: Vec::new(),

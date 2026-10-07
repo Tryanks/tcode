@@ -571,7 +571,6 @@ impl AppState {
             native_rewind_prefill_available: false,
             model_pending_restart: session.model_changed_while_live(),
             options_pending_restart: session.options_changed_while_live(),
-            ultrathink_armed: session.pending_ultrathink,
         })
     }
 

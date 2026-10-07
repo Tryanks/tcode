@@ -642,7 +642,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             id,
             value,
         } => app.set_active_option(&session_id, &id, value, cx),
-        Command::SelectUltrathink { session_id } => app.select_ultrathink(&session_id, cx),
         Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
         Command::CheckoutBranch { session_id, branch } => {
             app.checkout_branch(&session_id, branch, cx)

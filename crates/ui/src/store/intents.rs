@@ -721,11 +721,6 @@ impl WorkspaceStore {
             value,
         });
     }
-    pub fn select_ultrathink(&mut self) {
-        self.dispatch(Command::SelectUltrathink {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
-    }
 }
 
 impl WorkspaceStore {
