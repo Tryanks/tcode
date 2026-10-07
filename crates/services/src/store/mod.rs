@@ -547,7 +547,8 @@ impl SessionStore {
         let mut state = self.shared.lock_state()?;
         loop {
             match std::mem::replace(&mut *state, State::Closed) {
-                State::Unopened | State::Closed | State::Owned(_) => return Ok(()),
+                State::Unopened | State::Closed => return Ok(()),
+                State::Owned(ownership) => return ownership.unlock(),
                 State::Migrating => {
                     *state = State::Migrating;
                     state = self
@@ -566,7 +567,6 @@ impl SessionStore {
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
                 State::Closing(live) => {
-                    drop(state);
                     let Live { db, ownership, .. } = live;
                     let result = match Arc::try_unwrap(db) {
                         Ok(db) => catch_unwind(AssertUnwindSafe(|| db.checkpoint()))
@@ -580,6 +580,9 @@ impl SessionStore {
                             "session store is still referenced after its last operation",
                         )),
                     };
+                    // A concurrently launching child can inherit the lock descriptor
+                    // until exec. Closing our copy alone leaves that child holding it.
+                    let result = result.and(ownership.unlock());
                     drop(ownership);
                     return result;
                 }
