@@ -146,6 +146,11 @@ the machine's invitation for native clients and controls pairing and
 revocation.
 See [Use Tcode from other devices](docs/remote.md) for the full guide.
 
+[Shared spaces](docs/remote.md#shared-spaces) let trusted collaborators pair
+with a reusable link and work in selected projects on your machine. Members
+run commands with the machine's agents and permissions; spaces scope Tcode
+visibility and control, without isolating commands.
+
 **Security.** Native connections are authenticated by device and machine keys
 and encrypted end to end; a relay carries ciphertext. Removing a device on the
 machine closes its connection at once. The browser page is plain HTTP,

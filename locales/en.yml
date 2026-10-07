@@ -1402,5 +1402,7 @@ member:
   already_member: "This device is already paired with that machine. Ask the owner to move it to the space."
   space_unavailable: "This link is paused or no longer valid. Ask the owner for a new one."
   owner: "Machine owner"
+  empty_title: "This space has no projects yet"
   empty_description: "Ask the owner to add a project to this space."
+  threads_empty: "No threads yet. Create one in a shared project."
   unavailable: "This action is unavailable in a shared space."

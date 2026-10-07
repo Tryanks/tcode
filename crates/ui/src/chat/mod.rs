@@ -2266,6 +2266,8 @@ impl ChatView {
             div()
                 .flex_1()
                 .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
                 .text_size(px(15.))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
@@ -2286,6 +2288,8 @@ impl ChatView {
                 None => div()
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .text_size(px(15.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
@@ -2755,7 +2759,7 @@ impl ChatView {
         if !self.workspace_store.read(cx).scope().is_full() {
             return crate::material::empty_state(
                 Icon::new(IconName::Folder),
-                crate::tr!("mobile.projects_empty"),
+                crate::tr!("member.empty_title"),
                 crate::tr!("member.empty_description"),
                 cx,
             )
