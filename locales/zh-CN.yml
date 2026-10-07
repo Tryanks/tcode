@@ -222,7 +222,7 @@ quit:
   startup_failed: "Tcode 无法启动"
 migration:
   title: "正在升级 Tcode 数据"
-  description: "Tcode 的数据现在保存在 %{path}，正在把数据移到这里，并把旧版对话复制到统一的数据库 tcode.db。每份副本都会先校验，再删除原始文件。"
+  description: "保存位置：%{path}"
   relocating: "正在把数据目录移到 %{path}…"
   relocating_copy: "正在把数据目录复制到 %{path}：%{bytes}/%{total_bytes}"
   scanning: "正在查找对话…"
@@ -617,9 +617,8 @@ providers:
     env_hint: "KEY=value KEY2=value2"
   plugins:
     management: "插件管理"
-    management_description: "Tcode 通过各提供商自己的 CLI 或协议管理其原生插件。关闭后，Tcode 不会触碰这些插件。"
-    management_off: "插件管理已关闭；Tcode 不会触碰此提供商的插件。"
-    provider_off: "已关闭：Tcode 不会触碰 %{name} 的插件。"
+    management_off: "插件管理已关闭"
+    provider_off: "%{name} 插件管理已关闭"
     provider_switch: "在 Tcode 中管理 %{name} 插件"
     no_providers: "没有已启用且可由 Tcode 管理插件的提供商。"
     installed: "已安装（%{count}）"
@@ -692,10 +691,6 @@ providers:
     marketplace_source_placeholder: "owner/repo、https://… 或 /path/to/marketplace"
     add: "添加"
     remove: "移除"
-    apply_reload_or_restart: "技能、命令和钩子在运行中的会话执行 /reload-plugins 后或在下一个会话中生效；MCP 服务器在下一个会话中生效；更新需要重启。"
-    apply_reload_or_next_session: "所有变更（包括 MCP 服务器和更新）在运行中的会话执行 /reload-plugins 后或在下一个会话中生效。"
-    apply_next_session: "变更对之后开始的会话生效；尚未验证运行中的会话是否会应用。"
-    apply_unverified: "尚未验证运行中的会话是否会应用变更；请开始新会话。"
     manage: "管理插件"
     challenge:
       accept_command_title: "接受 %{name} 的命令？"
