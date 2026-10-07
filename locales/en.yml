@@ -843,6 +843,8 @@ composer:
   voice_preparing: "Preparing dictation…"
   voice_stop: "Stop dictation"
   voice_error: "Dictation failed: %{error}"
+  voice_enable_dictation: "macOS reports that Siri or Dictation is disabled. Microphone permission alone is not enough. Turn on Dictation in System Settings → Keyboard, then try voice input again."
+  voice_open_dictation_settings: "Open Dictation Settings"
 permission:
   recommended: "★ Recommended"
   pending: "Pending"
