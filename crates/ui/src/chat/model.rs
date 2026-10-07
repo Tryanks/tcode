@@ -28,6 +28,7 @@ pub(crate) type RowRenderArgs<'a> = (
 #[derive(Debug)]
 pub(crate) enum Segment<'a> {
     ActivityRun(Vec<&'a TimelineEntry>),
+    Images(Vec<&'a TimelineEntry>),
     Relay(&'a TimelineEntry),
     ModelChange(&'a TimelineEntry),
     ContextCompacted(&'a TimelineEntry),
@@ -151,7 +152,27 @@ pub(crate) fn segment_entries<'a>(
             ranges.push(index..index + 1);
         };
         match &entry.content {
-            EntryContent::Item(ItemContent::CommandExecution { .. })
+            EntryContent::Item(item)
+                if matches!(item, ItemContent::ImageRead { .. })
+                    || matches!(item, ItemContent::ToolCall { image_reads, status: ItemStatus::Completed, .. } if !image_reads.is_empty()) =>
+            {
+                flush_activities(
+                    &mut segments,
+                    &mut ranges,
+                    &mut activities,
+                    &mut run_start,
+                    index,
+                );
+                if let Some(Segment::Images(images)) = segments.last_mut() {
+                    images.push(entry);
+                    ranges.last_mut().expect("an image run has a range").end = index + 1;
+                } else {
+                    segments.push(Segment::Images(vec![entry]));
+                    ranges.push(index..index + 1);
+                }
+            }
+            EntryContent::Item(ItemContent::ImageRead { .. })
+            | EntryContent::Item(ItemContent::CommandExecution { .. })
             | EntryContent::Item(ItemContent::ToolCall { .. })
             | EntryContent::Item(ItemContent::Subagent { .. })
             | EntryContent::Item(ItemContent::WebSearch { .. })
@@ -247,6 +268,7 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             }
             EntryContent::Item(ItemContent::ToolCall { .. })
             | EntryContent::Item(ItemContent::WebSearch { .. })
+            | EntryContent::Item(ItemContent::ImageRead { .. })
             | EntryContent::Item(ItemContent::Other { .. }) => counts.tools += 1,
             EntryContent::Item(ItemContent::Subagent { .. }) => counts.subagents += 1,
             EntryContent::ContextCompacted(_)
@@ -1269,7 +1291,9 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             input,
             output,
             status,
+            image_reads,
         }) => {
+            image_reads.len().hash(hash);
             name.len().hash(hash);
             input.to_string().len().hash(hash);
             output.as_ref().map(String::len).hash(hash);
@@ -1314,6 +1338,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::ContextCompacted(_) => {}
         EntryContent::ContextWindowChanged { window } => window.hash(hash),
+        EntryContent::Item(ItemContent::ImageRead { path, .. }) => path.hash(hash),
         EntryContent::Item(ItemContent::WebSearch { query }) => {
             "web_search".len().hash(hash);
             serde_json::json!({ "query": query })
@@ -2175,6 +2200,41 @@ mod tests {
             [Segment::ActivityRun(activities), Segment::ContextWindowChanged(entry)]
                 if activities.len() == 1 && entry.id == "window"
         ));
+        let image = |id: &str| {
+            entry(
+                id,
+                EntryContent::Item(ItemContent::ImageRead {
+                    path: format!("/tmp/{id}.png"),
+                    image: None,
+                }),
+            )
+        };
+        let entries = [
+            image("one"),
+            entry(
+                "two",
+                EntryContent::Item(ItemContent::ToolCall {
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path":"two.png"}),
+                    output: None,
+                    status: ItemStatus::Completed,
+                    image_reads: vec![agent::Attachment {
+                        media_type: "image/png".into(),
+                        data_base64: String::new(),
+                        source_path: None,
+                    }],
+                }),
+            ),
+            command("cmd"),
+            image("three"),
+            entry("reply", assistant("done")),
+        ];
+        let segmented = segment_entries(&entries, false);
+        assert!(
+            matches!(segmented.flow.as_slice(), [Segment::Images(first), Segment::ActivityRun(_), Segment::Images(second), Segment::Assistant(_)]
+            if first.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["one", "two"] && second[0].id == "three")
+        );
+        assert_eq!(segmented.ranges, vec![0..2, 2..3, 3..4, 4..5]);
         let segmented = segment_entries(&[], false);
         assert!(segmented.flow.is_empty());
         assert!(segmented.pending_steers.is_empty());

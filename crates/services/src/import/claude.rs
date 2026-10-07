@@ -60,7 +60,12 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 },
                             });
                         }
-                        UserBlock::ToolResult { id, output, failed } => {
+                        UserBlock::ToolResult {
+                            id,
+                            output,
+                            failed,
+                            content,
+                        } => {
                             let Some(index) = pending.remove(&id) else {
                                 continue;
                             };
@@ -68,9 +73,14 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 && let ItemContent::ToolCall {
                                     output: item_output,
                                     status,
+                                    name,
+                                    image_reads,
                                     ..
                                 } = &mut item.content
                             {
+                                if !failed {
+                                    *image_reads = agent::tool_result_images(name, &content);
+                                }
                                 *item_output = Some(output);
                                 *status = if failed {
                                     ItemStatus::Failed
@@ -108,6 +118,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                             let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                             let input = block.get("input").cloned().unwrap_or(Value::Null);
                             Some(ItemContent::ToolCall {
+                                image_reads: Vec::new(),
                                 name: name.to_string(),
                                 input,
                                 output: None,
@@ -197,6 +208,7 @@ enum UserBlock {
         id: String,
         output: String,
         failed: bool,
+        content: Value,
     },
 }
 
@@ -214,6 +226,7 @@ fn content_blocks(content: &Value) -> Vec<UserBlock> {
                 .and_then(Value::as_str)
                 .map(|text| UserBlock::Text(text.to_string())),
             Some("tool_result") => Some(UserBlock::ToolResult {
+                content: block.get("content").cloned().unwrap_or(Value::Null),
                 id: block
                     .get("tool_use_id")
                     .and_then(Value::as_str)

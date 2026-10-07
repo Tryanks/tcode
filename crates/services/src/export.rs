@@ -321,6 +321,7 @@ mod tests {
             item(
                 "tool-1",
                 ItemContent::ToolCall {
+                    image_reads: Vec::new(),
                     name: "read_file".into(),
                     input: serde_json::json!({"path": "src/main.rs"}),
                     output: Some("read 12 lines".into()),
@@ -575,6 +576,7 @@ mod tests {
             events.push(item(
                 &format!("tool-{index}"),
                 ItemContent::ToolCall {
+                    image_reads: Vec::new(),
                     name: format!("check-{index}"),
                     input: serde_json::json!({"path": format!("file-{index}.rs")}),
                     output: Some(format!("result-{index}")),

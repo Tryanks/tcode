@@ -2329,6 +2329,7 @@ impl Mapper {
                     input: input.clone(),
                 },
                 ItemContent::ToolCall {
+                    image_reads: Vec::new(),
                     name,
                     input,
                     output: None,
@@ -2461,6 +2462,13 @@ impl Mapper {
                     ItemContent::FileChange { changes, status }
                 }
                 ToolItem::Tool { name, input } => ItemContent::ToolCall {
+                    image_reads: if !is_error && crate::image_reads::is_read_tool(&name) {
+                        crate::image_reads::content_images(
+                            block.get("content").unwrap_or(&Value::Null),
+                        )
+                    } else {
+                        Vec::new()
+                    },
                     name,
                     input,
                     output: Some(output),
@@ -4532,6 +4540,44 @@ mod tests {
                 );
             }
             other => panic!("expected ItemCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_read_results_exclude_failed_reads_and_image_generation() {
+        for (name, failed, expected) in [
+            ("Read", false, 1),
+            ("Read", true, 0),
+            ("generate_image", false, 0),
+            ("mcp__browser__preview_screenshot", false, 1),
+        ] {
+            let mut mapper = Mapper::new();
+            feed(&mut mapper, &json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"read","name":name,"input":{"file_path":"/tmp/image.png"}}]}}).to_string());
+            let events = feed(&mut mapper, &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read","is_error":failed,"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}]}]}}).to_string());
+            let AgentEvent::ItemCompleted(ThreadItem {
+                content:
+                    ItemContent::ToolCall {
+                        image_reads,
+                        status,
+                        ..
+                    },
+                ..
+            }) = &events[0]
+            else {
+                panic!("tool completion: {events:?}")
+            };
+            assert_eq!(image_reads.len(), expected, "{name}, failed={failed}");
+            assert_eq!(
+                *status,
+                if failed {
+                    ItemStatus::Failed
+                } else {
+                    ItemStatus::Completed
+                }
+            );
+            if expected != 0 {
+                assert_eq!(image_reads[0].data_base64, "AQID");
+            }
         }
     }
 

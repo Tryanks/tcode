@@ -1158,13 +1158,23 @@ impl PiMapper {
         if status == ItemStatus::Failed {
             self.failed = true;
         }
-        let item = tool_item(
+        let mut item = tool_item(
             &id,
             &tool.name,
             tool.input.clone(),
             tool.output.clone(),
             status,
         );
+        if status == ItemStatus::Completed
+            && crate::image_reads::is_read_tool(&tool.name)
+            && let ItemContent::ToolCall { image_reads, .. } = &mut item.content
+        {
+            *image_reads = crate::image_reads::content_images(
+                result
+                    .and_then(|r| r.get("content"))
+                    .unwrap_or(&Value::Null),
+            );
+        }
         vec![match status {
             ItemStatus::InProgress if has_result => AgentEvent::ItemUpdated(item),
             ItemStatus::InProgress if was_known => AgentEvent::ItemUpdated(item),
@@ -1205,6 +1215,7 @@ fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemSta
             status,
         },
         _ => ItemContent::ToolCall {
+            image_reads: Vec::new(),
             name: name.to_owned(),
             input,
             output: (!output.is_empty()).then_some(output),
@@ -1805,6 +1816,30 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn image_read_results_exclude_failed_reads_and_image_generation() {
+        for (name, failed, expected) in [
+            ("read", false, 2),
+            ("read", true, 0),
+            ("generate_image", false, 0),
+        ] {
+            let mut mapper = PiMapper::new();
+            mapper.on_message(&json!({"type":"tool_execution_start","toolCallId":"read","toolName":name,"args":{"path":"image.png"}}));
+            let events = mapper.on_message(&json!({"type":"tool_execution_end","toolCallId":"read","isError":failed,"result":{"content":[{"type":"image","mimeType":"image/png","data":"AQID"},{"type":"image","mimeType":"image/jpeg","data":"BAUG"}]}}));
+            let AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::ToolCall { image_reads, .. },
+                ..
+            }) = &events[0]
+            else {
+                panic!("tool completion: {events:?}")
+            };
+            assert_eq!(image_reads.len(), expected, "{name}, failed={failed}");
+            if expected != 0 {
+                assert_eq!(image_reads[1].data_base64, "BAUG");
+            }
+        }
     }
 
     #[test]

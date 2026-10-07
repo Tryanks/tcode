@@ -85,6 +85,12 @@ pub enum Query {
         session_id: String,
         item_id: String,
     },
+    /// Image bytes returned to the model by a read tool; omitted from timeline windows.
+    ReadItemImage {
+        session_id: String,
+        item_id: String,
+        image_index: usize,
+    },
     /// Every archived thread, most recently archived first.
     ArchivedSessions,
 }

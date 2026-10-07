@@ -55,10 +55,21 @@ fn oversized_output(event: &AgentEvent) -> bool {
         | AgentEvent::ItemUpdated(item)
         | AgentEvent::ItemCompleted(item) => match &item.content {
             ItemContent::ToolCall {
-                output: Some(output),
+                output,
+                image_reads,
                 ..
+            } => {
+                image_reads
+                    .iter()
+                    .any(|image| !image.data_base64.is_empty())
+                    || output
+                        .as_ref()
+                        .is_some_and(|output| output.len() > OUTPUT_PREVIEW_BYTES)
             }
-            | ItemContent::CommandExecution { output, .. } => output.len() > OUTPUT_PREVIEW_BYTES,
+            ItemContent::ImageRead {
+                image: Some(image), ..
+            } => !image.data_base64.is_empty(),
+            ItemContent::CommandExecution { output, .. } => output.len() > OUTPUT_PREVIEW_BYTES,
             _ => false,
         },
         AgentEvent::Delta {
@@ -83,9 +94,35 @@ pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRe
         | AgentEvent::ItemUpdated(item)
         | AgentEvent::ItemCompleted(item) => match &mut item.content {
             ItemContent::ToolCall {
-                output: Some(output),
+                output,
+                image_reads,
                 ..
-            } => shorten(output, false),
+            } => {
+                let full = output.as_ref().map(|output| output.len() as u64);
+                let mut removed = false;
+                for image in image_reads {
+                    if !image.data_base64.is_empty() {
+                        if let Some(output) = output {
+                            let preview = output.replace(&image.data_base64, "[image]");
+                            removed |= preview.len() != output.len();
+                            *output = preview;
+                        }
+                        image.data_base64.clear();
+                    }
+                }
+                let shortened = output.as_mut().and_then(|output| shorten(output, false));
+                if removed || shortened.is_some() {
+                    full
+                } else {
+                    None
+                }
+            }
+            ItemContent::ImageRead {
+                image: Some(image), ..
+            } => {
+                image.data_base64.clear();
+                None
+            }
             ItemContent::CommandExecution { output, .. } => shorten(output, true),
             _ => None,
         },
@@ -462,6 +499,43 @@ impl SessionLog {
         limit: u32,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
         self.view().history_page(before, limit)
+    }
+
+    pub(super) fn item_image(
+        &self,
+        item_id: &str,
+        image_index: usize,
+    ) -> Result<QueryResponse, ProtocolError> {
+        use base64::Engine as _;
+        let image = self
+            .fold
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.id == item_id)
+            .and_then(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::ToolCall { image_reads, .. }) => {
+                    image_reads.get(image_index)
+                }
+                EntryContent::Item(ItemContent::ImageRead { image, .. }) if image_index == 0 => {
+                    image.as_ref()
+                }
+                _ => None,
+            })
+            .ok_or_else(|| ProtocolError::out_of_scope("image is outside this item"))?;
+        if image.data_base64.len() > MAX_SESSION_HISTORY_BYTES {
+            return Err(ProtocolError {
+                code: "item_image_too_large".into(),
+                message: "The image exceeds the response limit.".into(),
+            });
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data_base64)
+            .map_err(|_| ProtocolError {
+                code: "invalid_image".into(),
+                message: "Invalid image encoding.".into(),
+            })?;
+        Ok(QueryResponse::FileBytes(bytes))
     }
 
     /// The whole output of one item, as the full log folds it.
@@ -962,6 +1036,20 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
         self.query_session_log(session_id, move |log| log.history_page(before, limit), cx)
+    }
+
+    pub(crate) fn item_image(
+        &mut self,
+        session_id: &str,
+        item_id: String,
+        image_index: usize,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        self.query_session_log(
+            session_id,
+            move |log| log.item_image(&item_id, image_index),
+            cx,
+        )
     }
 
     pub(crate) fn item_output(

@@ -202,6 +202,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 input,
                 output,
                 status,
+                ..
             }) => {
                 let target = tool_target(input);
                 let outcome = status_outcome(*status, output.as_deref().unwrap_or(""));
@@ -258,6 +259,12 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 ),
             ),
             EntryContent::ModelChanged { .. } => {}
+            EntryContent::Item(ItemContent::ImageRead { path, .. }) => activity(
+                &mut body,
+                "image_view",
+                path,
+                &status_outcome(ItemStatus::Completed, ""),
+            ),
             EntryContent::Item(ItemContent::WebSearch { query }) => activity(
                 &mut body,
                 "web_search",
@@ -413,6 +420,7 @@ mod tests {
             item(
                 "tool",
                 ItemContent::ToolCall {
+                    image_reads: Vec::new(),
                     name: "read_file".into(),
                     input: serde_json::json!({"path": "src/main.rs"}),
                     output: Some("line one\nline two".into()),
@@ -422,6 +430,7 @@ mod tests {
             item(
                 "failed",
                 ItemContent::ToolCall {
+                    image_reads: Vec::new(),
                     name: "build".into(),
                     input: serde_json::json!({"target": "workspace"}),
                     output: Some("compiler error\nmore detail".into()),

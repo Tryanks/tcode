@@ -477,6 +477,16 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             item_id: "foreign-tool".into(),
         }),
     ));
+    for session_id in ["a", "b"] {
+        denied(host.request(
+            member.clone(),
+            ClientPayload::Query(Query::ReadItemImage {
+                session_id: session_id.into(),
+                item_id: "foreign-tool".into(),
+                image_index: 0,
+            }),
+        ));
+    }
     assert_eq!(
         host.query(
             member.clone(),

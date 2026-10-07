@@ -59,10 +59,12 @@ fn claude_converter_maps_items_and_excludes_noise() {
         json!({"type":"assistant","message":{"role":"assistant","content":[
             {"type":"text","text":"Hello human"},
             {"type":"thinking","thinking":"Consider the request"},
-            {"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"demo.txt"}}
+            {"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"demo.txt"}},
+            {"type":"tool_use","id":"image-read","name":"Read","input":{"file_path":"image.png"}}
         ]},"timestamp":"2026-01-02T03:04:06.006Z","cwd":"/synthetic","sessionId":"claude-1"}),
         json!({"type":"user","message":{"role":"user","content":[
-            {"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"permission denied"}],"is_error":true}
+            {"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"permission denied"}],"is_error":true},
+            {"type":"tool_result","tool_use_id":"image-read","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}]}
         ]},"timestamp":"2026-01-02T03:04:07.006Z","cwd":"/synthetic","sessionId":"claude-1"}),
         json!({"type":"user","message":{"role":"user","content":"sidechain secret"},"isSidechain":true,"timestamp":"2026-01-02T03:04:08.006Z","cwd":"/synthetic"}),
         json!({"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-02T03:04:09.006Z","cwd":"/synthetic"}),
@@ -72,14 +74,17 @@ fn claude_converter_maps_items_and_excludes_noise() {
 
     let converted = claude::convert(&file, "claude:claude-1").unwrap().unwrap();
     let contents = item_contents(&converted);
-    assert_eq!(contents.len(), 4);
+    assert_eq!(contents.len(), 5);
+    assert!(
+        matches!(contents[4], ItemContent::ToolCall { image_reads, .. } if image_reads.len() == 1 && image_reads[0].data_base64 == "AQID")
+    );
     assert!(matches!(contents[0], ItemContent::UserMessage { text, .. } if text == "Hello Claude"));
     assert!(matches!(contents[1], ItemContent::AssistantMessage { text } if text == "Hello human"));
     assert!(
         matches!(contents[2], ItemContent::Reasoning { text } if text == "Consider the request")
     );
     assert!(matches!(contents[3], ItemContent::ToolCall {
-        name, input, output: Some(output), status: ItemStatus::Failed
+        name, input, output: Some(output), status: ItemStatus::Failed, ..
     } if name == "Read" && input == &json!({"file_path":"demo.txt"}) && output == "permission denied"));
 }
 
@@ -109,7 +114,7 @@ fn codex_converter_maps_external_history_and_excludes_harness_and_own_sessions()
     );
     assert!(matches!(contents[2], ItemContent::Reasoning { text } if text == "First\nSecond"));
     assert!(matches!(contents[3], ItemContent::ToolCall {
-        name, input, output: Some(output), status: ItemStatus::Completed
+        name, input, output: Some(output), status: ItemStatus::Completed, ..
     } if name == "read_file" && input == &json!({"path":"a.rs"}) && output == "file body"));
     write_lines(
         &file,

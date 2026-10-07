@@ -68,7 +68,8 @@ pub use wire::{
 // space id, device access, optional stored-event authors, and a space id on
 // pairing with the space name in the paired reply and two pairing rejections.
 //
-// Unreleased: (none)
+// Unreleased: adds ImageRead, ToolCall.image_reads metadata and ReadItemImage
+// for fetching model-read image bytes outside timeline windows.
 pub const PROTOCOL_VERSION: u32 = 9;
 
 #[cfg(test)]

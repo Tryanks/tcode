@@ -319,6 +319,7 @@ impl AppState {
                 | Query::GenerateCommitMessage { session_id, .. }
                 | Query::RenderThreadExport { session_id, .. }
                 | Query::ReadItemOutput { session_id, .. }
+                | Query::ReadItemImage { session_id, .. }
                 | Query::RenderStoredOutput { session_id, .. } => session(session_id),
                 Query::ReadProjectIcon { project_id, .. } => self
                     .projects

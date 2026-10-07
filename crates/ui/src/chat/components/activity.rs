@@ -86,6 +86,7 @@ pub(crate) fn activity_row(
             input,
             output,
             status,
+            ..
         }) => {
             let mut brief = tool_brief(input);
             if brief.is_empty()
@@ -197,7 +198,7 @@ pub(crate) fn activity_row(
 /// What the row's context menu copies: the detail's parts are plain text, so
 /// the window selection cannot reach them, and a reader wants the whole
 /// command or output rather than its one-line preview.
-fn activity_copy_items(entry: &TimelineEntry) -> Vec<(String, String)> {
+pub(super) fn activity_copy_items(entry: &TimelineEntry) -> Vec<(String, String)> {
     let mut items = Vec::new();
     let mut push = |key: &str, text: &str| {
         if !text.trim().is_empty() {

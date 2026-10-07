@@ -40,7 +40,7 @@ mod history;
 pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
 mod intents;
-pub(crate) use images::host_image;
+pub(crate) use images::{host_image, item_image};
 mod snapshots;
 
 pub use snapshots::ComposerState;
@@ -4888,6 +4888,7 @@ pub(crate) mod tests {
             id: "shot".into(),
             parent_item_id: None,
             content: ItemContent::ToolCall {
+                image_reads: Vec::new(),
                 name: "screenshot".into(),
                 input: serde_json::json!({}),
                 output: Some("preview".into()),
