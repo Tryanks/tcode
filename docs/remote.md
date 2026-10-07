@@ -62,11 +62,13 @@ contains device-local pages and **Archived Threads**. Sidebar preferences and
 read state stay on the device.
 
 Each device belongs to at most one space in this version. A device already
-paired with the machine is refused as **already a member**; the owner moves it
-to the desired space. The pairing screen says **This device is already paired
-with that machine. Ask the owner to move it to the space.** A paused, dead or
-missing space link says **This link is paused or no longer valid. Ask the owner
-for a new one.** A wrong secret says **The machine rejected this invitation.
+paired with the machine, fully or through a space, is refused as **already a
+member** and keeps the access it has; the owner can move a member to another
+space. The pairing screen says **This device is already paired with that
+machine. Connect to it from Machines; to join this space instead, ask the
+owner.** A paused, dead or missing space link says **This space link is paused
+or no longer valid. Ask the owner to turn it back on or send a new one.** A
+wrong secret says **The machine rejected this invitation.
 Check that Accept new devices is on and use a new invitation.** A connection
 failure says **Could not reach ‹address›.** A malformed link says **That is not
 a Tcode invitation link.** Pairing errors leave the device without new access.

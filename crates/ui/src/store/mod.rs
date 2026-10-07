@@ -621,6 +621,15 @@ impl WorkspaceStore {
         }
     }
 
+    pub fn space_label(&self) -> Option<String> {
+        match &self.scope {
+            WorkspaceScope::Full => None,
+            WorkspaceScope::Space { space_name, .. } => {
+                Some(crate::tr!("member.space", space = space_name).into_owned())
+            }
+        }
+    }
+
     fn member_settings_key(&self) -> String {
         match &self.scope {
             WorkspaceScope::Space { space_id, .. } => {
@@ -1381,8 +1390,7 @@ impl WorkspaceStore {
                 else {
                     return;
                 };
-                held.records.push(record.clone());
-                held.end += 1;
+                held.extend(std::slice::from_ref(record), held.end + 1);
                 let after = held.end;
                 let _ = self.host.update_after(&envelope.topic, after);
                 // A new turn means the user moved on; the recovery card for the
@@ -2999,48 +3007,20 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn message_byline(&self, entry_id: &str) -> Option<String> {
-        let records = &self
+        let held = self
             .threads
             .get(self.selected_session_id.as_ref()?)?
             .history
-            .as_ref()?
-            .records;
-        let user_record = |record: &&StoredEvent| match &record.event {
-            agent::AgentEvent::ItemStarted(item)
-            | agent::AgentEvent::ItemUpdated(item)
-            | agent::AgentEvent::ItemCompleted(item) => {
-                matches!(item.content, agent::ItemContent::UserMessage { .. })
-            }
-            agent::AgentEvent::SteerRequested { .. } => true,
-            _ => false,
-        };
-        let authors: HashSet<Option<&str>> = records
-            .iter()
-            .filter(user_record)
-            .map(|record| {
-                record
-                    .author
-                    .as_ref()
-                    .map(|author| author.device_id.as_str())
-            })
-            .collect();
-        let record = records
-            .iter()
-            .filter(user_record)
-            .find(|record| match &record.event {
-                agent::AgentEvent::ItemStarted(item)
-                | agent::AgentEvent::ItemUpdated(item)
-                | agent::AgentEvent::ItemCompleted(item) => item.id == entry_id,
-                agent::AgentEvent::SteerRequested { request_id, .. } => request_id == entry_id,
-                _ => false,
-            })?;
+            .as_ref()?;
+        let author = held.authors.get(entry_id)?;
         let own_id = self.client_host.as_ref().map(|host| host.device_id());
-        let other = record.author.as_ref().map_or(self.is_remote(), |author| {
+        // The host attributes only space members' messages. An unattributed
+        // one is the owner's, which is someone else only from inside a space.
+        let other = author.as_ref().map_or(!self.scope.is_full(), |author| {
             own_id.as_deref() != Some(author.device_id.as_str())
         });
-        (authors.len() > 1 || other).then(|| {
-            record
-                .author
+        (held.distinct_authors.len() > 1 || other).then(|| {
+            author
                 .as_ref()
                 .map(|author| author.name.clone())
                 .unwrap_or_else(|| crate::tr!("member.owner").into_owned())
@@ -4983,6 +4963,92 @@ pub(crate) mod tests {
                 cx,
             );
             assert!(store.title_generating("named"));
+        });
+    }
+
+    /// A device with full access to a remote machine is the owner's own: the
+    /// owner's unattributed messages carry no byline there, while a space
+    /// member's message is still attributed.
+    #[gpui::test]
+    fn a_full_remote_device_attributes_only_space_members(cx: &mut TestAppContext) {
+        use tcode_core::session::{Author, StoredEvent};
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                WorkspaceAttachment::Remote {
+                    host_id: "machine".into(),
+                    host_name: "Machine".into(),
+                },
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&workspace, &incoming, Vec::new(), cx);
+        let message = |id: &str, author: Option<Author>| StoredEvent {
+            author,
+            ts: Some(1),
+            event: agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: id.into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            elided: None,
+        };
+        let snapshot = |records: Vec<StoredEvent>| EventEnvelope {
+            request_id: None,
+            topic: Topic::SessionEvents {
+                session_id: "shared".into(),
+            },
+            event: ServerEvent::SessionSnapshot {
+                from: 0,
+                end: records.len() as u64,
+                total: records.len() as u64,
+                records,
+                total_turns: 1,
+                truncated: false,
+            },
+        };
+        workspace.update(cx, |store, cx| {
+            store.selected_session_id = Some("shared".into());
+            store.apply_domain_event(&snapshot(vec![message("owner", None)]), cx);
+            assert_eq!(store.message_byline("owner"), None);
+
+            let member = Author {
+                device_id: "member-device".into(),
+                name: "Alex's laptop".into(),
+            };
+            store.apply_domain_event(&snapshot(vec![message("member", Some(member))]), cx);
+            assert_eq!(
+                store.message_byline("member").as_deref(),
+                Some("Alex's laptop")
+            );
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "shared".into(),
+                    },
+                    event: ServerEvent::SessionEvent(message("owner", None)),
+                },
+                cx,
+            );
+            assert_eq!(
+                store.message_byline("owner").as_deref(),
+                Some(crate::tr!("member.owner").as_ref())
+            );
+            assert_eq!(
+                store.message_byline("member").as_deref(),
+                Some("Alex's laptop")
+            );
         });
     }
 
