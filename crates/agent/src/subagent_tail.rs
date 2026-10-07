@@ -317,6 +317,33 @@ impl TailReader {
     }
 }
 
+pub(crate) fn read_subagent_spawn(
+    claude_dir: &Path,
+    session_id: &str,
+    task_id: &str,
+) -> Option<ThreadItem> {
+    let session_dir = find_named_dir(&claude_dir.join("projects"), session_id, 5)?;
+    let name = format!("agent-{task_id}.meta.json");
+    let path = std::fs::read_dir(session_dir.join("subagents"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.file_name().is_some_and(|file| file == name.as_str()))?;
+    let meta: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(ThreadItem {
+        id: meta.get("toolUseId")?.as_str()?.to_owned(),
+        parent_item_id: None,
+        content: ItemContent::Subagent {
+            agent_type: meta.get("agentType")?.as_str()?.to_owned(),
+            description: meta.get("description")?.as_str()?.to_owned(),
+            status: ItemStatus::Completed,
+            summary: None,
+            model: None,
+            effort: None,
+        },
+    })
+}
+
 pub(crate) fn find_transcript(
     claude_dir: &Path,
     session_id: &str,
