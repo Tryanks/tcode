@@ -147,7 +147,6 @@ impl ProviderKind {
                         PluginActionKind::Update,
                     ],
                     marketplaces: true,
-                    apply: ApplyNote::ReloadOrRestart,
                 },
             },
             ProviderKind::Codex => Caps {
@@ -174,7 +173,6 @@ impl ProviderKind {
                         PluginActionKind::Disable,
                     ],
                     marketplaces: true,
-                    apply: ApplyNote::NextSession,
                 },
             },
             ProviderKind::Acp => Caps {
@@ -269,7 +267,6 @@ impl ProviderKind {
                         PluginActionKind::Update,
                     ],
                     marketplaces: true,
-                    apply: ApplyNote::ReloadOrNextSession,
                 },
             },
         }
@@ -294,36 +291,17 @@ impl ProviderKind {
 pub struct PluginManagement {
     pub actions: &'static [PluginActionKind],
     pub marketplaces: bool,
-    pub apply: ApplyNote,
 }
 
 impl PluginManagement {
     pub const NONE: Self = Self {
         actions: &[],
         marketplaces: false,
-        apply: ApplyNote::Unverified,
     };
 
     pub fn supports(&self, action: PluginActionKind) -> bool {
         self.actions.contains(&action)
     }
-}
-
-/// When a plugin change made through the native CLI reaches the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApplyNote {
-    /// Skills, commands and hooks apply after `/reload-plugins` in a running
-    /// session or in the next session; MCP servers only in the next session;
-    /// updates need a restart.
-    ReloadOrRestart,
-    /// Every change, MCP servers and updates included, applies after
-    /// `/reload-plugins` in a running session or in the next session.
-    ReloadOrNextSession,
-    /// Sessions started afterwards see the change; what a running session
-    /// picks up is not established.
-    NextSession,
-    /// No evidence yet of what a running session picks up.
-    Unverified,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
