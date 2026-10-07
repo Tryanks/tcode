@@ -65,7 +65,8 @@ pub use wire::{
 // removes SelectUltrathink and ultrathink_armed from session status. An older
 // peer sending a removed command is rejected. Adds transport principals, scope and
 // space-index topics, scope snapshots, space hosting actions and device access,
-// and optional stored-event authors for Shared Spaces.
+// optional stored-event authors, a space id on pairing with a space name in the
+// paired reply and two pairing rejections for Shared Spaces.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]
