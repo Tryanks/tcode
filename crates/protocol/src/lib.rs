@@ -58,9 +58,11 @@ pub use wire::{
 // revisions, makes session log cursors stored row positions, and acknowledges
 // a subscription to an unloaded thread after its window.
 //
-// Unreleased: removed app Plan commands, interaction mode and proposed-plan snapshots.
-// Unreleased: native permission options replace approval modes and expose requested selections.
-// Unreleased: Orchestrate child approval adds Auto as the default.
+// Unreleased: removes app Plan commands, interaction mode and proposed-plan
+// snapshots; replaces approval modes with native permission options and
+// requested selections; adds Orchestrate child approval Auto as the default;
+// removes SelectUltrathink and ultrathink_armed from session status. An older
+// peer sending a removed command is rejected.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]

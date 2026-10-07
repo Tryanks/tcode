@@ -51,7 +51,6 @@ pub struct ComposerState {
     pub active_option_descriptors: Vec<agent::OptionDescriptor>,
     pub active_option_selections: Vec<agent::OptionSelection>,
     pub requested_option_selections: Vec<agent::OptionSelection>,
-    pub ultrathink_armed: bool,
     pub options_pending_restart: bool,
 
     pub token_usage: Option<agent::TokenUsage>,
@@ -158,7 +157,6 @@ pub(crate) fn composer_state(
         requested_option_selections: status
             .map(|status| status.provider_option_requested_selections.clone())
             .unwrap_or_default(),
-        ultrathink_armed: status.is_some_and(|status| status.ultrathink_armed),
         options_pending_restart: status.is_some_and(|status| status.options_pending_restart),
         token_usage,
         usage,
@@ -266,7 +264,6 @@ mod tests {
             native_rewind_prefill_available: false,
             model_pending_restart: false,
             options_pending_restart: false,
-            ultrathink_armed: false,
         }
     }
 

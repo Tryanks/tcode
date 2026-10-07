@@ -346,7 +346,6 @@ impl Composer {
             })
         };
         let selections = composer.active_option_selections;
-        let ultrathink_armed = composer.ultrathink_armed;
         // Keep the effort value readable on phones; the sheet still exposes
         // every parameter, including context capacity and service tier.
         let mut chip_spec = spec.clone();
@@ -357,18 +356,10 @@ impl Composer {
         {
             chip_spec.options = vec![effort.clone()];
         }
-        let Some(label) = traits_chip_label(&chip_spec, &selections, ultrathink_armed) else {
+        let Some(label) = traits_chip_label(&chip_spec, &selections) else {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
-        // The reasoning section is locked while the prompt text itself contains
-        // "ultrathink".
-        let locked = self
-            .input
-            .read(cx)
-            .value()
-            .to_lowercase()
-            .contains("ultrathink");
         let pending_restart = composer.options_pending_restart;
 
         let trigger = Button::new("traits-chip")
@@ -408,8 +399,7 @@ impl Composer {
                 render_traits_pane(
                     &spec,
                     &selections,
-                    ultrathink_armed,
-                    (locked, composer_entity.read(cx).compact),
+                    composer_entity.read(cx).compact,
                     pending_restart,
                     &store_entity,
                     &context_window_custom,
@@ -892,13 +882,7 @@ fn render_compact_model_footer(
             } if id == "reasoningEffort" => Some((
                 // Use the localized shared label instead of provider-specific copy.
                 crate::tr!("mobile.effort").into_owned(),
-                // "Ultrathink" is a one-shot arming action, not a persisted
-                // effort level, so it stays out of the segmented control.
-                options
-                    .iter()
-                    .filter(|option| option.value != "ultrathink")
-                    .cloned()
-                    .collect::<Vec<_>>(),
+                options.clone(),
                 resolved_select_value(id, options, default_value, &selections),
             )),
             _ => None,
@@ -1107,12 +1091,6 @@ fn render_model_row(
                             .text_color(muted)
                             .child(crate::tr!("providers.mcp_unavailable")),
                     )
-                })
-                .when(row.provider.caps().native_computer_use, |this| {
-                    this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
-                        "providers.native_computer_use",
-                        name = provider_label(row.provider)
-                    )))
                 }),
         )
         .when(index < 9 && !compact, |this| {
@@ -1453,8 +1431,7 @@ fn render_permission_pane(
 fn render_traits_pane(
     spec: &ModelSpec,
     selections: &[agent::OptionSelection],
-    ultrathink_armed: bool,
-    (locked, compact): (bool, bool),
+    compact: bool,
     pending_restart: bool,
     store_entity: &Entity<WorkspaceStore>,
     context_window_custom: &Entity<InputState>,
@@ -1512,20 +1489,7 @@ fn render_traits_pane(
                     continue;
                 }
                 let options = &options;
-                let is_reasoning = id == "reasoningEffort";
                 pane = pane.child(section_header(label, cx));
-                if is_reasoning && locked {
-                    pane = pane.child(
-                        div()
-                            .flex_none()
-                            .px_2()
-                            .py_1p5()
-                            .text_size(px(13.))
-                            .text_color(muted)
-                            .child(crate::tr!("composer.ultrathink_locked")),
-                    );
-                    continue;
-                }
                 let resolved = resolved_select_value(id, options, default_value, selections);
                 let resolved_window = (id == "contextWindow")
                     .then(|| {
@@ -1546,14 +1510,9 @@ fn render_traits_pane(
                     .flatten();
                 for (index, opt) in options.iter().enumerate() {
                     let is_default = default_value.as_deref() == Some(opt.value.as_str());
-                    let is_ultra = is_reasoning && opt.value == "ultrathink";
                     let is_selected = if let Some(window) = resolved_window {
                         agent::claude::parse_context_window_tokens(&serde_json::json!(opt.value))
                             == Some(window)
-                    } else if is_reasoning && ultrathink_armed {
-                        is_ultra
-                    } else if is_ultra {
-                        false
                     } else {
                         resolved.as_deref() == Some(opt.value.as_str())
                     };
@@ -1587,14 +1546,10 @@ fn render_traits_pane(
                                 let opt_id = opt_id.clone();
                                 let opt_value = opt_value.clone();
                                 store.update(cx, |store, _cx| {
-                                    if is_ultra {
-                                        store.select_ultrathink();
-                                    } else {
-                                        store.set_active_option(
-                                            opt_id,
-                                            Some(serde_json::Value::String(opt_value)),
-                                        );
-                                    }
+                                    store.set_active_option(
+                                        opt_id,
+                                        Some(serde_json::Value::String(opt_value)),
+                                    );
                                 });
                                 pop.update(cx, |st, cx| st.dismiss(window, cx));
                             }),
@@ -1768,7 +1723,11 @@ fn render_fast_mode_bolt(
         _ => ("icons/zap.svg", theme.muted_foreground),
     };
     let icon = Icon::empty().path(path).text_color(color);
-    let wrapper = div().absolute().top_1().right_1().occlude();
+    let wrapper = div()
+        .absolute()
+        .top_1()
+        .right_1()
+        .block_mouse_except_scroll();
     let Some(fast) = fast else {
         // Inert: no hover affordance, just the desktop tooltip explaining why.
         let tooltip = crate::tr!("composer.fast_mode_unsupported");

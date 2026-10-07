@@ -71,7 +71,6 @@ impl AppState {
                 active.confirmed_option_selections.clear();
             }
             active.provider_commands = provider_commands;
-            active.pending_ultrathink = false;
             return;
         }
         // Established sessions can preview a different provider — or a
@@ -104,7 +103,6 @@ impl AppState {
             active.provider_commands = provider_commands;
             active.provider_options.clear();
             active.confirmed_option_selections.clear();
-            active.pending_ultrathink = false;
             if active.pending_relay.is_some() {
                 return;
             }
@@ -123,7 +121,6 @@ impl AppState {
             .option_selections
             .retain(|selection| Some(selection.id.as_str()) == permission_id.as_deref());
         active.meta.option_selections.extend(remembered_effort);
-        active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
             return;
         }
@@ -168,9 +165,6 @@ impl AppState {
                 id: id.to_string(),
                 value,
             });
-        }
-        if id == "reasoningEffort" {
-            active.pending_ultrathink = false;
         }
         let permission_push = permission
             .as_ref()
@@ -217,14 +211,6 @@ impl AppState {
             }
         }
         self.preview_draft_or_persist_active(target_id, cx);
-    }
-
-    /// Arm an Ultrathink turn: the next send carries the `ultrathink` keyword.
-    /// This is a transient per-send flag, not a persisted option.
-    pub fn select_ultrathink(&mut self, target_id: &str, _cx: &mut HostCx) {
-        if let Some(active) = self.resident_mut(target_id) {
-            active.pending_ultrathink = true;
-        }
     }
 
     /// Load the local branches for the active session's cwd in the background

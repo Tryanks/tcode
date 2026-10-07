@@ -437,7 +437,6 @@ pub struct SessionStatus {
     pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
-    pub ultrathink_armed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -229,7 +229,6 @@ impl AppState {
         active.meta.option_selections.clear();
         active.provider_options.clear();
         active.provider_commands = provider_commands;
-        active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
             return;
         }

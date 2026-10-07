@@ -298,7 +298,6 @@ pub(super) fn resolved_select_value(
 pub(super) fn traits_chip_label(
     spec: &ModelSpec,
     selections: &[agent::OptionSelection],
-    ultrathink_armed: bool,
 ) -> Option<String> {
     if spec.options.is_empty() {
         return None;
@@ -313,15 +312,6 @@ pub(super) fn traits_chip_label(
                 default_value,
                 ..
             } => {
-                // An armed Ultrathink shows in the reasoning segment (it is not
-                // persisted, so it does not resolve as an ordinary selection).
-                if id == "reasoningEffort"
-                    && ultrathink_armed
-                    && let Some(o) = options.iter().find(|o| o.value == "ultrathink")
-                {
-                    parts.push(o.label.clone());
-                    continue;
-                }
                 if id == "contextWindow" {
                     let selected = selections
                         .iter()
@@ -697,7 +687,7 @@ mod tests {
                 permissive: None,
             }],
         };
-        assert_eq!(traits_chip_label(&fast, &[], false), Some("Normal".into()));
+        assert_eq!(traits_chip_label(&fast, &[]), Some("Normal".into()));
         let thinking = agent::ModelSpec {
             id: "h".into(),
             display_name: "h".into(),
@@ -713,7 +703,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            traits_chip_label(&thinking, &[], false),
+            traits_chip_label(&thinking, &[]),
             Some("Thinking Off".into())
         );
         let unresolved = agent::ModelSpec {
@@ -736,17 +726,14 @@ mod tests {
                 permissive: None,
             }],
         };
-        assert_eq!(
-            traits_chip_label(&unresolved, &[], false),
-            Some("Thinking".into())
-        );
+        assert_eq!(traits_chip_label(&unresolved, &[]), Some("Thinking".into()));
         let bare = agent::ModelSpec {
             id: "b".into(),
             display_name: "b".into(),
             is_default: false,
             options: Vec::new(),
         };
-        assert_eq!(traits_chip_label(&bare, &[], false), None);
+        assert_eq!(traits_chip_label(&bare, &[]), None);
     }
 
     #[test]
