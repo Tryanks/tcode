@@ -12,7 +12,7 @@ use tcode_core::session::{StoredEvent, Timeline, TurnSnapshots, drop_turn_diffs}
 use turso::Connection;
 
 use super::db::{Db, blob, integer, text};
-use super::{EventEnvelopeRef, Row, SessionStore, decode_row, invalid_data};
+use super::{EventEnvelopeRef, SessionStore, decode_row, invalid_data};
 
 /// A thread named here has had [`SessionStore::drop_superseded_diffs`] run on
 /// it; `undecodable_position` is the row that made it leave the thread as it
@@ -123,14 +123,17 @@ fn pass(db: &Db, connection: &Connection, id: &str) -> io::Result<DiffPass> {
             }
             let position = integer(row, 0)? as u64;
             match decode_row(&blob(row, 1)?) {
-                Row::Record(stored) => superseded.extend(snapshots.apply_at(
-                    &mut fold,
-                    stored.ts,
-                    &stored.event,
-                    position,
-                )),
-                Row::Blank => {}
-                Row::Undecodable(_) => undecodable = Some(position),
+                Ok(Some(record)) => {
+                    let stored = record.into_stored(None);
+                    superseded.extend(snapshots.apply_at(
+                        &mut fold,
+                        stored.ts,
+                        &stored.event,
+                        position,
+                    ));
+                }
+                Ok(None) => {}
+                Err(_) => undecodable = Some(position),
             }
             Ok(())
         },
@@ -216,30 +219,31 @@ fn rewrite_without_diffs(
 /// was stored in, and the record that reads back from it; `None` when the row
 /// holds no snapshot with a diff.
 fn without_diffs(line: &[u8]) -> io::Result<Option<(Vec<u8>, StoredEvent)>> {
-    let Row::Record(mut stored) = decode_row(line) else {
+    let Ok(Some(record)) = decode_row(line) else {
         return Ok(None);
     };
+    let mut stored = record.into_stored(None);
     if !drop_turn_diffs(&mut stored.event) {
         return Ok(None);
     }
     let mut rewritten = match stored.ts {
-        Some(ts) => serde_json::to_vec(&EventEnvelopeRef {
-            author: stored.author.as_ref(),
+        Some(ts) => serde_json::to_vec(&EventEnvelopeRef::new(
             ts,
-            event: &stored.event,
-        }),
+            &stored.event,
+            stored.author.as_ref(),
+        )),
         None => serde_json::to_vec(&stored.event),
     }
     .map_err(invalid_data)?;
     if line.ends_with(b"\n") {
         rewritten.push(b'\n');
     }
-    if !matches!(decode_row(&rewritten), Row::Record(read) if read == stored) {
+    if !matches!(decode_row(&rewritten), Ok(Some(read)) if read.stored == stored) {
         return Err(invalid_data(
             "a turn-changes snapshot without its diffs does not read back as itself",
         ));
     }
-    Ok(Some((rewritten, *stored)))
+    Ok(Some((rewritten, stored)))
 }
 
 /// Forget that the thread's rows were dealt with, for a write that replaced

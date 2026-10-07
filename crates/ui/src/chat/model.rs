@@ -557,8 +557,12 @@ pub(crate) fn diff_stats(diff: Option<&str>) -> (u32, u32) {
     };
     let mut added = 0;
     let mut removed = 0;
+    let mut in_hunk = false;
     for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
+        if line.starts_with("@@") {
+            in_hunk = true;
+        }
+        if !in_hunk && (line.starts_with("+++") || line.starts_with("---")) {
             continue;
         }
         match line.as_bytes().first() {
@@ -2654,6 +2658,12 @@ mod tests {
                 Some("-only removed\n"),
                 "removed.rs",
                 Some((0, 1)),
+            ),
+            (
+                "literal-signs.txt",
+                Some("@@ -1,1 +1,1 @@\n---literal\n+++literal\n"),
+                "literal-signs.txt",
+                Some((1, 1)),
             ),
             ("empty.rs", Some(""), "empty.rs", None),
             ("blank.rs", Some("   \n\t\n \n"), "blank.rs", None),
