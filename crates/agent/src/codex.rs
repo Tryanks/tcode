@@ -2306,6 +2306,13 @@ impl Actor {
         let status = match kind {
             "completed" => ItemStatus::Completed,
             "interrupted" => ItemStatus::Interrupted,
+            // Messaging a finished child does not start another turn; only a
+            // started activity establishes that it owns work again.
+            "interacted" => self
+                .items
+                .get(&parent_id)
+                .map(|item| item_status(&item.content))
+                .unwrap_or(ItemStatus::InProgress),
             _ => ItemStatus::InProgress,
         };
         let parent = ThreadItem {
@@ -4951,6 +4958,52 @@ mod tests {
                 AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
                     if id == "call_spawn"
             ));
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn subagent_interaction_preserves_completion_until_work_restarts() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (index, (kind, expected)) in [
+                ("started", ItemStatus::InProgress),
+                ("interacted", ItemStatus::InProgress),
+                ("completed", ItemStatus::Completed),
+                ("interacted", ItemStatus::Completed),
+                ("started", ItemStatus::InProgress),
+                ("interrupted", ItemStatus::Interrupted),
+                ("interacted", ItemStatus::Interrupted),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                actor
+                    .handle_notification(
+                        "item/completed",
+                        &json!({"item": {
+                            "type": "subAgentActivity", "id": format!("activity-{index}"),
+                            "agentThreadId": "child", "agentPath": "/root/researcher",
+                            "kind": kind
+                        }}),
+                    )
+                    .await;
+                for _ in 0..2 {
+                    let event = events.try_recv().unwrap();
+                    let (AgentEvent::ItemStarted(item)
+                    | AgentEvent::ItemUpdated(item)
+                    | AgentEvent::ItemCompleted(item)) = event
+                    else {
+                        panic!("expected subagent snapshot");
+                    };
+                    assert!(
+                        matches!(item.content, ItemContent::Subagent { status, .. } if status == expected),
+                        "{kind} must preserve the child's actual work state: {item:?}"
+                    );
+                }
+                assert!(events.try_recv().is_err());
+            }
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
