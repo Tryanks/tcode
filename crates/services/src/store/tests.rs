@@ -1081,7 +1081,7 @@ const SNAPSHOT_LOG: &[u8] = b"{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"t
 {\"ts\":3,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":\"-a\\n+c\\n\"}],\"completeness\":\"exact\"}}\n\
 {\"ts\":4,\"event\":{\"type\":\"turn_completed\",\"turn_id\":\"t1\",\"status\":\"completed\",\"usage\":null}}\n\
 {\"ts\":5,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"t2\"}}\n\
-{\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+d\\n\"}],\"completeness\":\"exact\"}}\n\
+{\"author\":{\"device_id\":\"phone\",\"name\":\"Alice\"},\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+d\\n\"}],\"completeness\":\"exact\"}}\n\
 {\"ts\":7,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":\"+e\\n\"}],\"completeness\":\"exact\"}}\n";
 
 fn rows(store: &SessionStore, id: &str) -> Vec<Vec<u8>> {
@@ -1123,7 +1123,7 @@ fn superseded_snapshots_lose_their_diffs_in_place_once() {
     let after = rows(&store, "codex");
     let mut expected = before.clone();
     expected[1] = b"{\"type\":\"turn_changes_updated\",\"turn_id\":\"t1\",\"changes\":[{\"path\":\"f\",\"kind\":\"modify\",\"diff\":null}],\"completeness\":\"exact\"}\n".to_vec();
-    expected[6] = b"{\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":null}],\"completeness\":\"exact\"}}\n".to_vec();
+    expected[6] = b"{\"author\":{\"device_id\":\"phone\",\"name\":\"Alice\"},\"ts\":6,\"event\":{\"type\":\"turn_changes_updated\",\"turn_id\":\"t2\",\"changes\":[{\"path\":\"g\",\"kind\":\"create\",\"diff\":null}],\"completeness\":\"exact\"}}\n".to_vec();
     assert_eq!(after, expected);
     assert_eq!(
         tcode_core::session::Timeline::fold_events(store.read_events("codex").unwrap()),
@@ -1227,4 +1227,66 @@ fn writes_the_host_did_not_fold_forget_the_turn_index() {
             "{label}"
         );
     }
+}
+
+#[test]
+fn legacy_codex_file_contents_replay_as_patches_without_rewriting_history() {
+    use agent::ItemContent;
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/w"), None);
+    meta.id = "diff-history".into();
+    let legacy = concat!(
+        "{\"ts\":1,\"event\":{\"type\":\"item_completed\",\"id\":\"add\",\"content\":{\"kind\":\"file_change\",\"status\":\"completed\",\"changes\":[{\"path\":\"a.md\",\"kind\":\"create\",\"diff\":\"- list\\n\"}]}}}\n",
+        "{\"type\":\"provider_relay\",\"from_provider\":\"codex\",\"from_model\":null,\"to_provider\":\"claude_code\",\"to_model\":null}\n",
+        "{\"type\":\"item_completed\",\"id\":\"claude\",\"content\":{\"kind\":\"file_change\",\"status\":\"completed\",\"changes\":[{\"path\":\"b.md\",\"kind\":\"create\",\"diff\":\"+hello\"}]}}\n"
+    );
+    store
+        .apply(&[
+            Mutation::upsert_meta(meta.clone()),
+            Mutation::replace_event_log("diff-history", legacy.as_bytes().to_vec()),
+        ])
+        .unwrap();
+    let records = store.read_events("diff-history").unwrap();
+    let patch = |event: &AgentEvent| {
+        let AgentEvent::ItemCompleted(item) = event else {
+            panic!("completed")
+        };
+        let ItemContent::FileChange { changes, .. } = &item.content else {
+            panic!("file change")
+        };
+        changes[0].diff.clone().unwrap()
+    };
+    assert_eq!(patch(&records[0].event), "@@ -0,0 +1,1 @@\n+- list\n");
+    assert_eq!(patch(&records[2].event), "+hello");
+    assert_eq!(
+        store.read_rows("diff-history", 0..1).unwrap().records,
+        records[..1]
+    );
+    assert_eq!(
+        store.read_rows("diff-history", 2..3).unwrap().records,
+        records[2..]
+    );
+    assert_eq!(
+        store.read_event_log("diff-history").unwrap(),
+        legacy.as_bytes()
+    );
+    let exported =
+        crate::export::render_thread(&store, &meta, tcode_protocol::ThreadExportFormat::Jsonl)
+            .unwrap();
+    let export_path = dir.path().join("history.jsonl");
+    fs::write(&export_path, exported).unwrap();
+    let imported = crate::export::read_tcode_export(&export_path).unwrap();
+    assert_eq!(imported.event_log, legacy.as_bytes());
+    assert_eq!(imported.events, records);
+    let mut codex = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    codex.id = "new-diffs".into();
+    store.upsert_meta(&codex).unwrap();
+    store
+        .append_event("new-diffs", 4, &records[0].event)
+        .unwrap();
+    assert_eq!(
+        patch(&store.read_events("new-diffs").unwrap()[0].event),
+        patch(&records[0].event)
+    );
 }
