@@ -621,6 +621,15 @@ impl WorkspaceStore {
         }
     }
 
+    pub fn space_label(&self) -> Option<String> {
+        match &self.scope {
+            WorkspaceScope::Full => None,
+            WorkspaceScope::Space { space_name, .. } => {
+                Some(crate::tr!("member.space", space = space_name).into_owned())
+            }
+        }
+    }
+
     fn member_settings_key(&self) -> String {
         match &self.scope {
             WorkspaceScope::Space { space_id, .. } => {
@@ -3035,9 +3044,14 @@ impl WorkspaceStore {
                 _ => false,
             })?;
         let own_id = self.client_host.as_ref().map(|host| host.device_id());
-        let other = record.author.as_ref().map_or(self.is_remote(), |author| {
-            own_id.as_deref() != Some(author.device_id.as_str())
-        });
+        // The host attributes only space members' messages. An unattributed
+        // one is the owner's, which is someone else only from inside a space.
+        let other = record
+            .author
+            .as_ref()
+            .map_or(!self.scope.is_full(), |author| {
+                own_id.as_deref() != Some(author.device_id.as_str())
+            });
         (authors.len() > 1 || other).then(|| {
             record
                 .author
@@ -4983,6 +4997,74 @@ pub(crate) mod tests {
                 cx,
             );
             assert!(store.title_generating("named"));
+        });
+    }
+
+    /// A device with full access to a remote machine is the owner's own: the
+    /// owner's unattributed messages carry no byline there, while a space
+    /// member's message is still attributed.
+    #[gpui::test]
+    fn a_full_remote_device_attributes_only_space_members(cx: &mut TestAppContext) {
+        use tcode_core::session::{Author, StoredEvent};
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                WorkspaceAttachment::Remote {
+                    host_id: "machine".into(),
+                    host_name: "Machine".into(),
+                },
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&workspace, &incoming, Vec::new(), cx);
+        let message = |id: &str, author: Option<Author>| StoredEvent {
+            author,
+            ts: Some(1),
+            event: agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: id.into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            elided: None,
+        };
+        let snapshot = |records: Vec<StoredEvent>| EventEnvelope {
+            request_id: None,
+            topic: Topic::SessionEvents {
+                session_id: "shared".into(),
+            },
+            event: ServerEvent::SessionSnapshot {
+                from: 0,
+                end: records.len() as u64,
+                total: records.len() as u64,
+                records,
+                total_turns: 1,
+                truncated: false,
+            },
+        };
+        workspace.update(cx, |store, cx| {
+            store.selected_session_id = Some("shared".into());
+            store.apply_domain_event(&snapshot(vec![message("owner", None)]), cx);
+            assert_eq!(store.message_byline("owner"), None);
+
+            let member = Author {
+                device_id: "member-device".into(),
+                name: "Alex's laptop".into(),
+            };
+            store.apply_domain_event(&snapshot(vec![message("member", Some(member))]), cx);
+            assert_eq!(
+                store.message_byline("member").as_deref(),
+                Some("Alex's laptop")
+            );
         });
     }
 

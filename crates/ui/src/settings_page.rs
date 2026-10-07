@@ -925,10 +925,14 @@ impl SettingsPage {
                     }
                 }
                 .filter(|name| !name.trim().is_empty());
-                let label = name.map_or_else(
-                    || crate::tr!("settings.machine_settings_fallback").into_owned(),
-                    |name| crate::tr!("settings.machine_settings", name = name).into_owned(),
-                );
+                // A member manages none of the machine's settings; what this
+                // group holds for it is the space's own threads.
+                let label = store.space_label().unwrap_or_else(|| {
+                    name.map_or_else(
+                        || crate::tr!("settings.machine_settings_fallback").into_owned(),
+                        |name| crate::tr!("settings.machine_settings", name = name).into_owned(),
+                    )
+                });
                 (label, "settings-machine-caption")
             }
         };
