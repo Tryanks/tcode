@@ -1718,7 +1718,7 @@ impl AppShell {
             ),
             (
                 "plan",
-                crate::tr!("plan.tab_plan").into_owned(),
+                crate::tr!("tasks.tab").into_owned(),
                 selected_panel.map_or(!terminal && panel.right_tab == RightTab::Plan, |id| {
                     id == "plan"
                 }),
@@ -2784,7 +2784,6 @@ mod tests {
                 },
                 ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
                     session_id: "thread-a".into(),
-                    proposed: None,
                     steps: Vec::new(),
                 }),
             ),
@@ -3553,7 +3552,6 @@ mod tests {
             meta.native_subagent = readonly.then(|| "spawn-1".into());
             let mut status = session_status(session, std::path::Path::new("/project"));
             status.requested_model = meta.model.clone();
-            status.interaction_mode = agent::InteractionMode::Plan;
             status.activity.turn_running = readonly;
             status.conversation_read_only = readonly;
             status.provider_option_selections = vec![agent::OptionSelection {
@@ -3579,7 +3577,6 @@ mod tests {
                     },
                     ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
                         session_id: session.into(),
-                        proposed: None,
                         steps: Vec::new(),
                     }),
                 ),
@@ -3628,7 +3625,6 @@ mod tests {
             for selector in [
                 "model-picker",
                 "traits-chip",
-                "mode-chip",
                 "permission-chip",
                 "send-message",
             ] {
@@ -3653,10 +3649,6 @@ mod tests {
                     .iter()
                     .all(|payload| !matches!(payload, ClientPayload::Command(_))),
                 "disabled composer must not send commands"
-            );
-            assert_eq!(
-                store.read_with(cx, |store, _| store.composer_state().interaction_mode),
-                agent::InteractionMode::Plan
             );
         }
         deliver("thread-a", false, cx);
@@ -3780,6 +3772,7 @@ mod tests {
                 name: format!("Project {index}"),
                 root: root.join(format!("project-{index}")),
                 icon_path: None,
+                permission_defaults: Default::default(),
                 created_at: index as u64,
             })
             .collect();
@@ -4414,11 +4407,6 @@ mod tests {
                 "{keys}"
             );
         }
-        assert_eq!(
-            store.read_with(cx, |store, _| store.composer_state().interaction_mode),
-            agent::InteractionMode::Build,
-            "Ctrl+Shift+Tab must not toggle the composer's mode"
-        );
         cx.update(|window, cx| window.blur(cx));
         draw(cx);
         cx.simulate_keystrokes(second_key);
@@ -4977,10 +4965,6 @@ mod tests {
             requested_profile_id: None,
             acp_agent_id: None,
             project_id: None,
-            approval_mode: Default::default(),
-            effective_approval_mode: Default::default(),
-            native_approval_modes_enabled: true,
-            interaction_mode: Default::default(),
             queued_messages: Vec::new(),
             review_comment_drafts: Vec::new(),
             terminals: Vec::new(),
@@ -5013,6 +4997,7 @@ mod tests {
             steering_supported: false,
             provider_option_descriptors: Vec::new(),
             provider_option_selections: Vec::new(),
+            provider_option_requested_selections: Vec::new(),
             provider_commands: Vec::new(),
             git_branch: None,
             branches: Vec::new(),
@@ -5025,7 +5010,6 @@ mod tests {
             native_rewind_prefill_available: false,
             model_pending_restart: false,
             options_pending_restart: false,
-            approval_pending_restart: false,
             ultrathink_armed: false,
         }
     }

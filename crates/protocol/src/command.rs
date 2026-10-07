@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use agent::{
-    ApprovalDecision, ApprovalMode, InteractionMode, PluginScope, ProviderKind, RewindMode,
-};
+use agent::{ApprovalDecision, PluginScope, ProviderKind, RewindMode};
 use serde::{Deserialize, Serialize};
 use tcode_core::{
     acp::AcpAgentPatch,
@@ -398,45 +396,12 @@ pub enum Command {
     SelectUltrathink {
         session_id: String,
     },
-    SetInteractionMode {
-        session_id: String,
-        mode: InteractionMode,
-    },
-    ToggleInteractionMode {
-        session_id: String,
-    },
-    ImplementPlan {
-        session_id: String,
-    },
-    DismissPlan {
-        session_id: String,
-    },
-    ImplementPlanInNewThread {
-        session_id: String,
-        title: String,
-    },
-    CopyPlan {
-        markdown: String,
-    },
-    SavePlanToWorkspace {
-        session_id: String,
-        markdown: String,
-    },
-    DownloadPlan {
-        session_id: String,
-        markdown: String,
-        fallback_title: String,
-    },
     LoadBranches {
         session_id: String,
     },
     CheckoutBranch {
         session_id: String,
         branch: String,
-    },
-    SetActiveApprovalMode {
-        session_id: String,
-        mode: ApprovalMode,
     },
     ToggleFavoriteModel {
         model: String,
@@ -509,16 +474,8 @@ impl Command {
             | Self::SetActiveModel { session_id, .. }
             | Self::SetActiveOption { session_id, .. }
             | Self::SelectUltrathink { session_id, .. }
-            | Self::SetInteractionMode { session_id, .. }
-            | Self::ToggleInteractionMode { session_id, .. }
-            | Self::ImplementPlan { session_id, .. }
-            | Self::DismissPlan { session_id, .. }
-            | Self::ImplementPlanInNewThread { session_id, .. }
-            | Self::SavePlanToWorkspace { session_id, .. }
-            | Self::DownloadPlan { session_id, .. }
             | Self::LoadBranches { session_id, .. }
             | Self::CheckoutBranch { session_id, .. }
-            | Self::SetActiveApprovalMode { session_id, .. }
             | Self::RewindTurn { session_id, .. } => Some(session_id),
             Self::ForkThread { id } => Some(id),
             _ => None,
@@ -541,8 +498,6 @@ impl Command {
                 | Self::RefreshAcpRegistry
                 | Self::RefreshProviderPlugins { .. }
                 | Self::LoadBranches { .. }
-                | Self::CopyPlan { .. }
-                | Self::DownloadPlan { .. }
         )
     }
 }

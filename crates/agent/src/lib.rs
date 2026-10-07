@@ -66,7 +66,6 @@ pub struct Caps {
     pub native_rewind: bool,
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
-    pub live_approval_mode_switch: bool,
     pub live_option_push: LiveOptionPush,
     /// Whether this adapter can attach tcode's HTTP MCP servers to a session.
     /// Preview attachment rides the same capability as every other MCP server.
@@ -75,7 +74,6 @@ pub struct Caps {
     /// server is not attached to its sessions.
     pub native_computer_use: bool,
     pub launch_args: bool,
-    pub downgrade_approval_without_native_approvals: bool,
     pub option_descriptors: OptionDescriptors,
     pub home_path: bool,
     pub trust_project_extensions: bool,
@@ -129,12 +127,10 @@ impl ProviderKind {
                 native_rewind: true,
                 per_turn_effort: false,
                 options_apply_live: false,
-                live_approval_mode_switch: true,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
-                downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: false,
@@ -156,13 +152,11 @@ impl ProviderKind {
                 native_rewind: false,
                 per_turn_effort: true,
                 options_apply_live: false,
-                live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
                 native_computer_use: true,
                 launch_args: false,
-                downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: false,
@@ -183,14 +177,12 @@ impl ProviderKind {
                 native_rewind: false,
                 per_turn_effort: false,
                 options_apply_live: true,
-                live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::All,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
-                downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
@@ -202,12 +194,10 @@ impl ProviderKind {
                 native_rewind: false,
                 per_turn_effort: false,
                 options_apply_live: false,
-                live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
                 mcp_servers: false,
                 native_computer_use: false,
                 launch_args: true,
-                downgrade_approval_without_native_approvals: true,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: true,
@@ -219,12 +209,10 @@ impl ProviderKind {
                 native_rewind: false,
                 per_turn_effort: true,
                 options_apply_live: false,
-                live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
-                downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: false,
                 trust_project_extensions: false,
@@ -236,12 +224,10 @@ impl ProviderKind {
                 native_rewind: false,
                 per_turn_effort: false,
                 options_apply_live: true,
-                live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::All,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
-                downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
@@ -253,12 +239,10 @@ impl ProviderKind {
                 native_rewind: false,
                 per_turn_effort: false,
                 options_apply_live: true,
-                live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::All,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
-                downgrade_approval_without_native_approvals: false,
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
@@ -761,16 +745,11 @@ pub struct SessionOptions {
     pub fork: bool,
     /// Override for the CLI binary; `None` = resolve from PATH.
     pub binary_path: Option<PathBuf>,
-    /// How much the agent may do without asking (mirrors the three-mode
-    /// model of the UI; each provider maps it onto its native knobs).
-    pub approval_mode: ApprovalMode,
-    /// Chosen values for the model's [`OptionDescriptor`]s (reasoning effort,
+    /// Chosen values for the provider's [`OptionDescriptor`]s (permission,
+    /// reasoning effort,
     /// context window, service tier, fast mode, thinking, …). Each provider
     /// reads the ids it understands and ignores the rest.
     pub option_selections: Vec<OptionSelection>,
-    /// Build (default) vs Plan interaction mode. Codex applies this per turn via
-    /// `collaborationMode`; Claude via `--permission-mode plan` / restore.
-    pub interaction_mode: InteractionMode,
     /// Enabled tcode HTTP MCP servers to register with this session.
     pub mcp_servers: Vec<McpRegistration>,
     /// Per-provider environment (Settings → Providers): extra variables merged
@@ -850,16 +829,9 @@ impl McpRegistration {
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
     /// rides in `http_headers.Authorization` instead (verified against
     /// codex `config/src/mcp_types.rs`). Returns the full `key=value` argument.
-    ///
-    /// `default_tools_approval_mode = "approve"` exempts tcode's own servers
-    /// from codex's MCP tool-call approval (added in codex 0.149): these
-    /// servers are trusted by construction, and the prompt otherwise surfaces
-    /// as an `mcpServer/elicitation/request` whose form schema tcode cannot
-    /// render, so it auto-declines and the tool call fails.
     pub fn codex_config_override(&self) -> String {
-        // TOML basic strings; our url/token are ASCII with no quotes/backslashes.
         format!(
-            "mcp_servers.{name}={{url=\"{url}\",http_headers={{Authorization=\"Bearer {token}\"}},default_tools_approval_mode=\"approve\"}}",
+            "mcp_servers.{name}={{url=\"{url}\",http_headers={{Authorization=\"Bearer {token}\"}}}}",
             name = self.name,
             url = self.url,
             token = self.bearer_token,
@@ -902,16 +874,50 @@ pub struct ModelSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OptionDescriptor {
     Select {
-        id: String,    // "reasoningEffort" | "contextWindow" | "serviceTier" ...
-        label: String, // "Reasoning" | "Context Window" | "Service Tier"
+        id: String,
+        label: String,
         options: Vec<SelectOption>,
         default_value: Option<String>,
+        #[serde(default)]
+        role: OptionRole,
+        #[serde(default)]
+        apply: ApplyTiming,
+        #[serde(default)]
+        recommended: Option<String>,
+        #[serde(default)]
+        permissive: Option<String>,
     },
     Boolean {
-        id: String,    // "fastMode" | "thinking"
-        label: String, // "Fast Mode" | "Thinking"
+        id: String,
+        label: String,
         default_value: bool,
+        #[serde(default)]
+        role: OptionRole,
+        #[serde(default)]
+        apply: ApplyTiming,
+        #[serde(default)]
+        recommended: Option<bool>,
+        #[serde(default)]
+        permissive: Option<bool>,
     },
+}
+
+/// Where the UI places the control; carries no permission semantics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionRole {
+    #[default]
+    Model,
+    Permission,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyTiming {
+    #[default]
+    Live,
+    NextTurn,
+    Restart,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -919,6 +925,274 @@ pub struct SelectOption {
     pub value: String,
     pub label: String,
     pub description: Option<String>,
+    /// Present when this value cannot be selected; explains why.
+    #[serde(default)]
+    pub unavailable: Option<String>,
+}
+
+/// Pre-session controls; a session's ProviderOptions is authoritative.
+pub fn permission_control(provider: ProviderKind) -> Option<OptionDescriptor> {
+    let (id, apply, default, recommended, permissive, values) = match provider {
+        ProviderKind::ClaudeCode => (
+            "permissionMode",
+            ApplyTiming::Live,
+            "default",
+            "auto",
+            "bypassPermissions",
+            &[
+                (
+                    "default",
+                    "Manual",
+                    "Reads and built-in read-only commands run without asking; edits, other commands and network access ask you.",
+                ),
+                (
+                    "acceptEdits",
+                    "Accept edits",
+                    "Reads, file edits and common filesystem commands run without asking; other commands ask.",
+                ),
+                (
+                    "auto",
+                    "Auto",
+                    "A background safety classifier reviews each action; safe ones run, risky ones are blocked or ask. Unavailable when the account, model or organization does not support it.",
+                ),
+                (
+                    "dontAsk",
+                    "Don't ask",
+                    "Only pre-approved tools run; anything that would ask is denied instead.",
+                ),
+                (
+                    "bypassPermissions",
+                    "Bypass permissions",
+                    "Skips permission prompts. Deny/ask rules and protected paths still apply.",
+                ),
+            ] as &[(&str, &str, &str)],
+        ),
+        ProviderKind::Codex => (
+            "permissions",
+            ApplyTiming::NextTurn,
+            "ask",
+            "auto_review",
+            "full_access",
+            &[
+                (
+                    "ask",
+                    "Ask for approval",
+                    "Reads, edits and commands run inside the workspace sandbox; access to the internet or files outside the workspace asks you.",
+                ),
+                (
+                    "auto_review",
+                    "Approve for me",
+                    "Same workspace sandbox; requests that would ask are reviewed by Codex's auto-reviewer and only actions it finds risky ask you.",
+                ),
+                (
+                    "read_only",
+                    "Read Only",
+                    "Reads run in a read-only sandbox; editing files or network access asks you.",
+                ),
+                ("full_access", "Full Access", "No sandbox and no prompts."),
+            ] as &[(&str, &str, &str)],
+        ),
+        ProviderKind::Grok => (
+            "permissionMode",
+            ApplyTiming::Restart,
+            "default",
+            "auto",
+            "bypassPermissions",
+            &[
+                (
+                    "default",
+                    "Ask",
+                    "Reads run without asking; edits and commands ask you.",
+                ),
+                (
+                    "acceptEdits",
+                    "Accept edits",
+                    "Edits run without asking; commands still ask.",
+                ),
+                (
+                    "auto",
+                    "Auto",
+                    "A safety classifier approves routine actions; flagged ones ask you.",
+                ),
+                (
+                    "bypassPermissions",
+                    "Always approve",
+                    "Every tool call runs; deny rules still apply.",
+                ),
+                (
+                    "dontAsk",
+                    "Don't ask",
+                    "Only pre-approved tools run; anything that would ask is denied.",
+                ),
+            ] as &[(&str, &str, &str)],
+        ),
+        // Cursor exposes approvalMode only in user config, with no CLI override; --force honors unrestricted.
+        ProviderKind::Cursor => (
+            "approvalMode",
+            ApplyTiming::Restart,
+            "unrestricted",
+            "unrestricted",
+            "unrestricted",
+            &[(
+                "unrestricted",
+                "Run everything",
+                "Every tool call runs without asking",
+            )] as &[(&str, &str, &str)],
+        ),
+        ProviderKind::OpenCode => (
+            "permission_mode",
+            ApplyTiming::Live,
+            "normal",
+            "auto",
+            "auto",
+            &[
+                (
+                    "normal",
+                    "Normal",
+                    "Follows your OpenCode permission rules; actions marked ask wait for you.",
+                ),
+                (
+                    "auto",
+                    "Auto-approve",
+                    "Answers every ask with once, as OpenCode's own clients do; explicit deny rules still deny.",
+                ),
+            ] as &[(&str, &str, &str)],
+        ),
+        ProviderKind::Pi | ProviderKind::Acp => return None,
+    };
+    Some(OptionDescriptor::Select {
+        id: id.into(),
+        label: "Permissions".into(),
+        options: values
+            .iter()
+            .map(|(value, label, description)| SelectOption {
+                value: (*value).into(),
+                label: (*label).into(),
+                description: Some((*description).into()),
+                unavailable: None,
+            })
+            .collect(),
+        default_value: Some(default.into()),
+        role: OptionRole::Permission,
+        apply,
+        recommended: Some(recommended.into()),
+        permissive: Some(permissive.into()),
+    })
+}
+
+pub fn permission_notice(provider: ProviderKind) -> Option<&'static str> {
+    match provider {
+        ProviderKind::Pi => Some("No permission control"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn permission_controls_publish_native_choices_and_decode_old_model_options() {
+        for (provider, id, apply, values, default, recommended, permissive) in [
+            (
+                ProviderKind::ClaudeCode,
+                "permissionMode",
+                ApplyTiming::Live,
+                vec![
+                    "default",
+                    "acceptEdits",
+                    "auto",
+                    "dontAsk",
+                    "bypassPermissions",
+                ],
+                "default",
+                "auto",
+                "bypassPermissions",
+            ),
+            (
+                ProviderKind::Codex,
+                "permissions",
+                ApplyTiming::NextTurn,
+                vec!["ask", "auto_review", "read_only", "full_access"],
+                "ask",
+                "auto_review",
+                "full_access",
+            ),
+            (
+                ProviderKind::Grok,
+                "permissionMode",
+                ApplyTiming::Restart,
+                vec![
+                    "default",
+                    "acceptEdits",
+                    "auto",
+                    "bypassPermissions",
+                    "dontAsk",
+                ],
+                "default",
+                "auto",
+                "bypassPermissions",
+            ),
+            (
+                ProviderKind::OpenCode,
+                "permission_mode",
+                ApplyTiming::Live,
+                vec!["normal", "auto"],
+                "normal",
+                "auto",
+                "auto",
+            ),
+            (
+                ProviderKind::Cursor,
+                "approvalMode",
+                ApplyTiming::Restart,
+                vec!["unrestricted"],
+                "unrestricted",
+                "unrestricted",
+                "unrestricted",
+            ),
+        ] {
+            let OptionDescriptor::Select {
+                id: actual_id,
+                options,
+                default_value,
+                role,
+                apply: actual_apply,
+                recommended: actual_recommended,
+                permissive: actual_permissive,
+                ..
+            } = permission_control(provider).unwrap()
+            else {
+                panic!("native select control")
+            };
+            assert_eq!(actual_id, id);
+            assert_eq!(role, OptionRole::Permission);
+            assert_eq!(actual_apply, apply);
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| option.value.as_str())
+                    .collect::<Vec<_>>(),
+                values
+            );
+            assert!(options.iter().all(|option| {
+                option
+                    .description
+                    .as_ref()
+                    .is_some_and(|description| !description.is_empty())
+                    && option.unavailable.is_none()
+            }));
+            assert_eq!(default_value.as_deref(), Some(default));
+            assert_eq!(actual_recommended.as_deref(), Some(recommended));
+            assert_eq!(actual_permissive.as_deref(), Some(permissive));
+        }
+        assert_eq!(permission_control(ProviderKind::Pi), None);
+        assert_eq!(permission_control(ProviderKind::Acp), None);
+        let old: OptionDescriptor = serde_json::from_str(r#"{"kind":"select","id":"reasoningEffort","label":"Reasoning","options":[{"value":"high","label":"High","description":null}],"default_value":"high"}"#).unwrap();
+        assert!(
+            matches!(old, OptionDescriptor::Select { role:OptionRole::Model, apply:ApplyTiming::Live, recommended:None, permissive:None, options, .. } if options[0].unavailable.is_none())
+        );
+    }
 }
 
 /// Resolve a provider binary to an absolute path before spawning.
@@ -1150,22 +1424,12 @@ pub enum ProviderCommandKind {
     Skill,
 }
 
-/// Whether the agent should execute work or propose a plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InteractionMode {
-    #[default]
-    Build,
-    Plan,
-}
-
 /// Per-turn overrides layered on top of the session's persisted options.
 /// Codex and OpenCode apply effort/variant per turn; Claude and pi use their
 /// session-level option selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnOptions {
     pub effort: Option<String>,
-    pub interaction_mode: Option<InteractionMode>,
 }
 
 /// Where a static model catalog may refresh its data from. Claude's catalog is
@@ -1200,36 +1464,6 @@ pub async fn list_models(
         // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
         ProviderKind::Acp => Ok(Vec::new()),
     }
-}
-
-/// The user-facing permission model, provider-agnostic.
-///
-/// Providers map this onto their native controls:
-/// - Claude Code: `--permission-mode` default / acceptEdits / bypassPermissions,
-///   plus tcode-side ReadOnly filtering (switchable mid-session).
-/// - Codex: approval-policy × sandbox-mode combinations on thread start
-///   (mid-session switch may require a resume-restart).
-/// - pi: a bundled fail-closed tool-call extension in front of RPC extension UI.
-/// - OpenCode: `OPENCODE_PERMISSION` rules plus permission reply endpoints.
-/// - Grok: `--permission-mode` default / bypassPermissions at launch; under
-///   AutoAcceptEdits tcode approves Grok's edit permission requests once.
-/// - Cursor: `--force` at launch for FullAccess; otherwise its own permission
-///   requests, of which tcode approves reads and searches once under
-///   ReadOnly, and file changes once under AutoAcceptEdits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalMode {
-    /// Ask before commands and file changes.
-    Supervised,
-    /// Read-only actions run without prompts; anything that mutates pauses for approval.
-    ReadOnly,
-    /// Auto-approve edits, ask before other actions.
-    AutoAcceptEdits,
-    /// Allow commands and edits without prompts.
-    ///
-    /// Default for sessions without an explicit permission mode.
-    #[default]
-    FullAccess,
 }
 
 #[derive(Debug)]
@@ -1296,10 +1530,6 @@ pub enum SessionCommand {
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
     },
-    /// Switch the permission model mid-session. Providers that cannot switch
-    /// live emit `AgentEvent::Warning` and keep the old mode; the UI then
-    /// falls back to a resume-restart.
-    SetApprovalMode(ApprovalMode),
     /// Inject a message into the turn that is ALREADY running, so the model
     /// picks it up at its next opportunity to accept input (typically the next
     /// tool call). Distinct from queueing, which is an app-level concept: a
@@ -1314,10 +1544,6 @@ pub enum SessionCommand {
         text: String,
         attachments: Vec<Attachment>,
     },
-    /// Switch Build/Plan interaction mode. Codex/OpenCode apply it on the next
-    /// turn; Claude sends a `set_permission_mode` control request. pi has no
-    /// native Plan mode.
-    SetInteractionMode(InteractionMode),
     /// Set one of the agent's self-described options (see
     /// [`AgentEvent::ProviderOptions`]). An agent speaking ACP gets
     /// `session/set_mode` or `session/set_config_option` by the descriptor's
@@ -1442,8 +1668,7 @@ pub enum AgentEvent {
         to_provider: ProviderKind,
         to_model: Option<String>,
     },
-    /// A tcode-level decision about a captured plan. Never emitted by an
-    /// adapter; the runtime persists it so plan acceptance survives replay.
+    /// History-only: retained to decode stored plan decisions; never emitted.
     PlanResolved {
         item_id: String,
         resolution: PlanResolution,
@@ -1609,12 +1834,12 @@ pub enum AgentEvent {
         explanation: Option<String>,
         steps: Vec<PlanStep>,
     },
-    /// Streaming growth of a proposed-plan block (Codex `item/plan/delta`).
+    /// History-only: retained to decode stored proposed-plan deltas; never emitted.
     ProposedPlanDelta {
         item_id: String,
         text: String,
     },
-    /// A completed proposed plan (Codex plan item; Claude `ExitPlanMode`).
+    /// History-only: retained to decode stored proposed plans; never emitted.
     ProposedPlan {
         item_id: String,
         markdown: String,
@@ -1895,15 +2120,12 @@ pub struct ApprovalRequest {
     pub id: String,
     pub turn_id: Option<String>,
     pub kind: ApprovalKind,
-    /// Agent-supplied choices. An agent speaking ACP (a registry agent, Cursor
-    /// or Grok) sends its own option list (`session/request_permission`), so the
-    /// UI renders exactly those buttons. Empty for the other providers, whose
-    /// four fixed decisions ([`ApprovalDecision`]) apply instead.
+    /// The provider's native choices for this request, in provider order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<ApprovalOption>,
 }
 
-/// One choice offered by an ACP agent's permission request.
+/// One choice offered by a provider's permission request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalOption {
     /// Opaque id echoed back in [`ApprovalDecision::Option`].
@@ -1912,7 +2134,7 @@ pub struct ApprovalOption {
     pub kind: ApprovalOptionKind,
 }
 
-/// ACP's `PermissionOptionKind`: lets the UI style/order the buttons sanely.
+/// Native scope and disposition, for presentation and orchestration routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalOptionKind {
@@ -1947,19 +2169,36 @@ pub enum ApprovalKind {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
-    Approve,
-    /// Approve and don't ask again for this kind of action in this session.
-    ApproveForSession,
-    Deny,
-    /// Deny and cancel the turn. Claude maps this to a permission denial with
-    /// `"User cancelled tool execution."` (no interrupt); Codex maps it to the
-    /// protocol `{decision:"cancel"}` (deny + immediate turn interruption).
+    /// Codex aborts (`cancel`); Claude denies with "User cancelled tool execution";
+    /// ACP reports cancelled; OpenCode replies reject.
     Cancel,
-    /// Pick one of the agent's own [`ApprovalOption`]s (agents speaking ACP).
+    /// Pick one of the provider's own [`ApprovalOption`]s.
     Option(String),
+}
+
+impl<'de> Deserialize<'de> for ApprovalDecision {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum StoredDecision {
+            Cancel,
+            Option(String),
+            Approve,
+            ApproveForSession,
+            Deny,
+        }
+        Ok(match StoredDecision::deserialize(deserializer)? {
+            StoredDecision::Cancel => Self::Cancel,
+            StoredDecision::Option(id) => Self::Option(id),
+            // These ids are history-only and never occur in live request options.
+            StoredDecision::Approve => Self::Option("legacy:approve".into()),
+            StoredDecision::ApproveForSession => Self::Option("legacy:approve_for_session".into()),
+            StoredDecision::Deny => Self::Option("legacy:deny".into()),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

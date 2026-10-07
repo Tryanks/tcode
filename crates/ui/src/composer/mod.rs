@@ -27,9 +27,8 @@ use crate::{
     sizing::Sizable as _,
 };
 use agent::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOptionKind, ApprovalRequest,
-    InteractionMode, ModelSpec, OptionDescriptor, ProviderCommandKind, ProviderKind, TokenUsage,
-    UserInputQuestion,
+    ApprovalDecision, ApprovalKind, ApprovalOptionKind, ApprovalRequest, ModelSpec,
+    OptionDescriptor, ProviderCommandKind, ProviderKind, TokenUsage, UserInputQuestion,
 };
 use chrono::Local;
 use gpui::{
@@ -42,8 +41,6 @@ use gpui_base::PopoverState;
 use gpui_base::input::{MoveDown, MoveUp};
 
 pub(crate) const CONTEXT: &str = "Composer";
-
-gpui::actions!(tcode_composer, [ToggleInteractionMode]);
 
 /// A context-menu action on the composer's chips, queue rows and pending
 /// images, which the composer applies as their buttons do.
@@ -597,9 +594,6 @@ impl Composer {
         self.recompute_trigger(cx);
     }
 
-    /// Whether `submit` has anything to send. Keep the primary-action choice on
-    /// this same predicate so attachment/context-only drafts never masquerade
-    /// as an empty plan that Enter would implement.
     fn has_sendable_content(&self, cx: &App) -> bool {
         !self.input.read(cx).value().trim().is_empty()
             || !self.pending_images.is_empty()
@@ -694,12 +688,6 @@ impl Composer {
             self.text_cache.clear_current();
             input.update(cx, |state, cx| state.set_value("", window, cx));
             match command {
-                SlashIntent::Plan => self.workspace_store.update(cx, |store, _cx| {
-                    store.set_interaction_mode(InteractionMode::Plan)
-                }),
-                SlashIntent::Default => self.workspace_store.update(cx, |store, _cx| {
-                    store.set_interaction_mode(InteractionMode::Build)
-                }),
                 SlashIntent::Model => {
                     self.model_picker_token = self.model_picker_token.wrapping_add(1);
                 }
@@ -1041,8 +1029,6 @@ impl Composer {
         .into_any_element()
     }
 
-    /// The composer's primary control: the stop button while a turn runs, the
-    /// Refine / Implement (split) controls in the plan-ready state, else send.
     fn render_primary_action(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
         if self
             .workspace_store
@@ -1062,29 +1048,6 @@ impl Composer {
         }
         if turn_running {
             return self.render_send_or_stop(true, cx);
-        }
-        if self
-            .workspace_store
-            .read(cx)
-            .composer_state()
-            .plan_ready_markdown
-            .is_some()
-        {
-            if self.has_sendable_content(cx) && self.refines_the_plan(cx) {
-                // Refine: send the feedback and stay in Plan mode (a normal send
-                // while the session is in Plan mode continues planning).
-                return Button::new("plan-refine")
-                    .primary()
-                    .label(crate::tr!("plan.refine"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let input = this.input.clone();
-                        this.submit(&input, false, window, cx);
-                    }))
-                    .into_any_element();
-            }
-            if !self.has_sendable_content(cx) {
-                return self.render_implement_split(cx);
-            }
         }
         self.render_send_or_stop(turn_running, cx)
     }
@@ -1175,7 +1138,6 @@ impl Render for Composer {
                 .child(divider())
                 .child(self.render_context_meter(cx))
                 .child(self.render_permission_picker(cx))
-                .child(self.render_mode_chip(cx))
                 .child(div().flex_1())
                 .children(mic)
                 .child(self.render_primary_action(turn_running, cx))
@@ -1197,21 +1159,8 @@ impl Render for Composer {
             }
         });
 
-        let plan_ready_title = self
-            .workspace_store
-            .read(cx)
-            .composer_state()
-            .plan_ready_markdown
-            .map(|md| {
-                tcode_core::session::plan_title(&md)
-                    .unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned())
-            });
-        // Only Plan mode refines: in Build a typed message is an ordinary build
-        // turn, so promising refinement there would misdescribe what Enter does.
         let desired_placeholder = if readonly {
             crate::tr!("chat.subagent_readonly").into_owned()
-        } else if plan_ready_title.is_some() && self.refines_the_plan(cx) {
-            crate::tr!("plan.refine_placeholder").into_owned()
         } else if self.compact && !self.interactive(cx) {
             crate::tr!("mobile.offline_message").into_owned()
         } else {
@@ -1405,9 +1354,6 @@ impl Render for Composer {
                     });
                 },
             )
-            .when_some(plan_ready_title, |this, title| {
-                this.child(self.render_plan_ready_header(title, cx))
-            })
             .when(has_terminal_contexts, |this| this.child(context_chips))
             .when(has_review_comments, |this| this.child(review_chips))
             // Match sent-message typography while composing.
@@ -1437,15 +1383,6 @@ impl Render for Composer {
             .pb_2()
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::on_menu))
-            .on_action(cx.listener(|this, _: &ToggleInteractionMode, _, cx| {
-                if !this.interactive(cx) {
-                    cx.propagate();
-                    return;
-                }
-                this.workspace_store
-                    .update(cx, |store, _cx| store.toggle_interaction_mode());
-                cx.notify();
-            }))
             .child(
                 v_flex()
                     .w_full()
@@ -1482,7 +1419,6 @@ impl Render for Composer {
                                     .border_color(cx.theme().border)
                                     .bg(cx.theme().muted)
                                     .child(self.render_permission_picker(cx))
-                                    .child(self.render_mode_chip(cx))
                                     .child(div().flex_1())
                                     .child(self.render_context_meter(cx)),
                             )
@@ -1568,6 +1504,67 @@ mod replica_tests {
                 .unwrap(),
             )
             .unwrap();
+    }
+
+    /// A value the provider reports as unavailable is shown but never sent.
+    #[gpui::test]
+    fn unavailable_permission_rows_cannot_be_chosen(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        let mut descriptor = agent::permission_control(status.provider).unwrap();
+        let OptionDescriptor::Select { id, options, .. } = &mut descriptor else {
+            panic!("the draft's provider publishes a select permission control");
+        };
+        let id = id.clone();
+        options[1].unavailable = Some("Not available for this account".into());
+        let chosen = options[0].value.clone();
+        status
+            .provider_option_descriptors
+            .retain(|existing| !matches!(existing, OptionDescriptor::Select { id: existing, .. } if *existing == id));
+        status.provider_option_descriptors.push(descriptor);
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        cx.update(|window, cx| _ = window.draw(cx));
+        while outgoing.try_recv().is_ok() {}
+        let sent = || {
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                        tcode_protocol::ClientPayload::Command(
+                            tcode_protocol::Command::SetActiveOption { id, value, .. },
+                        ) => Some((id, value)),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector}"));
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.update(|window, cx| _ = window.draw(cx));
+        };
+        click(cx, "permission-chip");
+        click(cx, "permission-row-1");
+        cx.run_until_parked();
+        assert_eq!(sent(), []);
+        assert!(
+            cx.debug_bounds("permission-pane").is_some(),
+            "the menu stays open"
+        );
+        click(cx, "permission-row-0");
+        cx.run_until_parked();
+        assert_eq!(sent(), [(id, Some(serde_json::Value::String(chosen)))]);
     }
 
     #[gpui::test]
@@ -1698,95 +1695,6 @@ mod replica_tests {
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "New draft while the drop is pending"
-        );
-    }
-
-    struct PlanAndComposer {
-        plan: Entity<crate::plan_panel::PlanPanel>,
-        composer: Entity<Composer>,
-    }
-
-    impl Render for PlanAndComposer {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            v_flex()
-                .size_full()
-                .child(div().flex_1().child(self.plan.clone()))
-                .child(self.composer.clone())
-        }
-    }
-
-    #[gpui::test]
-    fn ready_plan_replica_renders_without_a_plan_in_the_history_window(cx: &mut TestAppContext) {
-        let (store, incoming, _outgoing, mut status) = attach(cx);
-        status.draft = false;
-        status.interaction_mode = InteractionMode::Plan;
-        let session_id = status.session_id.clone();
-        replace(
-            &incoming,
-            Topic::SessionStatus {
-                session_id: session_id.clone(),
-            },
-            ServerEvent::SessionStatusReplaced(Box::new(status)),
-        );
-        replace(
-            &incoming,
-            Topic::SessionEvents {
-                session_id: session_id.clone(),
-            },
-            ServerEvent::SessionSnapshot {
-                from: 0,
-                end: 1,
-                total: 1,
-                total_turns: 10,
-                truncated: false,
-                records: vec![tcode_core::session::StoredEvent {
-                    ts: Some(1),
-                    elided: None,
-                    event: agent::AgentEvent::TurnStarted {
-                        turn_id: "recent-turn".into(),
-                    },
-                }],
-            },
-        );
-        replace(
-            &incoming,
-            Topic::SessionPlan {
-                session_id: session_id.clone(),
-            },
-            ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
-                session_id,
-                proposed: Some(tcode_protocol::ProposedPlanStatus {
-                    item_id: "older-plan".into(),
-                    turn: 3,
-                    markdown: "# Ready across devices\n\nImplement the shared plan.".into(),
-                    ready: true,
-                    resolved: false,
-                }),
-                steps: vec![agent::PlanStep {
-                    step: "First shared task".into(),
-                    status: agent::PlanStepStatus::Pending,
-                }],
-            }),
-        );
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        assert_eq!(
-            store.read_with(cx, |store, _| store.with_active_timeline(|timeline| {
-                timeline.shown_proposed_plan().is_none()
-            })),
-            Some(true)
-        );
-        let (_, cx) = cx.add_window_view(|window, cx| PlanAndComposer {
-            plan: cx.new(|cx| crate::plan_panel::PlanPanel::new(store.clone(), cx)),
-            composer: cx.new(|cx| Composer::new_with_layout(store.clone(), true, window, cx)),
-        });
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        cx.update(|window, cx| _ = window.draw(cx));
-        assert!(cx.debug_bounds("panel-proposed-plan").is_some());
-        assert!(cx.debug_bounds("plan-step-0").is_some());
-        assert!(
-            cx.debug_bounds("implement-main").is_some(),
-            "Implement must use the ready replica"
         );
     }
 }

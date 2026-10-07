@@ -2536,9 +2536,7 @@ impl WorkspaceStore {
     pub(crate) fn panel_state(&self) -> PanelState {
         snapshots::panel_state(
             self.active_conversation_ui(),
-            self.session_status_replica.as_ref(),
             self.session_replica.as_ref().map(|(_, timeline)| timeline),
-            self.session_plan(),
         )
     }
 
@@ -2783,7 +2781,6 @@ impl WorkspaceStore {
         snapshots::composer_state(
             self.session_status_replica.as_ref(),
             self.session_replica.as_ref().map(|(_, timeline)| timeline),
-            self.session_plan(),
             &self.settings_replica,
             &self.providers_replica,
         )
@@ -4869,6 +4866,7 @@ mod tests {
             name: id.into(),
             root: root.to_path_buf(),
             icon_path: None,
+            permission_defaults: Default::default(),
             created_at: 0,
         }
     }
@@ -5747,9 +5745,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn session_status_replica_matches_live_after_queue_and_interaction_mode_change(
-        cx: &mut TestAppContext,
-    ) {
+    fn session_status_replica_matches_live_after_queue_change(cx: &mut TestAppContext) {
         let root = scratch_root("tcode-session-status-replica-consistency-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
@@ -5776,13 +5772,6 @@ mod tests {
                 session_id: session_id.clone(),
                 text: "queued for replication".into(),
                 attachment_paths: Vec::new(),
-            },
-        );
-        command(
-            &host,
-            Command::SetInteractionMode {
-                session_id: session_id.clone(),
-                mode: agent::InteractionMode::Plan,
             },
         );
         command(
@@ -5816,7 +5805,6 @@ mod tests {
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
                     status.queued_messages.len() == 1
-                        && status.interaction_mode == agent::InteractionMode::Plan
                         && status.review_comment_drafts.len() == 1
                         && *status == live
                 })
@@ -5831,7 +5819,6 @@ mod tests {
 
         assert_eq!(replica.queued_messages.len(), 1);
         assert_eq!(replica.queued_messages[0].text, "queued for replication");
-        assert_eq!(replica.interaction_mode, agent::InteractionMode::Plan);
         assert_eq!(replica.review_comment_drafts.len(), 1);
         assert_eq!(
             workspace.read_with(cx, |store, _cx| store.review_comments()),

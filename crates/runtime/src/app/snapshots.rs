@@ -398,15 +398,6 @@ impl AppState {
         let timeline = &self.resident(session_id)?.timeline;
         Some(SessionPlan {
             session_id: session_id.to_string(),
-            proposed: timeline
-                .shown_proposed_plan()
-                .map(|plan| ProposedPlanStatus {
-                    item_id: plan.item_id.clone(),
-                    turn: plan.turn,
-                    markdown: plan.markdown.clone(),
-                    ready: plan.ready,
-                    resolved: timeline.plan_resolved(&plan.item_id),
-                }),
             steps: timeline.plan_steps.clone(),
         })
     }
@@ -421,7 +412,7 @@ impl AppState {
     pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
         let session = self.resident(session_id)?;
         let meta = &session.meta;
-        let provider_option_descriptors = if matches!(
+        let mut provider_option_descriptors = if matches!(
             meta.provider.caps().option_descriptors,
             OptionDescriptors::Wire
         ) {
@@ -437,6 +428,39 @@ impl AppState {
                 .map(|spec| spec.options.clone())
                 .unwrap_or_default()
         };
+        if let Some(descriptor) = permission_control(meta.provider) {
+            provider_option_descriptors.push(descriptor);
+        }
+        for descriptor in &session.provider_options {
+            let id = match descriptor {
+                OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
+            };
+            provider_option_descriptors.retain(|existing| match existing {
+                OptionDescriptor::Select {
+                    id: existing_id, ..
+                }
+                | OptionDescriptor::Boolean {
+                    id: existing_id, ..
+                } => existing_id != id,
+            });
+            provider_option_descriptors.push(descriptor.clone());
+        }
+        let mut provider_option_selections = meta.option_selections.clone();
+        if !matches!(session.runtime, Runtime::Idle)
+            && let Some(descriptor) = session.permission_descriptor()
+        {
+            let id = match descriptor {
+                OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => id,
+            };
+            provider_option_selections.retain(|selection| selection.id != id);
+            provider_option_selections.extend(
+                session
+                    .confirmed_option_selections
+                    .iter()
+                    .filter(|selection| selection.id == id)
+                    .cloned(),
+            );
+        }
         let relay_confirmation = session.pending_relay.as_ref().and_then(|pending| {
             has_meaningful_history(&session.timeline).then(|| {
                 (
@@ -447,8 +471,6 @@ impl AppState {
         });
         let terminal_preferences = self.terminal_preferences_for(session);
         let (approvals, user_input) = self.open_requests(session_id, session);
-        let (effective_approval_mode, native_approval_modes_enabled) =
-            session_approval_policy(meta, &session_provider_settings(meta, &self.settings));
         let context_window = session
             .timeline
             .usage
@@ -475,10 +497,6 @@ impl AppState {
             requested_profile_id: meta.profile_id.clone(),
             acp_agent_id: meta.acp_agent_id.clone(),
             project_id: meta.project_id.clone(),
-            approval_mode: meta.approval_mode,
-            effective_approval_mode,
-            native_approval_modes_enabled,
-            interaction_mode: meta.interaction_mode,
             queued_messages: session
                 .queue
                 .iter()
@@ -536,7 +554,8 @@ impl AppState {
             pending_user_input: user_input.cloned(),
             steering_supported: session.can_steer(),
             provider_option_descriptors,
-            provider_option_selections: meta.option_selections.clone(),
+            provider_option_selections,
+            provider_option_requested_selections: meta.option_selections.clone(),
             provider_commands: session.provider_commands.clone(),
             git_branch: session.git_branch.clone(),
             branches: session.branches.clone(),
@@ -552,7 +571,6 @@ impl AppState {
             native_rewind_prefill_available: false,
             model_pending_restart: session.model_changed_while_live(),
             options_pending_restart: session.options_changed_while_live(),
-            approval_pending_restart: session.approval_mode_changed_while_live(),
             ultrathink_armed: session.pending_ultrathink,
         })
     }

@@ -171,9 +171,6 @@ pub struct PiProviderSettings {
     /// Whether pi should trust and load the project's local `.pi` configuration.
     #[serde(default, rename = "pi_trust_project_extensions")]
     pub trust_project_extensions: bool,
-    /// Whether tcode should inject its native approval extension into pi.
-    #[serde(default, rename = "pi_native_approvals")]
-    pub native_approvals: bool,
 }
 
 fn default_true() -> bool {
@@ -381,13 +378,12 @@ pub fn orchestrate_efforts(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildApprovalMode {
-    /// The parent (decision-layer) model answers via the orchestrate `approve` tool.
-    #[default]
     Orchestrator,
-    /// Auto-approve every child request for the session.
     AlwaysAllow,
-    /// The user answers in the child's composer (legacy behavior).
     Manual,
+    #[default]
+    #[serde(other)]
+    Auto,
 }
 
 /// Settings for tcode's built-in orchestration layer.
@@ -1329,6 +1325,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn child_approval_settings_preserve_old_orchestrator_and_default_to_auto() {
+        for (json, expected) in [
+            (r#"{}"#, ChildApprovalMode::Auto),
+            (
+                r#"{"child_approval":"orchestrator"}"#,
+                ChildApprovalMode::Orchestrator,
+            ),
+            (r#"{"child_approval":"auto"}"#, ChildApprovalMode::Auto),
+            (
+                r#"{"child_approval":"always_allow"}"#,
+                ChildApprovalMode::AlwaysAllow,
+            ),
+            (r#"{"child_approval":"manual"}"#, ChildApprovalMode::Manual),
+            (
+                r#"{"child_approval":"future_value"}"#,
+                ChildApprovalMode::Auto,
+            ),
+        ] {
+            let settings: OrchestrateSettings = serde_json::from_str(json).unwrap();
+            assert_eq!(settings.child_approval, expected, "{json}");
+        }
+        assert_eq!(
+            OrchestrateSettings::default().child_approval,
+            ChildApprovalMode::Auto
+        );
+        assert_eq!(
+            serde_json::to_value(ChildApprovalMode::Auto).unwrap(),
+            "auto"
+        );
+    }
+
+    #[test]
     fn older_settings_preserve_access_policy_and_accept_partial_feature_blocks() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert!(!legacy.auto_archive_disabled);
@@ -1377,10 +1405,6 @@ mod tests {
         assert!(partial.computer_use.show_agent_cursor);
         assert!(!partial.browser.enabled);
         assert!(partial.browser.allow_evaluate);
-        assert_eq!(
-            partial.orchestrate.child_approval,
-            ChildApprovalMode::Orchestrator
-        );
         assert!(!partial.orchestrate.child_worktrees);
         assert_eq!(partial.title_generation.profile_id, None);
         assert!(partial.plugins.provider_enabled(ProviderKind::ClaudeCode));
@@ -1528,18 +1552,14 @@ mod tests {
     fn old_pi_provider_settings_field_names_remain_serde_compatible() {
         let legacy: ProviderSettings = serde_json::from_str("{}").unwrap();
         assert!(!legacy.pi.trust_project_extensions);
-        assert!(!legacy.pi.native_approvals);
 
         let old_json = r#"{
-            "pi_trust_project_extensions": true,
-            "pi_native_approvals": true
+            "pi_trust_project_extensions": true
         }"#;
         let settings: ProviderSettings = serde_json::from_str(old_json).unwrap();
         assert!(settings.pi.trust_project_extensions);
-        assert!(settings.pi.native_approvals);
         let serialized = serde_json::to_value(&settings).unwrap();
         assert_eq!(serialized["pi_trust_project_extensions"], true);
-        assert_eq!(serialized["pi_native_approvals"], true);
         assert!(serialized.get("pi").is_none());
 
         let legacy_patch: ProfileConfigurationPatch = serde_json::from_str(
@@ -1556,7 +1576,6 @@ mod tests {
         )
         .unwrap();
         assert!(!legacy_patch.pi.trust_project_extensions);
-        assert!(!legacy_patch.pi.native_approvals);
     }
 
     fn persisted(name: &str) -> String {
@@ -1983,12 +2002,17 @@ mod tests {
             display_name: "Custom".into(),
             is_default: false,
             options: vec![OptionDescriptor::Select {
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
                 id: "reasoningEffort".into(),
                 label: "Effort".into(),
                 default_value: None,
                 options: ["medium", "high", "deep"]
                     .into_iter()
                     .map(|value| agent::SelectOption {
+                        unavailable: None,
                         value: value.into(),
                         label: value.into(),
                         description: None,

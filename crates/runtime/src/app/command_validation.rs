@@ -250,13 +250,6 @@ impl AppState {
                     "This review comment is no longer available.",
                 ));
             }
-            Command::ImplementPlan { .. }
-            | Command::DismissPlan { .. }
-            | Command::ImplementPlanInNewThread { .. }
-                if active.timeline.plan_ready().is_none() =>
-            {
-                return Err(error("unknown_plan", "There is no pending plan."));
-            }
             Command::RunGitAction { .. } if self.git_busy.contains(session_id) => {
                 return Err(error("git_busy", "A Git operation is already running."));
             }
@@ -327,7 +320,6 @@ impl AppState {
                 | Command::ConfirmRelayAndSend { .. }
                 | Command::OrchestrateTurn { .. }
                 | Command::Steer { .. }
-                | Command::ImplementPlan { .. }
         ) {
             if Self::conversation_read_only(&active.meta) {
                 return Err(error(
@@ -549,7 +541,7 @@ mod tests {
             Command::RespondApproval {
                 session_id: id.clone(),
                 request_id: "approval".into(),
-                decision: ApprovalDecision::Approve,
+                decision: ApprovalDecision::Option("accept".into()),
             },
             Command::RespondUserInput {
                 session_id: id.clone(),

@@ -16,9 +16,9 @@ use crate::acp_session::{
     prompt_status, stop_reason_status,
 };
 use crate::{
-    AgentError, AgentEvent, ApprovalMode, Attachment, Compaction, InteractionMode, ItemContent,
-    LaunchEnv, ModelSpec, ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TokenUsage,
-    TurnStatus, UserInputOption, UserInputQuestion,
+    AgentError, AgentEvent, Attachment, Compaction, ItemContent, LaunchEnv, ModelSpec,
+    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TokenUsage, TurnStatus,
+    UserInputOption, UserInputQuestion,
 };
 
 /// The non-interactive auth method: it validates `XAI_API_KEY` (or the key in
@@ -35,19 +35,11 @@ const TASK_BACKGROUNDED: &str = "_x.ai/task_backgrounded";
 const SESSION_NOTIFICATION: &str = "_x.ai/session_notification";
 const FORK: &str = "_x.ai/session/fork";
 
-/// Grok's session modes, by the ids `session/set_mode` takes and
-/// `current_mode_update` reports. Grok does not list them in `modes`.
-const DEFAULT_MODE: &str = "default";
-const PLAN_MODE: &str = "plan";
-
 pub(crate) mod plugins;
 
 /// Start (or resume, or fork) a Grok session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let grok = Grok {
-        approval_mode: opts.approval_mode,
-        ..Grok::default()
-    };
+    let grok = Grok::default();
     acp_session::start(ProviderKind::Grok, grok, opts).await
 }
 
@@ -63,9 +55,7 @@ pub async fn list_models(
         resume: None,
         fork: false,
         binary_path,
-        approval_mode: ApprovalMode::default(),
         option_selections: Vec::new(),
-        interaction_mode: InteractionMode::default(),
         mcp_servers: Vec::new(),
         launch_env,
         extra_args: Vec::new(),
@@ -117,7 +107,6 @@ fn available_models(state: &Value) -> impl Iterator<Item = &Value> {
 
 #[derive(Default)]
 struct Grok {
-    approval_mode: ApprovalMode,
     /// Steers sent with `_x.ai/interject`, oldest first, until Grok echoes
     /// them back as consumed.
     steers: Mutex<VecDeque<(String, String)>>,
@@ -413,15 +402,13 @@ impl Dialect for Grok {
 
     fn launch(&self, opts: &SessionOptions) -> Result<Launch, AgentError> {
         let program = crate::resolve_binary(opts.binary_path.as_deref(), "grok")?;
-        // `acceptEdits` at launch still asks before every edit, so
-        // AutoAcceptEdits runs in `default` and approves edits itself
-        // (`auto_approves`). `default` already runs reads unprompted.
-        let permission_mode = match opts.approval_mode {
-            ApprovalMode::Supervised | ApprovalMode::ReadOnly | ApprovalMode::AutoAcceptEdits => {
-                "default"
-            }
-            ApprovalMode::FullAccess => "bypassPermissions",
-        };
+        // Live switching through x.ai/yolo_mode_changed is unverified.
+        let permission_mode = opts
+            .option_selections
+            .iter()
+            .find(|selection| selection.id == "permissionMode")
+            .and_then(|selection| selection.value.as_str())
+            .unwrap_or("default");
         let mut args = vec![
             "--permission-mode".to_string(),
             permission_mode.to_string(),
@@ -497,7 +484,7 @@ impl Dialect for Grok {
             .as_ref()
             .and_then(|cursor| cursor.str_field(&["session_id"]))
             .map(str::to_string);
-        let (session_id, modes, config_options, existing) = match resumed {
+        let (session_id, modes, config_options) = match resumed {
             Some(source) => {
                 let session_id = if opts.fork {
                     fork(connection, &source, opts).await?
@@ -525,7 +512,6 @@ impl Dialect for Grok {
                     acp::SessionId::new(session_id),
                     resumed.modes,
                     resumed.config_options,
-                    true,
                 )
             }
             None => {
@@ -545,49 +531,11 @@ impl Dialect for Grok {
                             ))
                         }
                     })?;
-                (
-                    created.session_id,
-                    created.modes,
-                    created.config_options,
-                    false,
-                )
+                (created.session_id, created.modes, created.config_options)
             }
         };
 
-        let mut mode = match opts.interaction_mode {
-            InteractionMode::Plan => PLAN_MODE,
-            InteractionMode::Build => DEFAULT_MODE,
-        };
-        // Grok keeps a session's plan mode across processes without reporting
-        // it, so a continued session is always told its mode.
-        if existing || mode == PLAN_MODE {
-            let applied = connection
-                .send_request(acp::SetSessionModeRequest::new(
-                    session_id.clone(),
-                    acp::SessionModeId::new(mode),
-                ))
-                .block_task()
-                .await;
-            if let Err(err) = applied {
-                setup
-                    .warn(format!(
-                        "Grok did not switch to its {mode} mode: {}",
-                        describe(&err)
-                    ))
-                    .await;
-                mode = DEFAULT_MODE;
-            }
-        }
-        let modes = modes.unwrap_or_else(|| {
-            acp::SessionModeState::new(
-                mode,
-                vec![
-                    acp::SessionMode::new(DEFAULT_MODE, "Default"),
-                    acp::SessionMode::new(PLAN_MODE, "Plan"),
-                ],
-            )
-        });
-        setup.adopt(Some(&modes), config_options.as_deref());
+        setup.adopt(modes.as_ref(), config_options.as_deref());
         Ok(Established {
             resume: ResumeCursor(json!({ "session_id": session_id.0.to_string() })),
             session_id,
@@ -682,11 +630,6 @@ impl Dialect for Grok {
         }
     }
 
-    async fn set_approval_mode(&self, _session: &Session, _mode: ApprovalMode) {
-        // Applied as `--permission-mode` when the runtime restarts the session
-        // for the next turn.
-    }
-
     /// Offered `fs/*` and `terminal/*`, Grok runs every read, write and
     /// command through them instead of its own tools.
     fn client_services(&self) -> bool {
@@ -695,14 +638,6 @@ impl Dialect for Grok {
 
     fn owned_config_options(&self) -> &'static [&'static str] {
         &["model"]
-    }
-
-    fn auto_approves(&self, tool_call: &acp::ToolCallUpdate) -> bool {
-        self.approval_mode == ApprovalMode::AutoAcceptEdits
-            && matches!(
-                tool_call.fields.kind,
-                Some(acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move)
-            )
     }
 
     fn handles_request(&self, method: &str) -> bool {
@@ -716,25 +651,43 @@ impl Dialect for Grok {
         params: Value,
     ) -> Result<Value, acp::Error> {
         if method == EXIT_PLAN_MODE {
-            let item_id = params.get("toolCallId").and_then(Value::as_str);
-            let markdown = params
+            let content = params
                 .get("planContent")
                 .and_then(Value::as_str)
-                .filter(|plan| !plan.trim().is_empty());
-            if let (Some(item_id), Some(markdown)) = (item_id, markdown) {
-                session
-                    .emit(AgentEvent::ProposedPlan {
-                        item_id: item_id.to_string(),
-                        markdown: markdown.to_string(),
+                .unwrap_or("");
+            let answers = session
+                .ask_user(vec![UserInputQuestion {
+                    id: "decision".into(),
+                    header: method,
+                    question: content.to_owned(),
+                    options: [
+                        ("Approve", "Exit planning and begin implementation"),
+                        (
+                            "Request changes",
+                            "Keep planning; type feedback to request specific changes",
+                        ),
+                        ("Abandon", "Exit planning without implementation"),
+                    ]
+                    .into_iter()
+                    .map(|(label, description)| UserInputOption {
+                        label: label.into(),
+                        description: description.into(),
                     })
-                    .await;
-            }
-            // The decision is the user's, through tcode's plan flow, which
-            // implements in a later Build-mode turn. Approving here would let
-            // Grok implement before that, and holding the request would keep
-            // the turn open under it; every outcome but approval and
-            // abandonment keeps Grok planning.
-            return Ok(json!({ "outcome": "request_changes" }));
+                    .collect(),
+                    multi_select: false,
+                    prefill: None,
+                }])
+                .await;
+            let answer = answers
+                .as_ref()
+                .and_then(|answers| answers.get("decision"))
+                .and_then(Value::as_str);
+            return Ok(match answer {
+                Some("Approve") => json!({"outcome": "approved"}),
+                Some("Abandon") | None => json!({"outcome": "abandoned"}),
+                Some("Request changes") => json!({"outcome": "cancelled"}),
+                Some(feedback) => json!({"outcome": "cancelled", "feedback": feedback}),
+            });
         }
         let questions = questions(&params)?;
         Ok(match session.ask_user(questions).await {
@@ -980,8 +933,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ApprovalDecision, ApprovalKind, ContextFreshness, FileChangeKind, ItemStatus,
-        McpRegistration, OptionSelection, SessionCommand, ThreadItem,
+        ApprovalDecision, ContextFreshness, FileChangeKind, ItemStatus, McpRegistration,
+        OptionSelection, SessionCommand, ThreadItem,
     };
 
     // Grok 1.0.46 sessions recorded on the wire in both directions
@@ -1001,9 +954,19 @@ mod tests {
         let mut client = std::io::stdin().lock().lines();
         let mut agent = std::io::stdout().lock();
         let mut live_ids: HashMap<String, Value> = HashMap::new();
+        let mut mode_requests = HashSet::new();
         for record in fixture.lines() {
             let record: Value = serde_json::from_str(record).unwrap();
             let recorded = &record["message"];
+            if recorded["method"] == "session/set_mode" {
+                mode_requests.insert(recorded["id"].to_string());
+                continue;
+            }
+            if recorded.get("method").is_none()
+                && mode_requests.contains(&recorded["id"].to_string())
+            {
+                continue;
+            }
             if record["from"] == "agent" {
                 let mut message = recorded.clone();
                 if message.get("method").is_none() {
@@ -1130,9 +1093,7 @@ mod tests {
             model: None,
             resume: None,
             fork: false,
-            approval_mode: ApprovalMode::FullAccess,
             option_selections: Vec::new(),
-            interaction_mode: InteractionMode::Build,
             mcp_servers: Vec::new(),
             launch_env: LaunchEnv {
                 env: vec![(REPLAY_AGENT.into(), "1".into())],
@@ -1171,7 +1132,17 @@ mod tests {
                         AgentEvent::ApprovalRequested(request) => {
                             Some(SessionCommand::RespondApproval {
                                 request_id: request.id.clone(),
-                                decision: ApprovalDecision::Approve,
+                                decision: ApprovalDecision::Option(
+                                    request
+                                        .options
+                                        .iter()
+                                        .find(|option| {
+                                            option.kind == crate::ApprovalOptionKind::AllowOnce
+                                        })
+                                        .unwrap()
+                                        .id
+                                        .clone(),
+                                ),
                             })
                         }
                         AgentEvent::UserInputRequested {
@@ -1235,7 +1206,6 @@ mod tests {
             resume: Some(ResumeCursor(
                 json!({ "session_id": "01a10095-e65c-7983-a817-6884b010f1ae" }),
             )),
-            approval_mode: ApprovalMode::AutoAcceptEdits,
             option_selections: vec![OptionSelection {
                 id: "acp:cfg:reasoning_effort".into(),
                 value: json!("low"),
@@ -1293,20 +1263,6 @@ mod tests {
             ItemContent::FileChange { changes, status: ItemStatus::Completed }
                 if changes.len() == 1 && changes[0].kind == FileChangeKind::Modify
                     && changes[0].path.ends_with("/in.txt")));
-        let approvals: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                AgentEvent::ApprovalRequested(request) => Some(&request.kind),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            matches!(approvals.as_slice(), [
-                ApprovalKind::ExecCommand { command, .. },
-                ApprovalKind::ToolUse { name, .. },
-            ] if command.starts_with("for i in") && name == "tcode_probe__echo_upper"),
-            "AutoAcceptEdits approves the edit itself: {approvals:#?}"
-        );
         assert!(events.iter().any(|event| matches!(event,
             AgentEvent::UserInputRequested { questions, .. }
                 if questions[0].id == "Which greeting should I use?")));

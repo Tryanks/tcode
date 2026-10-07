@@ -1,8 +1,6 @@
 //! Native pi provider: persistent `pi --mode rpc` JSONL transport.
 //!
-//! RPC records are framed by LF only. A bundled extension supplies the
-//! permission boundary that pi intentionally leaves to hosts and translates
-//! its confirmation UI into tcode's canonical approval events.
+//! RPC records are framed by LF only. Extension confirmation UI is transported generically.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -17,16 +15,12 @@ use crate::TurnStatus;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
 use crate::{
-    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
+    ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
     LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
     ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
     ThreadItem, TokenUsage, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
-
-const PERMISSION_EXTENSION: &str = include_str!("../assets/pi/tcode-permissions.ts");
-const PLAN_MODE_WARNING: &str =
-    "pi RPC has no native Plan interaction mode; this session is running in Build mode";
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if opts.fork {
@@ -167,9 +161,14 @@ fn map_model(
                     value: level.into(),
                     label: thinking_label(level),
                     description: None,
+                    unavailable: None,
                 })
                 .collect(),
             default_value,
+            role: crate::OptionRole::Model,
+            apply: crate::ApplyTiming::Live,
+            recommended: None,
+            permissive: None,
         });
     }
     Some(ModelSpec {
@@ -217,33 +216,13 @@ async fn run_actor(
             return;
         }
     };
-    let extension = if gate_required(opts.approval_mode) {
-        match materialize_permission_extension() {
-            Ok(path) => Some(path),
-            Err(err) => {
-                let _ = ready.send(Err(err)).await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
     let mut cmd = crate::process::command(&binary);
-    // Profile arguments are applied first. The transport, optional permission
-    // extension, resume target, and read-only tool set are tcode-owned and go
-    // last so a profile cannot accidentally override the safety boundary.
     cmd.args(&opts.extra_args).arg("--mode").arg("rpc");
-    if let Some(extension) = extension {
-        cmd.arg("--extension").arg(extension);
-    }
     if let Some(thinking) = selected_thinking(&opts.option_selections) {
         cmd.arg("--thinking").arg(thinking);
     }
     if let Some(session) = resume_session(&opts.resume) {
         cmd.arg("--session").arg(session);
-    }
-    if opts.approval_mode == ApprovalMode::ReadOnly {
-        cmd.arg("--tools").arg("read,grep,find,ls");
     }
     cmd.current_dir(&opts.cwd)
         .stdin(Stdio::piped())
@@ -251,13 +230,6 @@ async fn run_actor(
         .stderr(Stdio::piped());
     for (key, value) in opts.launch_env.pairs(ProviderKind::Pi) {
         cmd.env(key, value);
-    }
-    if gate_required(opts.approval_mode) {
-        cmd.env(
-            "TCODE_PI_APPROVAL_MODE",
-            pi_approval_mode(opts.approval_mode),
-        )
-        .env("TCODE_PI_CWD", &opts.cwd);
     }
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -309,10 +281,8 @@ async fn run_actor(
         events,
         mapper: PiMapper::new(),
         next_request: 1,
-        approval_mode: opts.approval_mode,
-        pending_approvals: HashMap::new(),
+        pending_approvals: HashSet::new(),
         pending_dialogs: HashSet::new(),
-        approved_for_session: HashSet::new(),
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
         stderr_tail,
@@ -323,14 +293,6 @@ async fn run_actor(
         let details = actor.stderr_tail.append_to(err.to_string(), "\nstderr:\n");
         let _ = ready.send(Err(AgentError::Provider(details))).await;
         return;
-    }
-    if opts.interaction_mode == InteractionMode::Plan {
-        actor
-            .events
-            .emit(AgentEvent::Warning {
-                message: PLAN_MODE_WARNING.into(),
-            })
-            .await;
     }
     let unattached = unattached_servers(&opts);
     if !unattached.is_empty() {
@@ -358,10 +320,8 @@ struct PiActor {
     events: Sender<AgentEvent>,
     mapper: PiMapper,
     next_request: u64,
-    approval_mode: ApprovalMode,
-    pending_approvals: HashMap<String, String>,
+    pending_approvals: HashSet<String>,
     pending_dialogs: HashSet<String>,
-    approved_for_session: HashSet<String>,
     /// Native prompt request id -> canonical steering request id. pi's prompt
     /// response is only an acceptance signal, but it is stronger than merely
     /// acknowledging the stdin write.
@@ -431,15 +391,14 @@ impl SessionActor for PiActor {
                 request_id,
                 decision,
             } => {
-                let Some(tool_name) = self.pending_approvals.remove(&request_id) else {
-                    return Ok(());
+                let confirmed = match &decision {
+                    ApprovalDecision::Option(id) if id == "confirm" => true,
+                    ApprovalDecision::Option(id) if id == "decline" => false,
+                    ApprovalDecision::Cancel => false,
+                    ApprovalDecision::Option(_) => return Ok(()),
                 };
-                let confirmed = matches!(
-                    decision,
-                    ApprovalDecision::Approve | ApprovalDecision::ApproveForSession
-                );
-                if decision == ApprovalDecision::ApproveForSession {
-                    self.approved_for_session.insert(tool_name);
+                if !self.pending_approvals.remove(&request_id) {
+                    return Ok(());
                 }
                 send_json(
                     &mut self.stdin,
@@ -470,26 +429,6 @@ impl SessionActor for PiActor {
                     &json!({"id":request_id,"type":"set_thinking_level","level":level}),
                 )
                 .map_err(|err| err.to_string())
-            }
-            SessionCommand::SetApprovalMode(mode) => {
-                if mode != self.approval_mode {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: "pi permission changes require restarting the session".into(),
-                        })
-                        .await;
-                }
-                Ok(())
-            }
-            SessionCommand::SetInteractionMode(mode) => {
-                if mode == InteractionMode::Plan {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: PLAN_MODE_WARNING.into(),
-                        })
-                        .await;
-                }
-                Ok(())
             }
             SessionCommand::RespondUserInput {
                 request_id,
@@ -763,21 +702,40 @@ impl PiActor {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
-        if self.approved_for_session.contains(&tool_name) {
-            let _ = send_json(
-                &mut self.stdin,
-                &json!({"type":"extension_ui_response","id":id,"confirmed":true}),
-            );
-            return;
-        }
-        self.pending_approvals
-            .insert(id.to_owned(), tool_name.clone());
+        self.pending_approvals.insert(id.to_owned());
         self.events
             .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
                 id: id.to_owned(),
                 turn_id: self.mapper.current_turn.clone(),
-                kind: approval_kind(&tool_name, &payload),
-                options: Vec::new(),
+                kind: if payload.is_null() {
+                    ApprovalKind::ToolUse {
+                        name: message
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Confirmation")
+                            .to_owned(),
+                        input: Value::Null,
+                        detail: message
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    }
+                } else {
+                    approval_kind(&tool_name, &payload)
+                },
+                options: vec![
+                    ApprovalOption {
+                        id: "confirm".into(),
+                        label: "Confirm".into(),
+                        kind: ApprovalOptionKind::AllowOnce,
+                    },
+                    ApprovalOption {
+                        id: "decline".into(),
+                        label: "Decline".into(),
+                        kind: ApprovalOptionKind::RejectOnce,
+                    },
+                ],
             }))
             .await;
     }
@@ -789,7 +747,7 @@ impl PiActor {
     }
 
     fn cancel_pending_ui(&mut self) -> Result<(), String> {
-        for id in self.pending_approvals.drain().map(|(id, _)| id) {
+        for id in self.pending_approvals.drain() {
             send_json(
                 &mut self.stdin,
                 &json!({"type":"extension_ui_response","id":id,"confirmed":false}),
@@ -1532,22 +1490,6 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
     resume.as_ref()?.str_field(&["session_file", "session_id"])
 }
 
-fn pi_approval_mode(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Supervised => "supervised",
-        ApprovalMode::ReadOnly => "read_only",
-        ApprovalMode::AutoAcceptEdits => "auto_accept_edits",
-        ApprovalMode::FullAccess => "full_access",
-    }
-}
-
-fn gate_required(mode: ApprovalMode) -> bool {
-    matches!(
-        mode,
-        ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
-    )
-}
-
 /// The tcode tool families this session does without, named the way the user
 /// knows them from Settings.
 ///
@@ -1578,27 +1520,6 @@ fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
             .then_some(label)
     })
     .collect()
-}
-
-fn materialize_permission_extension() -> Result<PathBuf, AgentError> {
-    let directory = std::env::temp_dir().join(format!("tcode-pi-extension-{}", std::process::id()));
-    std::fs::create_dir_all(&directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let path = directory.join(format!(
-        "tcode-permissions-{}.ts",
-        env!("CARGO_PKG_VERSION")
-    ));
-    std::fs::write(&path, PERMISSION_EXTENSION)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(path)
 }
 
 fn ensure_success(message: &Value) -> Result<(), AgentError> {
@@ -1638,14 +1559,6 @@ fn send_json(writer: &mut impl Write, value: &Value) -> Result<(), AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn permission_gate_is_only_required_for_supervised_modes() {
-        assert!(gate_required(ApprovalMode::Supervised));
-        assert!(gate_required(ApprovalMode::AutoAcceptEdits));
-        assert!(!gate_required(ApprovalMode::FullAccess));
-        assert!(!gate_required(ApprovalMode::ReadOnly));
-    }
 
     #[test]
     fn bash_approval_distinguishes_builtin_execution_from_extension_tools() {

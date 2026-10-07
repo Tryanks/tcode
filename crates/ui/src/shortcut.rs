@@ -22,11 +22,6 @@ pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-tab", NavigateThread::Next, None),
         KeyBinding::new("ctrl-shift-tab", NavigateThread::Previous, None),
-        KeyBinding::new(
-            "shift-tab",
-            crate::composer::ToggleInteractionMode,
-            Some(crate::composer::CONTEXT),
-        ),
     ]);
     // Bindings dispatch before key-down listeners, and the terminal forwards
     // raw keystrokes (Tab, Ctrl-C as an interrupt) from its listener, so the
@@ -66,7 +61,6 @@ mod tests {
         terminal: FocusHandle,
         composer: FocusHandle,
         keys: Vec<String>,
-        toggles: usize,
     }
 
     impl Render for Harness {
@@ -83,11 +77,6 @@ mod tests {
                 .child(
                     div()
                         .key_context(crate::composer::CONTEXT)
-                        .on_action(cx.listener(
-                            |this, _: &crate::composer::ToggleInteractionMode, _, _| {
-                                this.toggles += 1;
-                            },
-                        ))
                         .child(div().track_focus(&self.composer)),
                 )
         }
@@ -105,7 +94,6 @@ mod tests {
                 terminal: cx.focus_handle().tab_stop(true),
                 composer: cx.focus_handle().tab_stop(true),
                 keys: Vec::new(),
-                toggles: 0,
             });
             *capture.borrow_mut() = Some(harness.clone());
             gpui_base::Root::new(harness, window, cx)
@@ -115,11 +103,8 @@ mod tests {
         (harness, cx)
     }
 
-    /// The window root binds Tab to focus traversal, and bindings dispatch
-    /// before key-down listeners: the terminal still receives Tab as input,
-    /// and Shift-Tab in the composer switches the interaction mode.
     #[gpui::test]
-    fn root_focus_traversal_leaves_terminal_and_composer_their_keys(cx: &mut TestAppContext) {
+    fn root_focus_traversal_leaves_terminal_its_keys(cx: &mut TestAppContext) {
         let (harness, cx) = mount(cx);
         let terminal = harness.read_with(cx, |harness, _| harness.terminal.clone());
         cx.update(|window, cx| terminal.focus(window, cx));
@@ -128,11 +113,5 @@ mod tests {
             assert_eq!(harness.keys, ["tab", "shift-tab"]);
         });
         assert!(cx.update(|window, _| terminal.is_focused(window)));
-
-        let composer = harness.read_with(cx, |harness, _| harness.composer.clone());
-        cx.update(|window, cx| composer.focus(window, cx));
-        cx.simulate_keystrokes("shift-tab");
-        harness.read_with(cx, |harness, _| assert_eq!(harness.toggles, 1));
-        assert!(cx.update(|window, _| composer.is_focused(window)));
     }
 }

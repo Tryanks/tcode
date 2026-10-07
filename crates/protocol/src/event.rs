@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{
-    ApprovalMode, ApprovalRequest, InteractionMode, OptionDescriptor, OptionSelection, PlanStep,
-    ProviderCommand, ProviderKind, RewindMode, TokenUsage,
+    ApprovalRequest, OptionDescriptor, OptionSelection, PlanStep, ProviderCommand, ProviderKind,
+    RewindMode, TokenUsage,
 };
 use serde::{Deserialize, Serialize};
 use tcode_core::{
@@ -377,18 +377,7 @@ pub struct SessionActivity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionPlan {
     pub session_id: String,
-    pub proposed: Option<ProposedPlanStatus>,
     pub steps: Vec<PlanStep>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProposedPlanStatus {
-    pub item_id: String,
-    /// Absolute turn index in the full session history.
-    pub turn: usize,
-    pub markdown: String,
-    pub ready: bool,
-    pub resolved: bool,
 }
 
 /// Host-owned runtime and full-history facts for one resident session.
@@ -403,10 +392,6 @@ pub struct SessionStatus {
     pub requested_profile_id: Option<String>,
     pub acp_agent_id: Option<String>,
     pub project_id: Option<String>,
-    pub approval_mode: ApprovalMode,
-    pub effective_approval_mode: ApprovalMode,
-    pub native_approval_modes_enabled: bool,
-    pub interaction_mode: InteractionMode,
     pub queued_messages: Vec<QueuedMessageStatus>,
     /// Backend-owned drafts used by provider-bound send-path assembly.
     pub review_comment_drafts: Vec<ReviewComment>,
@@ -439,6 +424,7 @@ pub struct SessionStatus {
     pub steering_supported: bool,
     pub provider_option_descriptors: Vec<OptionDescriptor>,
     pub provider_option_selections: Vec<OptionSelection>,
+    pub provider_option_requested_selections: Vec<OptionSelection>,
     pub provider_commands: Vec<ProviderCommand>,
     pub git_branch: Option<String>,
     pub branches: Vec<String>,
@@ -451,7 +437,6 @@ pub struct SessionStatus {
     pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
-    pub approval_pending_restart: bool,
     pub ultrathink_armed: bool,
 }
 
@@ -674,9 +659,6 @@ pub enum RuntimeNotice {
     NativeRewindCompleted {
         mode: RewindMode,
     },
-    PlanSaved {
-        file: String,
-    },
     SwitchedBranch {
         branch: String,
     },
@@ -705,7 +687,6 @@ impl RuntimeNotice {
             Self::ProviderMessage(_) | Self::WorktreeMergeFailed { .. } => NoticeSeverity::Warning,
             Self::TcodeUpdateAvailable { .. }
             | Self::NativeRewindCompleted { .. }
-            | Self::PlanSaved { .. }
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward

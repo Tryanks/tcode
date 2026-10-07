@@ -117,24 +117,12 @@ impl Composer {
                 (rows, String::new(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let builtins: [(&str, Option<&str>, &str, MenuAccept); 5] = [
+                let builtins: [(&str, Option<&str>, &str, MenuAccept); 3] = [
                     (
                         "model",
                         None,
                         "composer.cmd_model_desc",
                         MenuAccept::OpenModelPicker,
-                    ),
-                    (
-                        "plan",
-                        None,
-                        "composer.cmd_plan_desc",
-                        MenuAccept::SetMode(InteractionMode::Plan),
-                    ),
-                    (
-                        "default",
-                        None,
-                        "composer.cmd_default_desc",
-                        MenuAccept::SetMode(InteractionMode::Build),
                     ),
                     (
                         "orchestrate",
@@ -237,12 +225,6 @@ impl Composer {
             MenuAccept::OpenModelPicker => {
                 self.replace_trigger("", window, cx);
                 self.model_picker_token = self.model_picker_token.wrapping_add(1);
-            }
-            MenuAccept::SetMode(mode) => {
-                let mode = *mode;
-                self.replace_trigger("", window, cx);
-                self.workspace_store
-                    .update(cx, |store, _cx| store.set_interaction_mode(mode));
             }
         }
         self.active_trigger = None;
