@@ -97,6 +97,11 @@ enum OptionFile {
         id: String,
         label: String,
         options: Vec<SelectOptionFile>,
+        /// Values t3code sends as a prompt keyword rather than a launch
+        /// setting. The keyword reaches Claude Code verbatim when the user
+        /// types it, so tcode does not offer it as an option.
+        #[serde(default, rename = "promptInjectedValues")]
+        prompt_injected_values: Vec<String>,
     },
     Boolean {
         id: String,
@@ -128,8 +133,7 @@ struct ProfileAdapterFile {
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClaudeCodeProfile {
-    /// Effort selection → `--effort` value; `None` means no flag at all
-    /// (`ultrathink` is a prompt-prefix mode).
+    /// Effort selection → `--effort` value; `None` means no flag at all.
     #[serde(default)]
     effort_map: HashMap<String, Option<String>>,
     /// Option id → option value → suffix appended to the model slug
@@ -277,11 +281,19 @@ fn parse_version(value: &str) -> Result<Version, String> {
 
 fn descriptor(option: &OptionFile) -> Result<Option<OptionDescriptor>, String> {
     Ok(Some(match option {
-        OptionFile::Select { id, label, options } => {
+        OptionFile::Select {
+            id,
+            label,
+            options,
+            prompt_injected_values,
+        } => {
             let id = non_empty(id, "option id")?;
             let mut default_value = None;
             let mut mapped = Vec::with_capacity(options.len());
-            for option in options {
+            for option in options
+                .iter()
+                .filter(|option| !prompt_injected_values.contains(&option.id))
+            {
                 let value = non_empty(&option.id, "option value")?;
                 if option.is_default && default_value.is_none() {
                     default_value = Some(value.clone());
@@ -806,11 +818,6 @@ mod tests {
                             label: "Ultracode".into(),
                             description: Some("xhigh plus orchestration".into()),
                         },
-                        SelectOption {
-                            value: "ultrathink".into(),
-                            label: "Ultrathink".into(),
-                            description: None,
-                        },
                     ],
                     default_value: Some("medium".into()),
                 },
@@ -832,7 +839,7 @@ mod tests {
                     default_value: Some("1m".into()),
                 },
             ],
-            "unknown descriptor types are dropped, not fatal"
+            "unknown descriptor types and prompt-injected values are dropped"
         );
         assert!(!catalog.model("test-fixed").unwrap().spec.is_default);
         assert_eq!(

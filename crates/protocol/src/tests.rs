@@ -985,7 +985,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         "git_branch":null,"branches":[],"draft":false,"draft_workspace":{"kind":"local_checkout"},"worktree":null,
         "preparing_worktree":false,"relay_confirmation":null,"native_rewind_pending":false,
         "native_rewind_prefill_available":false,"model_pending_restart":false,"options_pending_restart":false,
-        "approval_pending_restart":false,"ultrathink_armed":false
+        "approval_pending_restart":false
     }}"#).unwrap();
     let status = serde_json::from_value::<ServerEvent>(status_wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(status).unwrap(), status_wire);

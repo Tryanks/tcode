@@ -44,7 +44,6 @@ impl AppState {
             active.meta.option_selections.clear();
             active.meta.option_selections.extend(remembered_effort);
             active.provider_commands = provider_commands;
-            active.pending_ultrathink = false;
             return;
         }
         // Established sessions can preview a different provider — or a
@@ -75,7 +74,6 @@ impl AppState {
             active.meta.option_selections.extend(remembered_effort);
             active.provider_commands = provider_commands;
             active.provider_options.clear();
-            active.pending_ultrathink = false;
             if active.pending_relay.is_some() {
                 return;
             }
@@ -88,7 +86,6 @@ impl AppState {
         active.meta.model = model;
         active.meta.option_selections.clear();
         active.meta.option_selections.extend(remembered_effort);
-        active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
             return;
         }
@@ -116,10 +113,6 @@ impl AppState {
                 value,
             });
         }
-        // Selecting a real reasoning effort supersedes a pending Ultrathink.
-        if id == "reasoningEffort" {
-            active.pending_ultrathink = false;
-        }
         // ACP agents apply every option change live; pi applies its thinking
         // level live. Route those choices back instead of waiting for a restart.
         if active.meta.provider.caps().live_option_push.supports(id)
@@ -133,14 +126,6 @@ impl AppState {
             active.live_option_selections = active.meta.option_selections.clone();
         }
         self.preview_draft_or_persist_active(target_id, cx);
-    }
-
-    /// Arm an Ultrathink turn: the next send carries the `ultrathink` keyword.
-    /// This is a transient per-send flag, not a persisted option.
-    pub fn select_ultrathink(&mut self, target_id: &str, _cx: &mut HostCx) {
-        if let Some(active) = self.resident_mut(target_id) {
-            active.pending_ultrathink = true;
-        }
     }
 
     /// The active session's Build/Plan interaction mode (`Build` when none).

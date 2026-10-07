@@ -805,7 +805,6 @@ composer:
   context_window_custom: "Custom"
   context_window_custom_placeholder: "e.g. 500k (100k–1M)"
   context_window_invalid: "Enter 100k–1M tokens, e.g. 500k"
-  ultrathink_locked: 'Your prompt contains "ultrathink" in the text. Remove it to change this option.'
   context: "Context"
   context_heading: "CONTEXT"
   used: "Used"

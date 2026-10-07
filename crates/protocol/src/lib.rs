@@ -59,7 +59,8 @@ pub use wire::{
 // revisions, makes session log cursors stored row positions, and acknowledges
 // a subscription to an unloaded thread after its window.
 //
-// Unreleased: (none)
+// Unreleased: removes SelectUltrathink and the session status's
+// ultrathink_armed; an older peer sending the command is rejected.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]

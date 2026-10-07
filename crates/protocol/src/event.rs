@@ -452,7 +452,6 @@ pub struct SessionStatus {
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
     pub approval_pending_restart: bool,
-    pub ultrathink_armed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

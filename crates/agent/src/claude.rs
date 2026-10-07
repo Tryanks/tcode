@@ -165,11 +165,10 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         cmd.arg(arg);
     }
     log::debug!(
-        "claude spawn args: model={:?} effort={:?} settings={:?} ultrathink={} permission-mode={} effective-permission-mode={}",
+        "claude spawn args: model={:?} effort={:?} settings={:?} permission-mode={} effective-permission-mode={}",
         launch.model_id,
         launch.effort,
         launch.settings_json,
-        launch.ultrathink,
         launch_permission_mode,
         applied_permission_mode,
     );
@@ -274,7 +273,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         line_rx,
         event_tx,
         session_config,
-        launch.ultrathink,
         opts.interaction_mode,
         base_permission_mode,
         applied_permission_mode,
@@ -406,12 +404,10 @@ struct ClaudeLaunchOptions {
     /// when the selected window exceeds what the bare slug already opens.
     model_id: Option<String>,
     /// `--effort` value after the manifest's `effortMap` (`None` when the
-    /// selection maps to no flag, e.g. `ultrathink`, a prompt-prefix mode).
+    /// selection maps to no flag).
     effort: Option<String>,
     /// `--settings` JSON string (fastMode / ultracode / alwaysThinkingEnabled).
     settings_json: Option<String>,
-    /// Whether the effort selection is `ultrathink` (prompt-prefix mode).
-    ultrathink: bool,
 }
 
 fn launch_settings_json(
@@ -451,7 +447,6 @@ impl ClaudeLaunchOptions {
         let spec = entry.map(|entry| &entry.spec);
         let raw_effort = selection_str(selections, "reasoningEffort");
         let resolved_effort = resolve_claude_effort(spec, raw_effort.as_deref());
-        let ultrathink = resolved_effort.as_deref() == Some("ultrathink");
         let ultracode = resolved_effort.as_deref() == Some("ultracode");
         let effort = match (entry, resolved_effort.as_deref()) {
             (Some(entry), Some(effort)) => entry.cli_effort(effort),
@@ -493,7 +488,6 @@ impl ClaudeLaunchOptions {
             model_id,
             effort,
             settings_json,
-            ultrathink,
         }
     }
 }
@@ -526,7 +520,6 @@ async fn actor_loop(
     line_rx: smol::channel::Receiver<String>,
     event_tx: smol::channel::Sender<AgentEvent>,
     config: SessionConfig,
-    ultrathink: bool,
     interaction_mode: InteractionMode,
     base_permission_mode: &'static str,
     applied_permission_mode: String,
@@ -537,7 +530,6 @@ async fn actor_loop(
     stderr_task: smol::Task<()>,
 ) {
     let mut mapper = Mapper::new_configured(
-        ultrathink,
         interaction_mode,
         base_permission_mode,
         applied_permission_mode,
@@ -840,8 +832,6 @@ async fn handle_command(
                 }
             }
 
-            // `ultrathink` is a prompt-prefix mode, not a `--effort` value.
-            let text = turn_text(text, mapper.ultrathink);
             let msg = user_message(&text, &attachments);
             if write_turn_message(stdin, &msg, delivery_id, event_tx)
                 .await
@@ -979,7 +969,6 @@ async fn handle_command(
             // residual race: a steer written microseconds before that status
             // may actually miss the request, but the CLI protocol exposes no
             // stronger acknowledgement, so we accept it at that checkpoint.
-            let text = turn_text(text, mapper.ultrathink);
             let msg = user_message(&text, &attachments);
             write_steering_message(stdin, &msg, request_id, mapper, event_tx).await;
             ControlFlow::Continue(())
@@ -1015,19 +1004,6 @@ async fn resolve_response<T>(
         let _ = event_tx.send(resolved(request_id, value)).await;
     } else {
         log::debug!("claude: response for unknown request {request_id}");
-    }
-}
-
-/// Add the `ultrathink` keyword, which Claude Code honours anywhere in the
-/// prompt. A message that starts with `/` is a slash command, and the CLI
-/// expands one only at byte 0, so there the keyword trails the text instead.
-fn turn_text(text: String, ultrathink: bool) -> String {
-    if !ultrathink {
-        text
-    } else if text.starts_with('/') {
-        format!("{text}\n\nultrathink")
-    } else {
-        format!("Ultrathink:\n{text}")
     }
 }
 
@@ -1251,8 +1227,6 @@ pub(crate) struct Mapper {
     /// `result` is then attributed to the interrupt rather than a failure
     /// (the CLI's result carries no reliable interrupt marker).
     interrupt_pending: bool,
-    /// Whether the effort selection is `ultrathink` (→ prompt prefix).
-    ultrathink: bool,
     /// Session Build/Plan mode (updated by `SetInteractionMode`).
     interaction_mode: InteractionMode,
     /// Permission mode to restore on Build (from the session's ApprovalMode).
@@ -1305,7 +1279,6 @@ impl Mapper {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::new_configured(
-            false,
             InteractionMode::Build,
             "default",
             "default".to_owned(),
@@ -1316,7 +1289,6 @@ impl Mapper {
     }
 
     fn new_configured(
-        ultrathink: bool,
         interaction_mode: InteractionMode,
         base_permission_mode: &'static str,
         applied_permission_mode: String,
@@ -1343,7 +1315,6 @@ impl Mapper {
             pending_user_input: HashMap::new(),
             approval_mode,
             interrupt_pending: false,
-            ultrathink,
             interaction_mode,
             base_permission_mode,
             applied_permission_mode,
@@ -3533,7 +3504,6 @@ mod tests {
             ("claude-fable-5-1", "<synthetic>", false),
         ] {
             let mut mapper = Mapper::new_configured(
-                false,
                 InteractionMode::Build,
                 "default",
                 "default".into(),
@@ -3568,7 +3538,6 @@ mod tests {
     #[test]
     fn model_changes_are_detected_at_stream_start_once_per_turn() {
         let mut mapper = Mapper::new_configured(
-            false,
             InteractionMode::Build,
             "default",
             "default".into(),
@@ -3643,7 +3612,6 @@ mod tests {
     #[test]
     fn classifier_refusal_result_emits_turn_blocked() {
         let mut mapper = Mapper::new_configured(
-            false,
             InteractionMode::Build,
             "default",
             "default".into(),
@@ -3805,12 +3773,6 @@ mod tests {
         let launch = resolve("test-wide", "ultracode");
         assert_eq!(launch.effort.as_deref(), Some("xhigh"));
         assert_eq!(settings(&launch)["ultracode"], true);
-        assert!(!launch.ultrathink);
-        // Mapped to null: no --effort flag, prompt-prefix mode.
-        let launch = resolve("test-wide", "ultrathink");
-        assert_eq!(launch.effort, None);
-        assert!(launch.ultrathink);
-        assert!(launch.settings_json.is_none());
         // Per-profile downgrade (max → high) and passthrough.
         assert_eq!(
             resolve("test-narrow", "max").effort.as_deref(),
@@ -4020,7 +3982,6 @@ mod tests {
         assert_eq!(launch_mode, "plan");
 
         let m = Mapper::new_configured(
-            false,
             InteractionMode::Plan,
             "default",
             launch_mode.into(),
