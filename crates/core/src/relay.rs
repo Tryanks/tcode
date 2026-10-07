@@ -259,7 +259,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 ),
             ),
             EntryContent::ModelChanged { .. } => {}
-            EntryContent::Item(ItemContent::ImageRead { path }) => activity(
+            EntryContent::Item(ItemContent::ImageRead { path, .. }) => activity(
                 &mut body,
                 "image_view",
                 path,

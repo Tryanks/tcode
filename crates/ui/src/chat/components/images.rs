@@ -26,14 +26,18 @@ pub(crate) fn image_tiles(
                 unreachable!()
             };
             let images = match item {
-                ItemContent::ImageRead { path } => {
+                ItemContent::ImageRead { path, .. } => {
                     let path = cwd.join(path);
                     let title = path
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned();
-                    vec![(crate::store::host_image(path.clone()), title, Some(path))]
+                    vec![(
+                        crate::store::item_image(session_id.into(), entry.id.clone(), 0),
+                        title,
+                        Some(path),
+                    )]
                 }
                 ItemContent::ToolCall {
                     image_reads, name, ..

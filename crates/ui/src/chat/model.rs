@@ -1338,7 +1338,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::ContextCompacted(_) => {}
         EntryContent::ContextWindowChanged { window } => window.hash(hash),
-        EntryContent::Item(ItemContent::ImageRead { path }) => path.hash(hash),
+        EntryContent::Item(ItemContent::ImageRead { path, .. }) => path.hash(hash),
         EntryContent::Item(ItemContent::WebSearch { query }) => {
             "web_search".len().hash(hash);
             serde_json::json!({ "query": query })
@@ -2205,6 +2205,7 @@ mod tests {
                 id,
                 EntryContent::Item(ItemContent::ImageRead {
                     path: format!("/tmp/{id}.png"),
+                    image: None,
                 }),
             )
         };

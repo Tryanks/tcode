@@ -164,7 +164,7 @@ fn searchable_item_text(content: &ItemContent) -> Option<String> {
                 .into_iter()
                 .chain(summary.iter().map(String::as_str)),
         )),
-        ItemContent::ImageRead { path } => Some(path.clone()),
+        ItemContent::ImageRead { path, .. } => Some(path.clone()),
         ItemContent::WebSearch { query } => Some(query.clone()),
         ItemContent::Other {
             provider_kind,

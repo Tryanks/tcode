@@ -576,6 +576,7 @@ struct Actor {
     lines: Receiver<ChildOutput>,
     events: Sender<AgentEvent>,
     thread_id: String,
+    cwd: PathBuf,
     /// Resolved model slug; used for `collaborationMode.settings.model`.
     model: Option<String>,
     /// Session reasoning effort (`reasoningEffort` selection), if any.
@@ -672,6 +673,7 @@ async fn run_actor(
         lines,
         events,
         thread_id: thread_id.clone(),
+        cwd: opts.cwd.clone(),
         model: model.clone(),
         effort: codex_effort(&opts.option_selections),
         service_tier: codex_service_tier(&opts.option_selections),
@@ -1386,6 +1388,41 @@ fn settle_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
 }
 
 impl Actor {
+    async fn capture_read_image(&mut self, item: &mut ThreadItem) {
+        use base64::Engine as _;
+        let ItemContent::ImageRead { path, image } = &mut item.content else {
+            return;
+        };
+        if let Some(ThreadItem {
+            content: ItemContent::ImageRead {
+                image: Some(saved), ..
+            },
+            ..
+        }) = self.items.get(&item.id)
+        {
+            *image = Some(saved.clone());
+            return;
+        }
+        let path = self.cwd.join(path);
+        match smol::fs::read(&path).await {
+            Ok(bytes) => {
+                *image = Some(crate::Attachment {
+                    media_type: match path.extension().and_then(|ext| ext.to_str()) {
+                        Some("jpg" | "jpeg") => "image/jpeg",
+                        Some("webp") => "image/webp",
+                        Some("gif") => "image/gif",
+                        _ => "image/png",
+                    }
+                    .into(),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    source_path: None,
+                });
+                self.items.insert(item.id.clone(), item.clone());
+            }
+            Err(error) => log::warn!("could not preserve image read {}: {error}", path.display()),
+        }
+    }
+
     async fn handle_auto_review(&mut self, params: &Value) {
         let review = params.get("review").unwrap_or(&Value::Null);
         let status = review
@@ -1964,6 +2001,7 @@ impl Actor {
                 )
                 && let Some(mut item) = map_item(value)
             {
+                self.capture_read_image(&mut item).await;
                 let thread_id = thread_id.expect("child notification has a thread id");
                 let parent_id = self
                     .subagent_parent_by_thread
@@ -2075,6 +2113,7 @@ impl Actor {
                     _ => {}
                 }
                 if let Some(mut item) = item_value.and_then(map_item) {
+                    self.capture_read_image(&mut item).await;
                     if let Some(subagent) = self.subagents.get(&item.id) {
                         let status = if method == "item/completed" {
                             item_status(&item.content)
@@ -3303,6 +3342,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         },
         "imageView" => ItemContent::ImageRead {
             path: string_field(item, "path"),
+            image: None,
         },
         "webSearch" => ItemContent::WebSearch {
             query: string_field(item, "query"),
@@ -4090,6 +4130,7 @@ mod tests {
                 lines: line_rx,
                 events: event_tx,
                 thread_id: "thread-1".into(),
+                cwd: std::env::temp_dir(),
                 model: Some("gpt-5-codex".into()),
                 effort: None,
                 service_tier: None,
@@ -5421,6 +5462,66 @@ mod tests {
     }
 
     #[test]
+    fn image_reads_preserve_each_file_version() {
+        smol::block_on(async {
+            use base64::Engine as _;
+            let (mut actor, events) = test_actor();
+            let path =
+                std::env::temp_dir().join(format!("tcode-image-read-{}.png", std::process::id()));
+            let mut received = Vec::new();
+            for (id, bytes) in [("first", b"first image"), ("later", b"later image")] {
+                smol::fs::write(&path, bytes).await.unwrap();
+                actor
+                    .handle_line(
+                        &json!({"method":"item/completed", "params":{
+                            "threadId":"thread-1", "item":{"type":"imageView", "id":id, "path":path}
+                        }})
+                        .to_string(),
+                    )
+                    .await;
+                let AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::ImageRead { image, .. },
+                    ..
+                }) = events.recv().await.unwrap()
+                else {
+                    panic!("image read");
+                };
+                received.push(image.expect("snapshot survives later overwrite"));
+            }
+            smol::fs::remove_file(&path).await.unwrap();
+            actor.handle_line(&json!({"method":"item/completed", "params":{
+                "threadId":"thread-1", "item":{"type":"imageView", "id":"first", "path":path}
+            }}).to_string()).await;
+            let AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::ImageRead { image, .. },
+                ..
+            }) = events.recv().await.unwrap()
+            else {
+                panic!("image read");
+            };
+            assert_eq!(
+                image,
+                Some(received[0].clone()),
+                "completion retains the original read after deletion"
+            );
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&received[0].data_base64)
+                    .unwrap(),
+                b"first image"
+            );
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&received[1].data_base64)
+                    .unwrap(),
+                b"later image"
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
     fn maps_core_item_kinds() {
         let command = map_item(&json!({"type":"commandExecution","id":"cmd-1","command":"pwd","aggregatedOutput":"/tmp\n","exitCode":0,"status":"completed"})).unwrap();
         assert!(matches!(
@@ -5441,7 +5542,7 @@ mod tests {
             map_item(&json!({"type":"imageView","id":"image-1","path":"/tmp/screenshot.png"}))
                 .unwrap();
         assert!(
-            matches!(image.content, ItemContent::ImageRead { path } if path == "/tmp/screenshot.png")
+            matches!(image.content, ItemContent::ImageRead { path, .. } if path == "/tmp/screenshot.png")
         );
 
         let unknown = map_item(&json!({"type":"sleep","id":"sleep-1","durationMs":10})).unwrap();

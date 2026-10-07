@@ -1414,6 +1414,21 @@ impl ChatView {
                         self.session_key.as_deref().unwrap_or_default(),
                         cx,
                     ));
+                    for entry in images {
+                        if matches!(
+                            &entry.content,
+                            EntryContent::Item(ItemContent::ToolCall { .. })
+                        ) {
+                            column = column.child(self.compose_activity_row(
+                                entry,
+                                true,
+                                false,
+                                false,
+                                AutoActivityRecency::Older,
+                                cx,
+                            ));
+                        }
+                    }
                 }
                 Segment::User(entry) => {
                     let (text, steering, context_len, attachments) =
