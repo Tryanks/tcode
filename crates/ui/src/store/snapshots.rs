@@ -52,7 +52,6 @@ pub struct ComposerState {
     pub active_model_spec: Option<agent::ModelSpec>,
     pub active_option_descriptors: Vec<agent::OptionDescriptor>,
     pub active_option_selections: Vec<agent::OptionSelection>,
-    pub ultrathink_armed: bool,
     pub options_pending_restart: bool,
     pub interaction_mode: agent::InteractionMode,
     pub token_usage: Option<agent::TokenUsage>,
@@ -166,7 +165,6 @@ pub(crate) fn composer_state(
         active_option_selections: status
             .map(|status| status.provider_option_selections.clone())
             .unwrap_or_default(),
-        ultrathink_armed: status.is_some_and(|status| status.ultrathink_armed),
         options_pending_restart: status.is_some_and(|status| status.options_pending_restart),
         interaction_mode: status
             .map(|status| status.interaction_mode)
@@ -293,7 +291,6 @@ mod tests {
             model_pending_restart: false,
             options_pending_restart: false,
             approval_pending_restart: false,
-            ultrathink_armed: false,
         }
     }
 
