@@ -925,6 +925,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -943,6 +944,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         let (_, cx) = cx.add_window_view(|window, cx| AcpPanel::new(store.clone(), window, cx));
         cx.simulate_resize(gpui::size(px(588.), px(456.)));
         cx.run_until_parked();

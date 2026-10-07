@@ -817,8 +817,8 @@ impl ProviderDialog {
                         crate::tr!("providers.models.favorite")
                     })
                     .on_click(move |_, _, cx| {
-                        store.update(cx, |store, _cx| {
-                            store.toggle_favorite_model(fav_id.clone());
+                        store.update(cx, |store, cx| {
+                            store.toggle_favorite_model(fav_id.clone(), cx);
                         });
                     }),
             )

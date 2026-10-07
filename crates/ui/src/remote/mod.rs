@@ -30,6 +30,7 @@ use crate::icon::{Icon, IconName};
 // Machines are a navigable content list, so their rows, captions and hairlines
 // are the shared plain-list vocabulary — the same the thread list uses.
 use crate::material::{list_caption, list_row, plain_list};
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::PairForm;
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
@@ -276,6 +277,9 @@ impl RemotePanel {
         cx: &mut Context<Self>,
     ) {
         if let Some(host) = self.form.finish_pair(generation, result, address) {
+            if let Some(message) = crate::pairing::joined_message(&host) {
+                window.push_notification(Notification::success(message), cx);
+            }
             let attachment = cx.global::<ClientAttachment>();
             attachment.save_host(host.clone());
             let switch = attachment.switcher();
@@ -402,6 +406,14 @@ impl RemotePanel {
                         .truncate()
                         .child(name.clone()),
                 )
+                .when_some(host.space_name.clone(), |column, space| {
+                    column.child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(space),
+                    )
+                })
                 .when_some(reason, |column, reason| {
                     column.child(
                         div()

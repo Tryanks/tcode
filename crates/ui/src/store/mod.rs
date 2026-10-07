@@ -26,8 +26,9 @@ use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
     ArchivedSessions, Command, CommandResponse, EventEnvelope, ExternalImportStatus,
     ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus, IndexSummary, PathEntry,
-    ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir,
-    ServerEvent, SessionPlan, SessionSearchHit, SessionStatus, Subscription, TerminalFrame, Topic,
+    ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, Scope,
+    ScopedProviderChoice, ServerEvent, SessionPlan, SessionSearchHit, SessionStatus, Subscription,
+    TerminalFrame, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -72,8 +73,8 @@ impl From<&Topic> for TopicKind {
             Topic::SessionEvents { .. } => Self::SessionEvents,
             Topic::SessionStatus { .. } => Self::SessionStatus,
             Topic::SessionPlan { .. } => Self::SessionPlan,
-            Topic::SpaceIndex { .. } => Self::SpaceIndex,
-            Topic::Scope => Self::Scope,
+            Topic::SpaceIndex { .. } => Self::Index,
+            Topic::Scope => Self::Index,
             Topic::Index => Self::Index,
             Topic::Settings => Self::Settings,
             Topic::Providers => Self::Providers,
@@ -122,12 +123,30 @@ pub(crate) type PreviewTarget = (
     std::sync::Arc<dyn tcode_client::host::TunnelOpener>,
 );
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceScope {
+    #[default]
+    Full,
+    Space {
+        space_id: String,
+        space_name: String,
+    },
+}
+
+impl WorkspaceScope {
+    pub fn is_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 /// The client-facing projection and command boundary for workspace state.
 ///
 /// Views observe this entity and use its typed accessors instead of retaining
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
     host: HostLink,
+    scope: WorkspaceScope,
+    scoped_providers: Vec<ScopedProviderChoice>,
     attachment: WorkspaceAttachment,
     client_host: Option<Rc<dyn ClientHost>>,
     /// The transport's live view of the attached machine: its authenticated
@@ -326,8 +345,7 @@ impl WorkspaceStore {
 
     /// Construct the complete projection for exactly one client link.
     ///
-    /// `seed_blocking` makes construction wait for the first Index/Settings/
-    /// Providers snapshots. Only the desktop composition root asks for it: it
+    /// `seed_blocking` waits for Scope and its allowed domain snapshots. Only the desktop composition root asks for it: it
     /// applies the locale and theme from `settings()` the instant the store
     /// exists. Every other client renders immediately and re-renders when the
     /// snapshots land, which is the only option on a single-threaded executor.
@@ -356,6 +374,8 @@ impl WorkspaceStore {
         let remote = matches!(attachment, WorkspaceAttachment::Remote { .. });
         let store = Self {
             host: host.clone(),
+            scope: WorkspaceScope::Full,
+            scoped_providers: Vec::new(),
             attachment,
             client_host,
             current_host,
@@ -406,39 +426,17 @@ impl WorkspaceStore {
         };
         let mut store = store;
 
-        // Construction seeding is itself protocol traffic: subscribe, then
-        // apply each snapshot event. No live AppState read exists here.
-        // Settings first: the index seed reconciles the destination, and that
-        // decision reads the remembered project out of settings.
-        let seed_topics = [Topic::Settings, Topic::Index, Topic::Providers];
-        for topic in &seed_topics {
-            if let Err(error) = host.subscribe(Subscription {
-                after: None,
-                topic: topic.clone(),
-            }) {
-                log::error!("failed to subscribe to {topic:?}: {}", error.message);
-            }
-        }
         let _ = host.subscribe(Subscription {
-            topic: Topic::RuntimeEvents,
+            topic: Topic::Scope,
             after: None,
         });
         let events = host.events();
         #[cfg(not(target_family = "wasm"))]
         if seed_blocking {
-            let mut seeded = HashSet::new();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
+            while !store.seed_ready() && std::time::Instant::now() < deadline {
                 match events.try_recv() {
                     Ok(envelope) => {
-                        match (&envelope.topic, &envelope.event) {
-                            (Topic::Index, ServerEvent::IndexSnapshot(_))
-                            | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
-                            | (Topic::Providers, ServerEvent::ProvidersReplaced(_)) => {
-                                seeded.insert(envelope.topic.clone());
-                            }
-                            _ => {}
-                        }
                         if let ServerEvent::Runtime(event) = &envelope.event {
                             cx.emit(event.clone());
                         } else {
@@ -451,12 +449,8 @@ impl WorkspaceStore {
                     Err(async_channel::TryRecvError::Closed) => break,
                 }
             }
-            if seeded.len() != seed_topics.len() {
-                log::error!(
-                    "host snapshot seeding timed out: received {}/{} domains",
-                    seeded.len(),
-                    seed_topics.len()
-                );
+            if !store.seed_ready() {
+                log::error!("host scope snapshot seeding timed out");
             }
         }
         #[cfg(target_family = "wasm")]
@@ -591,6 +585,151 @@ impl WorkspaceStore {
             .ok_or_else(|| "remote preview requires a paired machine connection".into())
     }
 
+    pub fn scope(&self) -> &WorkspaceScope {
+        &self.scope
+    }
+
+    fn index_topic(&self) -> Topic {
+        match &self.scope {
+            WorkspaceScope::Full => Topic::Index,
+            WorkspaceScope::Space { space_id, .. } => Topic::SpaceIndex {
+                space_id: space_id.clone(),
+            },
+        }
+    }
+
+    fn seed_ready(&self) -> bool {
+        self.baseline_topics.contains(&Topic::Scope)
+            && self.baseline_topics.contains(&self.index_topic())
+            && (!self.scope.is_full()
+                || (self.baseline_topics.contains(&Topic::Settings)
+                    && self.baseline_topics.contains(&Topic::Providers)))
+    }
+
+    pub fn machine_label(&self) -> String {
+        let machine = self.remote_host_name().unwrap_or_default();
+        match &self.scope {
+            WorkspaceScope::Full => machine.to_owned(),
+            WorkspaceScope::Space { space_name, .. } => {
+                crate::tr!("member.connection", space = space_name, machine = machine).into_owned()
+            }
+        }
+    }
+
+    fn member_settings_key(&self) -> String {
+        match &self.scope {
+            WorkspaceScope::Space { space_id, .. } => {
+                format!("{}:{space_id}", self.remote_host_id().unwrap_or_default())
+            }
+            WorkspaceScope::Full => String::new(),
+        }
+    }
+
+    fn save_member_settings(&self) {
+        if let Some(host) = &self.client_host {
+            let mut preferences = host.load_preferences();
+            let navigation = preferences
+                .navigation
+                .get_or_insert_with(|| serde_json::json!({}));
+            navigation["member_settings"][self.member_settings_key()] =
+                serde_json::to_value(&self.settings_replica).unwrap();
+            host.save_preferences(&preferences);
+        }
+    }
+
+    fn apply_scope(&mut self, scope: &Scope, cx: &mut Context<Self>) {
+        let next = match scope {
+            Scope::Full => WorkspaceScope::Full,
+            Scope::Space {
+                space_id,
+                space_name,
+                ..
+            } => WorkspaceScope::Space {
+                space_id: space_id.clone(),
+                space_name: space_name.clone(),
+            },
+        };
+        // Reconnect may move this device to another space or change its grant.
+        // Retire the previous domains before requesting the new baseline.
+        for subscription in self.host.subscriptions() {
+            if subscription.topic != Topic::Scope {
+                let _ = self.host.unsubscribe(subscription);
+            }
+        }
+        let changed = self.scope != next;
+        if changed {
+            self.leave_session();
+            self.threads.clear();
+            self.conversation_ui.clear();
+            self.index_replica = Default::default();
+            self.index_summary = Default::default();
+            self.draft_fallback_pending = false;
+        }
+        self.archived_replica = None;
+        self.archived_task = None;
+        self.baseline_topics.clear();
+        self.baseline_topics.insert(Topic::Scope);
+        if changed {
+            self.index_hydrated = false;
+            self.settings_hydrated = false;
+        }
+        self.scope = next;
+        self.providers_replica = Default::default();
+        self.scoped_providers.clear();
+        match scope {
+            Scope::Full => {
+                for topic in [
+                    Topic::Settings,
+                    Topic::Index,
+                    Topic::Providers,
+                    Topic::RuntimeEvents,
+                ] {
+                    let _ = self.host.subscribe(Subscription { topic, after: None });
+                }
+                if let Some(id) = self.selected_session_id.take() {
+                    self.select_session(id);
+                }
+            }
+            Scope::Space {
+                projects,
+                providers,
+                ..
+            } => {
+                if changed {
+                    self.settings_replica = self
+                        .client_host
+                        .as_ref()
+                        .and_then(|host| host.load_preferences().navigation)
+                        .and_then(|navigation| {
+                            navigation
+                                .get("member_settings")?
+                                .get(self.member_settings_key())
+                                .cloned()
+                        })
+                        .and_then(|settings| serde_json::from_value(settings).ok())
+                        .unwrap_or_default();
+                }
+                self.settings_hydrated = true;
+                self.index_replica.1 = projects.clone();
+                self.scoped_providers = providers.clone();
+                for choice in providers {
+                    self.providers_replica
+                        .model_catalogs
+                        .entry(choice.provider)
+                        .or_default()
+                        .extend(choice.models.clone());
+                }
+                let _ = self.host.subscribe(Subscription {
+                    topic: self.index_topic(),
+                    after: None,
+                });
+            }
+        }
+        for topic in [TopicKind::Settings, TopicKind::Providers, TopicKind::Index] {
+            cx.emit(StoreChange { topic });
+        }
+    }
+
     pub fn is_remote(&self) -> bool {
         matches!(self.attachment, WorkspaceAttachment::Remote { .. })
     }
@@ -632,22 +771,36 @@ impl WorkspaceStore {
                 !matches!(self.connection_state, ConnectionState::Syncing { .. })
             }
             ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. } => true,
-            ConnectionState::Connected { .. } => false,
+            ConnectionState::Connected { .. } => matches!(
+                self.connection_state,
+                ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+            ),
         };
         if restarts {
+            for subscription in self.host.subscriptions() {
+                if subscription.topic != Topic::Scope {
+                    let _ = self.host.unsubscribe(subscription);
+                }
+            }
             self.baseline_topics.clear();
             self.archived_task = None;
             self.index_summary.archived_revision = 0;
         }
         self.connection_state = state;
-        if restarts && matches!(self.connection_state, ConnectionState::Syncing { .. }) {
+        if restarts
+            && matches!(
+                self.connection_state,
+                ConnectionState::Syncing { .. } | ConnectionState::Connected { .. }
+            )
+        {
             // State and domain events arrive on separate queues. Request a fresh
             // baseline after invalidation, so a late event from the old socket
             // cannot satisfy readiness for the new one. HostLink correlates the
             // replies against these new request IDs and retains applied cursors.
-            for subscription in self.host.subscriptions() {
-                let _ = self.host.subscribe(subscription);
-            }
+            let _ = self.host.subscribe(Subscription {
+                topic: Topic::Scope,
+                after: None,
+            });
         }
     }
 
@@ -797,8 +950,9 @@ impl WorkspaceStore {
     }
 
     pub fn baseline_ready(&self) -> bool {
-        self.baseline_topics.contains(&Topic::Index)
-            && self.baseline_topics.contains(&Topic::Settings)
+        self.baseline_topics.contains(&Topic::Scope)
+            && self.baseline_topics.contains(&self.index_topic())
+            && (!self.scope.is_full() || self.baseline_topics.contains(&Topic::Settings))
             && self.selected_session_id.as_ref().is_none_or(|id| {
                 self.baseline_topics.contains(&Topic::SessionStatus {
                     session_id: id.clone(),
@@ -891,7 +1045,40 @@ impl WorkspaceStore {
         if !self.host.subscription_reply_is_current(envelope) {
             return;
         }
-        match (&envelope.topic, &envelope.event) {
+        if envelope.topic == Topic::Scope {
+            if let ServerEvent::ScopeSnapshot(scope) | ServerEvent::ScopeReplaced(scope) =
+                &envelope.event
+                && (!self.baseline_topics.contains(&Topic::Scope)
+                    || matches!(envelope.event, ServerEvent::ScopeReplaced(_)))
+            {
+                self.apply_scope(scope, cx);
+            }
+            return;
+        }
+        if matches!(envelope.topic, Topic::Index | Topic::SpaceIndex { .. })
+            && envelope.topic != self.index_topic()
+        {
+            return;
+        }
+        if !self.scope.is_full()
+            && matches!(
+                envelope.topic,
+                Topic::Settings
+                    | Topic::Providers
+                    | Topic::RuntimeEvents
+                    | Topic::Preview { .. }
+                    | Topic::ExternalImport { .. }
+            )
+        {
+            return;
+        }
+        let index_topic = self.index_topic();
+        let topic = if envelope.topic == index_topic {
+            &Topic::Index
+        } else {
+            &envelope.topic
+        };
+        match (topic, &envelope.event) {
             (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
                 if status.session_id == *session_id =>
             {
@@ -911,7 +1098,7 @@ impl WorkspaceStore {
             }
             _ => {}
         }
-        match (&envelope.topic, &envelope.event) {
+        match (topic, &envelope.event) {
             (
                 Topic::Preview { session_id },
                 ServerEvent::PreviewRequest {
@@ -1001,7 +1188,7 @@ impl WorkspaceStore {
             }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
                 self.index_hydrated = true;
-                let fresh_baseline = self.baseline_topics.insert(Topic::Index);
+                let fresh_baseline = self.baseline_topics.insert(index_topic.clone());
                 for project in &snapshot.projects {
                     if fresh_baseline
                         || self
@@ -1031,6 +1218,28 @@ impl WorkspaceStore {
                     self.selected_session_id.as_ref() == Some(session_id)
                         || snapshot.sessions.iter().any(|meta| meta.id == *session_id)
                 });
+                if let Some(id) = self.selected_session_id.clone() {
+                    let visible = snapshot.sessions.iter().any(|meta| meta.id == id)
+                        || self.session_status_replica.as_ref().is_some_and(|status| {
+                            status.draft
+                                && status.project_id.as_ref().is_some_and(|project| {
+                                    snapshot.projects.iter().any(|p| &p.id == project)
+                                })
+                        });
+                    if visible
+                        && !self
+                            .host
+                            .subscribed_topics()
+                            .contains(&Topic::SessionStatus {
+                                session_id: id.clone(),
+                            })
+                    {
+                        self.selected_session_id = None;
+                        self.select_session(id);
+                    } else if !visible && !self.scope.is_full() {
+                        self.leave_session();
+                    }
+                }
                 self.apply_index_summary(&snapshot.summary, cx);
                 if self.archived_requested {
                     self.load_archived_sessions(cx);
@@ -1054,6 +1263,7 @@ impl WorkspaceStore {
             }
             (Topic::Providers, ServerEvent::ProvidersReplaced(status)) => {
                 self.providers_replica = status.clone();
+                self.baseline_topics.insert(Topic::Providers);
             }
             (Topic::GitStatus { session_id }, ServerEvent::GitStatusReplaced(status)) => {
                 if let Some(thread) = self.threads.get_mut(session_id) {
@@ -1243,7 +1453,7 @@ impl WorkspaceStore {
         }
         self.load_pending_chat_history(cx);
         // Every index mutation re-decides the destination in one place.
-        if envelope.topic == Topic::Index {
+        if envelope.topic == index_topic {
             self.reconcile_destination(cx);
             self.removed_session = None;
             // A thread kept on screen (its failed send still offers Retry)
@@ -1254,19 +1464,22 @@ impl WorkspaceStore {
                 self.threads.remove(session_id);
             }
         }
-        self.acknowledge_read();
+        self.acknowledge_read(cx);
     }
 
-    pub(crate) fn set_conversation_on_screen(&mut self, on_screen: bool) {
+    pub(crate) fn set_conversation_on_screen(&mut self, on_screen: bool, cx: &mut Context<Self>) {
+        if !self.scope.is_full() && on_screen && !self.conversation_on_screen {
+            self.read_acknowledged = None;
+        }
         self.conversation_on_screen = on_screen;
-        self.acknowledge_read();
+        self.acknowledge_read(cx);
     }
 
     /// Report the thread on screen read through its current `updated_at`
     /// once its conversation has loaded. Only this marks a thread read: a
     /// subscription can reach the host long after the user left a view that
     /// never loaded.
-    fn acknowledge_read(&mut self) {
+    fn acknowledge_read(&mut self, cx: &mut Context<Self>) {
         if !self.conversation_on_screen {
             return;
         }
@@ -1302,6 +1515,7 @@ impl WorkspaceStore {
             session_id,
             through,
         });
+        self.local_settings_changed(cx);
     }
 
     /// Decide what the workspace shows after the index changed.
@@ -1421,6 +1635,22 @@ impl WorkspaceStore {
     }
 
     pub fn all_provider_profiles(&self) -> Vec<ResolvedProfile> {
+        if !self.scope.is_full() {
+            return self
+                .scoped_providers
+                .iter()
+                .map(|choice| ResolvedProfile {
+                    id: choice.profile_id.clone().unwrap_or_else(|| {
+                        tcode_core::settings::provider_key(choice.provider).to_owned()
+                    }),
+                    kind: choice.provider,
+                    settings: ProviderSettings {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                })
+                .collect();
+        }
         agent::ProviderKind::NATIVE
             .into_iter()
             .flat_map(|kind| self.settings_replica.profiles_for_kind(kind))
@@ -1434,7 +1664,23 @@ impl WorkspaceStore {
             .collect()
     }
 
+    fn scoped_choice(&self, profile_id: &str) -> Option<&ScopedProviderChoice> {
+        self.scoped_providers.iter().find(|choice| {
+            choice
+                .profile_id
+                .as_deref()
+                .unwrap_or(tcode_core::settings::provider_key(choice.provider))
+                == profile_id
+        })
+    }
+
     pub fn profile_catalog(&self, profile_id: &str) -> Vec<agent::ModelSpec> {
+        if !self.scope.is_full() {
+            return self
+                .scoped_choice(profile_id)
+                .map(|choice| choice.models.clone())
+                .unwrap_or_default();
+        }
         if Settings::is_builtin_profile_id(profile_id) {
             let kind = self
                 .settings_replica
@@ -1612,6 +1858,9 @@ impl WorkspaceStore {
     }
 
     pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        if tab == RightTab::Preview && !self.scope.is_full() {
+            return;
+        }
         if let Some(ui) = self.active_conversation_ui_mut() {
             ui.right_tab = tab;
             cx.notify();
@@ -1637,6 +1886,9 @@ impl WorkspaceStore {
     }
 
     pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.scope.is_full() {
+            return;
+        }
         self.toggle_tab_panel(RightTab::Preview, cx);
     }
 
@@ -1654,6 +1906,9 @@ impl WorkspaceStore {
     }
 
     pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.scope.is_full() {
+            return;
+        }
         if let Some(ui) = self.active_conversation_ui_mut()
             && !(ui.right_panel_open && ui.right_tab == RightTab::Preview)
         {
@@ -1664,6 +1919,9 @@ impl WorkspaceStore {
     }
 
     pub fn open_preview_panel_for(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if !self.scope.is_full() {
+            return;
+        }
         let destination = if self
             .session_status_replica
             .as_ref()
@@ -2036,6 +2294,21 @@ impl WorkspaceStore {
     }
 
     pub fn session_unread(&self, session_id: &str) -> bool {
+        if !self.scope.is_full() {
+            return self
+                .index_replica
+                .0
+                .iter()
+                .find(|meta| meta.id == session_id)
+                .is_some_and(|meta| {
+                    self.settings_replica
+                        .last_visited
+                        .get(session_id)
+                        .copied()
+                        .unwrap_or(0)
+                        < meta.updated_at
+                });
+        }
         self.index_summary
             .activity
             .get(session_id)
@@ -2103,6 +2376,9 @@ impl WorkspaceStore {
     }
 
     pub fn shell_window_title(&self) -> String {
+        if !self.scope.is_full() {
+            return self.machine_label();
+        }
         match self.session_status_replica.as_ref() {
             Some(status) if status.draft => crate::tr!("chat.new_thread").into_owned(),
             Some(status) => status.title.clone(),
@@ -2146,6 +2422,9 @@ impl WorkspaceStore {
     }
 
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
+        if let Some(choice) = self.scoped_choice(profile_id) {
+            return choice.provider;
+        }
         self.settings_replica
             .resolved_profile(profile_id)
             .map(|profile| profile.kind)
@@ -2185,6 +2464,9 @@ impl WorkspaceStore {
     }
 
     pub fn provider_profile_display_name(&self, profile_id: &str) -> String {
+        if let Some(choice) = self.scoped_choice(profile_id) {
+            return choice.name.clone();
+        }
         self.settings_replica.profile_display_name(profile_id)
     }
 
@@ -2341,6 +2623,9 @@ impl WorkspaceStore {
     /// than logged away: an empty list and a broken host look identical to the
     /// user otherwise.
     pub fn scan_external_history(&self, cx: &mut App) -> Task<Result<Vec<RecentDir>, String>> {
+        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+            return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
+        }
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ScanExternalHistory).await {
@@ -2355,6 +2640,9 @@ impl WorkspaceStore {
     /// starting a run: a fast completion is only recoverable through the
     /// subscription snapshot, not through the start reply.
     pub fn watch_external_import(&self, project_id: &str) {
+        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+            return;
+        }
         if let Err(error) = self.host.subscribe(Subscription {
             after: None,
             topic: Topic::ExternalImport {
@@ -2662,6 +2950,9 @@ impl WorkspaceStore {
         &self,
         cx: &mut App,
     ) -> Task<Result<tcode_core::permissions::ComputerUsePermissions, String>> {
+        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+            return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
+        }
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ComputerUsePermissions).await {
@@ -2678,6 +2969,9 @@ impl WorkspaceStore {
         action: tcode_protocol::HostingAction,
         cx: &mut App,
     ) -> Task<Result<tcode_protocol::HostingState, String>> {
+        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+            return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
+        }
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::Hosting { action }).await {
@@ -2699,6 +2993,55 @@ impl WorkspaceStore {
                 Err(error) => Err(protocol_io_error(error.message)),
             },
         )
+    }
+
+    pub(crate) fn message_byline(&self, entry_id: &str) -> Option<String> {
+        let records = &self
+            .threads
+            .get(self.selected_session_id.as_ref()?)?
+            .history
+            .as_ref()?
+            .records;
+        let user_record = |record: &&StoredEvent| match &record.event {
+            agent::AgentEvent::ItemStarted(item)
+            | agent::AgentEvent::ItemUpdated(item)
+            | agent::AgentEvent::ItemCompleted(item) => {
+                matches!(item.content, agent::ItemContent::UserMessage { .. })
+            }
+            agent::AgentEvent::SteerRequested { .. } => true,
+            _ => false,
+        };
+        let authors: HashSet<Option<&str>> = records
+            .iter()
+            .filter(user_record)
+            .map(|record| {
+                record
+                    .author
+                    .as_ref()
+                    .map(|author| author.device_id.as_str())
+            })
+            .collect();
+        let record = records
+            .iter()
+            .filter(user_record)
+            .find(|record| match &record.event {
+                agent::AgentEvent::ItemStarted(item)
+                | agent::AgentEvent::ItemUpdated(item)
+                | agent::AgentEvent::ItemCompleted(item) => item.id == entry_id,
+                agent::AgentEvent::SteerRequested { request_id, .. } => request_id == entry_id,
+                _ => false,
+            })?;
+        let own_id = self.client_host.as_ref().map(|host| host.device_id());
+        let other = record.author.as_ref().map_or(self.is_remote(), |author| {
+            own_id.as_deref() != Some(author.device_id.as_str())
+        });
+        (authors.len() > 1 || other).then(|| {
+            record
+                .author
+                .as_ref()
+                .map(|author| author.name.clone())
+                .unwrap_or_else(|| crate::tr!("member.owner").into_owned())
+        })
     }
 
     pub fn with_active_timeline<R>(&self, read: impl FnOnce(&Timeline) -> R) -> Option<R> {
@@ -2870,6 +3213,13 @@ impl WorkspaceStore {
         path: Option<PathBuf>,
         cx: &mut App,
     ) -> Task<Result<tcode_protocol::CommandResponse, ProtocolError>> {
+        if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
+            return cx.spawn(async |_| {
+                Err(ProtocolError::out_of_scope(
+                    "project icons are managed by the space owner",
+                ))
+            });
+        }
         let host = self.host.clone();
         cx.spawn(async move |_| {
             let png = if let Some(path) = path {
@@ -3168,7 +3518,7 @@ impl EventEmitter<StoreChange> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use agent::{AgentEvent, ItemContent, ProviderKind, ThreadItem, TurnStatus};
     use gpui::{AppContext as _, TestAppContext};
     use tcode_core::{
@@ -3186,6 +3536,335 @@ mod tests {
         ConversationDestination, WorkspaceAttachment, WorkspaceStore, effective_client_settings,
         history::HeldHistory,
     };
+
+    pub(crate) fn seed_full_scope(
+        store: &gpui::Entity<WorkspaceStore>,
+        incoming: &async_channel::Sender<String>,
+        deferred: Vec<String>,
+        cx: &mut TestAppContext,
+    ) {
+        incoming
+            .try_send(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Scope,
+                    event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let link = store.read_with(cx, |store, _| store.host.clone());
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        for line in deferred {
+            incoming.try_send(line).unwrap();
+        }
+    }
+
+    struct ScriptedSpace {
+        link: tcode_client::HostLink,
+        scope: std::sync::Arc<std::sync::Mutex<tcode_protocol::Scope>>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<tcode_protocol::ClientMessage>>>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ScriptedSpace {
+        fn new() -> Self {
+            use tcode_protocol::{ClientPayload, CommandResponse, HostMessage, Scope};
+            let (to_host, requests) = async_channel::unbounded();
+            let (replies, from_host) = async_channel::unbounded();
+            let link = tcode_client::HostLink::new(to_host, from_host);
+            let project = project_at("shared", std::path::Path::new("/shared"));
+            let scope = std::sync::Arc::new(std::sync::Mutex::new(Scope::Space {
+                space_id: "space-one".into(),
+                space_name: "Team".into(),
+                projects: vec![project],
+                providers: vec![tcode_protocol::ScopedProviderChoice {
+                    provider: ProviderKind::Codex,
+                    profile_id: Some("team-agent".into()),
+                    name: "Team agent".into(),
+                    models: vec![agent::ModelSpec {
+                        id: "team-model".into(),
+                        display_name: "Team model".into(),
+                        is_default: true,
+                        options: Vec::new(),
+                    }],
+                }],
+            }));
+            let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let worker_scope = scope.clone();
+            let worker_recorded = recorded.clone();
+            let pump = link.clone();
+            let worker = std::thread::spawn(move || {
+                smol::block_on(futures_lite::future::race(pump.pump(), async move {
+                    while let Ok(line) = requests.recv().await {
+                        let request = tcode_protocol::decode_client_line(&line).unwrap();
+                        worker_recorded.lock().unwrap().push(request.clone());
+                        let scope = worker_scope.lock().unwrap().clone();
+                        let response = match request.payload {
+                            ClientPayload::Subscribe(subscription) => {
+                                let event = match (&subscription.topic, &scope) {
+                                    (Topic::Scope, _) => ServerEvent::ScopeSnapshot(scope.clone()),
+                                    (
+                                        Topic::SpaceIndex { space_id },
+                                        Scope::Space {
+                                            space_id: scoped_id,
+                                            projects,
+                                            ..
+                                        },
+                                    ) if space_id == scoped_id => {
+                                        let mut session = thread(
+                                            &projects[0].root,
+                                            "shared-thread",
+                                            &projects[0].id,
+                                            None,
+                                        );
+                                        session.updated_at = 100;
+                                        ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                                            projects: projects.clone(),
+                                            sessions: vec![session],
+                                            summary: Default::default(),
+                                        })
+                                    }
+                                    _ => panic!(
+                                        "unexpected member subscription: {:?}",
+                                        subscription.topic
+                                    ),
+                                };
+                                HostMessage::Event(EventEnvelope {
+                                    request_id: Some(request.id),
+                                    topic: subscription.topic,
+                                    event,
+                                })
+                            }
+                            ClientPayload::Command(Command::StartDraft { .. }) => {
+                                HostMessage::Ack {
+                                    id: request.id,
+                                    result: Ok(CommandResponse::SessionId(None)),
+                                }
+                            }
+                            ClientPayload::Command(_) => HostMessage::Ack {
+                                id: request.id,
+                                result: Ok(CommandResponse::Unit),
+                            },
+                            ClientPayload::Query(tcode_protocol::Query::Ping) => {
+                                HostMessage::QueryResult {
+                                    id: request.id,
+                                    result: Ok(tcode_protocol::QueryResponse::Pong),
+                                }
+                            }
+                            ClientPayload::Query(tcode_protocol::Query::ReadProjectIcon {
+                                ..
+                            }) => HostMessage::QueryResult {
+                                id: request.id,
+                                result: Err(tcode_protocol::ProtocolError {
+                                    code: "not_found".into(),
+                                    message: "no project icon".into(),
+                                }),
+                            },
+                            ClientPayload::Unsubscribe(_) => continue,
+                            other => panic!("unexpected member request: {other:?}"),
+                        };
+                        if replies
+                            .send(tcode_protocol::encode_line(&response).unwrap())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }));
+            });
+            Self {
+                link,
+                scope,
+                requests: recorded,
+                worker: Some(worker),
+            }
+        }
+
+        fn store(&self, cx: &mut TestAppContext) -> gpui::Entity<WorkspaceStore> {
+            cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    self.link.clone(),
+                    WorkspaceAttachment::Remote {
+                        host_id: "machine".into(),
+                        host_name: "Studio".into(),
+                    },
+                    None,
+                    None,
+                    true,
+                    cx,
+                )
+            })
+        }
+
+        fn barrier(&self) {
+            smol::block_on(self.link.query(tcode_protocol::Query::Ping)).unwrap();
+        }
+    }
+
+    impl Drop for ScriptedSpace {
+        fn drop(&mut self) {
+            self.link.close();
+            self.worker.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn member_scope_seeds_only_the_space_index_and_reseeds_on_reconnect(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let host = ScriptedSpace::new();
+        let workspace = host.store(cx);
+        host.barrier();
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(
+                store
+                    .projects()
+                    .iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["shared"]
+            );
+            assert_eq!(store.grouped_sessions()[0].sessions[0].id, "shared-thread");
+            assert_eq!(store.enabled_profiles()[0].id, "team-agent");
+            assert_eq!(
+                store.picker_models_for_profile("team-agent")[0].id,
+                "team-model"
+            );
+            assert!(store.settings_hydrated());
+        });
+        let subscriptions = host
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|request| match &request.payload {
+                tcode_protocol::ClientPayload::Subscribe(subscription) => {
+                    Some(subscription.topic.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            subscriptions,
+            [
+                Topic::Scope,
+                Topic::SpaceIndex {
+                    space_id: "space-one".into()
+                }
+            ]
+        );
+        workspace.update(cx, |store, _| {
+            store.set_sidebar_layout(tcode_core::settings::SidebarLayout::Grouped)
+        });
+        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let (_sidebar, cx) = cx.add_window_view(|_, cx| {
+            crate::sidebar::SessionsSidebar::new(workspace.clone(), window_state, cx)
+        });
+        cx.simulate_resize(gpui::size(gpui::px(360.), gpui::px(800.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("project-header-shared").is_some(),
+            "the scoped project renders in the sidebar"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-thread-shared-thread").is_some(),
+            "the scoped conversation renders in the sidebar"
+        );
+        *host.scope.lock().unwrap() = tcode_protocol::Scope::Space {
+            space_id: "space-two".into(),
+            space_name: "Moved".into(),
+            projects: vec![project_at("other", std::path::Path::new("/other"))],
+            providers: Vec::new(),
+        };
+        workspace.update(cx, |store, _| {
+            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            });
+            store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
+        });
+        wait_until(cx, &workspace, "new space baseline", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.projects().first().is_some_and(|p| p.id == "other") && store.index_hydrated()
+            })
+        });
+        host.barrier();
+        workspace.read_with(cx, |store, _| {
+            assert!(store.enabled_profiles().is_empty());
+            assert_eq!(
+                store.index_topic(),
+                Topic::SpaceIndex {
+                    space_id: "space-two".into()
+                }
+            );
+        });
+        assert!(
+            host.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| !matches!(
+                    &request.payload,
+                    tcode_protocol::ClientPayload::Subscribe(tcode_protocol::Subscription {
+                        topic: Topic::Index
+                            | Topic::Settings
+                            | Topic::Providers
+                            | Topic::RuntimeEvents
+                            | Topic::Preview { .. }
+                            | Topic::ExternalImport { .. },
+                        ..
+                    })
+                ))
+        );
+    }
+
+    #[gpui::test]
+    fn member_sidebar_and_read_preferences_change_without_host_commands(cx: &mut TestAppContext) {
+        let host = ScriptedSpace::new();
+        let workspace = host.store(cx);
+        host.barrier();
+        host.requests.lock().unwrap().clear();
+        workspace.update(cx, |store, cx| {
+            store.toggle_project_collapsed("shared".into(), cx);
+            store.set_thread_collapsed("shared-thread".into(), true, cx);
+            store.set_sidebar_collapsed(true, cx);
+            store.cycle_project_sort(cx);
+            store.toggle_favorite_model("team-model".into(), cx);
+            store.mark_session_unread("shared-thread".into(), cx);
+            assert!(store.session_unread("shared-thread"));
+            store.dispatch(Command::MarkSessionRead {
+                session_id: "shared-thread".into(),
+                through: 100,
+            });
+            assert!(!store.session_unread("shared-thread"));
+            assert!(store.is_project_collapsed("shared"));
+            assert!(store.is_thread_collapsed("shared-thread"));
+            assert!(store.settings().sidebar_collapsed);
+            assert_eq!(
+                store.project_sort(),
+                tcode_core::settings::ProjectSort::NameAsc
+            );
+            assert_eq!(store.settings().favorite_models, ["team-model"]);
+        });
+        host.barrier();
+        assert!(
+            host.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| !matches!(
+                    &request.payload,
+                    tcode_protocol::ClientPayload::Command(_)
+                ))
+        );
+    }
 
     #[cfg(all(
         feature = "native-preview",
@@ -3247,6 +3926,7 @@ mod tests {
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -3258,6 +3938,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         store.update(cx, |store, _| {
             store.selected_session_id = Some("scripted".into());
             store.send_turn("hello".into(), Vec::new());
@@ -3451,6 +4132,7 @@ mod tests {
     fn archived_list_coalesces_revision_changes_and_reloads_a_stale_reply(cx: &mut TestAppContext) {
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -3462,6 +4144,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         let mut pump = std::pin::pin!(link.pump());
         let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
         let queries = || {
@@ -3606,6 +4289,7 @@ mod tests {
                 cx,
             )
         });
+        seed_full_scope(&store, &_incoming, Vec::new(), cx);
         let window_state =
             cx.new(|_| crate::window_state::WindowState::new(false).with_compact(true));
         let (_sidebar, cx) = cx.add_window_view(|_, cx| {
@@ -3773,6 +4457,7 @@ mod tests {
                 cx,
             )
         });
+        seed_full_scope(&workspace, &_incoming, Vec::new(), cx);
         workspace.update(cx, |store, cx| {
             let task_count = store.attachment_tasks.len();
             for index in 0..20 {
@@ -3839,6 +4524,7 @@ mod tests {
                 cx,
             )
         });
+        seed_full_scope(&workspace, &_incoming, Vec::new(), cx);
         workspace.update(cx, |store, cx| {
             store.select_session("large".into());
             let records = (450..500)
@@ -3953,10 +4639,12 @@ mod tests {
         use tcode_protocol::IndexSummary;
         let (to_host, _outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
+        crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
         let topic = Topic::SessionEvents {
             session_id: "merged".into(),
         };
@@ -4049,10 +4737,12 @@ mod tests {
     fn a_thread_is_reported_read_once_its_conversation_loads(cx: &mut TestAppContext) {
         let (to_host, outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
+        crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
         let reads = || {
             std::iter::from_fn(|| outgoing.try_recv().ok())
                 .filter_map(|line| {
@@ -4083,7 +4773,7 @@ mod tests {
             store.settings_replica.last_visited =
                 std::collections::HashMap::from([("left".into(), 50), ("shown".into(), 50)]);
 
-            store.set_conversation_on_screen(true);
+            store.set_conversation_on_screen(true, cx);
             store.select_session("left".into());
             store.leave_session();
             store.apply_domain_event(&session_snapshot("left", 0, vec![reply(1)]), cx);
@@ -4093,10 +4783,10 @@ mod tests {
             assert_eq!(reads(), [], "nothing has loaded yet");
             // A compact window went back to the thread list, which keeps the
             // thread selected, before the conversation arrived.
-            store.set_conversation_on_screen(false);
+            store.set_conversation_on_screen(false, cx);
             store.apply_domain_event(&session_snapshot("shown", 0, vec![reply(1)]), cx);
             assert_eq!(reads(), [], "loaded behind the thread list");
-            store.set_conversation_on_screen(true);
+            store.set_conversation_on_screen(true, cx);
             assert_eq!(reads(), [("shown".to_string(), 100)]);
             store.apply_domain_event(&upsert("left", 110), cx);
             assert_eq!(reads(), [], "unchanged for the thread on screen");
@@ -4120,6 +4810,7 @@ mod tests {
 
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
         let executor = cx.background_executor.clone();
@@ -4131,6 +4822,7 @@ mod tests {
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
+        crate::store::tests::seed_full_scope(&workspace, &incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
             store.selected_session_id = Some("large".into());
             store.session_status_replica = Some(status);
@@ -4441,6 +5133,7 @@ mod tests {
         for status_first in [false, true] {
             let (to_host, _outgoing) = async_channel::unbounded();
             let (_incoming, from_host) = async_channel::unbounded();
+            let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
             let link = tcode_client::HostLink::new(to_host, from_host);
             let workspace = cx.new(|cx| {
                 WorkspaceStore::new_attached(
@@ -4452,6 +5145,7 @@ mod tests {
                     cx,
                 )
             });
+            crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
             let open_question = |cx: &TestAppContext| {
                 workspace.read_with(cx, |store, _| {
                     store
@@ -4508,10 +5202,12 @@ mod tests {
         let id = status.session_id.clone();
         let (to_host, outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
+        crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
             store.selected_session_id = Some(id.clone());
             store.session_status_replica = Some(status);
@@ -4595,6 +5291,10 @@ mod tests {
         workspace.update(cx, |store, cx| {
             let status = store.session_status_replica.clone().unwrap();
             let snapshots = [
+                (
+                    Topic::Scope,
+                    ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                ),
                 (
                     Topic::Index,
                     ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
@@ -4956,6 +5656,7 @@ mod tests {
     fn delete_confirmation_counts_archived_descendants(cx: &mut TestAppContext) {
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -4967,6 +5668,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         let mut pump = std::pin::pin!(link.pump());
         let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
         let root = std::path::Path::new("/project");
@@ -5047,6 +5749,7 @@ mod tests {
         let delete_all = |cx: &mut TestAppContext, index, archived| {
             let (to_host, requests) = async_channel::unbounded();
             let (replies, from_host) = async_channel::unbounded();
+            let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
             let link = tcode_client::HostLink::new(to_host, from_host);
             let store = cx.new(|cx| {
                 WorkspaceStore::new_attached(
@@ -5058,6 +5761,7 @@ mod tests {
                     cx,
                 )
             });
+            crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
             let mut pump = std::pin::pin!(link.pump());
             let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
             // A thread on screen, so the empty-workspace draft does not open.
