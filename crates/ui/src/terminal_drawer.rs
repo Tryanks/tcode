@@ -1366,11 +1366,13 @@ impl TerminalDrawer {
                 this.child(
                     Button::new(("terminal-add-context", terminal_id))
                         .absolute()
+                        .block_mouse_except_scroll()
                         .right(px(PANE_PADDING))
                         .top(px(PANE_PADDING))
                         .small()
                         .label(crate::tr!("terminal.add_context"))
                         .tooltip(format!("{} · {}", label, crate::tr!("terminal.selection")))
+                        // The terminal must keep the selection this action captures.
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_store.update(cx, |store, _cx| {

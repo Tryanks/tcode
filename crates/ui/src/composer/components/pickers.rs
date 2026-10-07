@@ -1614,7 +1614,11 @@ fn render_fast_mode_bolt(
         _ => ("icons/zap.svg", theme.muted_foreground),
     };
     let icon = Icon::empty().path(path).text_color(color);
-    let wrapper = div().absolute().top_1().right_1().occlude();
+    let wrapper = div()
+        .absolute()
+        .top_1()
+        .right_1()
+        .block_mouse_except_scroll();
     let Some(fast) = fast else {
         // Inert: no hover affordance, just the desktop tooltip explaining why.
         let tooltip = crate::tr!("composer.fast_mode_unsupported");
