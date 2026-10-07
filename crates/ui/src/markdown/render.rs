@@ -1102,8 +1102,7 @@ fn render_code_block(
             copied,
             compact,
             move |_, window, cx| {
-                gpui_base::TextSelection::end(window, cx);
-                cx.stop_propagation();
+                crate::widgets::stop_click_propagation(window, cx);
                 view.update(cx, |state, cx| {
                     state.copy_code(path.clone(), code.clone(), cx)
                 });
@@ -1112,6 +1111,7 @@ fn render_code_block(
         );
         let corner = div()
             .absolute()
+            .block_mouse_except_scroll()
             .top_1()
             .right_1()
             .rounded(cx.theme().tokens.radius.md)
@@ -1173,8 +1173,7 @@ fn render_diagram(
     .object_fit(ObjectFit::Contain)
     .cursor_pointer()
     .on_click(move |_, window, cx| {
-        gpui_base::TextSelection::end(window, cx);
-        cx.stop_propagation();
+        crate::widgets::stop_click_propagation(window, cx);
         crate::image_viewer::open(
             lightbox_source.clone(),
             lightbox_label.to_string(),
