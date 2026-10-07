@@ -881,7 +881,7 @@ impl AppState {
             }
             return;
         }
-        if let Some(mut snapshot) = self.subscription_snapshot(&subscription) {
+        if let Some(mut snapshot) = self.subscription_snapshot(&subscription, &cx.principal) {
             snapshot.request_id = request_id;
             cx.emit(HostEvent::Domain(snapshot));
         }
@@ -971,9 +971,18 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<QueryResponse, tcode_protocol::ProtocolError>> {
         let read_id = session_id.to_string();
+        let scoped = matches!(cx.principal, tcode_protocol::Principal::Space { .. });
         self.query_session_log(
             session_id,
-            move |log| log.item_output(&read_id, &item_id),
+            move |log| {
+                log.item_output(&read_id, &item_id).map_err(|error| {
+                    if scoped && error.code == "unknown_item_output" {
+                        ProtocolError::out_of_scope("item is outside this session")
+                    } else {
+                        error
+                    }
+                })
+            },
             cx,
         )
     }

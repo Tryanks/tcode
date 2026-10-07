@@ -13,6 +13,7 @@ pub struct QueuedMessage {
     /// as earlier entries are dispatched out from under it.
     pub id: u64,
     pub(super) delivery_key: Option<String>,
+    pub author: Option<Author>,
     pub text: String,
     /// Provider-only context for the first turn after a relay. The canonical
     /// user event continues to record only `text`.
@@ -145,6 +146,7 @@ pub struct ActiveSession {
     /// A draft thread: set up (provider/model/cwd) but not yet persisted or
     /// started. Materialized into a real session on the first send.
     pub draft: bool,
+    pub(super) draft_device_id: Option<String>,
     /// The provider/model that owns the current native history while the picker
     /// previews a different provider. Consumed only by a confirmed send.
     pub(super) pending_relay: Option<PendingRelay>,
@@ -216,6 +218,7 @@ impl ActiveSession {
             git_branch: None,
             branches: Vec::new(),
             draft,
+            draft_device_id: None,
             pending_relay: None,
             runtime: Runtime::Idle,
             live_model: None,
@@ -442,6 +445,7 @@ impl ActiveSession {
         let context_window_changed = self.context_window_change();
         self.queue.push(QueuedMessage {
             delivery_key: None,
+            author: None,
             id,
             text,
             relay_transcript: None,
@@ -488,6 +492,7 @@ impl ActiveSession {
         let options = self.turn_options();
         self.queue.push(QueuedMessage {
             delivery_key: None,
+            author: None,
             id,
             text,
             relay_transcript: None,
