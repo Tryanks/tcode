@@ -34,8 +34,6 @@ impl Drop for TestDir {
     }
 }
 
-/// Acks every command, answers every subscription with an index event and
-/// `create_project` with a broadcast event; records every dedup key.
 fn fake_host() -> (HostMux, Arc<std::sync::Mutex<Vec<String>>>) {
     let (to_host, host_rx) = async_channel::unbounded::<String>();
     let (host_tx, from_host) = async_channel::unbounded::<String>();
@@ -43,31 +41,48 @@ fn fake_host() -> (HostMux, Arc<std::sync::Mutex<Vec<String>>>) {
     let seen = keys.clone();
     std::thread::spawn(move || {
         while let Ok(line) = host_rx.recv_blocking() {
-            let value: Value = serde_json::from_str(line.trim_end()).unwrap();
-            let id = value["id"].as_u64().unwrap();
-            if let Some(key) = value["key"].as_str() {
-                seen.lock().unwrap().push(key.to_owned());
+            let request = tcode_protocol::decode_client_line(&line).unwrap();
+            let id = request.id;
+            if let Some(key) = request.key {
+                seen.lock().unwrap().push(key);
             }
-            if value["payload"]["type"] == "subscribe" {
+            if let tcode_protocol::ClientPayload::Subscribe(subscription) = &request.payload {
+                let snapshot = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: Some(id),
+                    topic: subscription.topic.clone(),
+                    event: tcode_protocol::ServerEvent::IndexSnapshot(
+                        tcode_protocol::IndexSnapshot {
+                            summary: tcode_protocol::IndexSummary::default(),
+                            sessions: Vec::new(),
+                            projects: Vec::new(),
+                        },
+                    ),
+                });
                 host_tx
-                    .send_blocking(
-                        json!({"type": "event", "content": {"topic": "index", "event": {"type": "index_snapshot", "content": {"sessions": [], "projects": []}}}})
-                            .to_string(),
-                    )
+                    .send_blocking(tcode_protocol::encode_line(&snapshot).unwrap())
                     .unwrap();
             }
-            if value["payload"]["content"]["type"] == "create_project" {
+            let mut response = tcode_protocol::CommandResponse::Unit;
+            if let tcode_protocol::ClientPayload::Command(
+                tcode_protocol::Command::CreateProject { root },
+            ) = &request.payload
+            {
+                let broadcast = tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: None, topic: tcode_protocol::Topic::Index,
+                    event: serde_json::from_value(json!({"type":"index_upsert_project","content":{"id":"project","name":"Shared","root":root,"created_at":1}})).unwrap(),
+                });
                 host_tx
-                    .send_blocking(
-                        json!({"type": "event", "content": {"topic": "index", "event": {"type": "project_created", "content": {"path": value["payload"]["content"]["content"]["path"]}}}})
-                            .to_string(),
-                    )
+                    .send_blocking(tcode_protocol::encode_line(&broadcast).unwrap())
                     .unwrap();
+                response = tcode_protocol::CommandResponse::ProjectId(Some("project".into()));
             }
             host_tx
                 .send_blocking(
-                    json!({"type": "ack", "content": {"id": id, "result": {"Ok": {"type": "unit"}}}})
-                        .to_string(),
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                        id,
+                        result: Ok(response),
+                    })
+                    .unwrap(),
                 )
                 .unwrap();
         }
@@ -313,6 +328,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
     config.hosting = Some(Arc::new(move |action| {
         seen.lock().unwrap().push(format!("{action:?}"));
         Ok(tcode_protocol::HostingState {
+            spaces: Vec::new(),
             enabled: true,
             invite: Some(
                 "tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host".into(),
@@ -321,6 +337,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
             host_id: "machine".into(),
             host_name: "Test Host".into(),
             devices: vec![tcode_protocol::HostedDevice {
+                access: tcode_protocol::DeviceAccess::Full,
                 id: "phone".into(),
                 name: "Phone".into(),
                 created_unix: 1,
@@ -382,7 +399,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
 
         // The key is scoped to the browser's token, never to a client-chosen prefix.
         browser
-            .send(json!({"id":1,"key":"spoofed:0ec1ee7e-9f37-4bd8-9e04-9a1d84e9a8b4","payload":{"type":"command","content":{"type":"create_project","content":{"path":"/tmp/one"}}}}))
+            .send(json!({"id":1,"key":"spoofed:0ec1ee7e-9f37-4bd8-9e04-9a1d84e9a8b4","payload":{"type":"command","content":{"type":"create_project","content":{"root":"/tmp/one"}}}}))
             .await;
         assert!(
             browser.closed_within(Duration::from_secs(5)).await,
@@ -390,7 +407,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
         );
         let (mut browser, _) = Browser::hello(addr, hello(&token, "Chrome")).await;
         browser
-            .send(json!({"id":1,"key":"0ec1ee7e-9f37-4bd8-9e04-9a1d84e9a8b4","payload":{"type":"command","content":{"type":"create_project","content":{"path":"/tmp/one"}}}}))
+            .send(json!({"id":1,"key":"0ec1ee7e-9f37-4bd8-9e04-9a1d84e9a8b4","payload":{"type":"command","content":{"type":"create_project","content":{"root":"/tmp/one"}}}}))
             .await;
         assert_eq!(browser.recv().await["type"], "ack");
         let keys = keys.lock().unwrap().clone();
@@ -446,16 +463,14 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
         let (mut two, _) = Browser::hello(addr, hello(&tokens[1], "Firefox")).await;
         for (browser, id) in [(&mut one, 7), (&mut two, 7)] {
             browser
-                .send(json!({"id":id,"payload":{"type":"subscribe","content":{"topic":"index"}}}))
+                .send(json!({"id":id,"payload":{"type":"subscribe","content":{"topic":{"type":"index"}}}}))
                 .await;
             let mut kinds = vec![browser.recv().await["type"].as_str().unwrap().to_owned()];
             kinds.push(browser.recv().await["type"].as_str().unwrap().to_owned());
             kinds.sort();
             assert_eq!(kinds, ["ack", "event"]);
         }
-        // The second subscription's snapshot is broadcast to the first too.
-        assert_eq!(one.recv().await["type"], "event");
-        one.send(json!({"id":8,"payload":{"type":"command","content":{"type":"create_project","content":{"path":"/tmp/shared"}}}}))
+        one.send(json!({"id":8,"payload":{"type":"command","content":{"type":"create_project","content":{"root":"/tmp/shared"}}}}))
             .await;
         let mut seen = [one.recv().await, one.recv().await];
         seen.sort_by_key(|value| value["type"].as_str().unwrap().to_owned());
@@ -464,10 +479,10 @@ fn two_browsers_get_their_own_acks_and_shared_broadcasts() {
             seen[0]["content"]["id"], 8,
             "acks carry the browser's own id"
         );
-        assert_eq!(seen[1]["content"]["event"]["type"], "project_created");
+        assert_eq!(seen[1]["content"]["event"]["type"], "index_upsert_project");
         let broadcast = two.recv().await;
         assert_eq!(
-            broadcast["content"]["event"]["type"], "project_created",
+            broadcast["content"]["event"]["type"], "index_upsert_project",
             "a subscribed browser sees the other's broadcast"
         );
         // A reply to this later command is an ordered barrier: any leaked

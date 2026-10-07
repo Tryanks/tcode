@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
 use tcode_protocol::{
-    ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, ProtocolError, Query,
-    QueryResponse, decode_client_line,
+    ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
+    Query, QueryResponse, decode_client_line,
 };
 #[cfg(test)]
 use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
@@ -226,7 +226,13 @@ fn malformed_message_id(line: &str) -> Option<u64> {
 }
 
 pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, message: ClientMessage) {
-    let ClientMessage { id, payload, key } = message;
+    let ClientMessage {
+        id,
+        payload,
+        key,
+        principal,
+    } = message;
+    cx.principal = principal.unwrap_or(Principal::Full);
     match payload {
         ClientPayload::Command(command) => {
             let scoped_key = key.filter(|_| command.requires_delivery_key()).map(|key| {
@@ -242,6 +248,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
                     let result = cached.1.clone();
                     cache.push_back(cached);
                     cx.send_message(HostMessage::Ack { id, result });
+                    cx.principal = Principal::Full;
                     return;
                 }
             }
@@ -301,6 +308,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
             });
         }
     }
+    cx.principal = Principal::Full;
 }
 
 enum CommandOutcome {
@@ -1309,6 +1317,47 @@ mod tests {
     }
 
     #[test]
+    fn scope_and_space_index_subscriptions_reply_over_the_host_pipe() {
+        let root = std::env::temp_dir().join(format!("tcode-scope-{}", uuid::Uuid::new_v4()));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let link = host.link();
+        let events = link.events();
+        for (topic, expected) in [
+            (
+                Topic::Scope,
+                ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+            ),
+            (
+                Topic::SpaceIndex {
+                    space_id: "shared".into(),
+                },
+                ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    summary: tcode_protocol::IndexSummary::default(),
+                    projects: vec![],
+                    sessions: vec![],
+                }),
+            ),
+        ] {
+            link.subscribe(Subscription {
+                topic: topic.clone(),
+                after: None,
+            })
+            .unwrap();
+            let snapshot = next_event(&events, |event| event.topic == topic);
+            assert_eq!(snapshot.event, expected);
+            assert!(snapshot.request_id.is_some());
+        }
+        link.shutdown_blocking().unwrap();
+        host.stopped.recv_blocking().unwrap();
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn project_icons_replicate_persist_and_reset_to_t3_config() {
         let root =
             std::env::temp_dir().join(format!("tcode-project-icons-{}", uuid::Uuid::new_v4()));
@@ -1620,6 +1669,7 @@ mod tests {
                 "{:?}",
                 Timeline::fold_events(legacy_events().into_iter().map(|(ts, event)| {
                     StoredEvent {
+                        author: None,
                         ts,
                         event,
                         elided: None,

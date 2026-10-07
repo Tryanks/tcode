@@ -316,6 +316,12 @@ impl AppState {
     ) -> Option<EventEnvelope> {
         let topic = &subscription.topic;
         let event = match topic {
+            Topic::Scope => ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+            Topic::SpaceIndex { .. } => ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary: IndexSummary::default(),
+                sessions: Vec::new(),
+                projects: Vec::new(),
+            }),
             Topic::Index => ServerEvent::IndexSnapshot(self.index_snapshot()),
             Topic::Settings => ServerEvent::SettingsSnapshot(self.settings_snapshot()),
             Topic::Providers => ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),

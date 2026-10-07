@@ -224,6 +224,7 @@ fn without_diffs(line: &[u8]) -> io::Result<Option<(Vec<u8>, StoredEvent)>> {
     }
     let mut rewritten = match stored.ts {
         Some(ts) => serde_json::to_vec(&EventEnvelopeRef {
+            author: stored.author.as_ref(),
             ts,
             event: &stored.event,
         }),
@@ -238,7 +239,7 @@ fn without_diffs(line: &[u8]) -> io::Result<Option<(Vec<u8>, StoredEvent)>> {
             "a turn-changes snapshot without its diffs does not read back as itself",
         ));
     }
-    Ok(Some((rewritten, stored)))
+    Ok(Some((rewritten, *stored)))
 }
 
 /// Forget that the thread's rows were dealt with, for a write that replaced

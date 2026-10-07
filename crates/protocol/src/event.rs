@@ -26,6 +26,8 @@ pub enum Topic {
     SessionStatus { session_id: String },
     SessionPlan { session_id: String },
     Index,
+    SpaceIndex { space_id: String },
+    Scope,
     Settings,
     Providers,
     GitStatus { session_id: String },
@@ -134,6 +136,8 @@ pub enum ServerEvent {
     },
     SessionHistoryError(crate::ProtocolError),
     IndexSnapshot(IndexSnapshot),
+    ScopeSnapshot(Scope),
+    ScopeReplaced(Scope),
     SettingsSnapshot(Settings),
     /// The current (or latest) external-import run for one project. `None`
     /// means no run has ever started, or the project is gone. Only the latest
@@ -143,6 +147,26 @@ pub enum ServerEvent {
         project_id: String,
         status: Option<ExternalImportStatus>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum Scope {
+    Full,
+    Space {
+        space_id: String,
+        space_name: String,
+        projects: Vec<Project>,
+        providers: Vec<ScopedProviderChoice>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScopedProviderChoice {
+    pub provider: ProviderKind,
+    pub profile_id: Option<String>,
+    pub name: String,
+    pub models: Vec<agent::ModelSpec>,
 }
 
 /// Host-owned progress for one external-history import run.

@@ -553,6 +553,7 @@ impl AppState {
 
     fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
         let record = SessionEventRecord {
+            author: None,
             ts: Some(ts),
             event: event.clone(),
             elided: None,
