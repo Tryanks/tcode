@@ -429,6 +429,53 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         ),
         QueryResponse::FileBytes(b"A".to_vec())
     );
+    host.subscribe(
+        member.clone(),
+        Topic::SessionStatus {
+            session_id: "a".into(),
+        },
+    );
+    denied(host.request(
+        member.clone(),
+        ClientPayload::Command(Command::SendTurn {
+            session_id: "a".into(),
+            text: "attachment".into(),
+            attachment_paths: vec![host.a.root.join("visible.txt")],
+        }),
+    ));
+    denied(host.request(
+        member.clone(),
+        ClientPayload::Query(Query::RemoveUserFile {
+            path: host.a.root.join("visible.txt"),
+        }),
+    ));
+    let ServerEvent::SessionStatusReplaced(status) = host
+        .event(|event| matches!(&event.event, ServerEvent::SessionStatusReplaced(status) if status.session_id == "a") && event.request_id.is_some())
+        .event
+    else {
+        panic!("session status")
+    };
+    let QueryResponse::SavedAttachment(path) = host.query(
+        member.clone(),
+        Query::SaveAttachment {
+            dir: status.attachments_dir,
+            bytes: b"A".to_vec(),
+            ext: "txt".into(),
+        },
+    ) else {
+        panic!("saved attachment")
+    };
+    assert_eq!(
+        host.command(
+            member.clone(),
+            Command::SendTurn {
+                session_id: "a".into(),
+                text: "attachment".into(),
+                attachment_paths: vec![path],
+            },
+        ),
+        CommandResponse::Unit
+    );
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(
