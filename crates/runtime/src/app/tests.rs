@@ -8866,6 +8866,7 @@ fn tool_call(id: &str, output: String) -> SessionEventRecord {
             id: id.into(),
             parent_item_id: None,
             content: ItemContent::ToolCall {
+                image_reads: Vec::new(),
                 name: "screenshot".into(),
                 input: serde_json::json!({}),
                 output: Some(output),
@@ -8886,6 +8887,19 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     let preview = tcode_protocol::OUTPUT_PREVIEW_BYTES;
     let tool_output = format!("{}{}", "a".repeat(preview), "é".repeat(50_000));
     let command_output = format!("{}{}", "b".repeat(100_000), "z".repeat(preview));
+    let image_content = serde_json::json!([
+        {"type":"text", "text":"Dimensions: 1 × 1"},
+        {"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":"AQID"}}
+    ]);
+    let image_output = image_content.to_string();
+    let mut image_record = tool_call("image", image_output.clone());
+    if let AgentEvent::ItemCompleted(ThreadItem {
+        content: ItemContent::ToolCall { image_reads, .. },
+        ..
+    }) = &mut image_record.event
+    {
+        *image_reads = agent::tool_result_images("Read", &image_content);
+    }
     let records = vec![
         tool_call("tool", tool_output.clone()),
         SessionEventRecord {
@@ -8904,6 +8918,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
             elided: None,
         },
         tool_call("small", "ok".into()),
+        image_record,
     ];
     state.update(cx, |state, _| {
         state
@@ -8946,6 +8961,37 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
         );
         assert_eq!(sent[1].elided, Some(command_output.len() as u64));
         assert_eq!(sent[2], records[2], "a small output crosses whole");
+        let AgentEvent::ItemCompleted(ThreadItem {
+            content: ItemContent::ToolCall { image_reads, .. },
+            ..
+        }) = &sent[3].event
+        else {
+            panic!("image tool")
+        };
+        assert!(!serde_json::to_string(&sent[3]).unwrap().contains("AQID"));
+        assert_eq!(
+            state.event_records["outputs"]
+                .item_output("outputs", "image")
+                .unwrap(),
+            QueryResponse::ItemOutput(image_output.clone())
+        );
+        assert_eq!(image_reads.len(), 1);
+        assert_eq!(image_reads[0].media_type, "image/png");
+        assert!(
+            image_reads[0].data_base64.is_empty(),
+            "pixels stay on the host even with a short text output"
+        );
+        assert_eq!(
+            state.event_records["outputs"]
+                .item_image("image", 0)
+                .unwrap(),
+            QueryResponse::FileBytes(vec![1, 2, 3])
+        );
+        assert!(
+            state.event_records["outputs"]
+                .item_image("image", 1)
+                .is_err()
+        );
 
         let timeline = Timeline::fold_events(sent);
         assert_eq!(
@@ -8953,6 +8999,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
             HashMap::from([
                 ("tool".to_string(), tool_output.len() as u64),
                 ("command".to_string(), command_output.len() as u64),
+                ("image".to_string(), image_output.len() as u64),
             ])
         );
         assert_eq!(

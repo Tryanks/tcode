@@ -130,6 +130,7 @@ impl TranscriptMapper {
                     events.push(AgentEvent::ItemStarted(self.item(
                         id,
                         ItemContent::ToolCall {
+                            image_reads: Vec::new(),
                             name,
                             input,
                             output: None,
@@ -196,6 +197,7 @@ impl TranscriptMapper {
                     events.push(AgentEvent::ItemCompleted(self.item(
                         id,
                         ItemContent::ToolCall {
+                            image_reads: Vec::new(),
                             name,
                             input,
                             output: Some(output),

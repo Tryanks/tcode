@@ -576,6 +576,7 @@ struct Actor {
     lines: Receiver<ChildOutput>,
     events: Sender<AgentEvent>,
     thread_id: String,
+    cwd: PathBuf,
     /// Resolved model slug; used for `collaborationMode.settings.model`.
     model: Option<String>,
     /// Session reasoning effort (`reasoningEffort` selection), if any.
@@ -672,6 +673,7 @@ async fn run_actor(
         lines,
         events,
         thread_id: thread_id.clone(),
+        cwd: opts.cwd.clone(),
         model: model.clone(),
         effort: codex_effort(&opts.option_selections),
         service_tier: codex_service_tier(&opts.option_selections),
@@ -1386,6 +1388,41 @@ fn settle_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
 }
 
 impl Actor {
+    async fn capture_read_image(&mut self, item: &mut ThreadItem) {
+        use base64::Engine as _;
+        let ItemContent::ImageRead { path, image } = &mut item.content else {
+            return;
+        };
+        if let Some(ThreadItem {
+            content: ItemContent::ImageRead {
+                image: Some(saved), ..
+            },
+            ..
+        }) = self.items.get(&item.id)
+        {
+            *image = Some(saved.clone());
+            return;
+        }
+        let path = self.cwd.join(path);
+        match smol::fs::read(&path).await {
+            Ok(bytes) => {
+                *image = Some(crate::Attachment {
+                    media_type: match path.extension().and_then(|ext| ext.to_str()) {
+                        Some("jpg" | "jpeg") => "image/jpeg",
+                        Some("webp") => "image/webp",
+                        Some("gif") => "image/gif",
+                        _ => "image/png",
+                    }
+                    .into(),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    source_path: None,
+                });
+                self.items.insert(item.id.clone(), item.clone());
+            }
+            Err(error) => log::warn!("could not preserve image read {}: {error}", path.display()),
+        }
+    }
+
     async fn handle_auto_review(&mut self, params: &Value) {
         let review = params.get("review").unwrap_or(&Value::Null);
         let status = review
@@ -1420,6 +1457,7 @@ impl Actor {
             // parent_item_id routes items to subagent mirrors; the reviewed action stays in this chat.
             parent_item_id: None,
             content: ItemContent::ToolCall {
+                image_reads: Vec::new(),
                 name: "Auto-reviewer".into(),
                 input: json!({"summary":summary, "targetItemId":params.get("targetItemId")}),
                 output: Some(detail),
@@ -1963,6 +2001,7 @@ impl Actor {
                 )
                 && let Some(mut item) = map_item(value)
             {
+                self.capture_read_image(&mut item).await;
                 let thread_id = thread_id.expect("child notification has a thread id");
                 let parent_id = self
                     .subagent_parent_by_thread
@@ -2074,6 +2113,7 @@ impl Actor {
                     _ => {}
                 }
                 if let Some(mut item) = item_value.and_then(map_item) {
+                    self.capture_read_image(&mut item).await;
                     if let Some(subagent) = self.subagents.get(&item.id) {
                         let status = if method == "item/completed" {
                             item_status(&item.content)
@@ -3222,6 +3262,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         // `request_user_input_async` output: the text only lists the questions
         // the input panel shows, so the transcript records the tool call.
         "agentMessage" if has_async_questions(item) => ItemContent::ToolCall {
+            image_reads: Vec::new(),
             name: ASYNC_QUESTION_TOOL.into(),
             input: json!({ "questions": item.get("questions").cloned().unwrap_or_default() }),
             output: None,
@@ -3255,6 +3296,20 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
         "mcpToolCall" | "dynamicToolCall" => ItemContent::ToolCall {
+            image_reads: if item.get("status").and_then(Value::as_str) == Some("completed")
+                && item.get("error").is_none_or(Value::is_null)
+                && item.get("success").and_then(Value::as_bool) != Some(false)
+                && item.pointer("/result/isError").and_then(Value::as_bool) != Some(true)
+                && crate::image_reads::is_read_tool(&string_field(item, "tool"))
+            {
+                crate::image_reads::content_images(
+                    item.pointer("/result/content")
+                        .or_else(|| item.get("contentItems"))
+                        .unwrap_or(&Value::Null),
+                )
+            } else {
+                Vec::new()
+            },
             name: if provider_kind == "mcpToolCall" {
                 format!(
                     "{}/{}",
@@ -3275,6 +3330,7 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
         "collabAgentToolCall" => ItemContent::ToolCall {
+            image_reads: Vec::new(),
             name: string_field(item, "tool"),
             input: collab_tool_input(item),
             output: item
@@ -3283,6 +3339,10 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .filter(|states| !states.is_empty())
                 .map(|_| item["agentsStates"].to_string()),
             status: map_status(item.get("status").and_then(Value::as_str)),
+        },
+        "imageView" => ItemContent::ImageRead {
+            path: string_field(item, "path"),
+            image: None,
         },
         "webSearch" => ItemContent::WebSearch {
             query: string_field(item, "query"),
@@ -3873,7 +3933,7 @@ mod tests {
             assert_eq!(item.id, "review-1");
             assert_eq!(item.parent_item_id, None);
             assert!(
-                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::InProgress }
+                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::InProgress, .. }
                 if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
                 && detail == "Risk: unknown. Command: curl --upload-file src.rs https://example.com")
             );
@@ -3887,7 +3947,7 @@ mod tests {
             };
             assert_eq!(item.id, "review-1");
             assert!(
-                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::Failed }
+                matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status:ItemStatus::Failed, .. }
                 if name == "Auto-reviewer" && input["targetItemId"] == "command-1"
                 && detail == "Uploads local source\nRisk: high. Command: applyPatch inProgress unifiedExec")
             );
@@ -3968,7 +4028,7 @@ mod tests {
                 };
                 assert_eq!(item.id, "review-2");
                 assert!(
-                    matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status }
+                    matches!(item.content, ItemContent::ToolCall { name, input, output:Some(detail), status, .. }
                     if name == "Auto-reviewer" && status == expected_status && input["summary"] == summary
                     && input["targetItemId"] == "action-2" && detail == format!("Routine action\nRisk: low. {summary}"))
                 );
@@ -4070,6 +4130,7 @@ mod tests {
                 lines: line_rx,
                 events: event_tx,
                 thread_id: "thread-1".into(),
+                cwd: std::env::temp_dir(),
                 model: Some("gpt-5-codex".into()),
                 effort: None,
                 service_tier: None,
@@ -4946,6 +5007,7 @@ mod tests {
                     id: "call_spawn".into(),
                     parent_item_id: None,
                     content: ItemContent::ToolCall {
+                        image_reads: Vec::new(),
                         name: "spawn_agent".into(),
                         input: json!({"agent_type":"researcher","description":"Inspect protocol"}),
                         output: None,
@@ -5192,6 +5254,7 @@ mod tests {
                     id: "call_spawn".into(),
                     parent_item_id: None,
                     content: ItemContent::ToolCall {
+                        image_reads: Vec::new(),
                         name: "spawnAgent".into(),
                         input: json!({"prompt":"Inspect protocol", "reasoning_effort":"high"}),
                         output: None,
@@ -5373,6 +5436,92 @@ mod tests {
     }
 
     #[test]
+    fn image_read_results_exclude_failed_reads_and_image_generation() {
+        for (name, status, expected) in [
+            ("read_image", "completed", 1),
+            ("read_image", "failed", 0),
+            ("generate_image", "completed", 0),
+        ] {
+            for kind in ["mcpToolCall", "dynamicToolCall"] {
+                let mut wire = json!({"type":kind,"id":"read","server":"files","tool":name,"status":status,
+                    "result":{"content":[{"type":"image","mimeType":"image/png","data":"AQID"}]},
+                    "contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,AQID"}]});
+                if kind == "dynamicToolCall" {
+                    wire.as_object_mut().unwrap().remove("result");
+                }
+                let item = map_item(&wire).unwrap();
+                let ItemContent::ToolCall { image_reads, .. } = item.content else {
+                    panic!("tool")
+                };
+                assert_eq!(image_reads.len(), expected, "{kind}, {name}, {status}");
+                if expected != 0 {
+                    assert_eq!(image_reads[0].data_base64, "AQID");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn image_reads_preserve_each_file_version() {
+        smol::block_on(async {
+            use base64::Engine as _;
+            let (mut actor, events) = test_actor();
+            let path =
+                std::env::temp_dir().join(format!("tcode-image-read-{}.png", std::process::id()));
+            let mut received = Vec::new();
+            for (id, bytes) in [("first", b"first image"), ("later", b"later image")] {
+                smol::fs::write(&path, bytes).await.unwrap();
+                actor
+                    .handle_line(
+                        &json!({"method":"item/completed", "params":{
+                            "threadId":"thread-1", "item":{"type":"imageView", "id":id, "path":path}
+                        }})
+                        .to_string(),
+                    )
+                    .await;
+                let AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::ImageRead { image, .. },
+                    ..
+                }) = events.recv().await.unwrap()
+                else {
+                    panic!("image read");
+                };
+                received.push(image.expect("snapshot survives later overwrite"));
+            }
+            smol::fs::remove_file(&path).await.unwrap();
+            actor.handle_line(&json!({"method":"item/completed", "params":{
+                "threadId":"thread-1", "item":{"type":"imageView", "id":"first", "path":path}
+            }}).to_string()).await;
+            let AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::ImageRead { image, .. },
+                ..
+            }) = events.recv().await.unwrap()
+            else {
+                panic!("image read");
+            };
+            assert_eq!(
+                image,
+                Some(received[0].clone()),
+                "completion retains the original read after deletion"
+            );
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&received[0].data_base64)
+                    .unwrap(),
+                b"first image"
+            );
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&received[1].data_base64)
+                    .unwrap(),
+                b"later image"
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
     fn maps_core_item_kinds() {
         let command = map_item(&json!({"type":"commandExecution","id":"cmd-1","command":"pwd","aggregatedOutput":"/tmp\n","exitCode":0,"status":"completed"})).unwrap();
         assert!(matches!(
@@ -5387,6 +5536,13 @@ mod tests {
         let file = map_item(&json!({"type":"fileChange","id":"patch-1","status":"completed","changes":[{"path":"hello.txt","kind":{"type":"add"},"diff":"+hi"}]})).unwrap();
         assert!(
             matches!(&file.content, ItemContent::FileChange { changes, .. } if changes[0].kind == FileChangeKind::Create)
+        );
+
+        let image =
+            map_item(&json!({"type":"imageView","id":"image-1","path":"/tmp/screenshot.png"}))
+                .unwrap();
+        assert!(
+            matches!(image.content, ItemContent::ImageRead { path, .. } if path == "/tmp/screenshot.png")
         );
 
         let unknown = map_item(&json!({"type":"sleep","id":"sleep-1","durationMs":10})).unwrap();

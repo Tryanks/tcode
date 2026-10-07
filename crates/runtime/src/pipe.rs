@@ -845,6 +845,11 @@ fn dispatch_query(
             session_id,
             item_id,
         } => app.item_output(&session_id, item_id, cx),
+        Query::ReadItemImage {
+            session_id,
+            item_id,
+            image_index,
+        } => app.item_image(&session_id, item_id, image_index, cx),
         Query::ArchivedSessions => {
             let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })

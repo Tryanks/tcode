@@ -915,7 +915,28 @@ impl OpenCodeMapper {
             .pointer("/metadata/exit")
             .and_then(Value::as_i64)
             .and_then(|number| i32::try_from(number).ok());
-        let item = open_code_tool_item(&call_id, &name, input, output, exit_code, status);
+        let mut item = open_code_tool_item(&call_id, &name, input, output, exit_code, status);
+        if status == ItemStatus::Completed
+            && crate::image_reads::is_read_tool(&name)
+            && let ItemContent::ToolCall { image_reads, .. } = &mut item.content
+        {
+            *image_reads = state
+                .get("attachments")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|attachment| {
+                    let mime = attachment.get("mime")?.as_str()?;
+                    let url = attachment.get("url")?.as_str()?;
+                    let data = url.strip_prefix(&format!("data:{mime};base64,"))?;
+                    (mime.starts_with("image/") && !data.is_empty()).then(|| Attachment {
+                        media_type: mime.into(),
+                        data_base64: data.into(),
+                        source_path: None,
+                    })
+                })
+                .collect();
+        }
         vec![match state.get("status").and_then(Value::as_str) {
             Some("pending") => AgentEvent::ItemStarted(item),
             Some("completed" | "error") => AgentEvent::ItemCompleted(item),
@@ -979,6 +1000,7 @@ fn open_code_tool_item(
         }
     } else {
         ItemContent::ToolCall {
+            image_reads: Vec::new(),
             name: name.to_owned(),
             input,
             output,
@@ -1944,6 +1966,29 @@ mod tests {
             message.contains("OpenCode health stalled\nfinal startup detail"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn image_read_results_exclude_failed_reads_and_image_generation() {
+        for (name, status, expected) in [
+            ("read", "completed", 1),
+            ("read", "error", 0),
+            ("generate_image", "completed", 0),
+        ] {
+            let mut mapper = OpenCodeMapper::new("session".into());
+            let events = mapper.tool_updated(&json!({"callID":"read","tool":name,"state":{"status":status,"input":{"filePath":"image.png"},"output":"read image","attachments":[{"type":"file","mime":"image/png","url":"data:image/png;base64,AQID"}]}}));
+            let AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::ToolCall { image_reads, .. },
+                ..
+            }) = &events[0]
+            else {
+                panic!("tool completion: {events:?}")
+            };
+            assert_eq!(image_reads.len(), expected, "{name}, {status}");
+            if expected != 0 {
+                assert_eq!(image_reads[0].data_base64, "AQID");
+            }
+        }
     }
 
     #[test]
