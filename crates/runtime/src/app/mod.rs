@@ -9,11 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
-    AgentError, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, CatalogRefresh,
-    InteractionMode, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
-    OptionDescriptors, OptionSelection, PlanResolution, ProviderCommand, ProviderCommandKind,
-    ProviderKind, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
-    TurnOptions, TurnStatus, list_models,
+    AgentError, AgentEvent, ApplyTiming, ApprovalDecision, Attachment, CatalogRefresh, ItemContent,
+    ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionDescriptors, OptionSelection,
+    ProviderCommand, ProviderCommandKind, ProviderKind, RewindMode, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models, permission_control,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -35,8 +34,7 @@ use tcode_core::relay::{
     render_relay_transcript,
 };
 use tcode_core::session::{
-    EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt, implement_prompt,
-    plan_title,
+    EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
@@ -48,7 +46,7 @@ use tcode_core::ui::{
 use tcode_protocol::{
     AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
     ExternalThread, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    IndexSummary, MergeWorktreeFailure, PathEntry, ProposedPlanStatus, ProtocolError,
+    IndexSummary, MergeWorktreeFailure, PathEntry, ProtocolError,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueryResponse,
     QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
@@ -275,8 +273,7 @@ use orchestrate::McpWiring;
 pub use providers::ProviderCatalog;
 use providers::{
     computer_use_attaches, effort_selection, launch_env_for_profile, normalized_selections,
-    provider_secret_names, session_approval_policy, session_launch_env, session_options,
-    session_provider_settings,
+    provider_secret_names, session_launch_env, session_options,
 };
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;

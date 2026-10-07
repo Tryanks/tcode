@@ -213,14 +213,23 @@ mod tests {
         let mut models = catalog();
         models[1].options = vec![
             OptionDescriptor::Boolean {
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
                 id: "thinking".into(),
                 label: "Thinking".into(),
                 default_value: false,
             },
             OptionDescriptor::Select {
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
                 id: "reasoningEffort".into(),
                 label: "Reasoning".into(),
                 options: vec![SelectOption {
+                    unavailable: None,
                     value: "high".into(),
                     label: "High".into(),
                     description: None,
@@ -311,6 +320,10 @@ mod tests {
     fn fast_mode_keys_on_claude_boolean_and_codex_fast_tier() {
         let claude = ModelSpec {
             options: vec![OptionDescriptor::Boolean {
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
                 id: "fastMode".into(),
                 label: "Fast Mode".into(),
                 default_value: false,
@@ -330,15 +343,21 @@ mod tests {
         // The app-server model list names the fast tier `priority` / "Fast".
         let codex = ModelSpec {
             options: vec![OptionDescriptor::Select {
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
                 id: "serviceTier".into(),
                 label: "Service Tier".into(),
                 options: vec![
                     SelectOption {
+                        unavailable: None,
                         value: "default".into(),
                         label: "Standard".into(),
                         description: None,
                     },
                     SelectOption {
+                        unavailable: None,
                         value: "priority".into(),
                         label: "Fast".into(),
                         description: None,
@@ -360,9 +379,14 @@ mod tests {
         // Neither descriptor shape: no fast mode (Fable / Sonnet catalogs).
         let plain = ModelSpec {
             options: vec![OptionDescriptor::Select {
+                role: Default::default(),
+                apply: Default::default(),
+                recommended: None,
+                permissive: None,
                 id: "reasoningEffort".into(),
                 label: "Reasoning".into(),
                 options: vec![SelectOption {
+                    unavailable: None,
                     value: "high".into(),
                     label: "High".into(),
                     description: None,

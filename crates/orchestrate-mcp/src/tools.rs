@@ -14,6 +14,9 @@ use crate::{Broker, OrchestrateOp, ThreadPurpose};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct DispatchParams {
+    #[schemars(
+        description = "Provider name from the current Orchestrate configuration, for example codex or claude."
+    )]
     provider: String,
     #[serde(default)]
     #[schemars(
@@ -31,10 +34,20 @@ struct DispatchParams {
     )]
     profile: Option<String>,
     #[serde(default)]
-    access: Option<String>,
+    #[schemars(
+        description = "Native permission value from the target profile's permission list in the current Orchestrate configuration. Omit to use Settings → Orchestrate child approval policy (default: recommended). Unsupported values are rejected; providers without a permission control accept no value."
+    )]
+    permission: Option<String>,
+    #[schemars(description = "Short title for the new child thread.")]
     title: String,
+    #[schemars(
+        description = "Self-contained execution assignment with context, scope, constraints, and expected result."
+    )]
     brief: String,
     #[serde(default)]
+    #[schemars(
+        description = "Working directory for the child, absolute or relative to the parent directory. Omit to inherit the parent directory."
+    )]
     cwd: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -74,6 +87,9 @@ impl CollaborationEffort {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct CollaborateParams {
+    #[schemars(
+        description = "Provider name from the current Orchestrate configuration, for example codex or claude."
+    )]
     provider: String,
     #[serde(default)]
     #[schemars(
@@ -90,6 +106,12 @@ struct CollaborateParams {
         description = "Provider endpoint profile ID. Set only when the chosen configuration entry explicitly lists a profile ID; otherwise omit for the built-in endpoint. Do not put the model name here; use model instead."
     )]
     profile: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Native permission value from the target profile's permission list in the current Orchestrate configuration. Omit to use Settings → Orchestrate child approval policy (default: recommended). Unsupported values are rejected; providers without a permission control accept no value."
+    )]
+    permission: Option<String>,
+    #[schemars(description = "Short title for the new child thread.")]
     title: String,
     #[schemars(
         description = "Self-contained discussion: context, open question, current alternatives, constraints, and the independent perspective requested. Concrete implementation belongs to execution models."
@@ -122,10 +144,23 @@ struct ArchiveParams {
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ApproveParams {
+    #[schemars(description = "Child thread id from the pending approval callback.")]
     thread_id: String,
     #[serde(default)]
+    #[schemars(
+        description = "Pending approval request id from the callback. May be omitted only when the child has exactly one pending request."
+    )]
     request_id: Option<String>,
-    decision: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Exact native option id from the pending approval callback. Supply option or cancel: true, never both."
+    )]
+    option: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Cancel the pending request using the provider's native cancellation behavior. Supply cancel: true or option, never both."
+    )]
+    cancel: bool,
 }
 
 #[derive(Clone)]
@@ -146,7 +181,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch concrete execution work to an enabled execution-model profile in a new child Tcode thread. Use collaborate for peer decision discussions. Dispatch a brief to the thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
+        description = "Dispatch concrete execution work to an enabled execution-model profile in a new child Tcode thread. Use collaborate for peer decision discussions. Dispatch a brief to the thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. permission selects an exact native value listed for the target profile; omit it to use the child approval setting. The response records the resolved permission value. worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
     )]
     async fn dispatch(&self, Parameters(p): Parameters<DispatchParams>) -> CallToolResult {
         run_op(
@@ -158,7 +193,7 @@ impl OrchestrateTools {
                 model: p.model,
                 effort: p.effort,
                 profile: p.profile,
-                access: p.access,
+                permission: p.permission,
                 title: p.title,
                 brief: p.brief,
                 cwd: p.cwd,
@@ -172,7 +207,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Open a peer discussion with an enabled collaboration model from Settings → Orchestrate (bundled: Astra and Fable 5.1). Use for independent approaches, architecture, assumptions, and review of decisions. This is a read-only consultation, not an implementation assignment; dispatch concrete work to execution models. Prefer a complementary provider when it adds a useful perspective. Returns thread_id; use send for further discussion. The peer's report arrives through the normal completion callback."
+        description = "Open a peer discussion with an enabled collaboration model from Settings → Orchestrate (bundled: Astra and Fable 5.1). Use for independent approaches, architecture, assumptions, and review of decisions. This is a discussion, not an implementation assignment; dispatch concrete work to execution models. Prefer a complementary provider when it adds a useful perspective. Returns thread_id; use send for further discussion. permission selects an exact native value listed for the target profile; omit it to use the child approval setting. The response records the resolved permission value. The peer's report arrives through the normal completion callback."
     )]
     async fn collaborate(&self, Parameters(p): Parameters<CollaborateParams>) -> CallToolResult {
         run_op(
@@ -184,7 +219,7 @@ impl OrchestrateTools {
                 model: p.model,
                 effort: p.effort.map(|effort| effort.as_str().to_string()),
                 profile: p.profile,
-                access: Some("read_only".into()),
+                permission: p.permission,
                 title: p.title,
                 brief: p.brief,
                 cwd: None,
@@ -264,7 +299,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Answer a child thread's pending permission approval. decision is one of approve (this request only), approve_for_session (stop asking for similar requests this session), or deny. request_id may be omitted when the child has exactly one pending request."
+        description = "Answer a child thread's pending permission approval. Supply option with an exact native option id from the approval callback, or cancel: true to cancel; never both. request_id may be omitted when the child has exactly one pending request."
     )]
     async fn approve(&self, Parameters(p): Parameters<ApproveParams>) -> CallToolResult {
         run_op(
@@ -273,7 +308,8 @@ impl OrchestrateTools {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
                 request_id: p.request_id,
-                decision: p.decision,
+                option: p.option,
+                cancel: p.cancel,
             },
         )
         .await
@@ -395,7 +431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collaboration_tool_routes_peer_purpose_with_read_only_defaults() {
+    async fn collaboration_tool_routes_peer_purpose_and_native_permission() {
         let schema = serde_json::to_value(schemars::schema_for!(CollaborationEffort)).unwrap();
         assert_eq!(schema["enum"], serde_json::json!(["medium", "high"]));
         for effort in ["medium", "high"] {
@@ -411,8 +447,8 @@ mod tests {
             let request = rx.recv().await.unwrap();
             assert!(matches!(request.op, OrchestrateOp::Dispatch {
                 purpose: ThreadPurpose::Collaboration,
-                parent_id, provider, access: Some(access), worktree: Some(false), result_max_chars: Some(0), ..
-            } if parent_id == "parent" && provider == "codex" && access == "read_only"));
+                parent_id, provider, permission: Some(permission), worktree: Some(false), result_max_chars: Some(0), ..
+            } if parent_id == "parent" && provider == "codex" && permission == "ask"));
             request
                 .reply
                 .send(Ok(serde_json::json!({"thread_id": "peer"})))
@@ -425,11 +461,59 @@ mod tests {
                 model: None,
                 effort: None,
                 profile: None,
+                permission: Some("ask".into()),
                 title: "Design discussion".into(),
                 brief: "Compare the alternatives".into(),
             }))
             .await;
         assert_eq!(result.is_error, Some(false));
+        resolver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_permission_and_approval_parameters_reach_runtime() {
+        let (tx, rx) = async_channel::unbounded();
+        let tools = OrchestrateTools::new(
+            broker(tx, std::time::Duration::from_secs(30)),
+            "parent".into(),
+        );
+        let resolver = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            assert!(matches!(request.op, OrchestrateOp::Dispatch {
+                parent_id, permission: Some(permission), purpose: ThreadPurpose::Execution, ..
+            } if parent_id == "parent" && permission == "auto_review"));
+            request
+                .reply
+                .send(Ok(
+                    serde_json::json!({"thread_id":"child", "permission":"auto_review"}),
+                ))
+                .await
+                .unwrap();
+            for expected in [Some("Allow:Session"), None] {
+                let request = rx.recv().await.unwrap();
+                assert!(matches!(request.op, OrchestrateOp::Approve {
+                    parent_id, thread_id, option, cancel, request_id: None,
+                } if parent_id == "parent" && thread_id == "child" && option.as_deref() == expected && cancel == expected.is_none()));
+                request
+                    .reply
+                    .send(Ok(serde_json::json!({"ok":true})))
+                    .await
+                    .unwrap();
+            }
+        });
+        let result = tools.dispatch(Parameters(serde_json::from_value(serde_json::json!({
+            "provider":"codex", "permission":"auto_review", "title":"Inspect", "brief":"Inspect the code"
+        })).unwrap())).await;
+        assert_eq!(result.is_error, Some(false));
+        for params in [
+            serde_json::json!({"thread_id":"child", "option":"Allow:Session"}),
+            serde_json::json!({"thread_id":"child", "cancel":true}),
+        ] {
+            let result = tools
+                .approve(Parameters(serde_json::from_value(params).unwrap()))
+                .await;
+            assert_eq!(result.is_error, Some(false));
+        }
         resolver.await.unwrap();
     }
 

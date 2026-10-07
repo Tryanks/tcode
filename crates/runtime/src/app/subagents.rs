@@ -274,8 +274,6 @@ impl AppState {
         meta.profile_id = parent.profile_id.clone();
         // Native children inherit the launch settings until the provider reports
         // a child-specific model or effort on its Subagent item.
-        meta.approval_mode = parent.approval_mode;
-        meta.interaction_mode = parent.interaction_mode;
         meta.option_selections = parent.option_selections.clone();
         meta.acp_agent_id = parent.acp_agent_id.clone();
         meta.parent_session_id = Some(parent.id.clone());

@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use agent::{
-    ApprovalDecision, ApprovalMode, InteractionMode, PluginAction, ProviderKind, RewindMode,
-};
+use agent::{ApprovalDecision, PluginAction, ProviderKind, RewindMode};
 use gpui::{App, Context, Task};
 use tcode_core::{
     acp::AcpAgentPatch,
@@ -459,41 +457,6 @@ impl WorkspaceStore {
             index,
         });
     }
-    pub fn implement_plan(&mut self) {
-        self.dispatch(Command::ImplementPlan {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
-    }
-    pub fn dismiss_plan(&mut self) {
-        self.dispatch(Command::DismissPlan {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
-    }
-    pub fn implement_plan_in_new_thread(&mut self, title: String, cx: &mut Context<Self>) {
-        self.create_and_select(
-            Command::ImplementPlanInNewThread {
-                session_id: self.active_session_id().unwrap_or_default(),
-                title,
-            },
-            cx,
-        );
-    }
-    pub fn copy_plan(&mut self, markdown: String) {
-        self.dispatch(Command::CopyPlan { markdown });
-    }
-    pub fn save_plan_to_workspace(&mut self, markdown: String) {
-        self.dispatch(Command::SavePlanToWorkspace {
-            session_id: self.active_session_id().unwrap_or_default(),
-            markdown,
-        });
-    }
-    pub fn download_plan(&mut self, markdown: String, fallback_title: String) {
-        self.dispatch(Command::DownloadPlan {
-            session_id: self.active_session_id().unwrap_or_default(),
-            markdown,
-            fallback_title,
-        });
-    }
 }
 
 impl WorkspaceStore {
@@ -871,25 +834,5 @@ impl WorkspaceStore {
     }
     pub fn resolve_plugin_challenge(&mut self, op_id: RuntimeOperationId, accept: bool) {
         self.dispatch(Command::ResolvePluginChallenge { op_id, accept });
-    }
-}
-
-impl WorkspaceStore {
-    pub fn set_interaction_mode(&mut self, mode: InteractionMode) {
-        self.dispatch(Command::SetInteractionMode {
-            session_id: self.active_session_id().unwrap_or_default(),
-            mode,
-        });
-    }
-    pub fn toggle_interaction_mode(&mut self) {
-        self.dispatch(Command::ToggleInteractionMode {
-            session_id: self.active_session_id().unwrap_or_default(),
-        });
-    }
-    pub fn set_active_approval_mode(&mut self, mode: ApprovalMode) {
-        self.dispatch(Command::SetActiveApprovalMode {
-            session_id: self.active_session_id().unwrap_or_default(),
-            mode,
-        });
     }
 }

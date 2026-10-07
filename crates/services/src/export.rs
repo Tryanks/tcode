@@ -354,6 +354,91 @@ mod tests {
     }
 
     #[test]
+    fn legacy_plan_and_approval_log_loads_and_exports() {
+        let root = temp_root("legacy-plan");
+        fs::create_dir_all(&root).unwrap();
+        let mut meta =
+            serde_json::to_value(SessionMeta::new(ProviderKind::Codex, root.clone(), None))
+                .unwrap();
+        meta["id"] = serde_json::json!("legacy-plan");
+        meta["interaction_mode"] = serde_json::json!("plan");
+        meta["approval_mode"] = serde_json::json!("full_access");
+        fs::write(
+            root.join("sessions.json"),
+            serde_json::to_vec(&serde_json::json!([meta])).unwrap(),
+        )
+        .unwrap();
+        let log = br##"{"type":"turn_started","turn_id":"old-turn"}
+{"ts":2,"event":{"type":"proposed_plan_delta","item_id":"old-plan","text":"# Draft"}}
+{"ts":3,"event":{"type":"proposed_plan","item_id":"old-plan","markdown":"# Stored plan\n\nKeep this content."}}
+{"ts":4,"event":{"type":"plan_resolved","item_id":"old-plan","resolution":"implemented"}}
+{"ts":5,"event":{"type":"approval_resolved","request_id":"old-once","decision":"approve"}}
+{"ts":6,"event":{"type":"approval_resolved","request_id":"old-session","decision":"approve_for_session"}}
+{"ts":7,"event":{"type":"approval_resolved","request_id":"old-denied","decision":"deny"}}
+{"ts":8,"event":{"type":"turn_completed","turn_id":"old-turn","status":"completed","usage":null}}
+"##;
+        fs::write(root.join("legacy-plan.jsonl"), log).unwrap();
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        store
+            .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let meta = store.load_index().unwrap().pop().unwrap();
+        assert!(
+            serde_json::to_value(&meta)
+                .unwrap()
+                .get("interaction_mode")
+                .is_none()
+        );
+        let events = store.read_events(&meta.id).unwrap();
+        assert_eq!(events.len(), 8);
+        let decisions = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                AgentEvent::ApprovalResolved { decision, .. } => Some(decision.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decisions,
+            [
+                agent::ApprovalDecision::Option("legacy:approve".into()),
+                agent::ApprovalDecision::Option("legacy:approve_for_session".into()),
+                agent::ApprovalDecision::Option("legacy:deny".into()),
+            ]
+        );
+        assert!(
+            serde_json::to_value(&meta)
+                .unwrap()
+                .get("approval_mode")
+                .is_none()
+        );
+        let timeline = Timeline::fold_events(events);
+        let text: Vec<_> = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::AssistantMessage { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, ["# Stored plan\n\nKeep this content."]);
+        let markdown =
+            String::from_utf8(render_thread(&store, &meta, ThreadExportFormat::Markdown).unwrap())
+                .unwrap();
+        assert!(markdown.contains("# Stored plan\n\nKeep this content."));
+        assert!(!markdown.contains("# Draft"));
+        let export = render_thread(&store, &meta, ThreadExportFormat::Jsonl).unwrap();
+        let (_, exported_log) =
+            export.split_at(export.iter().position(|byte| *byte == b'\n').unwrap() + 1);
+        assert_eq!(exported_log, log);
+        let path = root.join("export.jsonl");
+        fs::write(&path, export).unwrap();
+        assert_eq!(read_tcode_export(&path).unwrap().events.len(), 8);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn jsonl_export_import_round_trips_folded_timeline() {
         let source_root = temp_root("source");
         let destination_root = temp_root("destination");

@@ -332,7 +332,7 @@ impl AppState {
         Some(registration)
     }
 
-    #[allow(clippy::too_many_arguments)] // mirrors the MCP dispatch schema
+    #[allow(clippy::too_many_arguments)] // Dispatch accepts the provider launch and child lifecycle settings.
     pub(crate) fn create_child_session(
         &mut self,
         parent_id: &str,
@@ -341,7 +341,7 @@ impl AppState {
         effort: Option<String>,
         fast: bool,
         profile_id: Option<String>,
-        approval_mode: ApprovalMode,
+        permission_selection: Option<OptionSelection>,
         title: String,
         cwd: Option<PathBuf>,
         brief: String,
@@ -360,7 +360,7 @@ impl AppState {
             effort,
             fast,
             profile_id,
-            approval_mode,
+            permission_selection,
             cwd,
             archive_on_complete,
             result_max_chars,
@@ -454,7 +454,7 @@ impl AppState {
                 model,
                 effort,
                 profile,
-                access,
+                permission,
                 title,
                 brief,
                 cwd,
@@ -483,23 +483,32 @@ impl AppState {
                     {
                         return Err(format!("unknown profile: {id}"));
                     }
-                    let approval_mode = if collaboration {
-                        ApprovalMode::ReadOnly
-                    } else {
-                        resolve_dispatch_access(access.as_deref())?
-                    };
-                    // The profile's fast setting is the default; a dispatch may
-                    // override it either way on the user's explicit instruction.
+                    let permission_selection = resolve_child_permission(
+                        permission_control(provider),
+                        self.settings.orchestrate.child_approval,
+                        permission.as_deref(),
+                    )?;
                     let fast = fast_override.unwrap_or(fast);
-                    Ok((provider, model, effort, fast, profile_id, approval_mode))
+                    Ok((
+                        provider,
+                        model,
+                        effort,
+                        fast,
+                        profile_id,
+                        permission_selection,
+                    ))
                 })();
-                let (provider, model, effort, fast, profile_id, approval_mode) = match resolved {
-                    Ok(resolved) => resolved,
-                    Err(err) => {
-                        let _ = reply.try_send(Err(err));
-                        return;
-                    }
-                };
+                let (provider, model, effort, fast, profile_id, permission_selection) =
+                    match resolved {
+                        Ok(resolved) => resolved,
+                        Err(err) => {
+                            let _ = reply.try_send(Err(err));
+                            return;
+                        }
+                    };
+                let resolved_permission = permission_selection
+                    .as_ref()
+                    .map(|selection| selection.value.clone());
                 let brief = if collaboration {
                     compose_collaboration_brief(
                         &self.settings.orchestrate,
@@ -523,7 +532,7 @@ impl AppState {
                             effort,
                             fast,
                             profile_id,
-                            approval_mode,
+                            permission_selection,
                             title,
                             None,
                             brief,
@@ -531,7 +540,7 @@ impl AppState {
                             result_max_chars,
                             cx,
                         )
-                        .map(|id| serde_json::json!({ "thread_id": id }));
+                        .map(|id| serde_json::json!({ "thread_id": id, "permission": resolved_permission }));
                     let _ = reply.try_send(result);
                     return;
                 }
@@ -554,7 +563,7 @@ impl AppState {
                     effort,
                     fast,
                     profile_id,
-                    approval_mode,
+                    permission_selection,
                     path.clone(),
                     archive_on_complete,
                     result_max_chars,
@@ -594,7 +603,7 @@ impl AppState {
                             .await
                             .unwrap_or_else(|_| Err("application closed".to_string()))
                             .map(|(id, worktree, worktree_path, warning)| {
-                                let mut response = serde_json::json!({ "thread_id": id });
+                                let mut response = serde_json::json!({ "thread_id": id, "permission": resolved_permission });
                                 if let Some(worktree) = worktree {
                                     response["worktree_path"] = serde_json::json!(
                                         worktree_path.expect("worktree path").display().to_string()
@@ -752,7 +761,8 @@ impl AppState {
                 parent_id,
                 thread_id,
                 request_id,
-                decision,
+                option,
+                cancel,
             } => {
                 let result = (|| {
                     self.require_child(&parent_id, &thread_id)?;
@@ -775,7 +785,7 @@ impl AppState {
                             }
                         },
                     };
-                    let decision = resolve_approval_decision(&decision)?;
+                    let decision = resolve_approval_decision(option.as_deref(), cancel, &request)?;
                     let request_id = request.id;
                     self.respond_session_approval(&thread_id, request_id.clone(), decision)?;
                     Ok(serde_json::json!({ "ok": true, "request_id": request_id }))
@@ -1175,33 +1185,17 @@ impl AppState {
         else {
             return;
         };
-        // Claude identifies this registered MCP tool by its qualified name.
-        // Other adapters expose arbitrary extension names or display titles,
-        // which cannot establish that a request belongs to our report server.
-        if child.provider == ProviderKind::ClaudeCode
-            && let agent::ApprovalKind::ToolUse { name, .. } = &request.kind
-            && name == "mcp__tcode_report__report_result"
+        if self.settings.orchestrate.child_approval == ChildApprovalMode::AlwaysAllow
+            && let Some(option) = native_allow_option(&request)
         {
-            if let Err(err) = self.respond_session_approval(
+            match self.respond_session_approval(
                 child_id,
                 request.id.clone(),
-                // A reporting exemption must not accept provider-suggested
-                // permission updates for the rest of the session.
-                ApprovalDecision::Approve,
+                ApprovalDecision::Option(option.id.clone()),
             ) {
-                log::warn!("failed to auto-approve report_result for child {child_id}: {err}");
+                Ok(()) => return,
+                Err(err) => log::warn!("failed to answer child {child_id} approval: {err}"),
             }
-            return;
-        }
-        if self.settings.orchestrate.child_approval == ChildApprovalMode::AlwaysAllow {
-            if let Err(err) = self.respond_session_approval(
-                child_id,
-                request.id.clone(),
-                ApprovalDecision::ApproveForSession,
-            ) {
-                log::warn!("failed to auto-approve child {child_id}: {err}");
-            }
-            return;
         }
         if !self
             .callback_approval_requests
@@ -1210,20 +1204,22 @@ impl AppState {
             return;
         }
         let parent_id = child.parent_session_id.as_deref().unwrap();
-        let text = match self.settings.orchestrate.child_approval {
-            ChildApprovalMode::Orchestrator => format!(
-                "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {} (request_id: {}). You are the approver: decide with the approve tool (decision: approve | approve_for_session | deny); deny anything outside the brief's scope.",
-                child.title,
-                approval_request_summary(&request),
-                request.id
-            ),
-            ChildApprovalMode::Manual => format!(
-                "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {}.",
-                child.title,
-                approval_request_summary(&request)
-            ),
-            ChildApprovalMode::AlwaysAllow => unreachable!(),
+        let options = request.options.iter().map(|option| {
+            serde_json::json!({ "id": option.id, "label": option.label, "kind": option.kind })
+        }).collect::<Vec<_>>();
+        let instruction = if self.settings.orchestrate.child_approval == ChildApprovalMode::Manual {
+            "The user answers in the child thread."
+        } else {
+            "You are the approver: use the approve tool with option: <exact id> or cancel: true; reject anything outside the brief's scope."
         };
+        let text = format!(
+            "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {} (request_id: {}). Native options: {}. {}",
+            child.title,
+            approval_request_summary(&request),
+            request.id,
+            serde_json::to_string(&options).expect("approval options serialize"),
+            instruction,
+        );
         self.deliver_orchestrate_callback_to_parent(parent_id, text, cx);
     }
 
@@ -1395,6 +1391,36 @@ pub(super) fn render_orchestrate_configuration(
             ));
         }
         for (entry, unavailable, choices) in available {
+            let mut permission_values = String::new();
+            if let Some(descriptor) = permission_control(entry.provider) {
+                permission_values.push_str(
+                    "\nNative `permission` values (omit to use the child approval setting):\n",
+                );
+                match descriptor {
+                    OptionDescriptor::Select {
+                        options,
+                        recommended,
+                        ..
+                    } => {
+                        for option in options.iter().filter(|option| option.unavailable.is_none()) {
+                            let marker = if recommended.as_deref() == Some(&option.value) {
+                                " (recommended)"
+                            } else {
+                                ""
+                            };
+                            permission_values.push_str(&format!(
+                                "- {} — {}: {}{marker}\n",
+                                option.value,
+                                option.label,
+                                option.description.as_deref().unwrap_or_default()
+                            ));
+                        }
+                    }
+                    OptionDescriptor::Boolean { .. } => {}
+                }
+            } else {
+                permission_values.push_str("\nNo native permission control; omit `permission`.\n");
+            }
             let profile = entry
                 .profile_id
                 .as_ref()
@@ -1410,6 +1436,7 @@ pub(super) fn render_orchestrate_configuration(
                     provider_name(entry.provider),
                     entry.guidance(collaboration).trim()
                 ));
+                text.push_str(&permission_values);
                 continue;
             }
             let efforts = if choices.is_empty() {
@@ -1427,6 +1454,7 @@ pub(super) fn render_orchestrate_configuration(
                 escape_markdown_inline(&entry.model),
                 entry.guidance(collaboration).trim()
             ));
+            text.push_str(&permission_values);
         }
     }
     text
@@ -1610,29 +1638,96 @@ fn model_missing_from_loaded_catalog(catalog: &[agent::ModelSpec], model: &str) 
     !catalog.is_empty() && !catalog.iter().any(|spec| spec.id == model)
 }
 
-pub(super) fn resolve_dispatch_access(access: Option<&str>) -> Result<ApprovalMode, String> {
-    let Some(access) = access.map(str::trim).filter(|access| !access.is_empty()) else {
-        return Ok(ApprovalMode::FullAccess);
+fn resolve_child_permission(
+    descriptor: Option<OptionDescriptor>,
+    mode: ChildApprovalMode,
+    explicit: Option<&str>,
+) -> Result<Option<OptionSelection>, String> {
+    let Some(descriptor) = descriptor else {
+        return if explicit.is_some() {
+            Err("this provider has no permission control; valid permission values: none (omit permission)".into())
+        } else {
+            Ok(None)
+        };
     };
-    match access.to_ascii_lowercase().as_str() {
-        "full" => Ok(ApprovalMode::FullAccess),
-        "read_only" => Ok(ApprovalMode::ReadOnly),
-        "workspace_write" => Ok(ApprovalMode::AutoAcceptEdits),
-        _ => Err(format!(
-            "unknown access: {access}; expected read_only, workspace_write, or full"
-        )),
-    }
+    let selection = match descriptor {
+        OptionDescriptor::Select {
+            id,
+            options,
+            default_value,
+            recommended,
+            permissive,
+            ..
+        } => {
+            let value = if let Some(value) = explicit {
+                if !options
+                    .iter()
+                    .any(|option| option.value == value && option.unavailable.is_none())
+                {
+                    let valid = options
+                        .iter()
+                        .filter(|option| option.unavailable.is_none())
+                        .map(|option| option.value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "unknown permission: {value}; valid permission values: {valid}"
+                    ));
+                }
+                Some(value.to_string())
+            } else {
+                match mode {
+                    ChildApprovalMode::Auto => recommended.or(default_value),
+                    ChildApprovalMode::AlwaysAllow => permissive.or(default_value),
+                    ChildApprovalMode::Orchestrator | ChildApprovalMode::Manual => default_value,
+                }
+            };
+            value.map(|value| OptionSelection {
+                id,
+                value: serde_json::Value::String(value),
+            })
+        }
+        OptionDescriptor::Boolean { .. } => {
+            return Err("this provider has no selectable permission values".into());
+        }
+    };
+    Ok(selection)
 }
 
-pub(super) fn resolve_approval_decision(decision: &str) -> Result<ApprovalDecision, String> {
-    let decision = decision.trim();
-    match decision.to_ascii_lowercase().as_str() {
-        "approve" => Ok(ApprovalDecision::Approve),
-        "approve_for_session" => Ok(ApprovalDecision::ApproveForSession),
-        "deny" => Ok(ApprovalDecision::Deny),
-        _ => Err(format!(
-            "unknown decision: {decision}; expected approve, approve_for_session, or deny"
+fn native_allow_option(request: &agent::ApprovalRequest) -> Option<&agent::ApprovalOption> {
+    use agent::ApprovalOptionKind::{AllowAlways, AllowOnce};
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == AllowAlways)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == AllowOnce)
+        })
+}
+
+fn resolve_approval_decision(
+    option: Option<&str>,
+    cancel: bool,
+    request: &agent::ApprovalRequest,
+) -> Result<ApprovalDecision, String> {
+    match (option, cancel) {
+        (Some(id), false) if request.options.iter().any(|option| option.id == id) => {
+            Ok(ApprovalDecision::Option(id.to_string()))
+        }
+        (Some(id), false) => Err(format!(
+            "unknown option: {id}; valid option ids: {}",
+            request
+                .options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
+        (None, true) => Ok(ApprovalDecision::Cancel),
+        _ => Err("supply option or cancel: true, never both".into()),
     }
 }
 
@@ -1678,7 +1773,7 @@ fn resolve_child_worktree(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // mirrors the MCP dispatch schema
+#[allow(clippy::too_many_arguments)] // Dispatch accepts the provider launch and child lifecycle settings.
 pub(super) fn build_child_meta(
     parent: &SessionMeta,
     provider: ProviderKind,
@@ -1686,7 +1781,7 @@ pub(super) fn build_child_meta(
     effort: Option<String>,
     fast: bool,
     profile_id: Option<String>,
-    approval_mode: ApprovalMode,
+    permission_selection: Option<OptionSelection>,
     cwd: PathBuf,
     archive_on_complete: bool,
     result_max_chars: Option<u32>,
@@ -1695,7 +1790,7 @@ pub(super) fn build_child_meta(
     meta.project_id = parent.project_id.clone();
     meta.parent_session_id = Some(parent.id.clone());
     meta.profile_id = profile_id;
-    meta.approval_mode = approval_mode;
+    meta.option_selections.extend(permission_selection);
     meta.archive_on_complete = archive_on_complete;
     meta.result_max_chars = result_max_chars;
     if let Some(effort) = effort {
@@ -1883,4 +1978,66 @@ pub(super) fn assemble_callback_text(
         digest()
     };
     format!("[orchestrate] thread {child_id} (\"{title}\") {state}.{token_segment}\n{body}")
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn missing_permission_hints_fall_back_and_control_less_providers_get_no_selection() {
+        for provider in [ProviderKind::ClaudeCode, ProviderKind::OpenCode] {
+            let mut descriptor = permission_control(provider).unwrap();
+            match &mut descriptor {
+                OptionDescriptor::Select {
+                    recommended,
+                    permissive,
+                    ..
+                } => {
+                    *recommended = None;
+                    *permissive = None;
+                }
+                OptionDescriptor::Boolean {
+                    recommended,
+                    permissive,
+                    ..
+                } => {
+                    *recommended = None;
+                    *permissive = None;
+                }
+            }
+            let expected = if provider == ProviderKind::ClaudeCode {
+                serde_json::json!("default")
+            } else {
+                serde_json::json!("normal")
+            };
+            for mode in [ChildApprovalMode::Auto, ChildApprovalMode::AlwaysAllow] {
+                assert_eq!(
+                    resolve_child_permission(Some(descriptor.clone()), mode, None)
+                        .unwrap()
+                        .unwrap()
+                        .value,
+                    expected
+                );
+            }
+        }
+        for provider in [ProviderKind::Pi, ProviderKind::Acp] {
+            for mode in [
+                ChildApprovalMode::Orchestrator,
+                ChildApprovalMode::Auto,
+                ChildApprovalMode::AlwaysAllow,
+                ChildApprovalMode::Manual,
+            ] {
+                assert_eq!(
+                    resolve_child_permission(permission_control(provider), mode, None).unwrap(),
+                    None
+                );
+                assert!(
+                    resolve_child_permission(permission_control(provider), mode, Some("true"))
+                        .unwrap_err()
+                        .contains("valid permission values: none")
+                );
+            }
+        }
+    }
 }

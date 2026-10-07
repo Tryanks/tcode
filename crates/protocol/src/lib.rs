@@ -17,12 +17,11 @@ pub use event::{
     AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
     ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot, IndexSummary,
     MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
-    PluginOperationTarget, PluginStaleReason, ProposedPlanStatus, ProviderPluginCatalog,
-    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, ServerEvent, SessionActivity, SessionEventRecord,
-    SessionPlan, SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus,
-    TerminalStatus, Topic,
+    PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable,
+    ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect,
+    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast,
+    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
@@ -59,8 +58,11 @@ pub use wire::{
 // revisions, makes session log cursors stored row positions, and acknowledges
 // a subscription to an unloaded thread after its window.
 //
-// Unreleased: removes SelectUltrathink and the session status's
-// ultrathink_armed; an older peer sending the command is rejected.
+// Unreleased: removes app Plan commands, interaction mode and proposed-plan
+// snapshots; replaces approval modes with native permission options and
+// requested selections; adds Orchestrate child approval Auto as the default;
+// removes SelectUltrathink and ultrathink_armed from session status. An older
+// peer sending a removed command is rejected.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 #[cfg(test)]

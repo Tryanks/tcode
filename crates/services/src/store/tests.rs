@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
-use agent::{ApprovalMode, ProviderCommand, ProviderCommandKind, TurnStatus};
+use agent::{ProviderCommand, ProviderCommandKind, TurnStatus};
 
 use std::sync::atomic::AtomicBool;
 
@@ -129,7 +129,6 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
     );
     let mixed = &file.sessions[0];
     assert_eq!(mixed.title, "Mixed");
-    assert_eq!(mixed.approval_mode, ApprovalMode::FullAccess);
     assert_eq!(mixed.archived_at, None);
 
     assert_eq!(store.read_event_log("mixed").unwrap(), MIXED_LOG);

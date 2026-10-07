@@ -88,11 +88,9 @@ impl AppState {
         let active = self.resident_mut(session_id).unwrap();
         active.runtime = Runtime::Starting { generation };
         active.idle_since = None;
-        // Remember the model + approval mode this process is being launched
-        // with so a later switch can detect the mismatch and restart.
         active.live_model = active.meta.model.clone();
-        active.live_approval_mode = Some(active.meta.approval_mode);
         active.live_option_selections = active.meta.option_selections.clone();
+        active.confirmed_option_selections.clear();
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
@@ -174,6 +172,29 @@ impl AppState {
                         if let Some(resident) = state.resident_mut(&session_id) {
                             resident.runtime = Runtime::Live(commands.clone());
                             resident._pump = Some(pump);
+                            if let Some(descriptor) = resident.permission_descriptor() {
+                                let (id, apply) = match descriptor {
+                                    OptionDescriptor::Select { id, apply, .. }
+                                    | OptionDescriptor::Boolean { id, apply, .. } => (id, apply),
+                                };
+                                if apply != ApplyTiming::Restart
+                                    && let Some(selection) = resident
+                                        .meta
+                                        .option_selections
+                                        .iter()
+                                        .find(|selection| selection.id == id)
+                                    && Some(selection)
+                                        != resident
+                                            .live_option_selections
+                                            .iter()
+                                            .find(|selection| selection.id == id)
+                                {
+                                    let _ = commands.try_send(SessionCommand::SetOption {
+                                        id: selection.id.clone(),
+                                        value: selection.value.clone(),
+                                    });
+                                }
+                            }
                         }
                         if matches_active {
                             if let Some((checkpoint_id, mode)) =

@@ -141,10 +141,10 @@ mod tests {
             );
 
             state
-                .respond_session_approval("child", "first".into(), ApprovalDecision::Deny)
+                .respond_session_approval("child", "first".into(), ApprovalDecision::Cancel)
                 .unwrap();
             assert!(
-                matches!(receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id, decision: ApprovalDecision::Deny }) if request_id == "first")
+                matches!(receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id, decision: ApprovalDecision::Cancel }) if request_id == "first")
             );
             assert_eq!(state.first_approval("child").unwrap().id, "second");
             assert!(!state.approval_requests("parent").is_empty());
@@ -152,7 +152,11 @@ mod tests {
             drop(receiver);
             assert!(
                 state
-                    .respond_session_approval("child", "second".into(), ApprovalDecision::Approve)
+                    .respond_session_approval(
+                        "child",
+                        "second".into(),
+                        ApprovalDecision::Option("accept".into())
+                    )
                     .is_err()
             );
             assert_eq!(
@@ -164,7 +168,7 @@ mod tests {
                 "child",
                 &AgentEvent::ApprovalResolved {
                     request_id: "second".into(),
-                    decision: ApprovalDecision::Approve,
+                    decision: ApprovalDecision::Option("accept".into()),
                 },
             );
             assert!(

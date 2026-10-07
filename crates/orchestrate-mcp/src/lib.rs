@@ -19,7 +19,7 @@ pub enum OrchestrateOp {
         model: Option<String>,
         effort: Option<String>,
         profile: Option<String>,
-        access: Option<String>,
+        permission: Option<String>,
         title: String,
         brief: String,
         cwd: Option<String>,
@@ -56,7 +56,8 @@ pub enum OrchestrateOp {
         parent_id: String,
         thread_id: String,
         request_id: Option<String>,
-        decision: String,
+        option: Option<String>,
+        cancel: bool,
     },
     /// A child thread pushing its final RESULT text up to the orchestrator.
     ReportResult { child_id: String, text: String },

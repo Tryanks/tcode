@@ -37,50 +37,18 @@ pub use crate::claude_context::{
 };
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
-    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, CatalogRefresh, ClassifierCategory, DeltaKind, FileChange, FileChangeKind,
-    InteractionMode, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
+    ApprovalRequest, Attachment, CatalogRefresh, ClassifierCategory, DeltaKind, FileChange,
+    FileChangeKind, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
     OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
     ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
     TokenUsage, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool,
     selection_str,
 };
 
-/// Denial returned to `ExitPlanMode` after the client captures the plan.
-const EXIT_PLAN_DENY_MESSAGE: &str = "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.";
-
 /// First Claude Code build whose headless control protocol is verified to
 /// expose `rewind_conversation` alongside the SDK's `rewind_files` request.
 const NATIVE_REWIND_MIN_VERSION: (u32, u32, u32) = (2, 1, 214);
-
-/// Map a canonical [`ApprovalMode`] onto the value Claude's CLI expects for
-/// `--permission-mode` (and the `set_permission_mode` control request).
-///
-/// Verified against `@anthropic-ai/claude-agent-sdk` v0.3.170
-/// `SDKControlSetPermissionModeRequest` (`sdk.d.ts`): `'default'` prompts for
-/// dangerous operations, `'acceptEdits'` auto-accepts file edits, and
-/// `'bypassPermissions'` skips all permission checks. ReadOnly also launches in
-/// default mode; tcode enforces its narrower policy in [`Mapper`].
-pub(crate) fn permission_mode_flag(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Supervised | ApprovalMode::ReadOnly => "default",
-        ApprovalMode::AutoAcceptEdits => "acceptEdits",
-        ApprovalMode::FullAccess => "bypassPermissions",
-    }
-}
-
-/// Permission mode placed on the internal launch argv. Persisted Plan sessions
-/// must enter the CLI's plan sandbox before their first message, without
-/// depending on an unchecked live control request.
-fn initial_permission_mode(
-    approval_mode: ApprovalMode,
-    interaction_mode: InteractionMode,
-) -> &'static str {
-    match interaction_mode {
-        InteractionMode::Plan => "plan",
-        InteractionMode::Build => permission_mode_flag(approval_mode),
-    }
-}
 
 /// Resolve the last permission-mode value on the effective argv. Provider
 /// launch arguments intentionally follow internal arguments and may use either
@@ -114,8 +82,12 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // (effort/context/fast/thinking are launch-time only; mid-session changes
     // ride the resume-restart machinery).
     let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
-    let base_permission_mode = permission_mode_flag(opts.approval_mode);
-    let launch_permission_mode = initial_permission_mode(opts.approval_mode, opts.interaction_mode);
+    let launch_permission_mode = opts
+        .option_selections
+        .iter()
+        .find(|selection| selection.id == "permissionMode")
+        .and_then(|selection| selection.value.as_str())
+        .unwrap_or("default");
     // Launch arguments are deliberately appended last, so the tracker must
     // follow their effective value rather than the internal flag they replace.
     let applied_permission_mode =
@@ -132,7 +104,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .arg("--permission-prompt-tool")
         .arg("stdio")
         .arg("--permission-mode")
-        .arg(launch_permission_mode);
+        .arg(launch_permission_mode)
+        .arg("--allow-dangerously-skip-permissions");
 
     if native_rewind {
         // User-message UUIDs are Claude's native checkpoint ids. SDK file
@@ -273,10 +246,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         line_rx,
         event_tx,
         session_config,
-        opts.interaction_mode,
-        base_permission_mode,
         applied_permission_mode,
-        opts.approval_mode,
         native_rewind,
         opts.model.clone(),
         stderr_tail,
@@ -520,23 +490,13 @@ async fn actor_loop(
     line_rx: smol::channel::Receiver<String>,
     event_tx: smol::channel::Sender<AgentEvent>,
     config: SessionConfig,
-    interaction_mode: InteractionMode,
-    base_permission_mode: &'static str,
     applied_permission_mode: String,
-    approval_mode: ApprovalMode,
     native_rewind: bool,
     expected_model: Option<String>,
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
-    let mut mapper = Mapper::new_configured(
-        interaction_mode,
-        base_permission_mode,
-        applied_permission_mode,
-        approval_mode,
-        native_rewind,
-        expected_model,
-    );
+    let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind, expected_model);
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
@@ -596,8 +556,6 @@ async fn actor_loop(
                         return;
                     }
                 }
-                // Drain any control responses the mapper needs to write back
-                // (e.g. the auto-deny answering an `ExitPlanMode` prompt).
                 for write in mapper.take_outgoing() {
                     let _ = write_line(&mut stdin, &write).await;
                 }
@@ -806,32 +764,9 @@ async fn handle_command(
         SessionCommand::SendTurn {
             delivery_id,
             text,
-            options,
+            options: _,
             attachments,
         } => {
-            // Apply the interaction mode (per-turn override, else session mode)
-            // via a `set_permission_mode` control request when it has changed.
-            let mode = options
-                .as_ref()
-                .and_then(|o| o.interaction_mode)
-                .unwrap_or(mapper.interaction_mode);
-            let desired = match mode {
-                InteractionMode::Plan => "plan",
-                InteractionMode::Build => mapper.base_permission_mode,
-            };
-            if desired != mapper.applied_permission_mode {
-                let req = mapper.set_permission_mode_request_str(desired);
-                if write_line(stdin, &req).await.is_err() {
-                    let _ = event_tx
-                        .send(AgentEvent::Error {
-                            message: "failed to write turn mode to provider stdin".into(),
-                            fatal: true,
-                        })
-                        .await;
-                    return ControlFlow::Break("provider stdin write failed");
-                }
-            }
-
             let msg = user_message(&text, &attachments);
             if write_turn_message(stdin, &msg, delivery_id, event_tx)
                 .await
@@ -847,12 +782,6 @@ async fn handle_command(
             }
             let turn_id = mapper.start_turn();
             let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
-            ControlFlow::Continue(())
-        }
-        SessionCommand::SetInteractionMode(mode) => {
-            // Stored now; the `set_permission_mode` switch is issued before the
-            // next `SendTurn`, so the mode changes between messages.
-            mapper.interaction_mode = mode;
             ControlFlow::Continue(())
         }
         SessionCommand::Interrupt => {
@@ -898,35 +827,26 @@ async fn handle_command(
             .await;
             ControlFlow::Continue(())
         }
-        SessionCommand::SetApprovalMode(mode) => {
-            // The CLI's control protocol switches permission mode live via a
-            // `set_permission_mode` control_request (same shape the Agent SDK
-            // sends). Plan mode is a stricter overlay: approval changes update
-            // only the Build mode to restore later.
-            let flag = permission_mode_flag(mode);
-            mapper.base_permission_mode = flag;
-            mapper.approval_mode = mode;
-            if mapper.interaction_mode == InteractionMode::Build {
-                let msg = mapper.set_permission_mode_request_str(permission_mode_flag(mode));
-                if write_line(stdin, &msg).await.is_err() {
-                    if let Some(request_id) = msg.get("request_id").and_then(Value::as_str) {
-                        mapper.pending_permission_modes.remove(request_id);
-                    }
-                    let _ = event_tx
-                        .send(AgentEvent::Warning {
-                            message: format!(
-                                "claude: failed to write permission-mode switch for {mode:?}"
-                            ),
-                        })
-                        .await;
+        SessionCommand::SetOption { id, value } if id == "permissionMode" => {
+            let Some(mode) = value.as_str() else {
+                return ControlFlow::Continue(());
+            };
+            let msg = mapper.set_permission_mode_request_str(mode);
+            if write_line(stdin, &msg).await.is_err() {
+                if let Some(request_id) = msg.get("request_id").and_then(Value::as_str) {
+                    mapper.pending_permission_modes.remove(request_id);
                 }
+                let _ = event_tx
+                    .send(AgentEvent::Warning {
+                        message: format!(
+                            "claude: failed to write permission-mode switch for {mode}"
+                        ),
+                    })
+                    .await;
             }
             ControlFlow::Continue(())
         }
-        SessionCommand::SetOption { id, .. } => {
-            log::debug!("claude: ignoring ACP-only SetOption {id}");
-            ControlFlow::Continue(())
-        }
+        SessionCommand::SetOption { .. } => ControlFlow::Continue(()),
         SessionCommand::Rewind {
             checkpoint_id,
             mode,
@@ -1151,15 +1071,9 @@ enum TailRequest {
     },
 }
 
-/// A pending permission prompt, kept so `RespondApproval` can echo the tool's
-/// (possibly updated) input and, for "approve for session", forward the SDK's
-/// `permission_suggestions` verbatim.
 struct PendingApproval {
     input: Value,
-    /// `permission_suggestions` from the `can_use_tool` control_request,
-    /// forwarded unchanged as `updatedPermissions` on `ApproveForSession` when
-    /// the SDK supplied a non-empty array.
-    suggestions: Option<Value>,
+    suggestions: HashMap<String, Value>,
 }
 
 /// Where a child item's lifecycle stands, as far as the canonical stream has
@@ -1219,26 +1133,16 @@ pub(crate) struct Mapper {
     /// Pending `AskUserQuestion` prompts: control request_id → the original
     /// `questions` array, echoed back verbatim in the allow response.
     pending_user_input: HashMap<String, Value>,
-    /// Canonical session access policy. FullAccess auto-allows every ordinary
-    /// tool; ReadOnly auto-allows only classified file reads. Special tools are
-    /// handled before either policy.
-    approval_mode: ApprovalMode,
     /// Set when we send an `interrupt` control_request; the next non-success
     /// `result` is then attributed to the interrupt rather than a failure
     /// (the CLI's result carries no reliable interrupt marker).
     interrupt_pending: bool,
-    /// Session Build/Plan mode (updated by `SetInteractionMode`).
-    interaction_mode: InteractionMode,
-    /// Permission mode to restore on Build (from the session's ApprovalMode).
-    base_permission_mode: &'static str,
     /// Permission mode currently applied on the CLI, so we only switch on change.
     applied_permission_mode: String,
+    auto_unavailable: Option<String>,
     /// Live permission-mode requests awaiting Claude's correlated response.
     /// A successful stdin write is not proof that the CLI applied the mode.
     pending_permission_modes: HashMap<String, String>,
-    /// Whether an `ExitPlanMode` plan has already been captured this turn.
-    exit_plan_captured: bool,
-    /// Control responses to write back (e.g. the auto-deny for `ExitPlanMode`).
     outgoing: Vec<Value>,
     request_usage: Value,
     latest_usage: TokenUsage,
@@ -1278,21 +1182,11 @@ pub(crate) struct Mapper {
 impl Mapper {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::new_configured(
-            InteractionMode::Build,
-            "default",
-            "default".to_owned(),
-            ApprovalMode::Supervised,
-            false,
-            None,
-        )
+        Self::new_configured("default".to_owned(), false, None)
     }
 
     fn new_configured(
-        interaction_mode: InteractionMode,
-        base_permission_mode: &'static str,
         applied_permission_mode: String,
-        approval_mode: ApprovalMode,
         native_rewind: bool,
         expected_model: Option<String>,
     ) -> Self {
@@ -1313,13 +1207,10 @@ impl Mapper {
             child_items: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_user_input: HashMap::new(),
-            approval_mode,
             interrupt_pending: false,
-            interaction_mode,
-            base_permission_mode,
             applied_permission_mode,
+            auto_unavailable: None,
             pending_permission_modes: HashMap::new(),
-            exit_plan_captured: false,
             outgoing: Vec::new(),
             request_usage: json!({}),
             latest_usage: TokenUsage::default(),
@@ -1363,7 +1254,6 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
-        self.exit_plan_captured = false;
         self.fallback_detected = false;
         self.stop_reason = None;
         self.pending_refusal_category = None;
@@ -1435,7 +1325,6 @@ impl Mapper {
     /// `request(e)` wraps the payload as
     /// `{request_id, type:"control_request", request:e}`, and
     /// `setPermissionMode(m)` sends `{subtype:"set_permission_mode", mode:m}`.
-    /// `set_permission_mode` with a raw wire mode string (e.g. `"plan"`).
     fn set_permission_mode_request_str(&mut self, mode: &str) -> Value {
         let message = self.control_request(json!({
             "subtype": "set_permission_mode",
@@ -1456,42 +1345,23 @@ impl Mapper {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Option<Value> {
-        let pending = self.pending_approvals.remove(request_id)?;
+        let pending = self.pending_approvals.get(request_id)?;
         let response = match decision {
-            // Agent-supplied option ids are an ACP concept; Claude's approvals
-            // are the fixed four. Deny rather than leave the turn hanging.
-            ApprovalDecision::Option(ref id) => {
-                log::warn!("claude: unexpected ACP option decision {id}; denying");
-                json!({ "behavior": "deny", "message": "User declined tool execution." })
-            }
-            ApprovalDecision::Approve => json!({
-                "behavior": "allow",
-                "updatedInput": pending.input,
+            ApprovalDecision::Option(id) if id == "allow" => json!({
+                "behavior": "allow", "updatedInput": pending.input,
             }),
-            ApprovalDecision::ApproveForSession => {
-                // Forward only SDK-supplied permission rules. Without suggestions,
-                // session approval is wire-equivalent to a one-time allow.
-                match &pending.suggestions {
-                    Some(suggestions) => json!({
-                        "behavior": "allow",
-                        "updatedInput": pending.input,
-                        "updatedPermissions": suggestions,
-                    }),
-                    None => json!({
-                        "behavior": "allow",
-                        "updatedInput": pending.input,
-                    }),
-                }
-            }
-            ApprovalDecision::Deny => json!({
-                "behavior": "deny",
-                "message": "User declined tool execution.",
+            ApprovalDecision::Option(id) if id == "deny" => json!({
+                "behavior": "deny", "message": "User declined tool execution.",
             }),
+            ApprovalDecision::Option(id) => {
+                let suggestions = pending.suggestions.get(&id)?;
+                json!({ "behavior": "allow", "updatedInput": pending.input, "updatedPermissions": suggestions })
+            }
             ApprovalDecision::Cancel => json!({
-                "behavior": "deny",
-                "message": "User cancelled tool execution.",
+                "behavior": "deny", "message": "User cancelled tool execution.",
             }),
         };
+        self.pending_approvals.remove(request_id);
         Some(control_response(request_id, response))
     }
 
@@ -1529,25 +1399,6 @@ impl Mapper {
                 (request_id, response)
             })
             .collect()
-    }
-
-    /// Emit at most one [`AgentEvent::ProposedPlan`] per turn. Claude can retry
-    /// `ExitPlanMode` after tcode's auto-deny with a fresh tool id; deduping by
-    /// id therefore re-arms the plan UI for the same turn.
-    fn capture_proposed_plan(
-        &mut self,
-        tool_use_id: Option<&str>,
-        markdown: String,
-    ) -> Option<AgentEvent> {
-        if self.exit_plan_captured {
-            return None;
-        }
-        self.exit_plan_captured = true;
-        let item_id = tool_use_id
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("plan-{}", self.turn_counter));
-        Some(AgentEvent::ProposedPlan { item_id, markdown })
     }
 
     /// Map one CLI stdout message to zero or more outcomes.
@@ -1596,6 +1447,38 @@ impl Mapper {
                 log::debug!("claude: ignoring message type {other:?}");
                 Vec::new()
             }
+        }
+    }
+
+    fn permission_options(&self) -> AgentEvent {
+        let mut descriptor =
+            crate::permission_control(ProviderKind::ClaudeCode).expect("Claude permission control");
+        if let OptionDescriptor::Select { options, .. } = &mut descriptor {
+            if let Some(auto) = options.iter_mut().find(|option| option.value == "auto") {
+                auto.unavailable.clone_from(&self.auto_unavailable);
+            }
+            if !options
+                .iter()
+                .any(|option| option.value == self.applied_permission_mode)
+            {
+                options.push(crate::SelectOption {
+                    value: self.applied_permission_mode.clone(),
+                    label: self.applied_permission_mode.clone(),
+                    description: None,
+                    unavailable: Some(if self.applied_permission_mode == "plan" {
+                        "Entered by the agent".into()
+                    } else {
+                        "Reported by Claude".into()
+                    }),
+                });
+            }
+        }
+        AgentEvent::ProviderOptions {
+            descriptors: vec![descriptor],
+            selections: vec![OptionSelection {
+                id: "permissionMode".into(),
+                value: json!(self.applied_permission_mode),
+            }],
         }
     }
 
@@ -1677,8 +1560,17 @@ impl Mapper {
                 return Vec::new();
             }
         }
+        if let Some(mode) = msg.get("permissionMode").and_then(Value::as_str) {
+            if mode == "auto" {
+                self.auto_unavailable = None;
+            } else if !self.session_started && self.applied_permission_mode == "auto" {
+                self.auto_unavailable =
+                    Some("Not available: the session started in another mode".into());
+            }
+            self.applied_permission_mode = mode.to_owned();
+        }
         if self.session_started {
-            return Vec::new();
+            return vec![self.permission_options()];
         }
         let session_id = match msg.get("session_id").and_then(Value::as_str) {
             Some(id) => id.to_string(),
@@ -1686,11 +1578,14 @@ impl Mapper {
         };
         self.session_started = true;
         let model = msg.get("model").and_then(Value::as_str).map(str::to_string);
-        let mut events = vec![AgentEvent::SessionStarted {
-            provider_session_id: session_id.clone(),
-            resume: ResumeCursor(json!({ "session_id": session_id })),
-            model,
-        }];
+        let mut events = vec![
+            AgentEvent::SessionStarted {
+                provider_session_id: session_id.clone(),
+                resume: ResumeCursor(json!({ "session_id": session_id })),
+                model,
+            },
+            self.permission_options(),
+        ];
         // The `slash_commands` (Command) and `skills` (Skill) arrays feed the
         // composer's `/` and `$` menus. Both are arrays of names (no descriptions).
         let commands = parse_provider_commands(msg);
@@ -2343,17 +2238,6 @@ impl Mapper {
             return Vec::new();
         }
 
-        // ExitPlanMode: capture the proposed plan from the assistant block
-        // (deduped against the permission-callback capture).
-        if name == "ExitPlanMode" {
-            if let Some(markdown) = extract_exit_plan_markdown(&input)
-                && let Some(event) = self.capture_proposed_plan(Some(&tool_use_id), markdown)
-            {
-                return vec![event];
-            }
-            return Vec::new();
-        }
-
         let (item, content) = if is_agent_tool(&name.to_lowercase()) {
             let content = spawned_subagent(&input);
             let item = ToolItem::subagent(&content, None).expect("a spawn snapshot is a Subagent");
@@ -2581,16 +2465,34 @@ impl Mapper {
         };
         if let Some(mode) = self.pending_permission_modes.remove(request_id) {
             if response.get("subtype").and_then(Value::as_str) == Some("success") {
-                self.applied_permission_mode = mode;
-                return Vec::new();
+                self.applied_permission_mode = response
+                    .pointer("/response/permissionMode")
+                    .or_else(|| response.pointer("/response/mode"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(&mode)
+                    .to_owned();
+                if self.applied_permission_mode == "auto" {
+                    self.auto_unavailable = None;
+                }
+                return vec![self.permission_options()];
             }
             let error = response
                 .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or("Claude Code rejected the permission-mode request");
-            return vec![AgentEvent::Warning {
+            let warning = AgentEvent::Warning {
                 message: format!("claude: failed to switch permission mode: {error}"),
-            }];
+            };
+            if mode == "auto"
+                && response
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| code.starts_with("auto_mode_"))
+            {
+                self.auto_unavailable = Some(error.to_owned());
+                return vec![warning, self.permission_options()];
+            }
+            return vec![warning];
         }
         let Some(pending) = self.pending_rewinds.remove(request_id) else {
             return Vec::new();
@@ -2682,8 +2584,6 @@ impl Mapper {
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // Questions require an answer even in full-access mode, so handle them
-        // before ordinary tool auto-approval.
         if tool_name == "AskUserQuestion" {
             let questions_raw = input.get("questions").cloned().unwrap_or_else(|| json!([]));
             let questions = parse_ask_user_questions(&input);
@@ -2696,39 +2596,7 @@ impl Mapper {
             }];
         }
 
-        // Capture one plan per turn, then deny the tool so the user can accept
-        // the proposed plan through tcode's plan flow.
-        if tool_name == "ExitPlanMode" {
-            let tool_use_id = request
-                .get("tool_use_id")
-                .and_then(Value::as_str)
-                .unwrap_or(&request_id);
-            let mut events = Vec::new();
-            if let Some(markdown) = extract_exit_plan_markdown(&input)
-                && let Some(event) = self.capture_proposed_plan(Some(tool_use_id), markdown)
-            {
-                events.push(event);
-            }
-            self.outgoing.push(control_response(
-                &request_id,
-                json!({ "behavior": "deny", "message": EXIT_PLAN_DENY_MESSAGE }),
-            ));
-            return events;
-        }
-
         let request_type = classify_claude_tool(&tool_name);
-
-        // Display classification uses name heuristics; automatic authorization must
-        // recognize exact native tools so an MCP lookalike cannot inherit access.
-        let read_only_allow = self.approval_mode == ApprovalMode::ReadOnly
-            && matches!(tool_name.as_str(), "Read" | "Glob" | "Grep" | "WebSearch");
-        if self.approval_mode == ApprovalMode::FullAccess || read_only_allow {
-            self.outgoing.push(control_response(
-                &request_id,
-                json!({ "behavior": "allow", "updatedInput": input }),
-            ));
-            return Vec::new();
-        }
 
         let detail = approval_detail(&tool_name, &input);
         let kind = match request_type {
@@ -2754,19 +2622,59 @@ impl Mapper {
             },
         };
 
-        let suggestions = request
+        let mut options = vec![
+            ApprovalOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: ApprovalOptionKind::AllowOnce,
+            },
+            ApprovalOption {
+                id: "deny".into(),
+                label: "Deny".into(),
+                kind: ApprovalOptionKind::RejectOnce,
+            },
+        ];
+        let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+        for suggestion in request
             .get("permission_suggestions")
-            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
-            .cloned();
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let scope = suggestion
+                .get("destination")
+                .and_then(Value::as_str)
+                .unwrap_or("session");
+            if let Some((_, suggestions)) = groups.iter_mut().find(|(known, _)| known == scope) {
+                suggestions.push(suggestion.clone());
+            } else {
+                groups.push((scope.to_owned(), vec![suggestion.clone()]));
+            }
+        }
+        let mut suggestions = HashMap::new();
+        for (index, (scope, group)) in groups.into_iter().enumerate() {
+            let id = format!("allow_suggestion:{index}");
+            let label = match scope.as_str() {
+                "session" => "Allow and remember for this session".to_owned(),
+                "userSettings" => "Allow and save to user settings".to_owned(),
+                "projectSettings" => "Allow and save to project settings".to_owned(),
+                "localSettings" => "Allow and save to local settings".to_owned(),
+                _ => format!("Allow and remember in {scope}"),
+            };
+            options.push(ApprovalOption {
+                id: id.clone(),
+                label,
+                kind: ApprovalOptionKind::AllowAlways,
+            });
+            suggestions.insert(id, json!(group));
+        }
         self.pending_approvals
             .insert(request_id.clone(), PendingApproval { input, suggestions });
-
         vec![AgentEvent::ApprovalRequested(ApprovalRequest {
             id: request_id,
             turn_id: self.current_turn_id.clone(),
             kind,
-            // Native approvals use the fixed four decisions.
-            options: Vec::new(),
+            options,
         })]
     }
 
@@ -3312,17 +3220,6 @@ fn extract_plan_steps_from_todo(input: &Value) -> Option<Vec<PlanStep>> {
     Some(steps)
 }
 
-/// Extract the plan markdown from an `ExitPlanMode` tool input (`{ plan }`),
-/// trimmed and non-empty.
-fn extract_exit_plan_markdown(input: &Value) -> Option<String> {
-    input
-        .get("plan")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-}
-
 fn has_boolean_option(spec: &ModelSpec, id: &str) -> bool {
     spec.options
         .iter()
@@ -3379,6 +3276,251 @@ pub async fn list_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_permission_switches_publish_only_confirmed_values() {
+        let mut mapper = Mapper::new();
+        for mode in [
+            "default",
+            "acceptEdits",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+        ] {
+            let previous = mapper.applied_permission_mode.clone();
+            let request = mapper.set_permission_mode_request_str(mode);
+            assert_eq!(
+                request["request"],
+                json!({"subtype":"set_permission_mode", "mode":mode})
+            );
+            assert_eq!(mapper.applied_permission_mode, previous);
+            let events = mapper.on_message(json!({"type":"control_response", "response": {
+                "subtype":"success", "request_id":request["request_id"], "response":{}
+            }}));
+            assert!(
+                matches!(events.as_slice(), [AgentEvent::ProviderOptions { selections, .. }]
+                if selections.iter().any(|selection| selection.id == "permissionMode" && selection.value == mode))
+            );
+        }
+        let request = mapper.set_permission_mode_request_str("auto");
+        let events = mapper.on_message(json!({"type":"control_response", "response": {
+            "subtype":"error", "request_id":request["request_id"], "error":"unsupported mode"
+        }}));
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::Warning { message }] if message.contains("unsupported mode"))
+        );
+        assert_eq!(mapper.applied_permission_mode, "bypassPermissions");
+
+        let request = mapper.set_permission_mode_request_str("auto");
+        let events = mapper.on_message(json!({"type":"control_response", "response": {
+            "subtype":"success", "request_id":request["request_id"], "response":{"permissionMode":"dontAsk"}
+        }}));
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::ProviderOptions { selections, .. }] if selections[0].value == "dontAsk")
+        );
+
+        let request = mapper.set_permission_mode_request_str("auto");
+        let reason = "Cannot set permission mode to auto: auto mode unavailable for this model";
+        let events = mapper.on_message(json!({"type":"control_response", "response": {
+            "subtype":"error", "request_id":request["request_id"],
+            "error":reason, "error_code":"auto_mode_model"
+        }}));
+        assert!(
+            events.iter().any(|event| matches!(event,
+                AgentEvent::ProviderOptions { descriptors, selections }
+                if selections[0].value == "dontAsk" && matches!(&descriptors[0],
+                    OptionDescriptor::Select { options, .. }
+                    if options.iter().any(|option| option.value == "auto"
+                        && option.unavailable.as_deref() == Some(reason))))),
+            "the provider's explicit auto unavailability must reach the picker: {events:?}"
+        );
+
+        let mut auto = Mapper::new_configured("auto".into(), false, None);
+        let events = auto.on_message(json!({"type":"system", "subtype":"init", "session_id":"native", "permissionMode":"default"}));
+        let descriptor = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ProviderOptions { descriptors, .. } => descriptors.first(),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            matches!(descriptor, OptionDescriptor::Select { options, .. }
+            if options.iter().any(|option| option.value == "auto" && option.unavailable.as_deref() == Some("Not available: the session started in another mode")))
+        );
+        let events = auto.on_message(json!({"type":"system", "subtype":"init", "session_id":"native", "permissionMode":"plan"}));
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::ProviderOptions { descriptors, selections }]
+            if selections[0].value == "plan" && matches!(&descriptors[0], OptionDescriptor::Select { options, .. }
+                if options.iter().any(|option| option.value == "plan" && option.unavailable.as_deref() == Some("Entered by the agent"))))
+        );
+
+        let mut supported = Mapper::new_configured("auto".into(), false, None);
+        supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"auto"}));
+        let events = supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"plan"}));
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::ProviderOptions { descriptors, selections }]
+            if selections[0].value == "plan" && matches!(&descriptors[0], OptionDescriptor::Select { options, .. }
+                if options.iter().any(|option| option.value == "plan" && option.unavailable.as_deref() == Some("Entered by the agent"))
+                && options.iter().any(|option| option.value == "auto" && option.unavailable.is_none()))),
+            "native plan entry must preserve confirmed auto availability: {events:?}"
+        );
+
+        for confirmation in ["control_response", "init"] {
+            let mut recovered = Mapper::new_configured("auto".into(), false, None);
+            recovered.on_message(json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"default"}));
+            let message = if confirmation == "init" {
+                json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"auto"})
+            } else {
+                let request = recovered.set_permission_mode_request_str("auto");
+                json!({"type":"control_response", "response": {
+                    "subtype":"success", "request_id":request["request_id"], "response":{"permissionMode":"auto"}
+                }})
+            };
+            let events = recovered.on_message(message);
+            assert!(
+                matches!(events.as_slice(), [AgentEvent::ProviderOptions { descriptors, selections }]
+                if selections[0].value == "auto" && matches!(&descriptors[0], OptionDescriptor::Select { options, .. }
+                    if options.iter().any(|option| option.value == "auto" && option.unavailable.is_none()))),
+                "{confirmation} confirmation must restore auto availability: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_permission_requests_apply_only_the_chosen_suggestion_group() {
+        let input = json!({"file_path":"file.rs", "content":"changed"});
+        let session =
+            json!({"type":"addRules", "rules":[{"toolName":"Write"}], "destination":"session"});
+        let user = json!({"type":"setMode", "mode":"acceptEdits", "destination":"userSettings"});
+        for name in [
+            "Write",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "mcp__tcode_report__report_result",
+        ] {
+            for choice in [
+                "allow",
+                "deny",
+                "allow_suggestion:0",
+                "allow_suggestion:1",
+                "cancel",
+            ] {
+                let mut mapper = Mapper::new();
+                let events = mapper.on_message(
+                    json!({"type":"control_request", "request_id":"native", "request": {
+                        "subtype":"can_use_tool", "tool_name":name, "input":input,
+                        "permission_suggestions":[session, user]
+                    }}),
+                );
+                let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+                    panic!("{events:?}")
+                };
+                assert_eq!(
+                    request
+                        .options
+                        .iter()
+                        .map(|option| option.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["allow", "deny", "allow_suggestion:0", "allow_suggestion:1"]
+                );
+                assert_eq!(
+                    request.options[2].label,
+                    "Allow and remember for this session"
+                );
+                assert!(mapper.take_outgoing().is_empty());
+                let decision = if choice == "cancel" {
+                    ApprovalDecision::Cancel
+                } else {
+                    ApprovalDecision::Option(choice.into())
+                };
+                let response = mapper.build_approval_response("native", decision).unwrap();
+                let body = &response["response"]["response"];
+                if matches!(choice, "deny" | "cancel") {
+                    assert_eq!(body["behavior"], "deny");
+                    assert_eq!(
+                        body["message"],
+                        if choice == "cancel" {
+                            "User cancelled tool execution."
+                        } else {
+                            "User declined tool execution."
+                        }
+                    );
+                } else {
+                    assert_eq!(body["behavior"], "allow");
+                    assert_eq!(body["updatedInput"], input);
+                }
+                match choice {
+                    "allow_suggestion:0" => {
+                        assert_eq!(body["updatedPermissions"], json!([session]))
+                    }
+                    "allow_suggestion:1" => assert_eq!(body["updatedPermissions"], json!([user])),
+                    _ => assert!(body.get("updatedPermissions").is_none()),
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_uses_native_permission_selection_and_enables_live_bypass() {
+        use std::os::unix::fs::PermissionsExt as _;
+        smol::block_on(async {
+            let directory = std::env::temp_dir()
+                .join(format!("agent-claude-permission-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let binary = directory.join("claude");
+            std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: false,
+                binary_path: Some(binary),
+                option_selections: vec![OptionSelection {
+                    id: "permissionMode".into(),
+                    value: json!("auto"),
+                }],
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+            })
+            .await
+            .unwrap();
+            loop {
+                let event = handle.events.recv().await.unwrap();
+                if let AgentEvent::ProviderOptions { selections, .. } = event {
+                    assert!(
+                        selections
+                            .iter()
+                            .any(|selection| selection.id == "permissionMode"
+                                && selection.value == "auto")
+                    );
+                    break;
+                }
+            }
+            let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
+            let args: Vec<_> = argv.lines().collect();
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--permission-mode", "auto"])
+            );
+            assert!(args.contains(&"--allow-dangerously-skip-permissions"));
+            handle
+                .commands
+                .send(SessionCommand::Shutdown)
+                .await
+                .unwrap();
+            while let Ok(event) = handle.events.recv().await {
+                if matches!(event, AgentEvent::SessionClosed { .. }) {
+                    break;
+                }
+            }
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
 
     #[test]
     fn fork_flag_requires_both_request_and_resume_cursor() {
@@ -3503,14 +3645,7 @@ mod tests {
             ("custom-model[variant]", "custom-model", true),
             ("claude-fable-5-1", "<synthetic>", false),
         ] {
-            let mut mapper = Mapper::new_configured(
-                InteractionMode::Build,
-                "default",
-                "default".into(),
-                ApprovalMode::Supervised,
-                false,
-                Some(expected.into()),
-            );
+            let mut mapper = Mapper::new_configured("default".into(), false, Some(expected.into()));
             mapper.start_turn();
             let events = mapper.on_message(json!({
                 "type": "assistant",
@@ -3537,14 +3672,8 @@ mod tests {
 
     #[test]
     fn model_changes_are_detected_at_stream_start_once_per_turn() {
-        let mut mapper = Mapper::new_configured(
-            InteractionMode::Build,
-            "default",
-            "default".into(),
-            ApprovalMode::Supervised,
-            false,
-            Some("claude-fable-5-1".into()),
-        );
+        let mut mapper =
+            Mapper::new_configured("default".into(), false, Some("claude-fable-5-1".into()));
         for served in ["claude-opus-5", "claude-opus-4-8", "claude-fable-5"] {
             let stream = json!({
                 "type": "stream_event",
@@ -3611,14 +3740,8 @@ mod tests {
 
     #[test]
     fn classifier_refusal_result_emits_turn_blocked() {
-        let mut mapper = Mapper::new_configured(
-            InteractionMode::Build,
-            "default",
-            "default".into(),
-            ApprovalMode::Supervised,
-            false,
-            Some("claude-fable-5".into()),
-        );
+        let mut mapper =
+            Mapper::new_configured("default".into(), false, Some("claude-fable-5".into()));
         mapper.start_turn();
 
         let assistant_events = feed(
@@ -3977,55 +4100,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_session_launches_with_plan_permission_mode() {
-        let launch_mode = initial_permission_mode(ApprovalMode::Supervised, InteractionMode::Plan);
-        assert_eq!(launch_mode, "plan");
-
-        let m = Mapper::new_configured(
-            InteractionMode::Plan,
-            "default",
-            launch_mode.into(),
-            ApprovalMode::Supervised,
-            false,
-            None,
-        );
-
-        assert_eq!(m.applied_permission_mode, "plan");
-    }
-
-    #[test]
-    fn set_approval_mode_while_in_plan_keeps_plan_permission_mode() {
-        smol::block_on(async {
-            let mut child = smol::process::Command::from(crate::process::test_echo_command())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut stdin = child.stdin.take().unwrap();
-            let (event_tx, _event_rx) = smol::channel::unbounded();
-            let mut m = Mapper::new();
-            m.interaction_mode = InteractionMode::Plan;
-            m.applied_permission_mode = "plan".into();
-
-            let flow = handle_command(
-                SessionCommand::SetApprovalMode(ApprovalMode::FullAccess),
-                &mut m,
-                &mut stdin,
-                &event_tx,
-                &mut child,
-            )
-            .await;
-
-            assert!(matches!(flow, ControlFlow::Continue(())));
-            assert_eq!(m.base_permission_mode, "bypassPermissions");
-            assert_eq!(m.applied_permission_mode, "plan");
-            assert!(m.pending_permission_modes.is_empty());
-            drop(stdin);
-            assert!(child.status().await.unwrap().success());
-        });
-    }
-
-    #[test]
     fn extra_permission_mode_arg_updates_launch_tracker() {
         let extra_args = vec!["--permission-mode".into(), "plan".into()];
         assert_eq!(
@@ -4039,65 +4113,6 @@ mod tests {
             effective_permission_mode("plan", &extra_args),
             "bypassPermissions"
         );
-    }
-
-    #[test]
-    fn exit_plan_mode_captures_once_per_turn() {
-        let mut m = Mapper::new();
-        m.start_turn();
-        let first = feed(
-            &mut m,
-            r##"{"type":"control_request","request_id":"req-plan-1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# First plan\n- step one"}}}"##,
-        );
-        assert!(matches!(
-            first.as_slice(),
-            [AgentEvent::ProposedPlan { item_id, markdown }]
-                if item_id == "req-plan-1" && markdown == "# First plan\n- step one"
-        ));
-        assert_eq!(
-            m.take_outgoing(),
-            vec![json!({
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": "req-plan-1",
-                    "response": {"behavior": "deny", "message": EXIT_PLAN_DENY_MESSAGE},
-                }
-            })]
-        );
-
-        let assistant = feed(
-            &mut m,
-            r##"{"type":"assistant","message":{"id":"msg_p","content":[{"type":"tool_use","id":"req-plan-1","name":"ExitPlanMode","input":{"plan":"# First plan\n- step one"}}]}}"##,
-        );
-        assert!(
-            assistant.is_empty(),
-            "the assistant replay must not repeat the proposal"
-        );
-
-        let second = feed(
-            &mut m,
-            r##"{"type":"control_request","request_id":"req-plan-2","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Retried plan"}}}"##,
-        );
-        assert!(
-            second.is_empty(),
-            "a retry in the same turn must not emit another ProposedPlan"
-        );
-        let outgoing = m.take_outgoing();
-        assert_eq!(outgoing.len(), 1, "the retry is still denied");
-        assert_eq!(outgoing[0]["response"]["request_id"], "req-plan-2");
-        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "deny");
-
-        m.start_turn();
-        let next_turn = feed(
-            &mut m,
-            r##"{"type":"control_request","request_id":"req-plan-3","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# New turn plan"}}}"##,
-        );
-        assert!(matches!(
-            next_turn.as_slice(),
-            [AgentEvent::ProposedPlan { .. }]
-        ));
-        assert_eq!(m.take_outgoing().len(), 1);
     }
 
     #[test]
@@ -4137,27 +4152,36 @@ mod tests {
             r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8","slash_commands":["plan","review",""],"skills":["dataviz"]}"#,
         );
         assert!(
-            matches!(&evs[0], AgentEvent::SessionStarted { provider_session_id, resume, model }
+            matches!(evs.iter().find(|event| matches!(event, AgentEvent::SessionStarted { .. })),
+            Some(AgentEvent::SessionStarted { provider_session_id, resume, model })
             if provider_session_id == "s1" && resume.0["session_id"] == "s1" && model.as_deref() == Some("claude-opus-4-8"))
         );
-        assert!(
-            feed(
-                &mut m,
-                r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8"}"#
-            )
-            .is_empty()
+        let commands = evs
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ProviderCommands { commands } => Some(commands),
+                _ => None,
+            })
+            .expect("init must publish native commands and skills");
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| (command.name.as_str(), command.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("plan", ProviderCommandKind::Command),
+                ("review", ProviderCommandKind::Command),
+                ("dataviz", ProviderCommandKind::Skill),
+            ]
         );
-        match &evs[1] {
-            AgentEvent::ProviderCommands { commands } => {
-                // Empty names dropped; two commands + one skill.
-                assert_eq!(commands.len(), 3);
-                assert_eq!(commands[0].name, "plan");
-                assert_eq!(commands[0].kind, ProviderCommandKind::Command);
-                assert_eq!(commands[2].name, "dataviz");
-                assert_eq!(commands[2].kind, ProviderCommandKind::Skill);
-            }
-            other => panic!("expected ProviderCommands, got {other:?}"),
-        }
+        let repeated = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8"}"#,
+        );
+        assert!(!repeated.iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionStarted { .. } | AgentEvent::ProviderCommands { .. }
+        )));
     }
 
     #[test]
@@ -4592,13 +4616,16 @@ mod tests {
                 ..
             })
         ));
-        assert!(
-            feed(
-                &mut m,
-                r#"{"type":"system","subtype":"init","session_id":"session-bg","model":"claude-haiku-4-5-20251001"}"#,
-            )
-            .is_empty()
+        let reinit = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"init","session_id":"session-bg","model":"claude-haiku-4-5-20251001"}"#,
         );
+        assert!(!reinit.iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionStarted { .. }
+                | AgentEvent::TurnStarted { .. }
+                | AgentEvent::TurnCompleted { .. }
+        )));
 
         let reinvoked = feed(
             &mut m,
@@ -4694,87 +4721,6 @@ mod tests {
                 ..
             } if completed == &turn_id
         ));
-    }
-
-    #[test]
-    fn deny_cancel_and_session_approval_wire_strings() {
-        // Denials use the user-facing message expected by the approval flow.
-        let mut m = Mapper::new();
-        feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-d","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf /"}}}"#,
-        );
-        let deny = m
-            .build_approval_response("req-d", ApprovalDecision::Deny)
-            .unwrap();
-        assert_eq!(deny["response"]["response"]["behavior"], "deny");
-        assert_eq!(
-            deny["response"]["response"]["message"],
-            "User declined tool execution."
-        );
-
-        // Cancel → deny with the exact "cancelled" message (no interrupt).
-        let mut mc = Mapper::new();
-        feed(
-            &mut mc,
-            r#"{"type":"control_request","request_id":"req-c","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
-        );
-        let cancel = mc
-            .build_approval_response("req-c", ApprovalDecision::Cancel)
-            .unwrap();
-        assert_eq!(cancel["response"]["response"]["behavior"], "deny");
-        assert_eq!(
-            cancel["response"]["response"]["message"],
-            "User cancelled tool execution."
-        );
-
-        // ApproveForSession with NO permission_suggestions → plain allow.
-        let mut m2 = Mapper::new();
-        feed(
-            &mut m2,
-            r#"{"type":"control_request","request_id":"req-s","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
-        );
-        let sess = m2
-            .build_approval_response("req-s", ApprovalDecision::ApproveForSession)
-            .unwrap();
-        assert_eq!(sess["response"]["response"]["behavior"], "allow");
-        assert!(
-            sess["response"]["response"]
-                .get("updatedPermissions")
-                .is_none()
-        );
-
-        for (decision, expected) in [
-            (
-                ApprovalDecision::Approve,
-                json!({"behavior":"allow", "updatedInput":{"text":"complete report"}}),
-            ),
-            (
-                ApprovalDecision::ApproveForSession,
-                json!({
-                    "behavior":"allow",
-                    "updatedInput":{"text":"complete report"},
-                    "updatedPermissions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],
-                }),
-            ),
-        ] {
-            let mut mapper = Mapper::new();
-            let events = feed(
-                &mut mapper,
-                r#"{"type":"control_request","request_id":"req-report","request":{"subtype":"can_use_tool","tool_name":"mcp__tcode_report__report_result","input":{"text":"complete report"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]}}"#,
-            );
-            assert!(matches!(
-                events.as_slice(),
-                [AgentEvent::ApprovalRequested(ApprovalRequest {
-                    kind: ApprovalKind::ToolUse { name, .. },
-                    ..
-                })] if name == "mcp__tcode_report__report_result"
-            ));
-            let response = mapper
-                .build_approval_response("req-report", decision)
-                .unwrap();
-            assert_eq!(response["response"]["response"], expected);
-        }
     }
 
     #[test]
@@ -4952,98 +4898,6 @@ mod tests {
     }
 
     #[test]
-    fn approval_policy_preserves_tool_input_and_keeps_questions_interactive() {
-        for mode in [
-            ApprovalMode::Supervised,
-            ApprovalMode::AutoAcceptEdits,
-            ApprovalMode::ReadOnly,
-            ApprovalMode::FullAccess,
-        ] {
-            for (name, input, read_only_allowed) in [
-                ("Read", json!({"file_path":"/tmp/a.txt"}), true),
-                ("Glob", json!({"pattern":"*.rs"}), true),
-                ("Grep", json!({"pattern":"fn main"}), true),
-                ("WebSearch", json!({"query":"Rust"}), true),
-                (
-                    "Write",
-                    json!({"file_path":"/tmp/a.txt", "content":"changed"}),
-                    false,
-                ),
-                ("Bash", json!({"command":"echo hi"}), false),
-                ("mcp__server__tool", json!({"arg":"value"}), false),
-                (
-                    "mcp__untrusted__search_and_delete",
-                    json!({"path":"/tmp/a.txt"}),
-                    false,
-                ),
-                ("mcp__untrusted__Read", json!({"path":"/tmp/a.txt"}), false),
-                ("PreviewAndWrite", json!({"path":"/tmp/a.txt"}), false),
-            ] {
-                let mut mapper = Mapper::new();
-                mapper.approval_mode = mode;
-                let events = mapper
-                    .on_message(json!({"type":"control_request", "request_id":"request",
-                    "request":{"subtype":"can_use_tool", "tool_name":name, "input":input}}));
-                let outgoing = mapper.take_outgoing();
-                if mode == ApprovalMode::FullAccess
-                    || (mode == ApprovalMode::ReadOnly && read_only_allowed)
-                {
-                    assert!(events.is_empty(), "{mode:?} {name}");
-                    assert!(mapper.pending_approvals.is_empty());
-                    assert_eq!(outgoing.len(), 1);
-                    assert_eq!(outgoing[0]["response"]["request_id"], "request");
-                    assert_eq!(
-                        outgoing[0]["response"]["response"],
-                        json!({"behavior":"allow", "updatedInput":input})
-                    );
-                } else {
-                    assert!(outgoing.is_empty(), "{mode:?} {name}");
-                    let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
-                        panic!("{mode:?} {name}: expected approval, got {events:?}");
-                    };
-                    assert_eq!(request.id, "request");
-                    assert_eq!(mapper.pending_approvals.len(), 1);
-                    match (name, &request.kind) {
-                        (
-                            "Read" | "Glob" | "Grep" | "WebSearch",
-                            ApprovalKind::FileRead { detail },
-                        ) => {
-                            assert!(detail.starts_with(&format!("{name}: ")))
-                        }
-                        (
-                            "mcp__untrusted__search_and_delete" | "PreviewAndWrite",
-                            ApprovalKind::FileRead { .. },
-                        ) => {}
-                        ("Write", ApprovalKind::FileChange { changes, .. }) => {
-                            assert_eq!(changes[0].path, "/tmp/a.txt")
-                        }
-                        ("Bash", ApprovalKind::ExecCommand { command, .. }) => {
-                            assert_eq!(command, "echo hi")
-                        }
-                        (
-                            "mcp__server__tool" | "mcp__untrusted__Read",
-                            ApprovalKind::ToolUse { input: actual, .. },
-                        ) => {
-                            assert_eq!(actual, &input)
-                        }
-                        other => panic!("wrong approval kind: {other:?}"),
-                    }
-                }
-            }
-            let mut mapper = Mapper::new();
-            mapper.approval_mode = mode;
-            let events = feed(
-                &mut mapper,
-                r#"{"type":"control_request","request_id":"question","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
-            );
-            assert!(
-                matches!(events.as_slice(), [AgentEvent::UserInputRequested { request_id, .. }] if request_id == "question")
-            );
-            assert!(mapper.take_outgoing().is_empty());
-        }
-    }
-
-    #[test]
     fn result_maps_to_turn_completed_with_usage() {
         let mut m = Mapper::new();
         let turn_id = m.start_turn();
@@ -5141,47 +4995,6 @@ mod tests {
     }
 
     #[test]
-    fn set_permission_mode_request_shape() {
-        let mut m = Mapper::new();
-        for (mode, native_mode, accepted) in [
-            (ApprovalMode::Supervised, "default", true),
-            (ApprovalMode::ReadOnly, "default", true),
-            (ApprovalMode::AutoAcceptEdits, "acceptEdits", true),
-            (ApprovalMode::FullAccess, "bypassPermissions", false),
-        ] {
-            let previous = m.applied_permission_mode.clone();
-            let req = m.set_permission_mode_request_str(permission_mode_flag(mode));
-            let request_id = req["request_id"].as_str().unwrap().to_owned();
-            assert_eq!(req["type"], "control_request");
-            assert_eq!(req["request"]["subtype"], "set_permission_mode");
-            assert_eq!(req["request"]["mode"], native_mode);
-            assert_eq!(
-                m.applied_permission_mode, previous,
-                "must wait for acknowledgement"
-            );
-
-            let events = m.on_message(json!({
-                "type": "control_response",
-                "response": if accepted {
-                    json!({"subtype": "success", "request_id": request_id, "response": {}})
-                } else {
-                    json!({"subtype": "error", "request_id": request_id, "error": "unsupported mode"})
-                }
-            }));
-            if accepted {
-                assert!(events.is_empty());
-                assert_eq!(m.applied_permission_mode, native_mode);
-            } else {
-                assert!(matches!(
-                    events.as_slice(),
-                    [AgentEvent::Warning { message }] if message.contains("unsupported mode")
-                ));
-                assert_eq!(m.applied_permission_mode, previous);
-            }
-        }
-    }
-
-    #[test]
     fn full_fixture_trace_parses() {
         let trace = include_str!("../tests/fixtures/claude/tool_use_trace.jsonl");
         let mut m = Mapper::new();
@@ -5206,7 +5019,10 @@ mod tests {
                     assert_eq!(changes[0].path, "/private/tmp/probe-claude-py/hello.txt");
                     assert_eq!(reason.as_deref(), Some("hello.txt"));
                     let response = m
-                        .build_approval_response(&request.id, ApprovalDecision::Approve)
+                        .build_approval_response(
+                            &request.id,
+                            ApprovalDecision::Option("allow".into()),
+                        )
                         .expect("response to the recorded request");
                     assert_eq!(
                         response,
@@ -5226,8 +5042,11 @@ mod tests {
                         })
                     );
                     assert!(
-                        m.build_approval_response(&request.id, ApprovalDecision::Approve)
-                            .is_none()
+                        m.build_approval_response(
+                            &request.id,
+                            ApprovalDecision::Option("allow".into())
+                        )
+                        .is_none()
                     );
                 }
                 all.push(event);

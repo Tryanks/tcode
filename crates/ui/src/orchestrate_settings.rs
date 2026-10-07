@@ -441,10 +441,10 @@ impl OrchestrateSettingsPanel {
 
     fn render_child_approval(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.store.read(cx).settings().orchestrate.child_approval;
-        let reset = (selected != ChildApprovalMode::Orchestrator).then(|| {
+        let reset = (selected != ChildApprovalMode::Auto).then(|| {
             self.reset_button("reset-orchestrate-child-approval", cx, |this, _, cx| {
                 this.store.update(cx, |store, _cx| {
-                    store.set_orchestrate_child_approval(ChildApprovalMode::Orchestrator)
+                    store.set_orchestrate_child_approval(ChildApprovalMode::Auto)
                 });
             })
         });
@@ -452,6 +452,7 @@ impl OrchestrateSettingsPanel {
             ChildApprovalMode::Orchestrator => {
                 crate::tr!("orchestrate.child_approval.orchestrator")
             }
+            ChildApprovalMode::Auto => crate::tr!("orchestrate.child_approval.auto"),
             ChildApprovalMode::AlwaysAllow => {
                 crate::tr!("orchestrate.child_approval.always_allow")
             }
@@ -461,14 +462,17 @@ impl OrchestrateSettingsPanel {
             .ghost()
             .outline()
             .compact()
+            .w_full()
+            .max_w_full()
             .child(
                 h_flex()
-                    .w(px(180.))
+                    .w_full()
+                    .min_w_0()
                     .items_center()
                     .justify_between()
                     .gap_2()
                     .text_size(px(13.))
-                    .child(selected_label)
+                    .child(div().flex_1().min_w_0().child(selected_label))
                     .child(
                         Icon::new(IconName::ChevronDown)
                             .xsmall()
@@ -477,11 +481,14 @@ impl OrchestrateSettingsPanel {
             );
         let panel = cx.entity();
         let dropdown = crate::material::overlay_popover("orchestrate-child-approval-popover", cx)
+            // The default left anchor clips this wide menu in narrow Settings.
+            .anchor(gpui::Anchor::TopRight)
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let option = |mode: ChildApprovalMode,
                               id: &'static str,
                               label: gpui::SharedString,
+                              description: gpui::SharedString,
                               cx: &mut Context<gpui_base::PopoverState>|
                  -> AnyElement {
                     let panel = panel.clone();
@@ -497,7 +504,14 @@ impl OrchestrateSettingsPanel {
                         .text_size(px(13.))
                         .cursor_pointer()
                         .hover(|style| style.bg(cx.theme().accent))
-                        .child(div().flex_1().child(label))
+                        .child(
+                            v_flex().flex_1().min_w_0().gap_0p5().child(label).child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(description),
+                            ),
+                        )
                         .when(mode == selected, |row| {
                             row.child(Icon::new(IconName::Check).xsmall())
                         })
@@ -513,12 +527,26 @@ impl OrchestrateSettingsPanel {
                 };
                 v_flex()
                     .p_1()
-                    .min_w(px(180.))
+                    .w(px(340.))
                     .gap_0p5()
                     .child(option(
                         ChildApprovalMode::Orchestrator,
                         "orchestrate-child-approval-orchestrator",
                         crate::tr!("orchestrate.child_approval.orchestrator")
+                            .into_owned()
+                            .into(),
+                        crate::tr!("orchestrate.child_approval.orchestrator_description")
+                            .into_owned()
+                            .into(),
+                        cx,
+                    ))
+                    .child(option(
+                        ChildApprovalMode::Auto,
+                        "orchestrate-child-approval-auto",
+                        crate::tr!("orchestrate.child_approval.auto")
+                            .into_owned()
+                            .into(),
+                        crate::tr!("orchestrate.child_approval.auto_description")
                             .into_owned()
                             .into(),
                         cx,
@@ -529,12 +557,18 @@ impl OrchestrateSettingsPanel {
                         crate::tr!("orchestrate.child_approval.always_allow")
                             .into_owned()
                             .into(),
+                        crate::tr!("orchestrate.child_approval.always_allow_description")
+                            .into_owned()
+                            .into(),
                         cx,
                     ))
                     .child(option(
                         ChildApprovalMode::Manual,
                         "orchestrate-child-approval-manual",
                         crate::tr!("orchestrate.child_approval.manual")
+                            .into_owned()
+                            .into(),
+                        crate::tr!("orchestrate.child_approval.manual_description")
                             .into_owned()
                             .into(),
                         cx,
@@ -549,10 +583,12 @@ impl OrchestrateSettingsPanel {
                     .px_3()
                     .py_2()
                     .gap_3()
+                    .flex_wrap()
                     .items_center()
                     .child(
                         v_flex()
-                            .flex_1()
+                            .flex_basis(px(260.))
+                            .flex_grow(1.)
                             .min_w_0()
                             .gap_0p5()
                             .child(self.row_title(
@@ -566,7 +602,7 @@ impl OrchestrateSettingsPanel {
                                     .child(crate::tr!("orchestrate.child_approval.description")),
                             ),
                     )
-                    .child(dropdown),
+                    .child(div().w(px(196.)).max_w_full().min_w_0().child(dropdown)),
             )
             .into_any_element()
     }

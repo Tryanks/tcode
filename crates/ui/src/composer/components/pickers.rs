@@ -283,7 +283,23 @@ impl Composer {
     pub(in super::super) fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
         let composer = store.composer_state();
-        let descriptors = composer.active_option_descriptors.clone();
+        let descriptors = composer
+            .active_option_descriptors
+            .iter()
+            .filter(|descriptor| {
+                matches!(
+                    descriptor,
+                    OptionDescriptor::Select {
+                        role: agent::OptionRole::Model,
+                        ..
+                    } | OptionDescriptor::Boolean {
+                        role: agent::OptionRole::Model,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if composer.conversation_read_only {
             let effort =
                 option_selection_str(&composer.active_option_selections, "reasoningEffort");
@@ -395,56 +411,6 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The Build/Plan interaction-mode chip.
-    pub(in super::super) fn render_mode_chip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = self
-            .workspace_store
-            .read(cx)
-            .composer_state()
-            .interaction_mode;
-        let muted = cx.theme().muted_foreground;
-        let (icon, label, tooltip) = match mode {
-            InteractionMode::Build => (
-                "icons/box.svg",
-                crate::tr!("composer.build"),
-                crate::tr!("composer.build_tooltip"),
-            ),
-            InteractionMode::Plan => (
-                "icons/ruler.svg",
-                crate::tr!("composer.plan"),
-                crate::tr!("composer.plan_tooltip"),
-            ),
-        };
-        Button::new("mode-chip")
-            .debug_selector(|| "mode-chip".into())
-            .when(self.compact, |button| {
-                button.max_w(px(80.)).overflow_hidden()
-            })
-            .ghost()
-            .compact()
-            .h(px(28.))
-            .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
-            .disabled(!self.interactive(cx))
-            .rounded(crate::material::radius_chip(cx))
-            .tooltip(tooltip)
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .gap_1p5()
-                    .items_center()
-                    .text_size(px(11.5))
-                    .text_color(muted)
-                    .child(Icon::empty().path(icon).small().text_color(muted))
-                    .child(div().min_w_0().truncate().child(label)),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.workspace_store
-                    .update(cx, |store, _cx| store.toggle_interaction_mode());
-            }))
-            .into_any_element()
-    }
-
     /// The circular context-window meter (ring showing used%, red > 90%) and
     /// its hover/click popover.
     pub(in super::super) fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -490,18 +456,17 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The approval-mode selector: a chip showing the current mode (icon +
-    /// label) opening a popover of the three modes (icon + bold name + muted
-    /// description, ✓ on the current one).
     pub(in super::super) fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = self.workspace_store.read(cx).composer_state();
-        let current = composer.effective_approval_mode;
-        let native_approval_modes_enabled = composer.native_approval_modes_enabled;
-        let (label, icon_path) = approval_mode_meta(current);
+        let Some(control) = PermissionControl::from_composer(&composer) else {
+            return permission_notice(&composer, cx);
+        };
         let muted = cx.theme().muted_foreground;
-
+        let label = control.shown_label();
+        let pending = control.requested.is_some();
         let trigger = Button::new("permission-chip")
             .debug_selector(|| "permission-chip".into())
+            .aria_label(crate::tr!("permission.chip", value = label.clone()).into_owned())
             .ghost()
             .compact()
             .h(px(28.))
@@ -516,35 +481,36 @@ impl Composer {
                     .items_center()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(Icon::empty().path(icon_path).small().text_color(muted))
+                    .child(
+                        Icon::empty()
+                            .path("icons/lock.svg")
+                            .small()
+                            .text_color(muted),
+                    )
                     .child(div().min_w_0().truncate().child(label))
+                    .when(pending, |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .child(crate::tr!("permission.pending")),
+                        )
+                    })
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
-
         let store_entity = self.workspace_store.clone();
         let compact = self.compact;
-        let pending_restart = composer.approval_pending_restart;
+        let title = control.label.clone();
         crate::material::overlay_popover("permission-popover", cx)
             .anchor(Anchor::BottomLeft)
-            .when(self.compact, |popover| {
-                popover.bottom_sheet(crate::tr!("mobile.approval_mode"))
-            })
+            .when(self.compact, |popover| popover.bottom_sheet(title))
             .trigger(trigger)
             .content(move |_, _, cx| {
-                render_permission_pane(
-                    (current, compact),
-                    pending_restart,
-                    native_approval_modes_enabled,
-                    &store_entity,
-                    &cx.entity(),
-                    cx,
-                )
+                render_permission_pane(&control, compact, &store_entity, &cx.entity(), cx)
             })
             .into_any_element()
     }
 
-    /// The "⋯" overflow button + popover holding the context / permission /
-    /// mode controls when the control row is too narrow to show them inline.
     /// The phone composer's "+" : a sheet of ways to add to the message.
     /// Only the photo library for now; more rows go here, not in the row.
     pub(in super::super) fn render_attach_menu(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -608,10 +574,17 @@ impl Composer {
         let composer = self.workspace_store.read(cx).composer_state();
         let usage = composer.token_usage;
         let muted = cx.theme().muted_foreground;
-        let mode = composer.effective_approval_mode;
-        let interaction = composer.interaction_mode;
-        let store_entity = self.workspace_store.clone();
-
+        let permission = PermissionControl::from_composer(&composer).map(|control| {
+            if control.requested.is_some() {
+                format!(
+                    "{} · {}",
+                    control.shown_label(),
+                    crate::tr!("permission.pending")
+                )
+            } else {
+                control.shown_label()
+            }
+        });
         let trigger = Button::new("overflow-controls")
             .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
             .ghost()
@@ -626,15 +599,7 @@ impl Composer {
             })
             .trigger(trigger)
             .content(move |_, window, cx| {
-                render_overflow_pane(
-                    usage,
-                    mode,
-                    interaction,
-                    &store_entity,
-                    &cx.entity(),
-                    window,
-                    cx,
-                )
+                render_overflow_pane(usage, permission.clone(), window, cx)
             })
             .into_any_element()
     }
@@ -884,8 +849,6 @@ fn render_model_pane(
         .child(rail)
         .child(pane);
     if compact {
-        // The phone pins Effort and Approval mode to the bottom of the model
-        // sheet as segmented controls; choosing applies at once.
         return v_flex()
             .w_full()
             .min_h_0()
@@ -901,10 +864,6 @@ fn render_model_pane(
     .into_any_element()
 }
 
-/// The compact model sheet's pinned footer:
-/// "Effort" — only when the active model describes a `reasoningEffort` select —
-/// over "Approval mode", both as segmented controls. Selecting applies
-/// immediately and leaves the sheet open.
 fn render_compact_model_footer(
     store_entity: &Entity<WorkspaceStore>,
     cx: &mut Context<PopoverState>,
@@ -977,42 +936,51 @@ fn render_compact_model_footer(
         footer = footer.child(group(label.into(), track, cx));
     }
 
-    let current = composer_state.effective_approval_mode;
-    let enabled = composer_state.native_approval_modes_enabled;
-    let segments = APPROVAL_MODES
-        .iter()
-        .map(|(mode, label, _, _)| {
-            let mode = *mode;
-            let disabled = !enabled
-                && matches!(
-                    mode,
-                    ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
-                );
-            let store = store_entity.clone();
-            crate::material::segment(
-                gpui::SharedString::from(format!("compact-approval-{label}")),
-                crate::tr!(label).into_owned(),
-                mode == current,
-                cx,
-            )
-            .disabled(disabled)
-            .on_change(move |_, _, _, cx| {
-                store.update(cx, |store, _cx| store.set_active_approval_mode(mode));
+    if let Some(control) = PermissionControl::from_composer(&composer_state) {
+        let shown = control.requested.as_ref().or(control.current.as_ref());
+        let segments = control
+            .rows
+            .iter()
+            .map(|row| {
+                let store = store_entity.clone();
+                let id = control.id.clone();
+                let value = row.value.clone();
+                crate::material::segment(
+                    gpui::SharedString::from(format!("compact-permission-{}", row.value)),
+                    if row.recommended {
+                        format!("{} ★", row.label)
+                    } else {
+                        row.label.clone()
+                    },
+                    shown == Some(&row.value),
+                    cx,
+                )
+                .disabled(row.unavailable.is_some())
+                .on_change(move |_, _, _, cx| {
+                    store.update(cx, |store, _cx| {
+                        store.set_active_option(id.clone(), Some(value.clone()))
+                    });
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    let track = crate::material::segmented_track("compact-approval", segments, cx);
+            .collect::<Vec<_>>();
+        let track = crate::material::segmented_track("compact-permission", segments, cx);
+        let label = match (control.requested.is_some(), control.apply_hint()) {
+            (true, Some(hint)) => {
+                format!(
+                    "{} · {} · {hint}",
+                    control.label,
+                    crate::tr!("permission.pending")
+                )
+            }
+            (true, None) => format!("{} · {}", control.label, crate::tr!("permission.pending")),
+            (false, _) => control.label.clone(),
+        };
+        footer = footer.child(group(label.into(), track, cx));
+    } else {
+        footer = footer.child(permission_notice(&composer_state, cx));
+    }
     footer
-        .child(group(
-            crate::tr!("mobile.approval_mode").into_owned().into(),
-            track,
-            cx,
-        ))
-        // The sheet's own bottom padding is the popover's; this keeps the last
-        // control clear of the home indicator.
         .child(div().h(px(8.)).flex_none())
-        // Occluded so a tap on a segment never falls through to the rows
-        // above, which dismiss the sheet.
         .id("compact-model-footer")
         .occlude()
         .border_t_1()
@@ -1191,55 +1159,196 @@ fn render_model_row(
         .into_any_element()
 }
 
-/// The approval-mode popover: three rows (icon + bold name + muted
-/// description), a ✓ on the current mode, and an optional restart note when the
-/// live provider (Codex) will restart to apply the change on the next turn.
+struct PermissionRow {
+    value: serde_json::Value,
+    label: String,
+    description: Option<String>,
+    unavailable: Option<String>,
+    recommended: bool,
+}
+
+struct PermissionControl {
+    id: String,
+    label: String,
+    rows: Vec<PermissionRow>,
+    /// The value the provider confirmed.
+    current: Option<serde_json::Value>,
+    /// A value the user chose that the provider has not confirmed yet.
+    requested: Option<serde_json::Value>,
+    apply: agent::ApplyTiming,
+}
+
+impl PermissionControl {
+    fn from_composer(composer: &crate::store::ComposerState) -> Option<Self> {
+        let descriptor = composer
+            .active_option_descriptors
+            .iter()
+            .find(|descriptor| {
+                matches!(
+                    descriptor,
+                    OptionDescriptor::Select {
+                        role: agent::OptionRole::Permission,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .or_else(|| agent::permission_control(composer.provider?))?;
+        let (id, label, rows, default, apply) = match descriptor {
+            OptionDescriptor::Select {
+                id,
+                label,
+                options,
+                default_value,
+                apply,
+                recommended,
+                ..
+            } => {
+                let rows = options
+                    .into_iter()
+                    .map(|option| PermissionRow {
+                        recommended: recommended.as_deref() == Some(option.value.as_str()),
+                        description: option.description.map(|description| {
+                            crate::i18n::translate_permission_description(
+                                &format!("permission.values.{id}.{}", option.value),
+                                &description,
+                            )
+                        }),
+                        value: serde_json::Value::String(option.value),
+                        label: crate::i18n::translate_english(
+                            "permission.current.label",
+                            &option.label,
+                        )
+                        .into_owned(),
+                        unavailable: option.unavailable.map(|reason| {
+                            crate::i18n::translate_english("permission.unavailable", &reason)
+                                .into_owned()
+                        }),
+                    })
+                    .collect();
+                (
+                    id,
+                    label,
+                    rows,
+                    default_value.map(serde_json::Value::String),
+                    apply,
+                )
+            }
+            OptionDescriptor::Boolean { .. } => return None,
+        };
+        let current = composer
+            .active_option_selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .map(|selection| selection.value.clone())
+            .or(default);
+        let requested = composer
+            .requested_option_selections
+            .iter()
+            .find(|selection| selection.id == id)
+            .map(|selection| selection.value.clone())
+            .filter(|value| Some(value) != current.as_ref());
+        Some(Self {
+            label: crate::i18n::translate_english(&format!("permission.controls.{id}"), &label)
+                .into_owned(),
+            id,
+            rows,
+            current,
+            requested,
+            apply,
+        })
+    }
+
+    fn row_label(&self, value: Option<&serde_json::Value>) -> Option<String> {
+        self.rows
+            .iter()
+            .find(|row| Some(&row.value) == value)
+            .map(|row| row.label.clone())
+    }
+
+    /// What the composer shows: the pending choice while one is in flight,
+    /// otherwise the provider's confirmed value.
+    fn shown_label(&self) -> String {
+        self.row_label(self.requested.as_ref().or(self.current.as_ref()))
+            .unwrap_or_else(|| self.label.clone())
+    }
+
+    fn apply_hint(&self) -> Option<std::borrow::Cow<'static, str>> {
+        match self.apply {
+            agent::ApplyTiming::Live => None,
+            agent::ApplyTiming::NextTurn => Some(crate::tr!("permission.next_turn")),
+            agent::ApplyTiming::Restart => Some(crate::tr!("permission.restart")),
+        }
+    }
+}
+
+fn permission_notice(composer: &crate::store::ComposerState, cx: &App) -> AnyElement {
+    let Some(notice) = composer.provider.and_then(agent::permission_notice) else {
+        return div().into_any_element();
+    };
+    let notice: gpui::SharedString =
+        crate::i18n::translate_english("permission.notice", notice).into();
+    let muted = cx.theme().muted_foreground;
+    h_flex()
+        .id("permission-notice")
+        .debug_selector(|| "permission-notice".into())
+        .min_w_0()
+        .min_h(px(28.))
+        .px_2()
+        .py_1()
+        .gap_1p5()
+        .items_center()
+        .text_size(px(13.))
+        .text_color(muted)
+        .child(
+            Icon::empty()
+                .path("icons/lock.svg")
+                .small()
+                .text_color(muted),
+        )
+        .child(notice)
+        .into_any_element()
+}
+
 fn render_permission_pane(
-    (current, compact): (ApprovalMode, bool),
-    pending_restart: bool,
-    native_approval_modes_enabled: bool,
+    control: &PermissionControl,
+    compact: bool,
     store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let primary = cx.theme().primary;
-
+    let caption = |text: gpui::SharedString| div().text_size(px(11.)).text_color(muted).child(text);
     let mut list = v_flex()
         .id("permission-menu")
         .role(Role::Menu)
-        .aria_label(crate::tr!("approval.choose_mode"))
+        .aria_label(control.label.clone())
         .w_full()
         .p_1()
         .gap_0p5();
-    for (index, (mode, label, description, icon_path)) in APPROVAL_MODES.iter().enumerate() {
-        let mode = *mode;
-        let is_current = mode == current;
-        let is_disabled = !native_approval_modes_enabled
-            && matches!(
-                mode,
-                ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
-            );
+    for (index, option) in control.rows.iter().enumerate() {
+        let effective = control.current.as_ref() == Some(&option.value);
+        let pending = control.requested.as_ref() == Some(&option.value);
+        let disabled = option.unavailable.is_some();
         let store = store_entity.clone();
         let popover = popover.clone();
-        let disabled_hint = crate::tr!("approval.pi_native_approvals_required");
-        let accessible_label = crate::tr!(
-            "approval.mode_option",
-            label = crate::tr!(*label),
-            description = if is_disabled {
-                format!("{} {}", crate::tr!(*description), disabled_hint)
-            } else {
-                crate::tr!(*description).into_owned()
-            }
-        )
-        .into_owned();
+        let value = option.value.clone();
+        let id = control.id.clone();
         list = list.child(
             h_flex()
                 .id(("permission-row", index))
+                .debug_selector(move || format!("permission-row-{index}"))
                 .role(Role::MenuItem)
-                .aria_label(accessible_label)
-                .aria_selected(is_current)
-                .when(is_current, |row| row.aria_active_descendant())
+                .aria_label(
+                    std::iter::once(option.label.as_str())
+                        .chain(option.description.as_deref())
+                        .chain(option.unavailable.as_deref())
+                        .collect::<Vec<_>>()
+                        .join(": "),
+                )
+                .aria_selected(effective)
+                .when(effective, |row| row.aria_active_descendant())
                 .w_full()
                 .min_h(px(if compact { 48. } else { 28. }))
                 .px_2()
@@ -1247,22 +1356,18 @@ fn render_permission_pane(
                 .gap_2()
                 .items_start()
                 .rounded(crate::material::radius_chip(cx))
-                .when(is_current, |row| row.bg(cx.theme().list_active))
-                .when(is_disabled, |row| row.opacity(0.55))
-                .when(!is_disabled, |row| {
+                .when(effective, |row| row.bg(cx.theme().list_active))
+                .when(disabled, |row| row.opacity(0.55))
+                .when(!disabled, |row| {
                     row.cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().muted))
+                        .hover(|style| style.bg(cx.theme().muted))
                         .on_click(move |_, window, cx| {
-                            store.update(cx, |store, _cx| store.set_active_approval_mode(mode));
-                            popover.update(cx, |st, cx| st.dismiss(window, cx));
+                            store.update(cx, |store, _cx| {
+                                store.set_active_option(id.clone(), Some(value.clone()))
+                            });
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
                         })
                 })
-                .child(
-                    Icon::empty()
-                        .path(*icon_path)
-                        .small()
-                        .text_color(if is_current { primary } else { muted }),
-                )
                 .child(
                     v_flex()
                         .flex_1()
@@ -1272,41 +1377,43 @@ fn render_permission_pane(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
+                                .flex_wrap()
                                 .text_size(px(13.))
-                                .child(div().font_medium().child(crate::tr!(*label)))
-                                .when(is_current, |this| {
-                                    this.child(
+                                .child(div().font_medium().child(option.label.clone()))
+                                .when(option.recommended, |row| {
+                                    row.child(caption(crate::tr!("permission.recommended").into()))
+                                })
+                                .when(effective, |row| {
+                                    row.child(
                                         Icon::new(IconName::Check).xsmall().text_color(primary),
                                     )
+                                })
+                                .when(pending, |row| {
+                                    row.child(caption(crate::tr!("permission.pending").into()))
                                 }),
                         )
-                        .child(
-                            v_flex()
-                                .gap_0p5()
-                                .text_size(px(11.))
-                                .text_color(muted)
-                                .child(crate::tr!(*description))
-                                .when(is_disabled, |text| text.child(disabled_hint)),
-                        ),
+                        .when_some(option.description.clone(), |column, description| {
+                            column.child(caption(description.into()))
+                        })
+                        .when_some(option.unavailable.clone(), |column, reason| {
+                            column.child(caption(reason.into()))
+                        }),
                 ),
         );
     }
-
     let mut pane = v_flex()
         .debug_selector(|| "permission-pane".into())
         .w_full()
         .when(!compact, |pane| pane.w(px(280.)))
         .child(list);
-    if pending_restart {
+    if let Some(hint) = control.apply_hint() {
         pane = pane.child(
             div()
                 .px_3()
                 .py_1p5()
                 .border_t_1()
                 .border_color(cx.theme().border)
-                .text_size(px(11.))
-                .text_color(muted)
-                .child(crate::tr!("composer.restart_note")),
+                .child(caption(hint.into())),
         );
     }
     if compact {
@@ -1367,6 +1474,7 @@ fn render_traits_pane(
                 label,
                 options,
                 default_value,
+                ..
             } => {
                 let options: Vec<agent::SelectOption> = if fast_owned {
                     options
@@ -1509,6 +1617,7 @@ fn render_traits_pane(
                 id,
                 label,
                 default_value,
+                ..
             } => {
                 if fast_owned {
                     continue;
@@ -1671,15 +1780,9 @@ fn render_fast_mode_bolt(
         .into_any_element()
 }
 
-/// The "⋯" overflow popover: the context chip's usage summary plus the
-/// permission / mode chips, shown when the control row collapses at narrow
-/// widths.
 fn render_overflow_pane(
     usage: Option<TokenUsage>,
-    mode: ApprovalMode,
-    interaction: InteractionMode,
-    store_entity: &Entity<WorkspaceStore>,
-    popover: &Entity<PopoverState>,
+    permission: Option<String>,
     window: &Window,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -1699,17 +1802,6 @@ fn render_overflow_pane(
             .into_any_element()
     };
 
-    let (mode_label, mode_icon) = approval_mode_meta(mode);
-    let (interaction_icon, interaction_label) = match interaction {
-        InteractionMode::Build => ("icons/box.svg", crate::tr!("composer.build")),
-        InteractionMode::Plan => ("icons/ruler.svg", crate::tr!("composer.plan")),
-    };
-    let next_interaction = match interaction {
-        InteractionMode::Build => InteractionMode::Plan,
-        InteractionMode::Plan => InteractionMode::Build,
-    };
-    let interaction_store = store_entity.clone();
-    let interaction_popover = popover.clone();
     v_flex()
         .w_full()
         .when(!crate::window_seam::window_is_compact(window, cx), |pane| {
@@ -1718,37 +1810,9 @@ fn render_overflow_pane(
         .p_1()
         .gap_0p5()
         .child(item(Icon::new(IconName::Info), context_label(usage)))
-        // The permission row stays display-only: its full-width counterpart is
-        // an explicit picker, and cycling here would let two stray clicks
-        // escalate a Supervised session all the way to Full access.
-        .child(item(Icon::empty().path(mode_icon), mode_label))
-        .child(
-            h_flex()
-                .id("overflow-interaction")
-                .w_full()
-                .px_2()
-                .py_1p5()
-                .gap_1p5()
-                .items_center()
-                .rounded(cx.theme().tokens.radius.sm)
-                .cursor_pointer()
-                .text_size(px(13.))
-                .text_color(muted)
-                .hover(|style| style.bg(cx.theme().muted))
-                .child(
-                    Icon::empty()
-                        .path(interaction_icon)
-                        .small()
-                        .text_color(muted),
-                )
-                .child(interaction_label)
-                .on_click(move |_, window, cx| {
-                    interaction_store.update(cx, |store, _cx| {
-                        store.set_interaction_mode(next_interaction)
-                    });
-                    interaction_popover.update(cx, |state, cx| state.dismiss(window, cx));
-                }),
-        )
+        .when_some(permission, |pane, label| {
+            pane.child(item(Icon::empty().path("icons/lock.svg"), label))
+        })
         .into_any_element()
 }
 
@@ -1987,14 +2051,10 @@ mod sheet_tests {
                         if context {
                             render_context_meter_pane(None, None, None, None, compact, cx)
                         } else {
-                            render_permission_pane(
-                                (ApprovalMode::Supervised, compact),
-                                false,
-                                true,
-                                &store,
-                                &cx.entity(),
-                                cx,
-                            )
+                            let mut composer = store.read(cx).composer_state();
+                            composer.provider = Some(ProviderKind::ClaudeCode);
+                            let control = PermissionControl::from_composer(&composer).unwrap();
+                            render_permission_pane(&control, compact, &store, &cx.entity(), cx)
                         }
                     }),
             )

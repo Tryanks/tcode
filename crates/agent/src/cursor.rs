@@ -22,9 +22,9 @@ use crate::acp_session::{
     prompt_status,
 };
 use crate::{
-    AgentError, AgentEvent, ApprovalMode, Attachment, InteractionMode, LaunchEnv, ModelSpec,
-    PlanStep, PlanStepStatus, ProviderKind, ResumeCursor, SessionHandle, SessionOptions,
-    TurnStatus, UserInputOption, UserInputQuestion,
+    AgentError, AgentEvent, Attachment, LaunchEnv, ModelSpec, PlanStep, PlanStepStatus,
+    ProviderKind, ResumeCursor, SessionHandle, SessionOptions, TurnStatus, UserInputOption,
+    UserInputQuestion,
 };
 
 use updates::Updates;
@@ -72,9 +72,7 @@ pub async fn list_models(
         resume: None,
         fork: false,
         binary_path,
-        approval_mode: ApprovalMode::Supervised,
         option_selections: Vec::new(),
-        interaction_mode: InteractionMode::default(),
         mcp_servers: Vec::new(),
         launch_env,
         extra_args: Vec::new(),
@@ -140,7 +138,6 @@ fn signed_out() -> AgentError {
 }
 
 struct Cursor {
-    approval_mode: ApprovalMode,
     updates: Mutex<Updates>,
     /// Cursor's todo list as `cursor/update_todos` last left it.
     todos: Mutex<Vec<Todo>>,
@@ -151,7 +148,6 @@ struct Cursor {
 impl Cursor {
     fn new(opts: &SessionOptions) -> Self {
         Self {
-            approval_mode: opts.approval_mode,
             updates: Mutex::new(Updates::new(opts.cwd.clone())),
             todos: Mutex::new(Vec::new()),
             run_failed: AtomicBool::new(false),
@@ -224,9 +220,8 @@ impl Dialect for Cursor {
         // common to resolve from PATH with confidence.
         let program = crate::resolve_binary(opts.binary_path.as_deref(), "cursor-agent")?;
         let mut args = Vec::new();
-        if opts.approval_mode == ApprovalMode::FullAccess {
-            args.push("--force".to_string());
-        }
+        // approvalMode allowlist/auto-review require user config; no documented launch override exists.
+        args.push("--force".to_string());
         args.extend(opts.extra_args.iter().cloned());
         args.push("acp".to_string());
         let client_meta = json!({ "parameterizedModelPicker": true, "subagents": true });
@@ -289,11 +284,6 @@ impl Dialect for Cursor {
             config_options = selected;
         }
         restore_parameters(setup, &session_id, &config_options).await;
-        if opts.interaction_mode == InteractionMode::Plan || setup.in_plan_mode() {
-            setup
-                .apply_interaction_mode(&session_id, opts.interaction_mode)
-                .await;
-        }
         Ok(Established {
             resume: ResumeCursor(json!({ "session_id": session_id.0.to_string() })),
             session_id,
@@ -344,11 +334,6 @@ impl Dialect for Cursor {
     ) {
     }
 
-    async fn set_approval_mode(&self, _session: &Session, _mode: ApprovalMode) {
-        // Applied at launch when the runtime restarts the session for the next
-        // turn.
-    }
-
     fn handles_request(&self, method: &str) -> bool {
         matches!(
             method,
@@ -386,24 +371,42 @@ impl Dialect for Cursor {
                 Ok(reply)
             }
             CREATE_PLAN => {
-                // Cursor's own CLI takes a created plan without asking: it
-                // saves the plan, and the user builds it in a later turn. An
-                // `accepted` outcome without a `planUri` has Cursor save it
-                // the same way; the user's decision is the proposed plan's.
-                let markdown = params.get("plan").and_then(Value::as_str).unwrap_or("");
-                if !replaying && !markdown.trim().is_empty() {
-                    let item_id = params
-                        .get("toolCallId")
-                        .and_then(Value::as_str)
-                        .unwrap_or(CREATE_PLAN);
-                    session
-                        .emit(AgentEvent::ProposedPlan {
-                            item_id: item_id.to_string(),
-                            markdown: markdown.to_string(),
-                        })
-                        .await;
+                if replaying {
+                    return Ok(json!({"outcome": {"outcome": "cancelled"}}));
                 }
-                Ok(json!({ "outcome": { "outcome": "accepted" } }))
+                let content = params.get("plan").and_then(Value::as_str).unwrap_or("");
+                let answers = session
+                    .ask_user(vec![UserInputQuestion {
+                        id: "decision".into(),
+                        header: method,
+                        question: content.to_owned(),
+                        options: [
+                            ("Accept", "Let Cursor save the plan"),
+                            (
+                                "Reject",
+                                "Decline the plan; type a reason to provide feedback",
+                            ),
+                        ]
+                        .into_iter()
+                        .map(|(label, description)| UserInputOption {
+                            label: label.into(),
+                            description: description.into(),
+                        })
+                        .collect(),
+                        multi_select: false,
+                        prefill: None,
+                    }])
+                    .await;
+                let answer = answers
+                    .as_ref()
+                    .and_then(|answers| answers.get("decision"))
+                    .and_then(Value::as_str);
+                Ok(match answer {
+                    Some("Accept") => json!({"outcome": {"outcome": "accepted"}}),
+                    Some("Reject") => json!({"outcome": {"outcome": "rejected"}}),
+                    Some(reason) => json!({"outcome": {"outcome": "rejected", "reason": reason}}),
+                    None => json!({"outcome": {"outcome": "cancelled"}}),
+                })
             }
             UPDATE_TODOS => {
                 if !replaying {
@@ -444,22 +447,6 @@ impl Dialect for Cursor {
 
     fn owned_config_options(&self) -> &'static [&'static str] {
         &[MODEL_CONFIG_ID]
-    }
-
-    fn auto_approves(&self, tool_call: &acp::ToolCallUpdate) -> bool {
-        let Some(kind) = tool_call.fields.kind else {
-            return false;
-        };
-        match self.approval_mode {
-            // A web fetch changes nothing locally but can carry data out, so
-            // it is asked about like any other action.
-            ApprovalMode::ReadOnly => matches!(kind, acp::ToolKind::Read | acp::ToolKind::Search),
-            ApprovalMode::AutoAcceptEdits => matches!(
-                kind,
-                acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move
-            ),
-            ApprovalMode::Supervised | ApprovalMode::FullAccess => false,
-        }
     }
 }
 
