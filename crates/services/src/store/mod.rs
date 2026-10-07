@@ -66,12 +66,37 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 struct EventEnvelope {
     ts: u64,
     event: AgentEvent,
+    #[serde(default)]
+    file_diff_version: Option<u8>,
 }
 
 #[derive(Serialize)]
 struct EventEnvelopeRef<'a> {
     ts: u64,
     event: &'a AgentEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_diff_version: Option<u8>,
+}
+
+impl<'a> EventEnvelopeRef<'a> {
+    fn new(ts: u64, event: &'a AgentEvent) -> Self {
+        let file_change = match event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item) => {
+                matches!(item.content, agent::ItemContent::FileChange { .. })
+            }
+            AgentEvent::ApprovalRequested(request) => {
+                matches!(request.kind, agent::ApprovalKind::FileChange { .. })
+            }
+            _ => false,
+        };
+        Self {
+            ts,
+            event,
+            file_diff_version: file_change.then_some(1),
+        }
+    }
 }
 
 /// Which installation a cached command list belongs to. Native commands
@@ -240,7 +265,8 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
-        let mut line = serde_json::to_vec(&EventEnvelopeRef { ts, event }).map_err(invalid_data)?;
+        let mut line =
+            serde_json::to_vec(&EventEnvelopeRef::new(ts, event)).map_err(invalid_data)?;
         line.push(b'\n');
         Ok(Self(Op::AppendEvent {
             session_id: session_id.to_owned(),
@@ -903,6 +929,7 @@ impl SessionStore {
         self.run("read events", |db| {
             db.read(|db, connection| {
                 let mut log = EventLog::default();
+                let mut provider = None;
                 db.query(
                     connection,
                     "SELECT position, line FROM events \
@@ -913,12 +940,20 @@ impl SessionStore {
                         let line = blob(row, 1)?;
                         log.next_row = position as u64 + 1;
                         match decode_row(&line) {
-                            Row::Record(stored) => {
+                            Ok(Some(record)) => {
+                                if record.legacy_file_diff && provider.is_none() {
+                                    provider = stored_provider_at(db, connection, id, position)?;
+                                }
+                                let stored = record.into_stored(provider);
+                                if let AgentEvent::ProviderRelay { to_provider, .. } = &stored.event
+                                {
+                                    provider = Some(*to_provider);
+                                }
                                 log.records.push(stored);
                                 log.rows.push(position as u64);
                             }
-                            Row::Blank => {}
-                            Row::Undecodable(reason) => {
+                            Ok(None) => {}
+                            Err(reason) => {
                                 log.undecodable += 1;
                                 log::warn!("skipping event {position} of {id}: {reason}");
                             }
@@ -1121,26 +1156,17 @@ pub struct EventLog {
     pub undecodable: usize,
 }
 
-/// What one stored row holds.
-enum Row {
-    Record(StoredEvent),
-    /// Only whitespace: no record in any build.
-    Blank,
-    Undecodable(String),
-}
-
-fn decode_row(line: &[u8]) -> Row {
+fn decode_row(line: &[u8]) -> Result<Option<ParsedRecord>, String> {
     let Ok(line) = std::str::from_utf8(line) else {
-        return Row::Undecodable("not UTF-8".into());
+        return Err("not UTF-8".into());
     };
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return Row::Blank;
+        return Ok(None);
     }
-    match parse_stored_line(trimmed) {
-        Ok(stored) => Row::Record(stored),
-        Err(error) => Row::Undecodable(format!("unparseable: {error}")),
-    }
+    parse_stored_line(trimmed)
+        .map(Some)
+        .map_err(|error| format!("unparseable: {error}"))
 }
 
 fn acquire_ownership(root: &Path) -> io::Result<File> {
@@ -1402,29 +1428,113 @@ fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> i
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
-/// Parse one JSONL line into a [`StoredEvent`], accepting both the timestamped
-/// envelope and the legacy bare-event form. Envelope is tried first; a bare
-/// event lacks the `ts`/`event` keys so it can't masquerade as one, and an
-/// envelope lacks the top-level `type` tag so it can't parse as a bare event.
-pub(crate) fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
-    match serde_json::from_str::<EventEnvelope>(line) {
-        Ok(envelope) => Ok(StoredEvent {
-            ts: Some(envelope.ts),
-            event: envelope.event,
-            elided: None,
-        }),
-        Err(_envelope_err) => match serde_json::from_str::<AgentEvent>(line) {
-            Ok(event) => Ok(StoredEvent {
-                ts: None,
-                event,
-                elided: None,
-            }),
-            // Both forms failed: the line is genuinely corrupt. The bare-event
-            // error is the more informative one (the envelope attempt always
-            // fails on a bare event merely because `ts` is missing).
-            Err(bare_err) => Err(bare_err),
-        },
+/// Retains the on-disk diff version until the event's historical provider is known.
+pub(crate) struct ParsedRecord {
+    stored: StoredEvent,
+    legacy_file_diff: bool,
+}
+
+impl ParsedRecord {
+    pub(crate) fn into_stored(mut self, provider: Option<ProviderKind>) -> StoredEvent {
+        if self.legacy_file_diff && provider == Some(ProviderKind::Codex) {
+            agent::codex::normalize_legacy_file_change_event(&mut self.stored.event);
+        }
+        self.stored
     }
+
+    pub(crate) fn previous_provider(&self) -> Option<ProviderKind> {
+        match self.stored.event {
+            AgentEvent::ProviderRelay { from_provider, .. } => Some(from_provider),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::Error> {
+    let (stored, version) = match serde_json::from_str::<EventEnvelope>(line) {
+        Ok(envelope) => (
+            StoredEvent {
+                ts: Some(envelope.ts),
+                event: envelope.event,
+                elided: None,
+            },
+            envelope.file_diff_version,
+        ),
+        Err(_) => (
+            StoredEvent {
+                ts: None,
+                event: serde_json::from_str::<AgentEvent>(line)?,
+                elided: None,
+            },
+            None,
+        ),
+    };
+    let legacy_file_diff = version.is_none()
+        && match &stored.event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item) => {
+                matches!(&item.content, agent::ItemContent::FileChange { changes, .. } if changes.iter().any(|change| matches!(change.kind, agent::FileChangeKind::Create | agent::FileChangeKind::Delete) && change.diff.is_some()))
+            }
+            AgentEvent::ApprovalRequested(request) => {
+                matches!(&request.kind, agent::ApprovalKind::FileChange { changes, .. } if changes.iter().any(|change| matches!(change.kind, agent::FileChangeKind::Create | agent::FileChangeKind::Delete) && change.diff.is_some()))
+            }
+            _ => false,
+        };
+    Ok(ParsedRecord {
+        stored,
+        legacy_file_diff,
+    })
+}
+
+fn stored_provider_at(
+    db: &Db,
+    connection: &turso::Connection,
+    id: &str,
+    position: i64,
+) -> io::Result<Option<ProviderKind>> {
+    // Metadata names the current provider. The next relay names the provider
+    // before it, including when a history page starts in the middle of a turn.
+    let mut provider = None;
+    let mut start = position;
+    loop {
+        let mut next = None;
+        db.query(
+            connection,
+            "SELECT position, line FROM events WHERE session_id = ?1 AND position >= ?2 \
+             AND instr(line, ?3) > 0 ORDER BY position LIMIT 1",
+            (id, start, b"\"provider_relay\"".as_slice()),
+            |row| {
+                next = Some((integer(row, 0)?, blob(row, 1)?));
+                Ok(())
+            },
+        )?;
+        let Some((position, line)) = next else { break };
+        if let Ok(Some(record)) = decode_row(&line) {
+            provider = record.previous_provider();
+            if provider.is_some() {
+                break;
+            }
+        }
+        let Some(next) = position.checked_add(1) else {
+            break;
+        };
+        start = next;
+    }
+    if provider.is_none() {
+        db.query(
+            connection,
+            "SELECT body FROM sessions WHERE id = ?1",
+            (id,),
+            |row| {
+                provider = serde_json::from_slice::<SessionMeta>(&blob(row, 0)?)
+                    .ok()
+                    .map(|meta| meta.provider);
+                Ok(())
+            },
+        )?;
+    }
+    Ok(provider)
 }
 
 pub use tcode_core::project::now_secs;

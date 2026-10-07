@@ -3438,14 +3438,67 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
         }
         _ => FileChangeKind::Modify,
     };
-    Some(FileChange {
+    let mut change = FileChange {
         path: change.get("path").and_then(Value::as_str)?.to_owned(),
         kind,
         diff: change
             .get("diff")
             .and_then(Value::as_str)
             .map(str::to_owned),
-    })
+    };
+    normalize_file_change_diff(&mut change);
+    Some(change)
+}
+
+/// Decode file contents stored by the Codex adapter before it normalized add/delete diffs.
+/// Only call this for unversioned Codex records; turn-wide snapshots already contain patches.
+pub fn normalize_legacy_file_change_event(event: &mut AgentEvent) {
+    let changes = match event {
+        AgentEvent::ItemStarted(item)
+        | AgentEvent::ItemUpdated(item)
+        | AgentEvent::ItemCompleted(item) => {
+            let ItemContent::FileChange { changes, .. } = &mut item.content else {
+                return;
+            };
+            changes
+        }
+        AgentEvent::ApprovalRequested(request) => {
+            let ApprovalKind::FileChange { changes, .. } = &mut request.kind else {
+                return;
+            };
+            changes
+        }
+        _ => return,
+    };
+    for change in changes {
+        normalize_file_change_diff(change);
+    }
+}
+
+fn normalize_file_change_diff(change: &mut FileChange) {
+    let sign = match change.kind {
+        FileChangeKind::Create => '+',
+        FileChangeKind::Delete => '-',
+        _ => return,
+    };
+    let Some(content) = change.diff.as_ref().filter(|content| !content.is_empty()) else {
+        return;
+    };
+    // Codex's add/delete `diff` is the complete file, even when that file itself looks like a patch.
+    let lines = content.split_inclusive('\n').count();
+    let mut patch = if sign == '+' {
+        format!("@@ -0,0 +1,{lines} @@\n")
+    } else {
+        format!("@@ -1,{lines} +0,0 @@\n")
+    };
+    for line in content.split_inclusive('\n') {
+        patch.push(sign);
+        patch.push_str(line);
+    }
+    if !content.ends_with('\n') {
+        patch.push_str("\n\\ No newline at end of file\n");
+    }
+    change.diff = Some(patch);
 }
 
 fn map_usage(value: &Value) -> Option<TokenUsage> {
@@ -5339,6 +5392,39 @@ mod tests {
         let unknown = map_item(&json!({"type":"sleep","id":"sleep-1","durationMs":10})).unwrap();
         assert!(
             matches!(unknown.content, ItemContent::Other { ref provider_kind, .. } if provider_kind == "sleep")
+        );
+    }
+
+    #[test]
+    fn file_change_contents_become_unified_patches() {
+        let item = map_item(&json!({
+            "type": "fileChange", "id": "patch-content", "status": "completed",
+            "changes": [
+                {"path": "new.md", "kind": {"type": "add"}, "diff": "hello\n- list\n++literal\n\nlast"},
+                {"path": "old.md", "kind": {"type": "delete"}, "diff": "hello\n"},
+                {"path": "empty", "kind": {"type": "add"}, "diff": ""},
+                {"path": "unknown", "kind": {"type": "add"}},
+                {"path": "edit", "kind": {"type": "update"}, "diff": "@@ -1 +1 @@\n-old\n+new\n"}
+            ]
+        })).unwrap();
+        let ItemContent::FileChange { changes, .. } = item.content else {
+            panic!("file change")
+        };
+        assert_eq!(
+            changes[0].diff.as_deref(),
+            Some(
+                "@@ -0,0 +1,5 @@\n+hello\n+- list\n+++literal\n+\n+last\n\\ No newline at end of file\n"
+            )
+        );
+        assert_eq!(
+            changes[1].diff.as_deref(),
+            Some("@@ -1,1 +0,0 @@\n-hello\n")
+        );
+        assert_eq!(changes[2].diff.as_deref(), Some(""));
+        assert_eq!(changes[3].diff, None);
+        assert_eq!(
+            changes[4].diff.as_deref(),
+            Some("@@ -1 +1 @@\n-old\n+new\n")
         );
     }
 
