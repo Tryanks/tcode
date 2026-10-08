@@ -1534,7 +1534,7 @@ impl WorkspaceStore {
     /// Only the conversation on screen is reconciled, so archiving a
     /// background thread (an Orchestrate sibling completing, a sweep) never
     /// steals navigation. When the thread on screen leaves the visible index —
-    /// auto-archived on completion, archived by hand, deleted — the workspace
+    /// archived (alone or with its lead), deleted — the workspace
     /// follows its still-visible parent; with no such parent it falls back to
     /// the last interacted project's draft, which is also what an empty
     /// workspace opens.
@@ -1898,6 +1898,10 @@ impl WorkspaceStore {
         self.toggle_tab_panel(RightTab::Plan, cx);
     }
 
+    pub fn toggle_agents_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_tab_panel(RightTab::Agents, cx);
+    }
+
     pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
         if !self.scope.is_full() {
             return;
@@ -2098,6 +2102,20 @@ impl WorkspaceStore {
 
     pub fn archived_loading(&self) -> bool {
         self.archived_replica.is_none()
+    }
+
+    /// Keep the archived threads current, unless they already are.
+    pub fn hold_archived_sessions(&mut self, cx: &mut Context<Self>) {
+        if !self.archived_requested {
+            self.load_archived_sessions(cx);
+        }
+    }
+
+    pub fn archived_sessions(&self) -> &[SessionMeta] {
+        self.archived_replica
+            .as_ref()
+            .map(|archived| archived.sessions.as_slice())
+            .unwrap_or_default()
     }
 
     /// Whether the Index baseline has arrived, including an empty Index.
@@ -2332,6 +2350,14 @@ impl WorkspaceStore {
             .activity
             .get(session_id)
             .is_some_and(|activity| activity.failed)
+    }
+
+    /// A dispatched agent's execution and delivery, as its host reports them.
+    pub fn agent_status(&self, session_id: &str) -> Option<tcode_protocol::AgentStatus> {
+        self.index_summary
+            .activity
+            .get(session_id)
+            .and_then(|activity| activity.agent)
     }
 
     pub fn waiting_for(&self, session_id: &str) -> bool {
@@ -6147,7 +6173,7 @@ pub(crate) mod tests {
         assert_eq!((counts, deleted), ((2, 0), vec!["parent".to_string()]));
     }
 
-    /// An Orchestrate child auto-archived on completion hands the workspace to
+    /// An Orchestrate child archived while on screen hands the workspace to
     /// its parent, keeping the parent's client-side records; archiving a thread
     /// the user is not viewing must not move them at all.
     #[gpui::test]

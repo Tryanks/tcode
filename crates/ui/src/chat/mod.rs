@@ -373,6 +373,8 @@ pub struct ChatView {
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
+    /// The Agents sheet's content on phone.
+    agents: Entity<crate::agents_panel::AgentsPanel>,
     terminal_was_open: bool,
     list_state: ListState,
     /// The timeline changed since the list last mirrored it. GPUI's list
@@ -680,6 +682,8 @@ impl ChatView {
                 cx,
             )
         });
+        let agents =
+            cx.new(|cx| crate::agents_panel::AgentsPanel::new(workspace_store.clone(), cx));
         let terminal_was_open = workspace_store.read(cx).panel_state().terminal_open;
 
         let mut this = Self {
@@ -688,6 +692,7 @@ impl ChatView {
             window_state,
             composer,
             terminal_drawer,
+            agents,
             terminal_was_open,
             list_state,
             timeline_stale: false,
@@ -1832,6 +1837,21 @@ impl ChatView {
         let key = format!("orchestrate-callback-{entry_id}");
         let expanded = self.expanded.contains(&key);
         let toggle_key = key;
+        let child_id = callback.child_id.clone();
+        let exists = {
+            let store = self.workspace_store.read(cx);
+            store
+                .sidebar_sessions()
+                .iter()
+                .chain(store.archived_sessions())
+                .any(|meta| meta.id == child_id)
+        };
+        let store = self.workspace_store.clone();
+        let on_open = exists.then(|| {
+            Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                crate::agents_panel::open_agent(&store, child_id.clone(), cx);
+            }) as components::subagent::ClickHandler
+        });
         components::disclosure::callback_row(
             entry_id,
             callback,
@@ -1839,6 +1859,7 @@ impl ChatView {
             cx.listener(move |this, _, _, cx| {
                 this.toggle_expanded(turn, &toggle_key, cx);
             }),
+            on_open,
             cx,
         )
     }
@@ -2203,6 +2224,103 @@ impl ChatView {
         self.command_panels.borrow_mut().hold(&item_id, task);
     }
 
+    /// The phone entry to the Agents view: a pill above the composer that
+    /// opens the sheet, shown while the thread has agents.
+    fn render_agents_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.window_state.read(cx).compact {
+            return None;
+        }
+        let store = self.workspace_store.read(cx);
+        let id = store.active_session_id()?;
+        if !crate::agents_panel::has_agents(store, &id) {
+            return None;
+        }
+        let agents = crate::agents_panel::Agents::of(store, &id);
+        let label: SharedString = match agents.count() {
+            1 => crate::tr!("agents.pill_one").into_owned(),
+            count => crate::tr!("agents.pill", count = count).into_owned(),
+        }
+        .into();
+        let cue = agents.cue(cx);
+        let panel = self.agents.clone();
+        let pill = crate::material::accessible_clickable(
+            h_flex(),
+            "agents-pill",
+            gpui::Role::Button,
+            label.clone(),
+            cx,
+        )
+        .debug_selector(|| "agents-pill".into())
+        .h(px(28.))
+        .px_3()
+        .gap_1p5()
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(crate::material::content_surface(cx))
+        .text_size(px(13.))
+        .cursor_pointer()
+        .child(Icon::new(IconName::Bot).size(px(14.)))
+        .child(label)
+        .when_some(cue, |pill, color| {
+            pill.child(div().size(px(6.)).rounded_full().bg(color))
+        });
+        Some(
+            h_flex()
+                .w_full()
+                .h(px(36.))
+                .px_4()
+                .items_center()
+                .child(
+                    crate::widgets::Popover::new("agents-sheet")
+                        .bottom_sheet(crate::tr!("agents.title"))
+                        .trigger_with(move |_, _, _| pill.into_any_element())
+                        .content(move |_, window, cx| {
+                            let sheet = cx.entity().downgrade();
+                            panel.update(cx, |panel, _| panel.in_sheet(sheet));
+                            div()
+                                .w_full()
+                                .h(window.viewport_size().height * 0.8)
+                                .child(panel.clone())
+                                .into_any_element()
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The way back from an agent to the thread it was reached from.
+    fn parent_link(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.workspace_store.read(cx);
+        let active = store.active_session_id()?;
+        let sessions = store.sidebar_sessions();
+        let parent_id = sessions
+            .iter()
+            .find(|meta| meta.id == active)?
+            .parent_session_id
+            .clone()?;
+        let parent = sessions.iter().find(|meta| meta.id == parent_id)?;
+        let title = parent.title.clone();
+        let short = truncate_title(&title, 24);
+        Some(
+            Button::new("agent-parent-link")
+                .debug_selector(|| "agent-parent-link".into())
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(IconName::ArrowLeft).size(px(14.)))
+                .label(short)
+                .tooltip(crate::tr!("agents.back_to_parent", title = title))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let parent_id = parent_id.clone();
+                    this.workspace_store
+                        .update(cx, |store, _| store.select_session(parent_id));
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn compose_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
         let active_id = self.workspace_store.read(cx).active_session_id();
         let mirror_id = active_id.as_deref().and_then(|active_id| {
@@ -2397,6 +2515,9 @@ impl ChatView {
                 });
             }));
 
+        // An agent's header leads back to the thread it was reached from.
+        let parent_link = self.parent_link(cx);
+
         // A draft shows a muted "New thread" label; an open thread its title;
         // nothing active shows "No active thread". The title stretch carries no
         // controls, so it doubles as the window's native drag handle where the
@@ -2443,6 +2564,16 @@ impl ChatView {
         let right_panel_open = panel.right_panel_open;
         let right_tab = panel.right_tab;
         let plan_showing = right_panel_open && right_tab == RightTab::Plan;
+        let agents_showing = right_panel_open && right_tab == RightTab::Agents;
+        let agents_cue = self
+            .workspace_store
+            .read(cx)
+            .active_session_id()
+            .and_then(|id| {
+                let store = self.workspace_store.read(cx);
+                crate::agents_panel::has_agents(store, &id)
+                    .then(|| crate::agents_panel::Agents::of(store, &id).cue(cx))
+            });
         let preview_showing = right_panel_open && right_tab == RightTab::Preview;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
@@ -2468,6 +2599,7 @@ impl ChatView {
         };
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
+            .children(parent_link)
             .child(
                 h_flex()
                     .flex_1()
@@ -2546,6 +2678,42 @@ impl ChatView {
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
                                     })),
                             )
+                            .when_some(agents_cue, |row, cue| {
+                                row.child(
+                                    div()
+                                        .relative()
+                                        .child(
+                                            Button::new("agents-panel")
+                                                .on_mouse_down(
+                                                    gpui::MouseButton::Left,
+                                                    |_, _, cx| cx.stop_propagation(),
+                                                )
+                                                .ghost()
+                                                .small()
+                                                .compact()
+                                                .icon(IconName::Bot)
+                                                .selected(agents_showing)
+                                                .tooltip(crate::tr!("agents.toggle"))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.workspace_store.update(cx, |store, cx| {
+                                                        store.toggle_agents_panel(cx)
+                                                    });
+                                                })),
+                                        )
+                                        .when_some(cue, |toggle, color| {
+                                            toggle.child(
+                                                div()
+                                                    .absolute()
+                                                    .top(px(3.))
+                                                    .right(px(3.))
+                                                    .size(px(6.))
+                                                    .rounded_full()
+                                                    .bg(color)
+                                                    .debug_selector(|| "agents-cue".into()),
+                                            )
+                                        }),
+                                )
+                            })
                             // The Preview tab is a product view now: it always
                             // offers open-externally and copy-URL, and says so
                             // where there is no embedded browser to drive.
@@ -3632,6 +3800,7 @@ impl Render for ChatView {
                     .gap_2()
                     .children(delivery_rows),
             )
+            .children(self.render_agents_pill(cx))
             .child(
                 div()
                     .id("chat-composer")
@@ -3673,6 +3842,14 @@ impl Render for ChatView {
         };
         root.when(!self.window_state.read(cx).compact, |el| el.child(header))
             .child(body)
+    }
+}
+
+fn truncate_title(title: &str, max: usize) -> String {
+    if title.chars().count() <= max {
+        title.to_string()
+    } else {
+        format!("{}…", title.chars().take(max).collect::<String>())
     }
 }
 

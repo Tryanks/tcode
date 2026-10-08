@@ -27,6 +27,7 @@ pub enum RightTab {
     #[default]
     Diff,
     Plan,
+    Agents,
     Preview,
     PullRequests,
 }

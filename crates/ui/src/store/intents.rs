@@ -319,6 +319,12 @@ impl WorkspaceStore {
     pub fn settle_session(&mut self, session_id: String) {
         self.dispatch(Command::SettleSession { session_id });
     }
+    pub fn cancel_agent(&mut self, session_id: String) {
+        self.dispatch(Command::CancelAgent { session_id });
+    }
+    pub fn interrupt_session(&mut self, session_id: String) {
+        self.dispatch(Command::Interrupt { session_id });
+    }
     pub fn set_auto_settle(&mut self, session_id: String, enabled: bool) {
         self.dispatch(Command::SetAutoSettle {
             session_id,

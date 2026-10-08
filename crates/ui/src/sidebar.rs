@@ -570,7 +570,7 @@ impl SessionsSidebar {
         if threads.is_empty() {
             return false;
         }
-        let active = self.store.read(cx).active_session_id();
+        let active = self.store.read(cx).roster_session_id();
         let current = threads.iter().position(|id| Some(id) == active.as_ref());
         let index = match action {
             NavigateThread::Index(index) => *index,
@@ -3150,7 +3150,7 @@ impl SessionsSidebar {
                 .into_any_element()
         } else {
             if self.compact_reveal_active {
-                let active = self.store.read(cx).active_session_id();
+                let active = self.store.read(cx).roster_session_id();
                 match model.rows.iter().position(|row| {
                     matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
                 }) {

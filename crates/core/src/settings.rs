@@ -474,24 +474,13 @@ impl Default for OrchestrateSettings {
 }
 
 /// Ignore retired lead identities and consume old fixed efforts only for migration.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(default)]
 struct OrchestrateSettingsData {
     decision_models: Option<Vec<LegacyOrchestrateModel>>,
     child_models: Vec<LegacyOrchestrateModel>,
     child_approval: ChildApprovalMode,
     child_worktrees: bool,
-}
-
-impl Default for OrchestrateSettingsData {
-    fn default() -> Self {
-        Self {
-            decision_models: None,
-            child_models: Vec::new(),
-            child_approval: ChildApprovalMode::default(),
-            child_worktrees: false,
-        }
-    }
 }
 
 impl From<OrchestrateSettingsData> for OrchestrateSettings {
