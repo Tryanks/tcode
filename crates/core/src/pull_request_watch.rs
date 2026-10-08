@@ -334,12 +334,14 @@ const CLOSED_SUFFIX: &str =
 fn snippet(body: &str) -> String {
     let mut text = String::new();
     let mut rest = body;
-    while let Some(start) = rest.find("<!--") {
+    // An unclosed `<!--` is no comment, so the rest of the body stays.
+    while let Some((start, end)) = rest
+        .find("<!--")
+        .and_then(|start| Some((start, start + rest[start..].find("-->")? + 3)))
+    {
         text.push_str(&rest[..start]);
         text.push(' ');
-        rest = rest[start..]
-            .find("-->")
-            .map_or("", |end| &rest[start + end + 3..]);
+        rest = &rest[end..];
     }
     text.push_str(rest);
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -788,10 +790,12 @@ mod tests {
         let mut review = remark("v", "lead", "2026-10-08T10:02:00Z", None);
         review.body.clear();
         review.review_state = Some("APPROVED".into());
+        let mut unclosed = remark("u", "author", "2026-10-08T10:03:00Z", None);
+        unclosed.body = "Needs a test <!-- unfinished".into();
         let report = WatchReport {
             changes: vec![
                 WatchChange::ChecksFailed(failed),
-                WatchChange::Remarks(vec![long, review]),
+                WatchChange::Remarks(vec![long, review, unclosed]),
                 WatchChange::Conflicting,
             ],
             next: PullRequestWatch {
@@ -822,7 +826,11 @@ mod tests {
             "  - reviewer on src/lib.rs: \"\"".len() + 200
         );
         assert_eq!(lines[15], "  - lead: APPROVED");
-        assert_eq!(lines[16], "- The branch now conflicts with main.");
+        assert_eq!(
+            lines[16], "  - author: \"Needs a test <!-- unfinished\"",
+            "an unclosed comment marker hides nothing"
+        );
+        assert_eq!(lines[17], "- The branch now conflicts with main.");
         assert_eq!(lines.last(), Some(&KEEP_WATCHING));
         assert!(!text.contains("inbox"));
         assert_eq!(
