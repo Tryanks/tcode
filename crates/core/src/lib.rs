@@ -9,6 +9,7 @@ pub mod provider_colors;
 pub mod provider_models;
 pub mod provider_status;
 pub mod pull_request;
+pub mod pull_request_watch;
 pub mod relay;
 pub mod session;
 pub mod settings;

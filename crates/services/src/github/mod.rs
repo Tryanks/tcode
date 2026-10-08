@@ -3,6 +3,7 @@
 pub mod api;
 pub mod credentials;
 pub mod graphql;
+pub mod pull_request_watch;
 pub mod pull_requests;
 mod quota;
 pub mod repository;
