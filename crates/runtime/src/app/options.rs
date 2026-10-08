@@ -23,7 +23,7 @@ impl AppState {
         let project_id = self
             .resident(target_id)
             .and_then(|active| active.meta.project_id.clone());
-        let permission_default = self.project_permission_selection(project_id.as_deref(), provider);
+        let permission_default = self.initial_permission_selection(project_id.as_deref(), provider);
         let provider_commands =
             self.cached_provider_commands(provider, profile_id.as_deref(), None);
         let Some(active) = self.resident_mut(target_id) else {

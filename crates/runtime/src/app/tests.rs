@@ -3031,7 +3031,7 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
             assert_eq!(draft.meta.profile_id.as_deref(), profile, "{name}");
             assert_eq!(draft.meta.cwd, PathBuf::from("/new-project"));
             assert_eq!(draft.meta.project_id.as_deref(), Some("target"));
-            let expected = if effort {
+            let mut expected = if effort {
                 vec![OptionSelection {
                     id: "reasoningEffort".into(),
                     value: serde_json::json!("high"),
@@ -3039,6 +3039,17 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
             } else {
                 vec![]
             };
+            expected.extend(
+                match provider {
+                    ProviderKind::ClaudeCode => Some(("permissionMode", "auto")),
+                    ProviderKind::Codex => Some(("permissions", "auto_review")),
+                    _ => None,
+                }
+                .map(|(id, value)| OptionSelection {
+                    id: id.into(),
+                    value: serde_json::json!(value),
+                }),
+            );
             assert_eq!(draft.meta.option_selections, expected, "{name}");
             assert!(state.store.load_index().unwrap().is_empty(), "{name}");
         });
@@ -3084,7 +3095,13 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
         assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
         assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5-1"));
         assert!(draft.meta.acp_agent_id.is_none());
-        assert!(draft.meta.option_selections.is_empty());
+        assert_eq!(
+            draft.meta.option_selections,
+            vec![OptionSelection {
+                id: "permissionMode".into(),
+                value: serde_json::json!("auto"),
+            }]
+        );
         assert!(state.store.load_index().unwrap().is_empty());
     });
 }
@@ -3130,11 +3147,14 @@ fn model_switch_restores_last_effort_used_with_that_model() {
 
         let draft = state.selected_session().unwrap();
         assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.6-sol"));
-        assert_eq!(draft.meta.option_selections.len(), 1);
-        assert_eq!(draft.meta.option_selections[0].id, "reasoningEffort");
         assert_eq!(
-            draft.meta.option_selections[0].value,
-            serde_json::json!("max")
+            draft
+                .meta
+                .option_selections
+                .iter()
+                .find(|selection| selection.id == "reasoningEffort")
+                .map(|selection| &selection.value),
+            Some(&serde_json::json!("max"))
         );
     });
 }

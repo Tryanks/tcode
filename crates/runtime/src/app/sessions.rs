@@ -1447,7 +1447,9 @@ impl AppState {
         }
     }
 
-    pub(super) fn project_permission_selection(
+    /// The permission a new conversation with `provider` starts at: the
+    /// project's configured value, otherwise the provider's recommended one.
+    pub(super) fn initial_permission_selection(
         &self,
         project_id: Option<&str>,
         provider: ProviderKind,
@@ -1459,17 +1461,23 @@ impl AppState {
                 project
                     .permission_defaults
                     .get(tcode_core::settings::provider_key(provider))
-            })?;
+            });
         match descriptor {
-            OptionDescriptor::Select { id, .. } => Some(OptionSelection {
-                id,
-                value: serde_json::Value::String(configured.clone()),
-            }),
-            OptionDescriptor::Boolean {
-                id, default_value, ..
+            OptionDescriptor::Select {
+                id, recommended, ..
             } => Some(OptionSelection {
                 id,
-                value: serde_json::Value::Bool(configured.parse().unwrap_or(default_value)),
+                value: serde_json::Value::String(configured.cloned().or(recommended)?),
+            }),
+            OptionDescriptor::Boolean {
+                id, recommended, ..
+            } => Some(OptionSelection {
+                id,
+                value: serde_json::Value::Bool(
+                    configured
+                        .and_then(|configured| configured.parse().ok())
+                        .or(recommended)?,
+                ),
             }),
         }
     }
@@ -1544,7 +1552,7 @@ impl AppState {
         draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
         if let Some(selection) =
-            self.project_permission_selection(draft.meta.project_id.as_deref(), provider)
+            self.initial_permission_selection(draft.meta.project_id.as_deref(), provider)
         {
             draft.meta.option_selections.push(selection);
         }
