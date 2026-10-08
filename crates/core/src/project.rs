@@ -49,6 +49,17 @@ pub fn project_name_from_root(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
+/// `path` with its `old_root` prefix replaced by `new_root`; `None` when
+/// `path` is not under `old_root`.
+pub fn rebase_path(path: &Path, old_root: &Path, new_root: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(old_root).ok()?;
+    Some(if rest.as_os_str().is_empty() {
+        new_root.to_path_buf()
+    } else {
+        new_root.join(rest)
+    })
+}
+
 /// Source checkout and branch of a session-owned worktree, used for cleanup.
 /// The session's `cwd` holds the worktree path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

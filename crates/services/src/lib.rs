@@ -3,6 +3,7 @@
 pub mod acp_registry;
 pub mod desktop;
 pub mod export;
+pub mod fs_tree;
 pub mod git;
 pub mod github;
 pub mod import;

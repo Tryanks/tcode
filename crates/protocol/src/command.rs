@@ -278,6 +278,17 @@ pub enum Command {
     CreateNewProject {
         name: String,
     },
+    /// Point a project at `root`, carrying every thread's working directory
+    /// under the old root along. With `move_files` the host moves the old
+    /// directory to `root` first, which must not exist yet; without it `root`
+    /// must already be a directory there. A project already at `root` absorbs
+    /// this one, threads included, and this one's id disappears. Refused with
+    /// `project_busy` while a thread of the project has a turn in flight.
+    SetProjectRoot {
+        project_id: String,
+        root: PathBuf,
+        move_files: bool,
+    },
     /// Start an import run. Progress, completion and the finalized index are
     /// host-owned: subscribe to [`crate::Topic::ExternalImport`] before sending
     /// this, and read the outcome from that replicated status. Returns

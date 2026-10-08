@@ -221,6 +221,230 @@ impl AppState {
         Ok(id)
     }
 
+    /// Point `project_id` at `root`; see [`Command::SetProjectRoot`]. Every
+    /// resident thread of the project is stopped first so no process keeps
+    /// working in the old directory; each resumes from its cursor when next
+    /// opened.
+    pub fn set_project_root(
+        &mut self,
+        project_id: &str,
+        root: PathBuf,
+        move_files: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<(), ProtocolError>> {
+        let outcome = self.prepare_project_root_change(project_id, &root, move_files, cx);
+        let host = cx.clone();
+        let project_id = project_id.to_string();
+        cx.spawn_background(async move {
+            let (old_root, worktrees) = outcome?;
+            let destination = root.clone();
+            host.unblock(move || {
+                if move_files {
+                    tcode_services::fs_tree::move_tree(&old_root, &destination)?;
+                } else if !destination.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{} is not a directory on this host", destination.display()),
+                    ));
+                }
+                if let Err(error) = tcode_services::worktree::repair(&destination, &worktrees) {
+                    log::warn!(
+                        "could not repair the worktrees of {}: {error}",
+                        destination.display()
+                    );
+                }
+                Ok(())
+            })
+            .await
+            .map_err(project_root_error)?;
+            host.enqueue_and_wait(move |app, cx| app.apply_project_root(&project_id, root, cx))
+                .await
+                .map_err(|_| ProtocolError {
+                    code: "transport_closed".into(),
+                    message: "Host stopped before the project root changed.".into(),
+                })?
+        })
+    }
+
+    /// Validate a root change and stop the project's resident threads.
+    /// Returns the old root and the worktree paths to repair.
+    fn prepare_project_root_change(
+        &mut self,
+        project_id: &str,
+        root: &Path,
+        move_files: bool,
+        cx: &mut HostCx,
+    ) -> Result<(PathBuf, Vec<PathBuf>), ProtocolError> {
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| ProtocolError {
+                code: "unknown_project".into(),
+                message: "This project is no longer available.".into(),
+            })?;
+        if !root.is_absolute() {
+            return Err(ProtocolError {
+                code: "invalid_project_root".into(),
+                message: format!("{} is not an absolute path on this host", root.display()),
+            });
+        }
+        let old_root = project.root.clone();
+        if move_files && root.starts_with(&old_root) {
+            return Err(ProtocolError {
+                code: "invalid_project_root".into(),
+                message: format!(
+                    "cannot move {} into itself at {}",
+                    old_root.display(),
+                    root.display()
+                ),
+            });
+        }
+        let in_project = |meta: &SessionMeta| {
+            meta.project_id.as_deref() == Some(project_id) || meta.cwd.starts_with(&old_root)
+        };
+        let resident_ids: Vec<String> = self
+            .residents
+            .live
+            .values()
+            .chain(self.residents.parked.values())
+            .filter(|active| in_project(&active.meta))
+            .map(|active| active.meta.id.clone())
+            .collect();
+        if resident_ids
+            .iter()
+            .any(|id| self.resident(id).is_some_and(ActiveSession::has_work))
+        {
+            return Err(ProtocolError {
+                code: "project_busy".into(),
+                message: "A thread of this project is still running; wait for it to finish.".into(),
+            });
+        }
+        for id in &resident_ids {
+            if self.residents.live.contains_key(id) {
+                self.shutdown_active(id, cx);
+            } else if let Some(parked) = self.residents.evict(id)
+                && let Runtime::Live(commands) = parked.runtime
+            {
+                let _ = commands.try_send(SessionCommand::Shutdown);
+            }
+        }
+        let worktrees = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.worktree.is_some() && in_project(meta))
+            .map(|meta| meta.cwd.clone())
+            .collect();
+        Ok((old_root, worktrees))
+    }
+
+    /// Record `root` as the project's root once the directory is in place,
+    /// carrying its threads along or into the project already there.
+    fn apply_project_root(
+        &mut self,
+        project_id: &str,
+        root: PathBuf,
+        cx: &mut HostCx,
+    ) -> Result<(), ProtocolError> {
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+        else {
+            return Err(ProtocolError {
+                code: "unknown_project".into(),
+                message: "This project is no longer available.".into(),
+            });
+        };
+        let old_root = project.root.clone();
+        let absorbing = self
+            .projects
+            .iter()
+            .find(|other| other.root == root && other.id != project_id)
+            .map(|other| other.id.clone());
+        let metas: Vec<SessionMeta> = self
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.project_id.as_deref() == Some(project_id) || meta.cwd.starts_with(&old_root)
+            })
+            .cloned()
+            .collect();
+        for mut meta in metas {
+            if let Some(cwd) = rebase_path(&meta.cwd, &old_root, &root) {
+                meta.cwd = cwd;
+            }
+            if let Some(worktree) = &mut meta.worktree
+                && let Some(path) = rebase_path(&worktree.root_project_path, &old_root, &root)
+            {
+                worktree.root_project_path = path;
+            }
+            if let Some(target) = &absorbing
+                && meta.project_id.as_deref() == Some(project_id)
+            {
+                meta.project_id = Some(target.clone());
+            }
+            if let Some(resident) = self.resident_mut(&meta.id) {
+                resident.meta.cwd = meta.cwd.clone();
+                resident.meta.worktree = meta.worktree.clone();
+                resident.meta.project_id = meta.project_id.clone();
+            }
+            self.persist_meta(&meta, cx);
+        }
+        match absorbing {
+            Some(target_id) => {
+                let target = self
+                    .projects
+                    .iter_mut()
+                    .find(|other| other.id == target_id)
+                    .expect("absorbing project was just found");
+                for (key, value) in &project.permission_defaults {
+                    target
+                        .permission_defaults
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+                if target.icon_path.is_none() {
+                    target.icon_path = project.icon_path.clone();
+                }
+                let target = target.clone();
+                self.enqueue_store_write(StoreWrite::UpsertProject(target), cx);
+                let draft_destination =
+                    ConversationDestination::ProjectDraft(project_id.to_string());
+                self.terminal_workspaces.remove(&draft_destination);
+                if self
+                    .terminal_preferences
+                    .remove(&draft_destination.preference_key())
+                    .is_some()
+                {
+                    self.write_terminal_preferences(cx);
+                }
+                self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
+                self.settings
+                    .collapsed_projects
+                    .retain(|id| id != project_id);
+                self.persist_settings(cx);
+                self.projects.retain(|other| other.id != project_id);
+                self.replace_external_import_status(project_id, None, cx);
+            }
+            None => {
+                let project = self
+                    .projects
+                    .iter_mut()
+                    .find(|other| other.id == project_id)
+                    .expect("project was just found");
+                if project.name == project_name_from_root(&old_root) {
+                    project.name = project_name_from_root(&root);
+                }
+                project.root = root;
+                let project = project.clone();
+                self.enqueue_store_write(StoreWrite::UpsertProject(project), cx);
+            }
+        }
+        Ok(())
+    }
+
     pub fn create_new_project(
         &self,
         name: String,
@@ -1883,6 +2107,19 @@ impl AppState {
             self.reopen_persisted_terminals(&session_id, terminal_preferences, cx);
         }
         self.refresh_git_status(&session_id, cx);
+    }
+}
+
+fn project_root_error(error: std::io::Error) -> ProtocolError {
+    ProtocolError {
+        code: match error.kind() {
+            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::AlreadyExists => {
+                "invalid_project_root"
+            }
+            _ => "move_project_failed",
+        }
+        .into(),
+        message: error.to_string(),
     }
 }
 

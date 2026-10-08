@@ -638,6 +638,16 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 task.await.map(|id| CommandResponse::ProjectId(Some(id)))
             }));
         }
+        Command::SetProjectRoot {
+            project_id,
+            root,
+            move_files,
+        } => {
+            let task = app.set_project_root(&project_id, root, move_files, cx);
+            return CommandOutcome::Pending(
+                cx.spawn_background(async move { task.await.map(|()| CommandResponse::Unit) }),
+            );
+        }
         Command::StartScratchDraft => {
             let task = app.start_scratch_draft(cx);
             return CommandOutcome::Pending(cx.spawn_background(async move {
@@ -1905,3 +1915,7 @@ mod spaces_tests;
 #[cfg(test)]
 #[path = "pipe_project_creation_tests.rs"]
 mod project_creation_tests;
+
+#[cfg(test)]
+#[path = "pipe_project_root_tests.rs"]
+mod project_root_tests;

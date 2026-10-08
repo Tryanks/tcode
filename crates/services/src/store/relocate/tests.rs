@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 
 use super::super::tests::{tree, write_older_data_dir};
 use super::*;
+use crate::fs_tree::CHUNK_BYTES;
 
 /// An older data dir and the data dir to move it into, under one temporary
 /// directory removed when the test ends.
