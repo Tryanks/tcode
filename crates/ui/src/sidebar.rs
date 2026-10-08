@@ -380,9 +380,51 @@ struct ProjectDelete(String);
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = tcode_project, no_json)]
 struct ChangeProjectIcon(String);
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = tcode_project, no_json)]
+struct ChangeProjectRoot(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_project, no_json)]
 struct ProjectReveal(String);
+
+/// Ask before removing a project and its threads from Tcode.
+pub(super) fn confirm_remove_project(
+    store: Entity<WorkspaceStore>,
+    project_id: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some((project_name, count)) = store.read(cx).project_summary(&project_id) else {
+        return;
+    };
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let alert = alert.bg(cx.theme().popover);
+        let store = store.clone();
+        let project_id = project_id.clone();
+        alert
+            .title(crate::tr!(
+                "sidebar.remove_project_title",
+                project = project_name.clone()
+            ))
+            .description(crate::tr!(
+                "sidebar.remove_project_description",
+                count = count
+            ))
+            .button_props(
+                DialogButtons::default()
+                    .ok_variant(ButtonVariant::Danger)
+                    .ok_text(crate::tr!("sidebar.remove_project_action"))
+                    .cancel_text(crate::tr!("settings.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, _, cx| {
+                store.update(cx, |store, _cx| {
+                    store.delete_project(project_id.clone());
+                });
+                true
+            })
+    });
+}
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
@@ -1460,38 +1502,7 @@ impl SessionsSidebar {
         if !self.store.read(cx).scope().is_full() {
             return;
         }
-        let store = self.store.clone();
-        let project_id = action.0.clone();
-        let Some((project_name, count)) = store.read(cx).project_summary(&project_id) else {
-            return;
-        };
-        window.open_alert_dialog(cx, move |alert, _, cx| {
-            let alert = alert.bg(cx.theme().popover);
-            let store = store.clone();
-            let project_id = project_id.clone();
-            alert
-                .title(crate::tr!(
-                    "sidebar.remove_project_title",
-                    project = project_name.clone()
-                ))
-                .description(crate::tr!(
-                    "sidebar.remove_project_description",
-                    count = count
-                ))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("sidebar.remove_project_action"))
-                        .cancel_text(crate::tr!("settings.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, _cx| {
-                        store.delete_project(project_id.clone());
-                    });
-                    true
-                })
-        });
+        confirm_remove_project(self.store.clone(), action.0.clone(), window, cx);
     }
 
     /// A project's share items, where the machine this window shows has
@@ -1543,6 +1554,18 @@ impl SessionsSidebar {
                 cx,
             );
         }
+    }
+
+    fn on_change_project_root(
+        &mut self,
+        action: &ChangeProjectRoot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
+        crate::change_project_root_dialog::open(self.store.clone(), action.0.clone(), window, cx);
     }
 
     fn on_project_reveal(
@@ -2150,6 +2173,10 @@ impl SessionsSidebar {
                     menu.menu(
                         crate::tr!("project_icon.title"),
                         Box::new(ChangeProjectIcon(id.clone())),
+                    )
+                    .menu(
+                        crate::tr!("sidebar.change_project_root"),
+                        Box::new(ChangeProjectRoot(id.clone())),
                     )
                 })
                 .when(scope.is_full(), |menu| {
@@ -4334,6 +4361,7 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_project_thread_rules))
             .on_action(cx.listener(Self::on_project_delete))
             .on_action(cx.listener(Self::on_change_project_icon))
+            .on_action(cx.listener(Self::on_change_project_root))
             .on_action(cx.listener(Self::on_project_reveal))
             .on_action(cx.listener(Self::on_filter_project))
             .on_action(cx.listener(Self::on_start_draft_for_project))

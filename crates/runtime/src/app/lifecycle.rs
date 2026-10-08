@@ -276,12 +276,21 @@ impl AppState {
                                 state.deliver_child_callback(&session_id, TurnStatus::Failed, cx);
                             }
                             state.evaluate_thread_settlement(&session_id, cx);
-                            state.report_error(
-                                RuntimeError::ProviderStart {
+                            let missing_cwd = state
+                                .find_meta(&session_id)
+                                .filter(|meta| !meta.cwd.is_dir())
+                                .map(|meta| (meta.project_id, meta.cwd));
+                            let error = match missing_cwd {
+                                Some((project_id, cwd)) => RuntimeError::WorkingDirectoryMissing {
+                                    session_id: session_id.clone(),
+                                    project_id,
+                                    cwd,
+                                },
+                                None => RuntimeError::ProviderStart {
                                     error: err.to_string(),
                                 },
-                                cx,
-                            );
+                            };
+                            state.report_error(error, cx);
                         }
                     }
                 }

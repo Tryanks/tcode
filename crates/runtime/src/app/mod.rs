@@ -26,6 +26,7 @@ use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
 use tcode_core::project::{
     Project, SessionMeta, SettledOverride, WorktreeInfo, WorktreeSharing, descendant_session_ids,
+    project_name_from_root, rebase_path,
 };
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{

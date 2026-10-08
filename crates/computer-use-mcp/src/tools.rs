@@ -757,11 +757,18 @@ fn permissions() -> PermissionSnapshot {
 }
 
 #[cfg(target_os = "macos")]
+const STALE_CODE_MESSAGE: &str = "Tcode's executable on disk changed after this Tcode process started (it was rebuilt, re-signed or replaced), so macOS rejects its Accessibility and Screen Recording grants until Tcode restarts. The grants in System Settings are intact: do not request them again; ask the user to quit and reopen Tcode, then retry.";
+
+#[cfg(target_os = "macos")]
 fn permission_gate(
     permissions: PermissionSnapshot,
     needs_accessibility: bool,
     needs_screen_recording: bool,
 ) -> Option<CallToolResult> {
+    if (needs_accessibility || needs_screen_recording) && crate::permissions::code_changed_on_disk()
+    {
+        return Some(tool_error(STALE_CODE_MESSAGE));
+    }
     if needs_accessibility && !permissions.accessibility {
         return Some(tool_error(
             "Accessibility permission is missing; grant it in Tcode Settings → Computer Use.",
