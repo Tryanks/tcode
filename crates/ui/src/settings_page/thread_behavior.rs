@@ -228,6 +228,7 @@ impl SettingsPage {
                             Button::new(SharedString::from(format!("edit-rules-{id}")))
                                 .ghost()
                                 .xsmall()
+                                .text_size(px(13.))
                                 .label(crate::tr!("settings.auto_settle.edit"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.edit_project_rules(edit.clone(), window, cx)
@@ -523,12 +524,12 @@ impl Render for ProjectRulesEditor {
                 )
                 .content(move |_, _, cx| {
                     let popover = cx.entity();
-                    v_flex()
-                        .p_1()
-                        .min_w(px(240.))
-                        .gap_0p5()
-                        .children(choices.clone().into_iter().enumerate().map(
-                            |(index, (value, label))| {
+                    v_flex().p_1().min_w(px(240.)).gap_0p5().children(
+                        choices
+                            .clone()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (value, label))| {
                                 let editor = editor.clone();
                                 let popover = popover.clone();
                                 let checked = trigger_label == label;
@@ -560,8 +561,8 @@ impl Render for ProjectRulesEditor {
                                     });
                                     popover.update(cx, |popover, cx| popover.dismiss(window, cx));
                                 })
-                            },
-                        ))
+                            }),
+                    )
                 })
                 .into_any_element()
         };
