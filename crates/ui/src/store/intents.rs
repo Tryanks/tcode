@@ -334,6 +334,9 @@ impl WorkspaceStore {
     pub fn set_auto_settle_after_days(&mut self, days: Option<f64>) {
         self.patch_settings(SettingsPatch::AutoSettleAfterDays(days));
     }
+    pub fn set_auto_settle_on_merge(&mut self, enabled: bool) {
+        self.patch_settings(SettingsPatch::AutoSettleOnMerge(enabled));
+    }
     pub fn set_project_settlement(
         &mut self,
         project_id: String,
