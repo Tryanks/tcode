@@ -994,22 +994,16 @@ impl SessionsSidebar {
         self.settle_thread(&action.0, window, cx);
     }
 
-    fn find_session(&self, id: &str, cx: &App) -> Option<SessionMeta> {
-        self.store
-            .read(cx)
-            .sidebar_sessions()
-            .into_iter()
-            .find(|meta| meta.id == id)
-    }
-
     /// Settle a thread; its undo also restores a pin it loses.
     fn settle_thread(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let pin = self
-            .find_session(id, cx)
+            .store
+            .read(cx)
+            .thread_meta(id)
             .filter(|meta| meta.pinned_at.is_some())
             .map(|meta| Command::PinSession {
                 session_id: id.to_owned(),
-                order_key: meta.pin_order,
+                order_key: meta.pin_order.clone(),
             });
         let undo = std::iter::once(Command::UnsettleSession {
             session_id: id.to_owned(),
@@ -4145,7 +4139,7 @@ impl Render for SessionsSidebar {
                     ] {
                         let empty = rows.is_empty();
                         visible.push(FlatListRow::Boundary(section, empty));
-                        top += self.drag_boundary_height(section, empty, scope.as_deref());
+                        top += self.drag_boundary_height(empty, scope.as_deref());
                         for meta in rows.iter() {
                             visible.push(FlatListRow::Thread(Box::new((*meta).clone()), top));
                             top += FLAT_ROW_HEIGHT;
@@ -6114,7 +6108,8 @@ mod tests {
     /// Pinned rows lead in key order with keyless pins after them, new and
     /// reopened rows lead Active, and activity moves nothing. Dragging an
     /// active row between two pins pins it with a key between theirs; Escape
-    /// cancels a drag; settling a pinned thread undoes with its old key.
+    /// cancels a drag; Move down writes only the moved key; unpinning or
+    /// settling a pinned thread undoes with its old key.
     #[gpui::test]
     fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext) {
         use tcode_protocol::{
@@ -6158,6 +6153,7 @@ mod tests {
             thread("fresh", 95),
             pinned("pin-old", 80, None),
             pinned("pin-new", 90, None),
+            pinned("pin-c", 3, Some("w")),
             pinned("pin-b", 1, Some("t")),
             pinned("pin-a", 2, Some("f")),
         ];
@@ -6251,7 +6247,8 @@ mod tests {
         sent(cx);
         draw(cx);
         let order = [
-            "pin-a", "pin-b", "pin-new", "pin-old", "reopened", "fresh", "busy", "arranged",
+            "pin-a", "pin-b", "pin-c", "pin-new", "pin-old", "reopened", "fresh", "busy",
+            "arranged",
         ];
         for compact in [false, true] {
             window_state.update(cx, |state, cx| {
@@ -6317,6 +6314,43 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.simulate_mouse_up(target.center(), left, none);
         assert_eq!(sent(cx), vec![], "Escape cancels the drag");
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_unpin(&ThreadUnpin("pin-a".into()), window, cx)
+        });
+        assert_eq!(
+            sent(cx),
+            vec![Command::UnpinSession {
+                session_id: "pin-a".into()
+            }]
+        );
+        sidebar.update_in(cx, |sidebar, window, cx| sidebar.undo_lifecycle(window, cx));
+        assert_eq!(
+            sent(cx),
+            vec![Command::PinSession {
+                session_id: "pin-a".into(),
+                order_key: Some("f".into()),
+            }]
+        );
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_move(&ThreadMove("pin-a".into(), true), window, cx)
+        });
+        let commands = sent(cx);
+        let [
+            Command::ReorderPinned {
+                session_id,
+                order_key,
+            },
+        ] = commands.as_slice()
+        else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(session_id, "pin-a");
+        assert!(
+            "t" < order_key.as_str() && order_key.as_str() < "w",
+            "{order_key}"
+        );
 
         sidebar.update_in(cx, |sidebar, window, cx| {
             sidebar.settle_thread("pin-b", window, cx)

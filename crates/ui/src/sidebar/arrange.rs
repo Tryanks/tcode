@@ -32,6 +32,9 @@ pub(super) struct ThreadDrag {
     /// Where the thread lands in Pinned or Active, as an index among that
     /// section's other rows; `None` leaves it where it was.
     gap: Option<(ThreadSection, usize)>,
+    /// The other rows of each section inside `scope` as the drag began,
+    /// which gap indexes count.
+    others: ThreadSections<String>,
     over: Option<ThreadSection>,
     can_settle: bool,
     width: Pixels,
@@ -295,9 +298,9 @@ impl SessionsSidebar {
             })
         };
         let _ = sidebar.update(cx, |this, cx| {
+            let sections = this.scoped_sections(dragged.scope.as_deref(), cx);
             let gap = (dragged.from != ThreadSection::Settled)
                 .then(|| {
-                    let sections = this.scoped_sections(dragged.scope.as_deref(), cx);
                     sections
                         .section(dragged.from)
                         .iter()
@@ -306,11 +309,24 @@ impl SessionsSidebar {
                         .map(|index| (dragged.from, index))
                 })
                 .flatten();
+            let others = |section| {
+                sections
+                    .section(section)
+                    .iter()
+                    .filter(|(meta, inside)| *inside && meta.id != dragged.session_id)
+                    .map(|(meta, _)| meta.id.clone())
+                    .collect()
+            };
             this.drag = Some(ThreadDrag {
                 session_id: dragged.session_id.clone(),
                 from: dragged.from,
                 scope: dragged.scope.clone(),
                 gap,
+                others: ThreadSections {
+                    pinned: others(ThreadSection::Pinned),
+                    active: others(ThreadSection::Active),
+                    settled: vec![],
+                },
                 over: Some(dragged.from),
                 can_settle: dragged.can_settle,
                 width: px(240.),
@@ -394,12 +410,11 @@ impl SessionsSidebar {
                     over = Some(gap.map_or(drag.from, |(section, _)| section));
                 }
                 DropZone::Row { id, section } => {
-                    let sections = self.scoped_sections(scope, cx);
-                    let index = sections
+                    let index = drag
+                        .others
                         .section(*section)
                         .iter()
-                        .filter(|(meta, inside)| *inside && meta.id != drag.session_id)
-                        .position(|(meta, _)| meta.id == *id);
+                        .position(|other| other == id);
                     if let Some(index) = index {
                         gap = Some((*section, index + usize::from(lower)));
                         over = Some(*section);
@@ -491,7 +506,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(meta) = self.find_session(id, cx) else {
+        let Some(meta) = self.store.read(cx).thread_meta(id).cloned() else {
             return;
         };
         let from = thread_section(&meta);
@@ -599,7 +614,7 @@ impl SessionsSidebar {
     /// Whether a thread can move up and down within its section, or `None`
     /// for a settled thread.
     pub(super) fn move_bounds(&self, id: &str, cx: &App) -> Option<(bool, bool)> {
-        let meta = self.find_session(id, cx)?;
+        let meta = self.store.read(cx).thread_meta(id).cloned()?;
         let section = thread_section(&meta);
         if section == ThreadSection::Settled {
             return None;
@@ -621,7 +636,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(meta) = self.find_session(&action.0, cx) else {
+        let Some(meta) = self.store.read(cx).thread_meta(&action.0).cloned() else {
             return;
         };
         let section = thread_section(&meta);
@@ -684,7 +699,7 @@ impl SessionsSidebar {
     }
 
     pub(super) fn unpin_thread(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(meta) = self.find_session(id, cx) else {
+        let Some(meta) = self.store.read(cx).thread_meta(id).cloned() else {
             return;
         };
         self.perform_lifecycle(
@@ -712,7 +727,7 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         self.arrange_scope = (self.store.read(cx).sidebar_layout() == SidebarLayout::Grouped)
-            .then(|| self.find_session(&action.0, cx))
+            .then(|| self.store.read(cx).thread_meta(&action.0).cloned())
             .flatten()
             .and_then(|meta| meta.project_id);
         self.arrange_settled_expanded = false;
@@ -720,9 +735,9 @@ impl SessionsSidebar {
             .update(cx, |state, cx| state.go(Destination::ArrangeThreads, cx));
     }
 
-    /// The label above the first row of Pinned or Active while a drag is in
-    /// progress, or the target that stands in for an empty section. Nothing
-    /// at rest.
+    /// While a drag is in progress, the label at the start of Pinned or
+    /// Active, overlaying the rows so they never move, or the target that
+    /// stands in for an empty section. Nothing at rest.
     pub(super) fn render_drag_boundary(
         &self,
         section: ThreadSection,
@@ -733,9 +748,6 @@ impl SessionsSidebar {
         let Some(drag) = self.drag.as_ref().filter(|drag| drag.scope == scope) else {
             return div().into_any_element();
         };
-        if empty && section == ThreadSection::Active && drag.target(scope.as_deref()).is_none() {
-            return div().into_any_element();
-        }
         let targeted = drag.target(scope.as_deref()) == Some(section);
         let color = if targeted {
             cx.theme().primary
@@ -746,8 +758,8 @@ impl SessionsSidebar {
             ThreadSection::Pinned => crate::tr!("sidebar.pinned"),
             _ => crate::tr!("sidebar.active"),
         };
-        let element = if empty {
-            div().w_full().py_1().child(
+        if empty {
+            let target = div().w_full().py_1().child(
                 h_flex()
                     .h(px(EMPTY_TARGET_HEIGHT - 8.))
                     .px_2()
@@ -760,10 +772,27 @@ impl SessionsSidebar {
                     .font_medium()
                     .text_color(color)
                     .child(label),
-            )
-        } else {
-            div().w_full().child(
+            );
+            return self
+                .drop_zone(target, DropZone::Start(section), scope, 0., cx)
+                .into_any_element();
+        }
+        // The first section starts the list, so its label sits inside the
+        // first row; the second straddles the seam between the sections.
+        let top = match section {
+            ThreadSection::Pinned => 0.,
+            _ => -BOUNDARY_LABEL_HEIGHT / 2.,
+        };
+        div()
+            .relative()
+            .w_full()
+            .h_0()
+            .child(
                 h_flex()
+                    .absolute()
+                    .top(px(top))
+                    .left_0()
+                    .right_0()
                     .h(px(BOUNDARY_LABEL_HEIGHT))
                     .px_2()
                     .gap_2()
@@ -771,6 +800,9 @@ impl SessionsSidebar {
                     .child(
                         div()
                             .flex_none()
+                            .px_1()
+                            .rounded(cx.theme().tokens.radius.sm)
+                            .bg(cx.theme().sidebar)
                             .text_size(px(12.))
                             .font_medium()
                             .text_color(color)
@@ -782,31 +814,20 @@ impl SessionsSidebar {
                         cx.theme().sidebar_foreground.opacity(0.25)
                     })),
             )
-        };
-        self.drop_zone(element, DropZone::Start(section), scope, 0., cx)
             .into_any_element()
     }
 
-    /// The height [`Self::render_drag_boundary`] takes, for row offsets.
-    pub(super) fn drag_boundary_height(
-        &self,
-        section: ThreadSection,
-        empty: bool,
-        scope: Option<&str>,
-    ) -> f32 {
-        match self
+    /// The height of the target [`Self::render_drag_boundary`] shows for an
+    /// empty section, for row offsets; a label takes none.
+    pub(super) fn drag_boundary_height(&self, empty: bool, scope: Option<&str>) -> f32 {
+        let dragging = self
             .drag
             .as_ref()
-            .filter(|drag| drag.scope.as_deref() == scope)
-        {
-            None => 0.,
-            Some(drag)
-                if empty && section == ThreadSection::Active && drag.target(scope).is_none() =>
-            {
-                0.
-            }
-            Some(_) if empty => EMPTY_TARGET_HEIGHT,
-            Some(_) => BOUNDARY_LABEL_HEIGHT,
+            .is_some_and(|drag| drag.scope.as_deref() == scope);
+        if dragging && empty {
+            EMPTY_TARGET_HEIGHT
+        } else {
+            0.
         }
     }
 
