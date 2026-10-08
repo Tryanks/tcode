@@ -27,8 +27,8 @@ pub enum PullRequestRead {
         after: String,
     },
     ViewedFiles,
-    /// Media the pull request's conversation points at on GitHub. `validator` is the one a
-    /// previous answer carried, to revalidate a cached copy.
+    /// Media the pull request's conversation points at on GitHub, or an author's avatar.
+    /// `validator` is the one a previous answer carried, to revalidate a cached copy.
     Media {
         url: String,
         validator: Option<String>,
@@ -45,6 +45,8 @@ pub struct PullRequestFiles {
     pub next_page: Option<u32>,
     /// Every changed file has been listed once the pages before this one were read too.
     pub complete: bool,
+    /// GitHub's count of changed files, which a listing may fall short of.
+    pub changed_files: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +137,8 @@ pub struct PullRequestReviewThread {
     pub outdated: bool,
     /// Absent for a comment on a whole file.
     pub anchor: Option<PullRequestReviewAnchor>,
+    /// The last lines of the hunk the thread was left on, without its `@@` header.
+    pub diff_hunk: Option<String>,
     pub comments: Vec<PullRequestComment>,
     pub total_comments: u64,
     /// Where [`PullRequestRead::ThreadReplies`] carries on, while replies remain unread.

@@ -13,6 +13,7 @@ pub mod repository;
 
 pub use api::{GitHubApi, GitHubError, RequestOptions, Response, RestRequest};
 pub use credentials::{Credential, CredentialError, Credentials, Identity};
+pub use read_cache::Fresh;
 
 pub fn normalize_host(host: &str) -> Result<String, CredentialError> {
     let host = host.trim().to_ascii_lowercase();

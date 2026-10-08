@@ -324,34 +324,69 @@ impl AppState {
         }
         let reads = self.pull_requests.reads.clone();
         let task = cx.unblock(move || {
-            Ok(match read {
+            use tcode_services::github::Fresh;
+            fn reply<V: Clone>(
+                fresh: Fresh<V>,
+                wrap: impl FnOnce(V) -> PullRequestReadResponse,
+            ) -> (PullRequestReadResponse, SystemTime) {
+                (wrap((*fresh.value).clone()), fresh.expires_at)
+            }
+            Ok::<_, GitHubError>(match read {
                 PullRequestRead::Files { page } => {
-                    PullRequestReadResponse::Files((*reads.files(&key, page)?).clone())
+                    reply(reads.files(&key, page)?, PullRequestReadResponse::Files)
                 }
-                PullRequestRead::FileText { revision, path } => PullRequestReadResponse::FileText(
-                    (*reads.file_text(&key, &revision, &path)?).clone(),
+                PullRequestRead::FileText { revision, path } => reply(
+                    reads.file_text(&key, &revision, &path)?,
+                    PullRequestReadResponse::FileText,
                 ),
-                PullRequestRead::Conversation => {
-                    PullRequestReadResponse::Conversation((*reads.conversation(&key)?).clone())
-                }
-                PullRequestRead::ThreadReplies { thread_id, after } => {
-                    PullRequestReadResponse::ThreadReplies(
-                        (*reads.thread_replies(&key, &thread_id, &after)?).clone(),
-                    )
-                }
-                PullRequestRead::ViewedFiles => {
-                    PullRequestReadResponse::ViewedFiles((*reads.viewed_files(&key)?).clone())
-                }
+                PullRequestRead::Conversation => reply(
+                    reads.conversation(&key)?,
+                    PullRequestReadResponse::Conversation,
+                ),
+                PullRequestRead::ThreadReplies { thread_id, after } => reply(
+                    reads.thread_replies(&key, &thread_id, &after)?,
+                    PullRequestReadResponse::ThreadReplies,
+                ),
+                PullRequestRead::ViewedFiles => reply(
+                    reads.viewed_files(&key)?,
+                    PullRequestReadResponse::ViewedFiles,
+                ),
                 PullRequestRead::Media { url, validator } => {
-                    PullRequestReadResponse::Media(reads.media(&key, &url, validator.as_deref())?)
+                    let media = reads.media(&key, &url, validator.as_deref())?;
+                    let expires_at = match &media {
+                        tcode_protocol::PullRequestMedia::Image { expires_at, .. }
+                        | tcode_protocol::PullRequestMedia::NotModified { expires_at } => {
+                            UNIX_EPOCH + Duration::from_secs(*expires_at)
+                        }
+                        tcode_protocol::PullRequestMedia::External { .. } => SystemTime::now(),
+                    };
+                    (PullRequestReadResponse::Media(media), expires_at)
                 }
             })
         });
         cx.spawn_background(async move {
             task.await
-                .map(|response| QueryResponse::PullRequest(Box::new(response)))
+                .map(|(response, expires_at)| QueryResponse::PullRequest {
+                    response: Box::new(response),
+                    expires_at: expires_at
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                })
                 .map_err(read_error)
         })
+    }
+    /// A manual refresh: the host's answers about the pull request go, and the sync reads it.
+    pub fn refresh_pull_request(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        cx: &mut HostCx,
+    ) -> Result<(), ProtocolError> {
+        self.linked_pull_request(session_id, &key)?;
+        self.pull_requests.reads.invalidate(&key);
+        self.request_pull_request_sync(key, cx);
+        Ok(())
     }
     pub fn set_pull_request_files_viewed(
         &mut self,

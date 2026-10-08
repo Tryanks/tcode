@@ -159,7 +159,7 @@ fn whole_diff_keeps_renames_deletions_and_binaries_and_reads_text_at_a_revision(
         }
     });
 
-    let files = reads.files(&key(), None).unwrap();
+    let files = reads.files(&key(), None).unwrap().value;
     assert_eq!((files.base.as_str(), files.head.as_str()), (BASE, HEAD));
     assert!(files.complete && files.next_page.is_none());
     let summary: Vec<_> = files
@@ -191,19 +191,28 @@ fn whole_diff_keeps_renames_deletions_and_binaries_and_reads_text_at_a_revision(
     assert_eq!(files.files[2].patch, PullRequestPatch::Binary);
 
     assert_eq!(
-        *reads.file_text(&key(), HEAD, "src/new name.rs").unwrap(),
+        *reads
+            .file_text(&key(), HEAD, "src/new name.rs")
+            .unwrap()
+            .value,
         PullRequestFileText::Text("fn main() {\n    new();\n}\n".into())
     );
     assert_eq!(
-        *reads.file_text(&key(), HEAD, "assets/logo.png").unwrap(),
+        *reads
+            .file_text(&key(), HEAD, "assets/logo.png")
+            .unwrap()
+            .value,
         PullRequestFileText::Binary
     );
     assert_eq!(
-        *reads.file_text(&key(), HEAD, "big.txt").unwrap(),
+        *reads.file_text(&key(), HEAD, "big.txt").unwrap().value,
         PullRequestFileText::Oversized
     );
     assert_eq!(
-        *reads.file_text(&key(), BASE, "src/new name.rs").unwrap(),
+        *reads
+            .file_text(&key(), BASE, "src/new name.rs")
+            .unwrap()
+            .value,
         PullRequestFileText::Missing,
         "a side the revision does not have is missing, not a failure"
     );
@@ -296,7 +305,7 @@ fn a_refused_whole_diff_pages_the_changed_files_and_names_withheld_patches() {
         }
     });
 
-    let first = reads.files(&key(), None).unwrap();
+    let first = reads.files(&key(), None).unwrap().value;
     assert_eq!(first.files.len(), 100);
     assert_eq!(
         (first.next_page, first.complete),
@@ -315,7 +324,7 @@ fn a_refused_whole_diff_pages_the_changed_files_and_names_withheld_patches() {
             Some("old/moved.rs")
         )
     );
-    let second = reads.files(&key(), Some(2)).unwrap();
+    let second = reads.files(&key(), Some(2)).unwrap().value;
     assert_eq!(second.files[0].kind, agent::FileChangeKind::Delete);
     assert_eq!((second.next_page, second.complete), (None, true));
     assert_eq!(
@@ -350,6 +359,7 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
             ],
             "commit": null,
             "originalCommit": {"oid": BASE},
+            "diffHunk": "@@ -8,5 +8,5 @@\n a\n b\n-c\n+d\n e\n f",
         })
     };
     match seen.operation().as_deref() {
@@ -416,7 +426,7 @@ fn conversation_keeps_an_outdated_multiline_thread_and_pages_its_replies_within_
     let reads = reads(&fixture, &store);
     let (_server, log) = serve(fixture, conversation_reply);
 
-    let conversation = reads.conversation(&key()).unwrap();
+    let conversation = reads.conversation(&key()).unwrap().value;
     assert!(conversation.complete);
     assert!(conversation.description.body.starts_with("Screenshot:"));
     assert_eq!(
@@ -445,13 +455,19 @@ fn conversation_keeps_an_outdated_multiline_thread_and_pages_its_replies_within_
         "an outdated thread keeps the lines it was left on, at the commit it was left on"
     );
     assert_eq!(
+        thread.diff_hunk.as_deref(),
+        Some("-c\n+d\n e\n f"),
+        "the excerpt is the hunk's last lines"
+    );
+    assert_eq!(
         (thread.total_comments, thread.replies_after.as_deref()),
         (12, Some("C10"))
     );
 
     let replies = reads
         .thread_replies(&key(), "PRRT_outdated", "C10")
-        .unwrap();
+        .unwrap()
+        .value;
     assert_eq!(replies.comments[0].id, "RC_11");
     assert_eq!(
         reads
@@ -488,7 +504,7 @@ fn a_thread_list_past_ten_pages_is_reported_incomplete() {
         }
         conversation_reply(seen)
     });
-    let conversation = reads.conversation(&key()).unwrap();
+    let conversation = reads.conversation(&key()).unwrap().value;
     assert!(!conversation.complete);
     assert_eq!(
         log.lock()
@@ -540,7 +556,7 @@ fn viewed_files_stop_at_five_pages_and_marking_rereads_only_the_viewed_state() {
             .count()
     };
 
-    let viewed = reads.viewed_files(&key()).unwrap();
+    let viewed = reads.viewed_files(&key()).unwrap().value;
     assert_eq!(viewed.files.len(), 500);
     assert!(!viewed.complete, "a sixth page is unknown, not unviewed");
     assert_eq!(
@@ -636,7 +652,7 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
 
     thread::scope(|scope| {
         let readers: Vec<_> = (0..4)
-            .map(|_| scope.spawn(|| reads.conversation(&key()).unwrap()))
+            .map(|_| scope.spawn(|| reads.conversation(&key()).unwrap().value))
             .collect();
         for reader in readers {
             reader.join().unwrap();
@@ -661,12 +677,12 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
         "a failure is kept for no one; the next reader asks again"
     );
 
-    let first = reads.conversation(&key()).unwrap().account.clone();
+    let first = reads.conversation(&key()).unwrap().value.account.clone();
     store
         .store
         .set_github_token("github.com", Some("second-account"))
         .unwrap();
-    let second = reads.conversation(&key()).unwrap().account.clone();
+    let second = reads.conversation(&key()).unwrap().value.account.clone();
     assert_eq!(
         count("PullRequestConversation"),
         4,
@@ -681,9 +697,23 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
         Some("Bearer second-account")
     );
 
-    reads.viewed_files(&key()).unwrap();
+    let viewed = reads.viewed_files(&key()).unwrap();
     reads.viewed_files(&key()).unwrap();
     assert_eq!(count("PullRequestViewedFiles"), 1);
+    let left = |at: std::time::SystemTime| {
+        at.duration_since(std::time::SystemTime::now())
+            .unwrap_or_default()
+            .as_secs_f64()
+            .round()
+    };
+    assert_eq!(
+        (
+            left(viewed.expires_at),
+            left(reads.conversation(&key()).unwrap().expires_at)
+        ),
+        (15., 60.),
+        "each answer tells its reader when to ask again"
+    );
     thread::sleep(Duration::from_secs(15));
     reads.viewed_files(&key()).unwrap();
     assert_eq!(
@@ -780,6 +810,9 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
             ("github.com", "/user-attachments/assets/wide") => {
                 (200, "Content-Type: image/png\r\n".into(), png(9000, 1))
             }
+            ("avatars.githubusercontent.com", "/u/1") => {
+                (200, "Content-Type: image/png\r\n".into(), png(2, 2))
+            }
             ("github.com", "/user-attachments/assets/page") => (
                 200,
                 "Content-Type: text/html\r\n".into(),
@@ -815,6 +848,20 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
             "the signed hop never sees the token"
         );
     }
+    assert!(matches!(
+        media("https://avatars.githubusercontent.com/u/1").unwrap(),
+        PullRequestMedia::Image { .. }
+    ));
+    assert_eq!(
+        log.lock().unwrap().last().unwrap().authorization,
+        None,
+        "an author's avatar is public and read without the token"
+    );
+    assert_eq!(
+        media("https://avatars.githubusercontent.com/u/2").unwrap_err(),
+        GitHubError::InvalidInput,
+        "an avatar no author of the pull request has is not read"
+    );
     assert_eq!(
         media(&asset("vid-1")).unwrap(),
         PullRequestMedia::External {

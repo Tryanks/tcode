@@ -111,12 +111,24 @@ fn type_from_name(url: &Url) -> Option<&'static str> {
     })
 }
 
+/// An author's avatar, which GitHub serves publicly and never with the credential.
+fn avatar_url(source: &str) -> Option<Url> {
+    let url = Url::parse(source).ok()?;
+    (url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("avatars.githubusercontent.com")))
+    .then_some(url)
+}
+
 pub(super) fn fetch(
     api: &GitHubApi,
     source: &str,
     validator: Option<&str>,
 ) -> Result<PullRequestMedia, GitHubError> {
-    let mut target = asset_url(source).ok_or(GitHubError::InvalidInput)?;
+    let mut target = asset_url(source)
+        .or_else(|| avatar_url(source))
+        .ok_or(GitHubError::InvalidInput)?;
     // Without a github.com credential a public asset still loads, and a private one fails as
     // it does in a browser that is not signed in.
     let token = api

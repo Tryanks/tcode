@@ -441,6 +441,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx,
             ));
         }
+        Command::RefreshPullRequest { session_id, key } => {
+            return CommandOutcome::Immediate(
+                app.refresh_pull_request(&session_id, key, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::SetPullRequestFilesViewed {
             session_id,
             key,

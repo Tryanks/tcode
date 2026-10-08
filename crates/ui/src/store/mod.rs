@@ -3082,7 +3082,7 @@ impl WorkspaceStore {
         key: tcode_core::pull_request::PullRequestKey,
         read: tcode_protocol::PullRequestRead,
         cx: &mut App,
-    ) -> Task<Result<tcode_protocol::PullRequestReadResponse, ProtocolError>> {
+    ) -> Task<Result<(tcode_protocol::PullRequestReadResponse, u64), ProtocolError>> {
         let host = self.host.clone();
         cx.spawn(async move |_| {
             match host
@@ -3093,7 +3093,10 @@ impl WorkspaceStore {
                 })
                 .await?
             {
-                QueryResponse::PullRequest(response) => Ok(*response),
+                QueryResponse::PullRequest {
+                    response,
+                    expires_at,
+                } => Ok((*response, expires_at)),
                 _ => Err(ProtocolError {
                     code: "invalid_pull_request_response".into(),
                     message: "Unexpected pull request response".into(),

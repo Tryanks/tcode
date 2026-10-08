@@ -157,7 +157,11 @@ pub enum QueryResponse {
     TerminalFrame(Box<crate::terminal::TerminalFrame>),
     ItemOutput(String),
     ArchivedSessions(crate::ArchivedSessions),
-    PullRequest(Box<crate::PullRequestReadResponse>),
+    PullRequest {
+        response: Box<crate::PullRequestReadResponse>,
+        /// Unix seconds after which the host answers this read afresh.
+        expires_at: u64,
+    },
 }
 
 /// One content match in a stored session, addressed by the folded timeline

@@ -107,7 +107,8 @@ pub use wire::{
 // answers automation for threads it is not viewing.
 // Unreleased: Query::PullRequest reads a linked pull request's files, file
 // text, conversation, review thread replies, viewed files and media;
-// SetPullRequestFilesViewed marks or unmarks files as viewed.
+// SetPullRequestFilesViewed marks or unmarks files as viewed;
+// RefreshPullRequest drops the host's reads of one and syncs it.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

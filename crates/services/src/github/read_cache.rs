@@ -2,7 +2,7 @@ use super::GitHubError;
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tcode_core::pull_request::PullRequestKey;
 
@@ -14,7 +14,22 @@ pub(super) struct ReadKey {
     pub(super) read: String,
 }
 
-type Outcome<V> = Result<Arc<V>, GitHubError>;
+/// An answer and when its reader should ask again.
+#[derive(Debug)]
+pub struct Fresh<V> {
+    pub value: Arc<V>,
+    pub expires_at: SystemTime,
+}
+impl<V> Clone for Fresh<V> {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            expires_at: self.expires_at,
+        }
+    }
+}
+
+type Outcome<V> = Result<Fresh<V>, GitHubError>;
 
 struct Flight<V> {
     outcome: Mutex<Option<Outcome<V>>>,
@@ -23,7 +38,7 @@ struct Flight<V> {
 
 enum Slot<V> {
     Ready {
-        value: Arc<V>,
+        fresh: Fresh<V>,
         until: Instant,
         bytes: usize,
     },
@@ -55,8 +70,8 @@ impl<V> ReadCache<V> {
         let flight = {
             let mut slots = self.slots.lock().unwrap();
             match slots.get(&key) {
-                Some(Slot::Ready { value, until, .. }) if *until > Instant::now() => {
-                    return Ok(value.clone());
+                Some(Slot::Ready { fresh, until, .. }) if *until > Instant::now() => {
+                    return Ok(fresh.clone());
                 }
                 Some(Slot::Loading(flight)) => {
                     let flight = flight.clone();
@@ -89,13 +104,16 @@ impl<V> ReadCache<V> {
         match load() {
             Ok((value, ttl)) => {
                 let bytes = size(&value);
-                let value = Arc::new(value);
+                let fresh = Fresh {
+                    value: Arc::new(value),
+                    expires_at: SystemTime::now() + ttl,
+                };
                 let keep = (!ttl.is_zero() && bytes <= self.budget / 4).then(|| Slot::Ready {
-                    value: value.clone(),
+                    fresh: fresh.clone(),
                     until: Instant::now() + ttl,
                     bytes,
                 });
-                landing.land(Ok(value), keep)
+                landing.land(Ok(fresh), keep)
             }
             Err(error) => landing.land(Err(error), None),
         }
@@ -109,10 +127,10 @@ impl<V> ReadCache<V> {
             .unwrap()
             .iter()
             .filter_map(|(key, slot)| match slot {
-                Slot::Ready { value, until, .. }
+                Slot::Ready { fresh, until, .. }
                     if key.pull_request == *pull_request && *until > now =>
                 {
-                    Some(value.clone())
+                    Some(fresh.value.clone())
                 }
                 _ => None,
             })

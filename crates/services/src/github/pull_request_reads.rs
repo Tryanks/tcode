@@ -6,7 +6,7 @@ use super::{
     api::{Authentication, DEADLINE_CAP},
     graphql::{self, AliasItem, Document, Variables},
     media,
-    read_cache::{ReadCache, ReadKey},
+    read_cache::{Fresh, ReadCache, ReadKey},
     repository::Repository,
 };
 use agent::FileChangeKind;
@@ -38,7 +38,7 @@ const MAX_PAGES: usize = 10;
 const VIEWED_PAGES: usize = 5;
 const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
-const ACTOR: &str = "author { login avatarUrl }";
+const ACTOR: &str = "author { login avatarUrl(size: 64) }";
 const REACTIONS: &str = "reactionGroups { content viewerHasReacted reactors { totalCount } }";
 
 #[derive(Debug, Clone)]
@@ -170,6 +170,7 @@ impl Reader<'_> {
                     .ok_or(GitHubError::InvalidResponse)?,
                 next_page: None,
                 complete: true,
+                changed_files: revisions.changed_files,
             }),
             Ok(_) => self.files_page(revisions, 1),
             Err(refusal @ GitHubError::Response { .. }) => {
@@ -204,6 +205,7 @@ impl Reader<'_> {
             files: rows.iter().filter_map(listed_file).collect(),
             next_page,
             complete: next_page.is_none() && listed >= revisions.changed_files,
+            changed_files: revisions.changed_files,
         })
     }
 
@@ -279,7 +281,7 @@ impl Reader<'_> {
         comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
 
         let thread_query = format!(
-            "query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ reviewThreads(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id isResolved isOutdated path line startLine originalLine originalStartLine diffSide startDiffSide comments(first: 10) {{ totalCount pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} commit {{ oid }} originalCommit {{ oid }} }} }} }} }} }} }} }}"
+            "query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ reviewThreads(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id isResolved isOutdated path line startLine originalLine originalStartLine diffSide startDiffSide comments(first: 10) {{ totalCount pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} diffHunk commit {{ oid }} originalCommit {{ oid }} }} }} }} }} }} }} }}"
         );
         let mut threads = Vec::new();
         let mut cursor = Value::Null;
@@ -420,14 +422,15 @@ impl PullRequestReads {
         &self,
         key: &PullRequestKey,
         page: Option<u32>,
-    ) -> Result<Arc<PullRequestFiles>, GitHubError> {
+    ) -> Result<Fresh<PullRequestFiles>, GitHubError> {
         if page == Some(0) {
             return Err(GitHubError::InvalidInput);
         }
         let reader = self.reader(key)?;
-        let revisions =
-            self.revisions
-                .read(reader.read_key("revisions"), || reader.revisions(), |_| 128)?;
+        let revisions = self
+            .revisions
+            .read(reader.read_key("revisions"), || reader.revisions(), |_| 128)?
+            .value;
         self.files.read(
             reader.read_key(format!("files {page:?}")),
             || {
@@ -459,7 +462,7 @@ impl PullRequestReads {
         key: &PullRequestKey,
         revision: &str,
         path: &str,
-    ) -> Result<Arc<PullRequestFileText>, GitHubError> {
+    ) -> Result<Fresh<PullRequestFileText>, GitHubError> {
         if !is_revision(revision) || !is_repository_path(path) {
             return Err(GitHubError::InvalidInput);
         }
@@ -477,7 +480,7 @@ impl PullRequestReads {
     pub fn conversation(
         &self,
         key: &PullRequestKey,
-    ) -> Result<Arc<PullRequestConversation>, GitHubError> {
+    ) -> Result<Fresh<PullRequestConversation>, GitHubError> {
         let reader = self.reader(key)?;
         self.conversations.read(
             reader.read_key("conversation"),
@@ -491,7 +494,7 @@ impl PullRequestReads {
         key: &PullRequestKey,
         thread: &str,
         after: &str,
-    ) -> Result<Arc<PullRequestThreadReplies>, GitHubError> {
+    ) -> Result<Fresh<PullRequestThreadReplies>, GitHubError> {
         let reader = self.reader(key)?;
         self.replies.read(
             reader.read_key(format!("replies {thread} {after}")),
@@ -503,7 +506,7 @@ impl PullRequestReads {
     pub fn viewed_files(
         &self,
         key: &PullRequestKey,
-    ) -> Result<Arc<PullRequestViewedFiles>, GitHubError> {
+    ) -> Result<Fresh<PullRequestViewedFiles>, GitHubError> {
         let reader = self.reader(key)?;
         self.viewed.read(
             reader.read_key("viewed"),
@@ -605,8 +608,15 @@ impl PullRequestReads {
         url: &str,
         validator: Option<&str>,
     ) -> Result<PullRequestMedia, GitHubError> {
-        let conversation = self.conversation(key)?;
+        let conversation = self.conversation(key)?.value;
         let mentioned = conversation_bodies(&conversation).any(|body| body.contains(url))
+            || conversation_comments(&conversation).any(|comment| {
+                comment
+                    .author
+                    .as_ref()
+                    .and_then(|author| author.avatar_url.as_deref())
+                    == Some(url)
+            })
             || self
                 .replies
                 .held(key)
@@ -629,7 +639,9 @@ impl PullRequestReads {
     }
 }
 
-fn conversation_bodies(conversation: &PullRequestConversation) -> impl Iterator<Item = &str> {
+fn conversation_comments(
+    conversation: &PullRequestConversation,
+) -> impl Iterator<Item = &PullRequestComment> {
     std::iter::once(&conversation.description)
         .chain(&conversation.comments)
         .chain(
@@ -638,7 +650,10 @@ fn conversation_bodies(conversation: &PullRequestConversation) -> impl Iterator<
                 .iter()
                 .flat_map(|thread| thread.comments.iter()),
         )
-        .map(|comment| comment.body.as_str())
+}
+
+fn conversation_bodies(conversation: &PullRequestConversation) -> impl Iterator<Item = &str> {
+    conversation_comments(conversation).map(|comment| comment.body.as_str())
 }
 
 fn comment_bytes(comment: &PullRequestComment) -> usize {
@@ -646,16 +661,7 @@ fn comment_bytes(comment: &PullRequestComment) -> usize {
 }
 
 fn conversation_bytes(conversation: &PullRequestConversation) -> usize {
-    std::iter::once(&conversation.description)
-        .chain(&conversation.comments)
-        .chain(
-            conversation
-                .threads
-                .iter()
-                .flat_map(|thread| thread.comments.iter()),
-        )
-        .map(comment_bytes)
-        .sum()
+    conversation_comments(conversation).map(comment_bytes).sum()
 }
 
 fn is_revision(value: &str) -> bool {
@@ -790,6 +796,16 @@ fn thread_from(raw: &Value) -> Option<PullRequestReviewThread> {
         resolved: raw["isResolved"].as_bool().unwrap_or(false),
         outdated: raw["isOutdated"].as_bool().unwrap_or(false),
         anchor,
+        diff_hunk: comments
+            .first()
+            .and_then(|comment| comment["diffHunk"].as_str())
+            .map(|hunk| {
+                let lines: Vec<_> = hunk
+                    .lines()
+                    .filter(|line| !line.starts_with("@@"))
+                    .collect();
+                lines[lines.len().saturating_sub(4)..].join("\n")
+            }),
         comments: comments
             .into_iter()
             .filter_map(|raw| comment_from(raw, None))
