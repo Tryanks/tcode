@@ -81,7 +81,8 @@ pub use wire::{
 // idle-auto-archive settings are removed.
 // Unreleased: stored messages carry human/agent/server origin; absent origin
 // uses the historical top-level human / dispatched child agent fallback.
-// Unreleased: adds the SetProjectRoot command.
+// Unreleased: adds the SetProjectRoot command and the WorkingDirectoryMissing
+// runtime error.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

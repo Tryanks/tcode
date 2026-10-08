@@ -33,7 +33,9 @@ use gpui_base::{
 };
 use tcode_client::host::ClientHost;
 use tcode_core::ui::RightTab;
-use tcode_protocol::{RuntimeEffect, RuntimeNotification as RuntimeEvent, RuntimeOperationId};
+use tcode_protocol::{
+    RuntimeEffect, RuntimeError, RuntimeNotification as RuntimeEvent, RuntimeOperationId,
+};
 
 use crate::attachment::{Attachment, LocalTransport, same_target};
 use crate::chat::ChatView;
@@ -1160,6 +1162,21 @@ impl AppShell {
             }
             RuntimeEvent::Effect(RuntimeEffect::CopyToClipboard { text }) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                return;
+            }
+            RuntimeEvent::Error(RuntimeError::WorkingDirectoryMissing {
+                project_id: Some(project_id),
+                cwd,
+                ..
+            }) if self.store().is_some() => {
+                let store = self.store().expect("checked above");
+                crate::change_project_root_dialog::open_missing_directory(
+                    store,
+                    project_id.clone(),
+                    cwd.clone(),
+                    window,
+                    cx,
+                );
                 return;
             }
             RuntimeEvent::Error(_) | RuntimeEvent::Notice(_) => {

@@ -212,6 +212,8 @@ sidebar:
   change_project_root_move_help: "On: Tcode moves the folder there, so the new path must not exist yet. Off: the folder was already moved by hand, so the new path must exist."
   change_project_root_working: "Changing path… a move across drives copies every file first."
   change_project_root_action: "Change path"
+  missing_directory_title: "Project folder not found"
+  missing_directory_description: "The folder of \"%{project}\" is gone: %{path}. If you moved it, point the project at its new location; otherwise remove the project from Tcode. Its threads keep their conversations either way until removed."
   remove_project: "Remove project"
   remove_project_title: 'Remove project "%{project}"?'
   remove_project_description: "This removes the project and its %{count} threads from Tcode. Files on disk are not touched."
@@ -1116,6 +1118,7 @@ errors:
   process_gone: "Session process is gone; try reopening."
   provider_start: "Failed to start provider: %{error}"
   provider_closed_reason: "Provider session closed unexpectedly: %{reason}"
+  working_directory_missing: "The working directory %{cwd} no longer exists."
   provider_closed: "Provider session closed unexpectedly."
   persist_event: "Failed to persist event: %{error}"
   export_thread: "Failed to export thread: %{error}"

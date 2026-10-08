@@ -71,6 +71,91 @@ pub(super) fn open(
     });
 }
 
+/// A thread could not start because `cwd` is gone: offer to point the
+/// project at where it went, or to remove it from Tcode.
+pub(super) fn open_missing_directory(
+    store: Entity<WorkspaceStore>,
+    project_id: String,
+    cwd: PathBuf,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some((project_name, _)) = store.read(cx).project_summary(&project_id) else {
+        return;
+    };
+    let cwd = cwd.to_string_lossy().into_owned();
+    window.open_dialog(cx, move |builder, _window, cx| {
+        let change_store = store.clone();
+        let change_id = project_id.clone();
+        let remove_store = store.clone();
+        let remove_id = project_id.clone();
+        builder
+            .w(px(480.))
+            .rounded(crate::material::radius_overlay(cx))
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_xl()
+            .title(crate::tr!("sidebar.missing_directory_title").into_owned())
+            .content({
+                let project_name = project_name.clone();
+                let cwd = cwd.clone();
+                move |content_el, _, cx| {
+                    content_el.child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                crate::tr!(
+                                    "sidebar.missing_directory_description",
+                                    project = project_name.clone(),
+                                    path = cwd.clone()
+                                )
+                                .into_owned(),
+                            ),
+                    )
+                }
+            })
+            .footer(
+                DialogActions::new()
+                    .child(
+                        Button::new("missing-directory-cancel")
+                            .rounded(crate::material::radius_button(cx))
+                            .label(crate::tr!("sidebar.cancel"))
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                            }),
+                    )
+                    .child(
+                        Button::new("missing-directory-remove")
+                            .rounded(crate::material::radius_button(cx))
+                            .danger()
+                            .label(crate::tr!("sidebar.remove_project"))
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                crate::sidebar::confirm_remove_project(
+                                    remove_store.clone(),
+                                    remove_id.clone(),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                    )
+                    .child(
+                        Button::new("missing-directory-change")
+                            .rounded(crate::material::radius_button(cx))
+                            .primary()
+                            .label(crate::tr!("sidebar.change_project_root"))
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                open(change_store.clone(), change_id.clone(), window, cx);
+                            }),
+                    )
+                    .into_any_element(),
+            )
+    });
+}
+
 impl ChangeProjectRootDialog {
     fn new(
         store: Entity<WorkspaceStore>,
