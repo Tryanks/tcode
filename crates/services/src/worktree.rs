@@ -293,6 +293,28 @@ fn same_existing_path(left: &Path, right: &Path) -> bool {
         )
 }
 
+/// Re-point the `.git` files of `worktrees` at `root` after the main
+/// repository moved; a path that is not a registered worktree is reported by
+/// git and skipped.
+pub fn repair(root: &Path, worktrees: &[PathBuf]) -> Result<(), WorktreeError> {
+    if worktrees.is_empty() {
+        return Ok(());
+    }
+    let output = crate::process::command("git")
+        .current_dir(root)
+        .args(["worktree", "repair"])
+        .args(worktrees)
+        .output()
+        .map_err(io_error)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(WorktreeError(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
+    }
+}
+
 fn prune(root: &Path) -> Result<(), WorktreeError> {
     let output = crate::process::command("git")
         .current_dir(root)
@@ -831,6 +853,27 @@ mod tests {
         std::fs::write(root.join(path), contents).unwrap();
         run(root, &["add", path]);
         run(root, &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn repair_reconnects_worktrees_after_the_repository_moves() {
+        let (temp, root) = scratch_repo("tcode-worktree-repair");
+        let worktrees = temp.join("worktrees");
+        let created = provision_for_test(&root, "session", &worktrees);
+        let moved = temp.join("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        assert!(run_git(&created.path, &["status", "--porcelain"]).is_err());
+
+        repair(&moved, std::slice::from_ref(&created.path)).unwrap();
+        run_git(&created.path, &["status", "--porcelain"]).unwrap();
+        assert_eq!(
+            porcelain_worktree_paths(&moved).unwrap(),
+            [
+                moved.canonicalize().unwrap(),
+                created.path.canonicalize().unwrap()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

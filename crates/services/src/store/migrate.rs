@@ -46,7 +46,7 @@ const LEGACY_DIR: &str = "legacy";
 /// A thread's log is committed in transactions of about this size; one
 /// transaction for a multi-hundred-megabyte log holds every dirty page in
 /// memory and doubles the WAL.
-pub(super) const CHUNK_BYTES: usize = 8 << 20;
+pub(super) use crate::fs_tree::CHUNK_BYTES;
 /// At most this many rows, and about [`CHUNK_BYTES`], are compared per read
 /// when verifying, so a reader never pins the WAL or memory for a whole log.
 const VERIFY_ROWS: i64 = 4096;
@@ -765,14 +765,4 @@ pub(super) fn sync_file(path: &Path) -> io::Result<()> {
 }
 
 /// Make a directory's entries (a rename, a new file) durable.
-#[cfg(unix)]
-pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
-}
-
-/// NTFS journals renames itself, and std cannot open a directory handle on
-/// Windows.
-#[cfg(not(unix))]
-pub(super) fn sync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
-}
+pub(super) use crate::fs_tree::sync_dir;

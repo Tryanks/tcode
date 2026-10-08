@@ -513,6 +513,9 @@ struct ProjectDelete(String);
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = tcode_project, no_json)]
 struct ChangeProjectIcon(String);
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = tcode_project, no_json)]
+struct ChangeProjectRoot(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_project, no_json)]
 struct ProjectReveal(String);
@@ -1582,6 +1585,18 @@ impl SessionsSidebar {
         }
     }
 
+    fn on_change_project_root(
+        &mut self,
+        action: &ChangeProjectRoot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.store.read(cx).scope().is_full() {
+            return;
+        }
+        crate::change_project_root_dialog::open(self.store.clone(), action.0.clone(), window, cx);
+    }
+
     fn on_project_reveal(
         &mut self,
         action: &ProjectReveal,
@@ -2172,6 +2187,10 @@ impl SessionsSidebar {
                     menu.menu(
                         crate::tr!("project_icon.title"),
                         Box::new(ChangeProjectIcon(id.clone())),
+                    )
+                    .menu(
+                        crate::tr!("sidebar.change_project_root"),
+                        Box::new(ChangeProjectRoot(id.clone())),
                     )
                 })
                 .menu_with_enable(
@@ -4251,6 +4270,7 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_project_archive_all))
             .on_action(cx.listener(Self::on_project_delete))
             .on_action(cx.listener(Self::on_change_project_icon))
+            .on_action(cx.listener(Self::on_change_project_root))
             .on_action(cx.listener(Self::on_project_reveal))
             .on_action(cx.listener(Self::on_filter_project))
             .on_action(cx.listener(Self::on_start_draft_for_project))
