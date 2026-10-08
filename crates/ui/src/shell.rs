@@ -153,6 +153,7 @@ impl Render for DestinationView {
                     Destination::Threads => shell.render_threads_page(window, cx),
                     Destination::Thread => shell.render_thread_page(window, cx),
                     Destination::Panel => shell.render_panel_page(window, cx),
+                    Destination::PullRequest => shell.render_pull_request_page(window, cx),
                     Destination::Settings => shell.render_settings_page(false, window, cx),
                     Destination::SettingsSection | Destination::SettingsThreadRules => {
                         shell.render_settings_page(true, window, cx)
@@ -1956,6 +1957,37 @@ impl AppShell {
             ))
             .child(div().flex_none().px(px(16.)).py(px(8.)).child(segments))
             .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+
+    fn render_pull_request_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let back = self.back_control(cx);
+        let Some(attachment) = &self.attachment else {
+            return div().into_any_element();
+        };
+        let view = attachment.chat.read(cx).pull_request_view(cx);
+        let session = attachment.link.store.read(cx).active_session_id();
+        let key = session.as_deref().and_then(|session| {
+            attachment
+                .link
+                .store
+                .read(cx)
+                .open_pull_request(session)
+                .cloned()
+        });
+        if let (Some(session), Some(key)) = (session, key) {
+            view.update(cx, |view, cx| view.show(session, key, cx));
+        }
+        let (title, actions) = view.update(cx, |view, cx| (view.nav_title(), view.nav_actions(cx)));
+        v_flex()
+            .size_full()
+            .bg(crate::material::content_surface(cx))
+            .child(nav_bar(back, title, None, actions, window, cx))
+            .child(div().flex_1().min_h_0().child(view))
             .into_any_element()
     }
 

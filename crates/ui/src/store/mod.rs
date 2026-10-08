@@ -39,7 +39,9 @@ mod history;
 pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
 mod intents;
-pub(crate) use images::{host_image, item_image};
+pub(crate) use images::{
+    MediaState, host_image, item_image, pull_request_media, pull_request_media_state,
+};
 mod snapshots;
 
 pub use snapshots::ComposerState;
@@ -225,6 +227,8 @@ pub struct WorkspaceStore {
     fallback_blocks: HashMap<String, FallbackBlock>,
     fallback_reviews: HashMap<String, FallbackReview>,
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
+    /// The pull request each thread has open, in this run only.
+    open_pull_requests: HashMap<String, tcode_core::pull_request::PullRequestKey>,
     /// A project-draft fallback is in flight, so the reconcile step does not
     /// ask for one more draft per index event while it resolves.
     draft_fallback_pending: bool,
@@ -421,6 +425,7 @@ impl WorkspaceStore {
             fallback_blocks: HashMap::new(),
             fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
+            open_pull_requests: HashMap::new(),
             draft_fallback_pending: false,
         };
         let mut store = store;
@@ -1983,6 +1988,33 @@ impl WorkspaceStore {
     ) -> &[tcode_core::pull_request::ThreadPullRequestLink] {
         self.thread_meta(session_id)
             .map_or(&[], |meta| meta.pull_requests.as_slice())
+    }
+
+    /// The pull request the thread has open, read inside its Pull requests tab or page.
+    pub fn open_pull_request(
+        &self,
+        session_id: &str,
+    ) -> Option<&tcode_core::pull_request::PullRequestKey> {
+        self.open_pull_requests.get(session_id)
+    }
+
+    pub fn set_open_pull_request(
+        &mut self,
+        session_id: &str,
+        key: Option<tcode_core::pull_request::PullRequestKey>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match key {
+            Some(key) => {
+                self.open_pull_requests
+                    .insert(session_id.to_owned(), key.clone())
+                    != Some(key)
+            }
+            None => self.open_pull_requests.remove(session_id).is_some(),
+        };
+        if changed {
+            cx.notify();
+        }
     }
 
     fn conversation_ui_by_key(&self, key: &str) -> Option<&ConversationUiState> {

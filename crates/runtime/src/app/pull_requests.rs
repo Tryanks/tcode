@@ -373,7 +373,10 @@ impl AppState {
                         .unwrap_or_default()
                         .as_secs(),
                 })
-                .map_err(read_error)
+                .map_err(|error| {
+                    log::debug!("pull request read failed: {error}");
+                    read_error(error)
+                })
         })
     }
     /// A manual refresh: the host's answers about the pull request go, and the sync reads it.

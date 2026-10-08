@@ -28,6 +28,13 @@ enum ImageRequest {
         override_path: Option<PathBuf>,
         pixels: u32,
     },
+    /// Media a pull request names, keyed by the GitHub account that read its conversation.
+    PullRequestMedia {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        account: String,
+        url: String,
+    },
 }
 
 struct HostImage;
@@ -63,6 +70,19 @@ impl Asset for HostImage {
                     project_id: id,
                     pixels,
                 },
+                ImageRequest::PullRequestMedia {
+                    session_id,
+                    key,
+                    url,
+                    ..
+                } => Query::PullRequest {
+                    session_id,
+                    key,
+                    read: tcode_protocol::PullRequestRead::Media {
+                        url,
+                        validator: None,
+                    },
+                },
             };
             let host = host?;
             #[cfg(test)]
@@ -75,6 +95,27 @@ impl Asset for HostImage {
             let result = host.query(query).await;
             let bytes = match result {
                 Ok(QueryResponse::FileBytes(bytes)) => bytes,
+                Ok(QueryResponse::PullRequest { response, .. }) => match *response {
+                    tcode_protocol::PullRequestReadResponse::Media(
+                        tcode_protocol::PullRequestMedia::Image { bytes, mime, .. },
+                    ) => {
+                        // The host decided the type; an SVG is drawn as an image only.
+                        let format = gpui::ImageFormat::from_mime_type(&mime)
+                            .ok_or_else(|| std::io::Error::other("unsupported media type"))?;
+                        return Ok(Arc::new(Image::from_bytes(format, bytes)));
+                    }
+                    tcode_protocol::PullRequestReadResponse::Media(
+                        tcode_protocol::PullRequestMedia::External { mime },
+                    ) => {
+                        return Err(std::io::Error::other(format!("{EXTERNAL_MEDIA}{mime}")).into());
+                    }
+                    other => {
+                        return Err(std::io::Error::other(format!(
+                            "pull request media is not an image: {other:?}"
+                        ))
+                        .into());
+                    }
+                },
                 result => {
                     return Err(std::io::Error::other(format!(
                         "host image read failed: {result:?}"
@@ -110,6 +151,133 @@ pub(crate) fn item_image(session_id: String, item_id: String, image_index: usize
         item_id: item_id.clone(),
         image_index,
     })
+}
+
+/// Marks a load that found video or audio, which opens in the browser instead.
+const EXTERNAL_MEDIA: &str = "external pull request media: ";
+
+/// Where one pull request media read stands for a view drawing it.
+pub(crate) enum MediaState {
+    Loading,
+    Ready,
+    /// Video or audio, by MIME type.
+    External(String),
+    TooLarge,
+    Unavailable,
+}
+
+pub(crate) fn pull_request_media_state(
+    session_id: &str,
+    key: &tcode_core::pull_request::PullRequestKey,
+    account: &str,
+    url: &str,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) -> MediaState {
+    let Some(images) = cx.try_global::<HostImages>() else {
+        return MediaState::Unavailable;
+    };
+    let request = (
+        images.namespace,
+        ImageRequest::PullRequestMedia {
+            session_id: session_id.to_owned(),
+            key: key.clone(),
+            account: account.to_owned(),
+            url: url.to_owned(),
+        },
+    );
+    match window.use_asset::<HostImage>(&request, cx) {
+        None => MediaState::Loading,
+        Some(Ok(_)) => MediaState::Ready,
+        Some(Err(error)) => {
+            let error = error.to_string();
+            if let Some((_, mime)) = error.split_once(EXTERNAL_MEDIA) {
+                MediaState::External(mime.trim().to_owned())
+            } else if error.contains("pull_request_too_large") {
+                MediaState::TooLarge
+            } else {
+                MediaState::Unavailable
+            }
+        }
+    }
+}
+
+/// The pull request media this client holds decoded, oldest first, within a byte budget.
+#[derive(Default)]
+struct PullRequestMediaCache {
+    held: std::collections::VecDeque<((u64, ImageRequest), usize)>,
+    bytes: usize,
+    /// The account each host's GitHub host was last read as.
+    accounts: std::collections::HashMap<(u64, String), String>,
+}
+impl Global for PullRequestMediaCache {}
+
+const PULL_REQUEST_MEDIA_BYTES: usize = 64 * 1024 * 1024;
+
+/// Media a pull request's conversation names, read by the host. Each account's copies are
+/// its own: a conversation read as another account names another `account`, and reading
+/// one drops every copy the previous account read.
+pub(crate) fn pull_request_media(
+    session_id: String,
+    key: tcode_core::pull_request::PullRequestKey,
+    account: String,
+    url: String,
+) -> ImageSource {
+    ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
+        let namespace = cx.try_global::<HostImages>()?.namespace;
+        let request = (
+            namespace,
+            ImageRequest::PullRequestMedia {
+                session_id: session_id.clone(),
+                key: key.clone(),
+                account: account.clone(),
+                url: url.clone(),
+            },
+        );
+        let loaded = window.use_asset::<HostImage>(&request, cx)?;
+        if let Ok(image) = &loaded {
+            hold_pull_request_media(request, image.bytes().len(), cx);
+        }
+        match loaded {
+            Ok(image) => image.use_render_image(window, cx).map(Ok),
+            Err(error) => Some(Err(error)),
+        }
+    })
+}
+
+fn hold_pull_request_media(request: (u64, ImageRequest), bytes: usize, cx: &mut App) {
+    let ImageRequest::PullRequestMedia { key, account, .. } = &request.1 else {
+        return;
+    };
+    let partition = (request.0, key.host.clone());
+    let cache = cx.default_global::<PullRequestMediaCache>();
+    let mut dropped = Vec::new();
+    if cache.accounts.get(&partition) != Some(account) {
+        cache.accounts.insert(partition.clone(), account.clone());
+        cache.held.retain(|((namespace, held), size)| {
+            let other = matches!(held, ImageRequest::PullRequestMedia { key, account: held_account, .. }
+                if (*namespace, key.host.clone()) == partition && held_account != account);
+            if other {
+                dropped.push(((*namespace, held.clone()), *size));
+            }
+            !other
+        });
+    }
+    if !cache.held.iter().any(|(held, _)| *held == request) {
+        cache.held.push_back((request, bytes));
+        cache.bytes += bytes;
+    }
+    cache.bytes -= dropped.iter().map(|(_, size)| size).sum::<usize>();
+    while cache.bytes > PULL_REQUEST_MEDIA_BYTES && cache.held.len() > 1 {
+        let Some(oldest) = cache.held.pop_front() else {
+            break;
+        };
+        cache.bytes -= oldest.1;
+        dropped.push(oldest);
+    }
+    for (request, _) in dropped {
+        cx.remove_asset::<HostImage>(&request);
+    }
 }
 
 pub(crate) fn icon_thumbnail(path: PathBuf) -> ImageSource {

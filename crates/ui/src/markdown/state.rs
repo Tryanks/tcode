@@ -38,6 +38,16 @@ pub(super) enum PendingContextTarget {
     Image { url: SharedUri, title: String },
 }
 
+/// Images a view reads through the host rather than by URL. The chat supplies none.
+#[derive(Clone)]
+pub struct ImageResolver {
+    /// The source to draw a URL from, for a URL this resolver owns.
+    pub source: Rc<dyn Fn(&str) -> Option<ImageSource>>,
+    /// What stands in for an owned URL until it can be drawn: a loading box, or why it cannot.
+    pub pending:
+        Rc<dyn Fn(&str, &str, &mut gpui::Window, &mut gpui::App) -> Option<gpui::AnyElement>>,
+}
+
 /// State backing a [`super::MarkdownView`].
 pub struct MarkdownState {
     pub(super) focus_handle: FocusHandle,
@@ -45,6 +55,7 @@ pub struct MarkdownState {
     pub(super) selectable: bool,
     pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
+    pub(super) image_resolver: Option<ImageResolver>,
     link_targets: LinkTargetCache,
     pub(super) pending_context: Option<PendingContextTarget>,
     /// Keyed by the copied code block's root path.
@@ -89,6 +100,7 @@ impl MarkdownState {
             selectable: false,
             compact_headings: false,
             base_dir: None,
+            image_resolver: None,
             link_targets: LinkTargetCache::default(),
             pending_context: None,
             copied: CopiedMark::default(),
@@ -183,6 +195,11 @@ impl MarkdownState {
         cx.notify();
     }
 
+    pub fn set_image_resolver(&mut self, resolver: Option<ImageResolver>, cx: &mut Context<Self>) {
+        self.image_resolver = resolver;
+        cx.notify();
+    }
+
     pub(super) fn base_dir(&self) -> Option<&Path> {
         self.base_dir.as_deref()
     }
@@ -194,6 +211,13 @@ impl MarkdownState {
     /// Markdown file images belong to the attached host, including relative paths.
     /// Do not check the client's filesystem before asking that host for the bytes.
     pub(super) fn image_source(&self, uri: &SharedUri) -> ImageSource {
+        if let Some(source) = self
+            .image_resolver
+            .as_ref()
+            .and_then(|resolver| (resolver.source)(uri.as_ref()))
+        {
+            return source;
+        }
         let path = PathBuf::from(uri.as_ref());
         if path.is_absolute() {
             return crate::store::host_image(path);

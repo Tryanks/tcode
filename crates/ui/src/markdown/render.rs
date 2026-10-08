@@ -494,7 +494,10 @@ fn render_block(
             .w_full()
             .pb(gap)
             .whitespace_normal()
-            .child(render_paragraph(paragraph, &options.path, state, cx))
+            .child(
+                pending_images(paragraph, state, window, cx)
+                    .unwrap_or_else(|| render_paragraph(paragraph, &options.path, state, cx)),
+            )
             .into_any_element(),
         BlockNode::Heading {
             level, children, ..
@@ -570,6 +573,49 @@ fn render_block(
             .into_any_element(),
         BlockNode::Unknown => div().into_any_element(),
     }
+}
+
+/// An image-only paragraph whose images a resolver still stands in for: each is drawn as its
+/// stand-in until it can be drawn, and as the image once it can.
+fn pending_images(
+    paragraph: &Paragraph,
+    state: &Entity<MarkdownState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let resolver = state.read(cx).image_resolver.clone()?;
+    if paragraph
+        .children
+        .iter()
+        .any(|child| !child.text.is_empty())
+    {
+        return None;
+    }
+    let images: Vec<_> = paragraph
+        .children
+        .iter()
+        .filter_map(|child| child.image.as_ref())
+        .collect();
+    let pending: Vec<_> = images
+        .iter()
+        .map(|image| (resolver.pending)(image.url.as_ref(), &image.title(), window, cx))
+        .collect();
+    if pending.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(
+        v_flex()
+            .w_full()
+            .gap_1()
+            .children(images.into_iter().zip(pending).map(|(image, pending)| {
+                pending.unwrap_or_else(|| {
+                    let source = state.read(cx).image_source(&image.url);
+                    FittedImage::new(source.clone(), img(source).object_fit(ObjectFit::Contain))
+                        .into_any_element()
+                })
+            }))
+            .into_any_element(),
+    )
 }
 
 fn render_paragraph(

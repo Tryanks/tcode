@@ -26,7 +26,7 @@ use gpui_base::input::SelectAll;
 
 #[cfg(test)]
 pub(crate) use parse::parse;
-pub use state::MarkdownState;
+pub use state::{ImageResolver, MarkdownState};
 pub use view::{MarkdownView, MenuExtension};
 
 pub(super) const CONTEXT: &str = "MarkdownView";
