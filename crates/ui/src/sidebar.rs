@@ -1024,7 +1024,6 @@ impl SessionsSidebar {
             Command::UnsettleSession {
                 session_id: action.0.clone(),
             },
-            crate::tr!("sidebar.undo_settled_one").into_owned(),
             window,
             cx,
         );
@@ -1034,7 +1033,6 @@ impl SessionsSidebar {
         &mut self,
         command: Command,
         reverse: Command,
-        title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1059,13 +1057,14 @@ impl SessionsSidebar {
                 }),
             _ => None,
         };
+        let settling = matches!(command, Command::SettleSession { .. });
         let request = self
             .store
             .update(cx, |store, cx| store.command(command, cx));
         cx.spawn_in(window, async move |this, cx| match request.await {
             Ok(_) => {
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.push_lifecycle_undo(reverse, reopen, title, window, cx);
+                    this.push_lifecycle_undo(reverse, reopen, window, cx);
                     if let Some(pin) = prior_pin
                         && let Some(undo) = &mut this.lifecycle_undo
                     {
@@ -1075,7 +1074,12 @@ impl SessionsSidebar {
             }
             Err(error) => {
                 let _ = this.update_in(cx, |_, window, cx| {
-                    window.push_notification(Notification::warning(error.message), cx)
+                    let message = if settling && error.code == "thread_busy" {
+                        crate::tr!("sidebar.settle_refused").into_owned()
+                    } else {
+                        error.message
+                    };
+                    window.push_notification(Notification::warning(message), cx)
                 });
             }
         })
@@ -1086,7 +1090,6 @@ impl SessionsSidebar {
         &mut self,
         command: Command,
         reopen: Option<String>,
-        _title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1587,7 +1590,6 @@ impl SessionsSidebar {
                     session_id: session_id.clone(),
                 },
                 Command::UnarchiveSession { session_id },
-                crate::tr!("sidebar.undo_archived_one").into_owned(),
                 window,
                 cx,
             );
@@ -1616,7 +1618,6 @@ impl SessionsSidebar {
                             Command::UnarchiveSession {
                                 session_id: session_id.clone(),
                             },
-                            crate::tr!("sidebar.undo_archived_one").into_owned(),
                             window,
                             cx,
                         )
