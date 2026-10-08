@@ -89,6 +89,14 @@ impl<T> ThreadSections<T> {
             ThreadSection::Settled => &self.settled,
         }
     }
+
+    pub fn section_mut(&mut self, section: ThreadSection) -> &mut Vec<T> {
+        match section {
+            ThreadSection::Pinned => &mut self.pinned,
+            ThreadSection::Active => &mut self.active,
+            ThreadSection::Settled => &mut self.settled,
+        }
+    }
 }
 
 pub fn partition_threads<'a>(
@@ -180,7 +188,7 @@ pub fn spread_order_keys(count: usize) -> Vec<String> {
     (1..=count)
         .map(|index| {
             let mut value = (step * index as f64).round() as u64;
-            if value % base == 0 {
+            if value.is_multiple_of(base) {
                 value += 1;
             }
             let mut key = vec![b'a'; width];
