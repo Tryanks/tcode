@@ -25,9 +25,9 @@ impl AppState {
     /// The host's own wakes are not the user's to steer or drop.
     pub(super) fn queued_message_editable(active: &ActiveSession, id: u64) -> bool {
         active.delivery_in_flight != Some(id)
-            && active.queue.iter().any(|message| {
+            && !active.queue.iter().any(|message| {
                 message.id == id
-                    && !matches!(
+                    && matches!(
                         message.kind,
                         super::active_session::QueuedMessageKind::PullRequestWake { .. }
                     )
@@ -337,14 +337,6 @@ impl AppState {
                 ));
             }
             _ => {}
-        }
-        // Stop also ends the thread's watches, with or without a live provider.
-        if matches!(command, Command::Interrupt { .. })
-            && tcode_core::pull_request::watched(&active.meta.pull_requests)
-                .next()
-                .is_some()
-        {
-            return Ok(());
         }
         if matches!(command, Command::Interrupt { .. })
             && !active.turn_in_flight

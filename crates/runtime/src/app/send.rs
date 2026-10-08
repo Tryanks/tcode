@@ -699,15 +699,16 @@ impl AppState {
         target_id: &str,
         cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
-        let watches_ended = self.stop_pull_request_watches(target_id, cx);
-        let Some(ActiveSession {
-            runtime: Runtime::Live(commands),
-            ..
-        }) = self.resident(target_id)
-        else {
-            if watches_ended {
-                return Ok(());
-            }
+        self.stop_pull_request_watches(target_id, cx);
+        // An idle provider never answers an interrupt, which would leave the thread stopping.
+        let Some(active) = self.resident(target_id).filter(|active| {
+            active.turn_in_flight
+                || active.timeline.turn_running
+                || active.background_task_count > 0
+        }) else {
+            return Ok(());
+        };
+        let Runtime::Live(commands) = &active.runtime else {
             return Err(provider_command_error("The provider is no longer running."));
         };
         commands
