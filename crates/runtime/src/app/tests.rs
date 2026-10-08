@@ -10992,6 +10992,176 @@ fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
     });
 }
 
+/// A pin promotes a settled thread without reopening it, holds an idle
+/// thread out of automatic settlement, and a settle removes the pin and the
+/// thread's place in the active order.
+#[test]
+fn pinning_promotes_and_exempts_until_a_settle_unpins() {
+    use tcode_core::project::SettledOverride;
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("pinned-threads");
+    let stamp = now_millis() - 10 * 86_400_000;
+    for (id, settled) in [("parked", true), ("idle", false), ("arranged", false)] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        meta.created_at = stamp / 1000;
+        meta.settled_at = settled.then_some(stamp / 1000);
+        meta.settled_override = settled.then_some(SettledOverride::Settled);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(
+                id,
+                stamp,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "old-request".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "Earlier work".into(),
+                        context_len: None,
+                        attachments: vec![],
+                    },
+                }),
+            )
+            .unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| state.settings.auto_settle_after_days = None);
+    let command = |state: &TestEntity, cx: &mut TestAppContext, id, command| {
+        through_pipe(
+            state,
+            cx,
+            id,
+            tcode_protocol::ClientPayload::Command(command),
+        )
+        .into_iter()
+        .find_map(|message| match message {
+            HostMessage::Ack { id: acked, result } if acked == id => Some(result),
+            _ => None,
+        })
+        .unwrap()
+        .map(|_| ())
+        .map_err(|error| error.code)
+    };
+
+    command(
+        &state,
+        cx,
+        1,
+        Command::PinSession {
+            session_id: "parked".into(),
+            order_key: Some("n".into()),
+        },
+    )
+    .unwrap();
+    state.read(|state| {
+        let parked = state.find_meta("parked").unwrap();
+        assert!(!parked.is_settled());
+        assert_eq!(parked.settled_override, Some(SettledOverride::Active));
+        assert_eq!(parked.unsettled_at, None, "a pin is not a reopen");
+        assert_eq!(parked.pin_order.as_deref(), Some("n"));
+    });
+    command(
+        &state,
+        cx,
+        2,
+        Command::PinSession {
+            session_id: "idle".into(),
+            order_key: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        command(
+            &state,
+            cx,
+            3,
+            Command::ReorderActive {
+                session_id: "idle".into(),
+                order_key: "m".into(),
+            },
+        ),
+        Err("not_active".into())
+    );
+    assert_eq!(
+        command(
+            &state,
+            cx,
+            4,
+            Command::ReorderPinned {
+                session_id: "arranged".into(),
+                order_key: "m".into(),
+            },
+        ),
+        Err("not_pinned".into())
+    );
+    command(
+        &state,
+        cx,
+        5,
+        Command::ReorderActive {
+            session_id: "arranged".into(),
+            order_key: "m".into(),
+        },
+    )
+    .unwrap();
+
+    state.dispatch_command(
+        cx,
+        6,
+        Command::PatchSettings {
+            patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
+        },
+    );
+    cx.run_until(|state| {
+        state
+            .find_meta("arranged")
+            .is_some_and(|meta| meta.is_settled())
+    });
+    state.read(|state| {
+        let arranged = state.find_meta("arranged").unwrap();
+        assert_eq!(
+            arranged.active_order, None,
+            "settling clears the arrangement"
+        );
+        let idle = state.find_meta("idle").unwrap();
+        assert!(!idle.is_settled(), "a pinned thread is exempt");
+        assert!(!state.find_meta("parked").unwrap().is_settled());
+    });
+
+    command(
+        &state,
+        cx,
+        7,
+        Command::UnpinSession {
+            session_id: "parked".into(),
+        },
+    )
+    .unwrap();
+    state.read(|state| {
+        let parked = state.find_meta("parked").unwrap();
+        assert_eq!((parked.pinned_at, parked.pin_order), (None, None));
+        assert_eq!(
+            parked.settled_override,
+            Some(SettledOverride::Active),
+            "unpinning keeps the thread active"
+        );
+    });
+    command(
+        &state,
+        cx,
+        8,
+        Command::SettleSession {
+            session_id: "idle".into(),
+        },
+    )
+    .unwrap();
+    state.read(|state| {
+        let idle = state.find_meta("idle").unwrap();
+        assert!(idle.is_settled());
+        assert_eq!(idle.pinned_at, None, "settling unpins");
+    });
+}
+
 #[test]
 fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     let cx = &mut TestAppContext::default();

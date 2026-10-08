@@ -1,5 +1,6 @@
 use super::*;
 use tcode_core::settings::SettingsPatch;
+use tcode_core::thread_sort::ThreadSection;
 
 impl AppState {
     pub(super) fn native_rewind_blocked(&self, active: &ActiveSession) -> bool {
@@ -183,7 +184,12 @@ impl AppState {
         };
         if matches!(
             command,
-            Command::SettleSession { .. } | Command::UnsettleSession { .. }
+            Command::SettleSession { .. }
+                | Command::UnsettleSession { .. }
+                | Command::PinSession { .. }
+                | Command::UnpinSession { .. }
+                | Command::ReorderPinned { .. }
+                | Command::ReorderActive { .. }
         ) && self
             .find_meta(session_id)
             .is_some_and(|meta| meta.archived_at.is_some())
@@ -192,6 +198,34 @@ impl AppState {
                 "archived_session",
                 "Unarchive this thread before changing its lifecycle.",
             ));
+        }
+        if let Command::PinSession {
+            order_key: Some(order_key),
+            ..
+        }
+        | Command::ReorderPinned { order_key, .. }
+        | Command::ReorderActive { order_key, .. } = command
+            && order_key.is_empty()
+        {
+            return Err(error("invalid_order_key", "An order key cannot be empty."));
+        }
+        // Only a thread in the section has a place in its order, so a reorder
+        // raced by an unpin or a settle never pins or reopens the thread again.
+        let section = self
+            .find_meta(session_id)
+            .map(|meta| tcode_core::thread_sort::thread_section(&meta));
+        match command {
+            Command::ReorderPinned { .. }
+                if section.is_some_and(|section| section != ThreadSection::Pinned) =>
+            {
+                return Err(error("not_pinned", "This thread is not pinned."));
+            }
+            Command::ReorderActive { .. }
+                if section.is_some_and(|section| section != ThreadSection::Active) =>
+            {
+                return Err(error("not_active", "This thread is not in Active."));
+            }
+            _ => {}
         }
         if matches!(command, Command::SettleSession { .. }) && self.settle_thread_busy(session_id) {
             return Err(error(
@@ -206,6 +240,10 @@ impl AppState {
                 | Command::CancelAgent { .. }
                 | Command::UnsettleSession { .. }
                 | Command::SetAutoSettle { .. }
+                | Command::PinSession { .. }
+                | Command::UnpinSession { .. }
+                | Command::ReorderPinned { .. }
+                | Command::ReorderActive { .. }
                 | Command::ArchiveSession { .. }
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }
