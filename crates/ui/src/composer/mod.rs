@@ -1532,7 +1532,6 @@ mod replica_tests {
     ) {
         let (store, incoming, outgoing, mut status) = attach(cx);
         status.queued_messages = vec![tcode_protocol::QueuedMessageStatus {
-            origin: None,
             id: 7,
             editable: false,
             delivery_key: None,
@@ -1624,7 +1623,6 @@ mod replica_tests {
         status
             .queued_messages
             .push(tcode_protocol::QueuedMessageStatus {
-                origin: None,
                 id: 8,
                 editable: true,
                 delivery_key: None,

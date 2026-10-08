@@ -2014,10 +2014,7 @@ impl WorkspaceStore {
             self.settings_replica.project_sort,
         );
         for group in &mut groups {
-            tcode_core::thread_sort::sort_threads(
-                &mut group.sessions,
-                &self.index_summary.activity_clocks,
-            );
+            tcode_core::thread_sort::sort_threads(&mut group.sessions);
         }
         groups
     }
@@ -2251,15 +2248,14 @@ impl WorkspaceStore {
     }
 
     pub fn flat_sessions(&self) -> Vec<SessionMeta> {
-        let visible: Vec<_> = self
+        let mut visible: Vec<_> = self
             .index_replica
             .0
             .iter()
             .filter(|meta| meta.archived_at.is_none())
             .cloned()
             .collect();
-        let mut visible = visible;
-        tcode_core::thread_sort::sort_threads(&mut visible, &self.index_summary.activity_clocks);
+        tcode_core::thread_sort::sort_threads(&mut visible);
         visible
     }
 
@@ -2307,16 +2303,9 @@ impl WorkspaceStore {
 
     pub fn failed_for(&self, session_id: &str) -> bool {
         self.index_summary
-            .activity_clocks
+            .activity
             .get(session_id)
-            .is_some_and(|clocks| clocks.failed)
-    }
-
-    pub fn thread_activity(
-        &self,
-        session_id: &str,
-    ) -> Option<&tcode_core::settlement::ThreadActivity> {
-        self.index_summary.activity_clocks.get(session_id)
+            .is_some_and(|activity| activity.failed)
     }
 
     pub fn waiting_for(&self, session_id: &str) -> bool {

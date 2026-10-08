@@ -100,97 +100,155 @@ impl SettingsPage {
             );
         }
         let projects = self.store.read(cx).projects();
-        let eligible: Vec<_> = projects
-            .iter()
-            .filter(|project| {
-                !settings
-                    .project_settlement_overrides
-                    .contains_key(&project.id)
-            })
-            .cloned()
-            .collect();
-        let options = eligible
-            .into_iter()
-            .map(|project| SelectRowOption {
-                id: project.id.clone().into(),
-                label: project.name.clone().into(),
-                value: project,
-                selected: false,
-                description: None,
-            })
-            .collect();
-        rows.push(
-            self.select_row(
-                "add-project-rules",
-                "project-rules-popover",
-                "project-rules-menu",
-                240.,
-                crate::tr!("settings.auto_settle.overrides")
-                    .into_owned()
-                    .into(),
-                crate::tr!("settings.auto_settle.overrides_description")
-                    .into_owned()
-                    .into(),
-                crate::tr!("settings.auto_settle.add_override")
-                    .into_owned()
-                    .into(),
-                options,
-                None,
-                |project, page, window, cx| {
-                    page.update(cx, |page, cx| page.edit_project_rules(project, window, cx))
-                },
-                cx,
-            ),
-        );
-        for project in projects.into_iter().filter(|project| {
+        let summary = |project: &Project| -> Option<SharedString> {
             settings
                 .project_settlement_overrides
-                .contains_key(&project.id)
-        }) {
-            let rules = &settings.project_settlement_overrides[&project.id];
-            let summary = rules
+                .get(&project.id)?
                 .auto_settle_after_days
                 .map(days_label)
-                .unwrap_or_default();
-            let edit = project.clone();
-            let id = project.id.clone();
+        };
+        if self.window_state.read(cx).compact {
+            // Phone: every project is a row that pushes its rules page; there
+            // is no dropdown or dialog to pick one from.
             rows.push(
-                gpui_base::h_flex()
+                self.row_frame(cx)
+                    .child(self.row_labels(
+                        crate::tr!("settings.auto_settle.overrides"),
+                        crate::tr!("settings.auto_settle.overrides_description"),
+                        None,
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+            for project in projects {
+                let summary = summary(&project);
+                let edit = project.clone();
+                rows.push(
+                    crate::material::accessible_clickable(
+                        gpui_base::h_flex(),
+                        SharedString::from(format!("project-rules-{}", project.id)),
+                        Role::Button,
+                        SharedString::from(project.name.clone()),
+                        cx,
+                    )
+                    .w_full()
                     .min_h(px(44.))
                     .px_3()
                     .gap_2()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|row| row.bg(cx.theme().list_hover))
                     .child(crate::project_icon::artwork(&project, 16.))
-                    .child(div().flex_1().text_size(px(15.)).child(project.name))
                     .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(15.))
+                            .child(project.name.clone()),
+                    )
+                    .children(summary.map(|summary| {
                         div()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(summary),
-                    )
+                            .child(summary)
+                    }))
                     .child(
-                        Button::new(SharedString::from(format!("edit-rules-{id}")))
-                            .ghost()
+                        Icon::new(IconName::ChevronRight)
                             .xsmall()
-                            .label(crate::tr!("settings.auto_settle.edit"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.edit_project_rules(edit.clone(), window, cx)
-                            })),
+                            .text_color(cx.theme().muted_foreground),
                     )
-                    .child(
-                        Button::new(SharedString::from(format!("remove-rules-{id}")))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .tooltip(crate::tr!("settings.auto_settle.remove_override"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.dispatch_settings(
-                                    |store| store.set_project_settlement(id.clone(), None),
-                                    cx,
-                                )
-                            })),
-                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.edit_project_rules(edit.clone(), window, cx)
+                    }))
                     .into_any_element(),
+                );
+            }
+        } else {
+            let options = projects
+                .iter()
+                .filter(|project| {
+                    !settings
+                        .project_settlement_overrides
+                        .contains_key(&project.id)
+                })
+                .map(|project| SelectRowOption {
+                    id: project.id.clone().into(),
+                    label: project.name.clone().into(),
+                    value: project.clone(),
+                    selected: false,
+                    description: None,
+                })
+                .collect();
+            rows.push(
+                self.select_row(
+                    "add-project-rules",
+                    "project-rules-popover",
+                    "project-rules-menu",
+                    240.,
+                    crate::tr!("settings.auto_settle.overrides")
+                        .into_owned()
+                        .into(),
+                    crate::tr!("settings.auto_settle.overrides_description")
+                        .into_owned()
+                        .into(),
+                    crate::tr!("settings.auto_settle.add_override")
+                        .into_owned()
+                        .into(),
+                    options,
+                    None,
+                    |project, page, window, cx| {
+                        page.update(cx, |page, cx| page.edit_project_rules(project, window, cx))
+                    },
+                    cx,
+                ),
             );
+            for project in projects.into_iter().filter(|project| {
+                settings
+                    .project_settlement_overrides
+                    .contains_key(&project.id)
+            }) {
+                let summary = summary(&project).unwrap_or_default();
+                let edit = project.clone();
+                let id = project.id.clone();
+                rows.push(
+                    gpui_base::h_flex()
+                        .min_h(px(44.))
+                        .px_3()
+                        .gap_2()
+                        .child(crate::project_icon::artwork(&project, 16.))
+                        .child(div().flex_1().text_size(px(15.)).child(project.name))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(summary),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("edit-rules-{id}")))
+                                .ghost()
+                                .xsmall()
+                                .label(crate::tr!("settings.auto_settle.edit"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.edit_project_rules(edit.clone(), window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("remove-rules-{id}")))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Close)
+                                .tooltip(crate::tr!("settings.auto_settle.remove_override"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.dispatch_settings(
+                                        |store| store.set_project_settlement(id.clone(), None),
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
         }
         v_flex()
             .child(self.section_label(crate::tr!("settings.threads_section"), cx))
@@ -261,9 +319,13 @@ fn days_label(value: Option<f64>) -> SharedString {
     value.map_or_else(
         || crate::tr!("settings.auto_settle.never").into_owned().into(),
         |days| {
-            crate::tr!("settings.auto_settle.days_value", count = days)
-                .into_owned()
-                .into()
+            if days == 1. {
+                crate::tr!("settings.auto_settle.days_value_one")
+            } else {
+                crate::tr!("settings.auto_settle.days_value", count = days)
+            }
+            .into_owned()
+            .into()
         },
     )
 }
@@ -394,36 +456,82 @@ impl Render for ProjectRulesEditor {
             .map(|(_, label)| label.clone())
             .unwrap_or_default();
         let editor = cx.entity();
-        let selector = crate::material::overlay_popover("project-auto-settle", cx)
-            .trigger(
-                Button::new("project-auto-settle-choice")
-                    .ghost()
-                    .outline()
-                    .label(trigger_label)
-                    .icon(IconName::ChevronDown),
-            )
-            .content(move |_, _, cx| {
-                let popover = cx.entity();
-                v_flex()
-                    .p_1()
-                    .children(choices.clone().into_iter().enumerate().map(
-                        |(index, (value, label))| {
-                            let editor = editor.clone();
-                            let popover = popover.clone();
-                            Button::new(("project-rules-option", index))
-                                .ghost()
-                                .label(label)
-                                .justify_start()
-                                .on_click(move |_, window, cx| {
-                                    editor.update(cx, |editor, cx| {
-                                        editor.draft.auto_settle_after_days = value;
-                                        cx.notify();
-                                    });
-                                    popover.update(cx, |popover, cx| popover.dismiss(window, cx));
-                                })
-                        },
-                    ))
-            });
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let selector = if compact {
+            // A phone page lists the choices; it opens no dropdown.
+            let rows = choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (value, label))| {
+                    let checked = trigger_label == label;
+                    let editor = editor.clone();
+                    crate::material::accessible_clickable(
+                        gpui_base::h_flex(),
+                        ("project-rules-choice", index),
+                        Role::Button,
+                        SharedString::from(label.clone()),
+                        cx,
+                    )
+                    .aria_selected(checked)
+                    .w_full()
+                    .min_h(px(44.))
+                    .px_3()
+                    .gap_2()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|row| row.bg(cx.theme().list_hover))
+                    .child(div().flex_1().text_size(px(15.)).child(label))
+                    .when(checked, |row| {
+                        row.child(
+                            Icon::new(IconName::Check)
+                                .size_4()
+                                .text_color(cx.theme().primary),
+                        )
+                    })
+                    .on_click(move |_, _, cx| {
+                        editor.update(cx, |editor, cx| {
+                            editor.draft.auto_settle_after_days = value;
+                            cx.notify();
+                        })
+                    })
+                    .into_any_element()
+                })
+                .collect();
+            crate::material::grouped(rows, cx).into_any_element()
+        } else {
+            crate::material::overlay_popover("project-auto-settle", cx)
+                .trigger(
+                    Button::new("project-auto-settle-choice")
+                        .ghost()
+                        .outline()
+                        .label(trigger_label)
+                        .icon(IconName::ChevronDown),
+                )
+                .content(move |_, _, cx| {
+                    let popover = cx.entity();
+                    v_flex()
+                        .p_1()
+                        .children(choices.clone().into_iter().enumerate().map(
+                            |(index, (value, label))| {
+                                let editor = editor.clone();
+                                let popover = popover.clone();
+                                Button::new(("project-rules-option", index))
+                                    .ghost()
+                                    .label(label)
+                                    .justify_start()
+                                    .on_click(move |_, window, cx| {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.draft.auto_settle_after_days = value;
+                                            cx.notify();
+                                        });
+                                        popover
+                                            .update(cx, |popover, cx| popover.dismiss(window, cx));
+                                    })
+                            },
+                        ))
+                })
+                .into_any_element()
+        };
         let mut content = v_flex()
             .gap_3()
             .child(
@@ -442,7 +550,7 @@ impl Render for ProjectRulesEditor {
                 )
                 .child(days_input(&self.days));
         }
-        if crate::window_seam::window_is_compact(window, cx) {
+        if compact {
             content = content.child(
                 Button::new("save-project-rules")
                     .label(crate::tr!("settings.auto_settle.save"))

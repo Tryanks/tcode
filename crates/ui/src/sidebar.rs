@@ -194,9 +194,7 @@ fn derive_thread_render_state(
 }
 
 fn partition_settled(sessions: &[SessionMeta]) -> (Vec<SessionMeta>, Vec<SessionMeta>) {
-    let (mut pinned, active, settled) = tcode_core::thread_sort::partition_threads(sessions);
-    pinned.extend(active);
-    (pinned, settled)
+    tcode_core::thread_sort::partition_threads(sessions)
 }
 
 fn thread_visible(meta: &SessionMeta, collapsed_parents: &HashSet<String>) -> bool {
@@ -354,7 +352,7 @@ struct LifecycleUndo {
     entries: Vec<UndoEntry>,
 }
 struct UndoEntry {
-    commands: Vec<Command>,
+    command: Command,
     reopen: Option<String>,
 }
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -1044,19 +1042,6 @@ impl SessionsSidebar {
             }
             _ => None,
         };
-        let prior_pin = match &command {
-            Command::SettleSession { session_id } => self
-                .store
-                .read(cx)
-                .sidebar_sessions()
-                .into_iter()
-                .find(|meta| &meta.id == session_id && meta.pinned_at.is_some())
-                .map(|meta| Command::PinSession {
-                    session_id: meta.id,
-                    order_key: meta.pin_order,
-                }),
-            _ => None,
-        };
         let settling = matches!(command, Command::SettleSession { .. });
         let request = self
             .store
@@ -1065,11 +1050,6 @@ impl SessionsSidebar {
             Ok(_) => {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.push_lifecycle_undo(reverse, reopen, window, cx);
-                    if let Some(pin) = prior_pin
-                        && let Some(undo) = &mut this.lifecycle_undo
-                    {
-                        undo.entries.last_mut().unwrap().commands.push(pin);
-                    }
                 });
             }
             Err(error) => {
@@ -1114,10 +1094,7 @@ impl SessionsSidebar {
             .as_mut()
             .unwrap()
             .entries
-            .push(UndoEntry {
-                commands: vec![command],
-                reopen,
-            });
+            .push(UndoEntry { command, reopen });
         let count = self.lifecycle_undo.as_ref().unwrap().entries.len();
         let title = match (kind, count) {
             (UndoKind::Settle, 1) => crate::tr!("sidebar.undo_settled_one"),
@@ -1133,26 +1110,25 @@ impl SessionsSidebar {
                 .message(title)
                 .action(move |_, window, cx| {
                     let weak = weak.clone();
-                    Button::new("undo-thread-lifecycle")
-                        .outline()
+                    let button = Button::new("undo-thread-lifecycle")
                         .small()
                         .label(crate::tr!("sidebar.undo"))
-                        .when(
-                            !crate::window_seam::window_is_compact(window, cx),
-                            |button| {
-                                button.when_some(
-                                    crate::widgets::kbd::Kbd::binding_for_action(
-                                        &ThreadUndo,
-                                        Some("TcodeShell"),
-                                        window,
-                                    ),
-                                    |button, kbd| button.child(kbd),
-                                )
-                            },
-                        )
                         .on_click(move |_, window, cx| {
                             let _ = weak.update(cx, |this, cx| this.undo_lifecycle(window, cx));
-                        })
+                        });
+                    // The phone pill has no keyboard to hint at.
+                    if crate::window_seam::window_is_compact(window, cx) {
+                        button.ghost()
+                    } else {
+                        button.outline().when_some(
+                            crate::widgets::kbd::Kbd::binding_for_action(
+                                &ThreadUndo,
+                                Some("TcodeShell"),
+                                window,
+                            ),
+                            |button, kbd| button.child(kbd),
+                        )
+                    }
                 })
                 .autohide(true),
             cx,
@@ -1171,24 +1147,23 @@ impl SessionsSidebar {
         let store = self.store.clone();
         cx.spawn_in(window, async move |_, cx| {
             for entry in undo.entries.into_iter().rev() {
-                for command in entry.commands {
-                    let Ok(request) =
-                        cx.update(|_, cx| store.update(cx, |store, cx| store.command(command, cx)))
-                    else {
-                        return;
-                    };
-                    if let Err(error) = request.await {
-                        let _ = cx.update(|window, cx| {
-                            window.push_notification(
-                                Notification::error(crate::tr!(
-                                    "sidebar.undo_failed",
-                                    reason = error.message
-                                )),
-                                cx,
-                            )
-                        });
-                        return;
-                    }
+                let command = entry.command;
+                let Ok(request) =
+                    cx.update(|_, cx| store.update(cx, |store, cx| store.command(command, cx)))
+                else {
+                    return;
+                };
+                if let Err(error) = request.await {
+                    let _ = cx.update(|window, cx| {
+                        window.push_notification(
+                            Notification::error(crate::tr!(
+                                "sidebar.undo_failed",
+                                reason = error.message
+                            )),
+                            cx,
+                        )
+                    });
+                    return;
                 }
                 if let Some(id) = entry.reopen {
                     store.update(cx, |store, _| store.select_session(id));
@@ -2720,10 +2695,7 @@ impl SessionsSidebar {
         let action_id = session_id.clone();
         let settled = meta.is_settled();
         let timestamp = if settled {
-            tcode_core::thread_sort::settled_timestamp_ms(
-                meta,
-                self.store.read(cx).thread_activity(&meta.id),
-            ) / 1000
+            tcode_core::thread_sort::settled_timestamp(meta)
         } else {
             meta.updated_at
         };
@@ -2757,28 +2729,29 @@ impl SessionsSidebar {
             )
             .when(action_on_hover, |slot| {
                 slot.child(
-                    crate::material::accessible_clickable(
-                        h_flex(),
-                        gpui::SharedString::from(format!("settle-flat-thread-{session_id}")),
-                        Role::Button,
-                        label.clone(),
-                        cx,
+                    Button::new(SharedString::from(format!(
+                        "settle-flat-thread-{session_id}"
+                    )))
+                    .ghost()
+                    .xsmall()
+                    .icon(
+                        Icon::new(if settled {
+                            IconName::Undo2
+                        } else {
+                            IconName::CircleCheck
+                        })
+                        .text_color(cx.theme().muted_foreground),
                     )
+                    .aria_label(label.clone())
+                    .tooltip(label)
                     .absolute()
                     .right_0()
                     .top_0()
-                    .size_5()
-                    .items_center()
-                    .justify_center()
-                    .rounded(cx.theme().tokens.radius.sm)
-                    .cursor_pointer()
+                    // Opacity, not visibility, keeps the button a tab stop so
+                    // keyboard focus can reveal it.
                     .opacity(0.)
                     .group_hover(row_key, |button| button.opacity(1.))
-                    .focus(|button| button.opacity(1.).bg(cx.theme().sidebar_accent))
-                    .hover(|button| button.bg(cx.theme().sidebar_accent))
-                    .tooltip(move |window, cx| {
-                        Tooltip::new(label.clone().into_owned()).build(window, cx)
-                    })
+                    .focus(|button| button.opacity(1.))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         crate::widgets::stop_click_propagation(window, cx);
                         if settled {
@@ -2786,16 +2759,7 @@ impl SessionsSidebar {
                         } else {
                             this.on_settle(&ThreadSettle(action_id.clone()), window, cx);
                         }
-                    }))
-                    .child(
-                        Icon::new(if settled {
-                            IconName::Undo2
-                        } else {
-                            IconName::CircleCheck
-                        })
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
-                    ),
+                    })),
                 )
             })
     }
@@ -3251,10 +3215,7 @@ impl SessionsSidebar {
                             .into_owned()
                             .into(),
                         relative_time: humanize_ago(now.saturating_sub(if meta.is_settled() {
-                            tcode_core::thread_sort::settled_timestamp_ms(
-                                meta,
-                                self.store.read(cx).thread_activity(&meta.id),
-                            ) / 1000
+                            tcode_core::thread_sort::settled_timestamp(meta)
                         } else {
                             meta.updated_at
                         }))
@@ -3380,10 +3341,7 @@ impl SessionsSidebar {
                     let row = Rc::make_mut(row);
                     row.relative_time =
                         humanize_ago(now.saturating_sub(if row.meta.is_settled() {
-                            tcode_core::thread_sort::settled_timestamp_ms(
-                                &row.meta,
-                                self.store.read(cx).thread_activity(&row.meta.id),
-                            ) / 1000
+                            tcode_core::thread_sort::settled_timestamp(&row.meta)
                         } else {
                             row.meta.updated_at
                         }))
@@ -4517,6 +4475,7 @@ mod tests {
                     waiting,
                     waiting_for_approval: false,
                     waiting_for_input: false,
+                    failed: false,
                     unread: false,
                     fork: ForkAvailability::Available,
                 },
@@ -5886,6 +5845,7 @@ mod tests {
                             waiting: false,
                             waiting_for_approval: false,
                             waiting_for_input: false,
+                            failed: false,
                             unread: false,
                             fork: tcode_protocol::ForkAvailability::Available,
                         },

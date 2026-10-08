@@ -526,8 +526,15 @@ impl NotificationList {
         }
     }
 
+    /// Whether a notification of this type is shown and not already leaving.
     pub fn contains_type(&self, kind: TypeId) -> bool {
-        self.manager.iter().any(|(id, _, status)| status != ToastTransitionStatus::Ending && matches!(id, NotificationId::Type(value) | NotificationId::Key(value, _) if *value == kind))
+        self.manager.iter().any(|(id, _, status)| {
+            status != ToastTransitionStatus::Ending
+                && matches!(
+                    id,
+                    NotificationId::Type(value) | NotificationId::Key(value, _) if *value == kind
+                )
+        })
     }
 
     pub fn close(&mut self, id: impl Into<NotificationId>, _: &mut Window, cx: &mut Context<Self>) {

@@ -5213,6 +5213,7 @@ mod tests {
                 waiting: false,
                 waiting_for_approval: false,
                 waiting_for_input: false,
+                failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
             },

@@ -1,3 +1,5 @@
+//! Full-page settings route with section navigation and editable settings.
+
 pub(crate) mod thread_behavior;
 
 use std::collections::HashMap;

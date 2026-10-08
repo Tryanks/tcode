@@ -12,6 +12,7 @@ pub(crate) enum NavigateThread {
 
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::navigate_thread);
+    // With nothing focused the shell's own Undo listener is off the dispatch path.
     cx.on_action(crate::shell::undo_thread_action);
     cx.bind_keys([KeyBinding::new(
         "secondary-z",
