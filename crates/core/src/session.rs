@@ -147,6 +147,8 @@ pub struct Author {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<MessageOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<Author>,
     pub ts: Option<u64>,
     pub event: AgentEvent,
@@ -155,6 +157,20 @@ pub struct StoredEvent {
     /// read from the log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elided: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    Human,
+    Agent,
+    Server,
+}
+
+impl MessageOrigin {
+    pub fn legacy(has_parent: bool) -> Self {
+        if has_parent { Self::Agent } else { Self::Human }
+    }
 }
 
 impl StoredEvent {
@@ -173,6 +189,7 @@ impl StoredEvent {
 impl From<AgentEvent> for StoredEvent {
     fn from(event: AgentEvent) -> Self {
         StoredEvent {
+            origin: None,
             author: None,
             ts: None,
             event,
@@ -2706,6 +2723,7 @@ mod tests {
 
     fn at(ts: u64, event: AgentEvent) -> StoredEvent {
         StoredEvent {
+            origin: None,
             author: None,
             ts: Some(ts),
             event,
@@ -3070,6 +3088,7 @@ mod tests {
                 started(1_000, running("a")),
                 completed(2_000, ran("a")),
                 StoredEvent {
+                    origin: None,
                     author: None,
                     ts: first_end,
                     event: turn_completed(),
@@ -3162,12 +3181,14 @@ mod tests {
         let turn = |n: u64| {
             [
                 StoredEvent {
+                    origin: None,
                     author: None,
                     ts: Some(n * 10),
                     event: user_msg(&format!("user-{n}"), "go"),
                     elided: None,
                 },
                 StoredEvent {
+                    origin: None,
                     author: None,
                     ts: Some(n * 10 + 1),
                     event: AgentEvent::TurnStarted {
@@ -3176,12 +3197,14 @@ mod tests {
                     elided: None,
                 },
                 StoredEvent {
+                    origin: None,
                     author: None,
                     ts: Some(n * 10 + 2),
                     event: assistant_delta("pi-assistant-0:0", &format!("text {n}")),
                     elided: None,
                 },
                 StoredEvent {
+                    origin: None,
                     author: None,
                     ts: Some(n * 10 + 3),
                     event: AgentEvent::TurnCompleted {
@@ -3232,6 +3255,7 @@ mod tests {
     #[test]
     fn synthetic_entry_ids_do_not_depend_on_how_much_earlier_history_is_folded() {
         let error = |ts: u64| StoredEvent {
+            origin: None,
             author: None,
             ts: Some(ts),
             event: AgentEvent::Error {
@@ -3242,6 +3266,7 @@ mod tests {
         };
         let log = [
             StoredEvent {
+                origin: None,
                 author: None,
                 ts: Some(1),
                 event: user_msg("user-1", "go"),
@@ -3249,6 +3274,7 @@ mod tests {
             },
             error(2),
             StoredEvent {
+                origin: None,
                 author: None,
                 ts: Some(3),
                 event: AgentEvent::TurnCompleted {
@@ -3259,6 +3285,7 @@ mod tests {
                 elided: None,
             },
             StoredEvent {
+                origin: None,
                 author: None,
                 ts: Some(4),
                 event: user_msg("user-2", "again"),

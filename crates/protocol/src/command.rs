@@ -301,7 +301,11 @@ pub enum Command {
     SettleSession {
         session_id: String,
     },
-    MakeSessionActive {
+    SetAutoSettle {
+        session_id: String,
+        enabled: bool,
+    },
+    UnsettleSession {
         session_id: String,
     },
     ArchiveSession {
@@ -309,9 +313,6 @@ pub enum Command {
     },
     UnarchiveSession {
         session_id: String,
-    },
-    AutoArchiveSweep {
-        project_id: String,
     },
     RenameSession {
         session_id: String,
@@ -446,7 +447,6 @@ pub enum CommandResponse {
         section: Option<String>,
         session_id: Option<String>,
     },
-    ArchivedCount(usize),
     ExternalImportStarted(bool),
 }
 
@@ -472,7 +472,8 @@ impl Command {
             | Self::AddReviewComment { session_id, .. }
             | Self::RemoveReviewComment { session_id, .. }
             | Self::SettleSession { session_id, .. }
-            | Self::MakeSessionActive { session_id, .. }
+            | Self::UnsettleSession { session_id, .. }
+            | Self::SetAutoSettle { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
             | Self::UnarchiveSession { session_id, .. }
             | Self::RenameSession { session_id, .. }

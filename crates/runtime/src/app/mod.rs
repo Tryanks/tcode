@@ -25,8 +25,7 @@ use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
 use tcode_core::project::{
-    AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo, WorktreeSharing,
-    auto_archive_candidates, descendant_session_ids,
+    Project, SessionMeta, SettledOverride, WorktreeInfo, WorktreeSharing, descendant_session_ids,
 };
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
@@ -34,7 +33,7 @@ use tcode_core::relay::{
     render_relay_transcript,
 };
 use tcode_core::session::{
-    Author, EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt,
+    Author, EntryContent, MessageOrigin, ReviewComment, Timeline, append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
@@ -257,6 +256,7 @@ mod providers;
 mod pull_requests;
 mod send;
 mod sessions;
+mod settlement;
 mod snapshots;
 mod store_write;
 mod subagents;
@@ -342,6 +342,12 @@ pub struct AppState {
     store_failed: bool,
     pub sessions: Vec<SessionMeta>,
     archived_revision: u64,
+    settlement_sweep_running: bool,
+    settlement_sweep_pending: bool,
+    settlement_timer_generation: u64,
+    decision_revisions: HashMap<String, u64>,
+    callback_generations: HashMap<String, u64>,
+    thread_activity: HashMap<String, tcode_core::settlement::ThreadActivity>,
     space_scopes: HashMap<String, BTreeSet<String>>,
     space_policy_revisions: HashMap<String, u64>,
     space_archives_revision: Option<u64>,
@@ -554,6 +560,12 @@ impl AppState {
             sessions,
             projects,
             archived_revision: 0,
+            settlement_sweep_running: false,
+            settlement_sweep_pending: false,
+            settlement_timer_generation: 0,
+            decision_revisions: HashMap::new(),
+            callback_generations: HashMap::new(),
+            thread_activity: HashMap::new(),
             space_scopes: HashMap::new(),
             space_policy_revisions: HashMap::new(),
             space_archives_revision: None,

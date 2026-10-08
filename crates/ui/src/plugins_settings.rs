@@ -1830,10 +1830,12 @@ mod tests {
     /// Settings with Claude Code's plugin management switched on.
     fn claude_managed() -> Settings {
         let mut settings = Settings::default();
-        settings.apply(SettingsPatch::PluginManagementProvider {
-            provider: agent::ProviderKind::ClaudeCode,
-            enabled: true,
-        });
+        settings
+            .apply(SettingsPatch::PluginManagementProvider {
+                provider: agent::ProviderKind::ClaudeCode,
+                enabled: true,
+            })
+            .unwrap();
         settings
     }
 

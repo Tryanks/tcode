@@ -394,6 +394,8 @@ pub struct SessionActivity {
     pub waiting: bool,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
+    /// The latest run ended in an error and nothing has run since.
+    pub failed: bool,
     pub unread: bool,
     pub fork: ForkAvailability,
 }

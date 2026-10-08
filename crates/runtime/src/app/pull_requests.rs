@@ -432,7 +432,7 @@ impl AppState {
                     group.projects.push(meta.project_id.clone());
                 }
                 // Settled threads share updates without independently scheduling reads.
-                if meta.settled_at.is_none() {
+                if !meta.is_settled() {
                     group
                         .observations
                         .push((link.snapshot.clone(), link.stack.clone()));
@@ -643,7 +643,7 @@ impl AppState {
                 .is_none_or(|s| !s.same_observation(&summary.snapshot))
                 || link.stack != stack;
             let mut changed = observation_changed;
-            if meta.settled_at.is_none()
+            if !meta.is_settled()
                 && let PullRequestStackState::Native(topology) = &stack
             {
                 for layer in &topology.layers {
@@ -712,7 +712,7 @@ impl AppState {
                 Some(threads) => threads.get(&meta.id).map(|refresh| (meta, *refresh)),
             })
             .filter_map(|(meta, refresh)| Some((self.find_meta(&meta.id)?, refresh)))
-            .filter(|(meta, _)| meta.archived_at.is_none() && meta.settled_at.is_none())
+            .filter(|(meta, _)| meta.archived_at.is_none() && !meta.is_settled())
             .map(|(meta, refresh)| {
                 let root = self.pull_request_project_cwd(&meta);
                 (meta, root, refresh)
@@ -786,7 +786,7 @@ impl AppState {
                                     || current.worktree != meta.worktree
                                     || current.project_id != meta.project_id
                                     || current.archived_at.is_some()
-                                    || current.settled_at.is_some()
+                                    || current.is_settled()
                                     || state.pull_request_project_cwd(&current) != root
                                 {
                                     return;

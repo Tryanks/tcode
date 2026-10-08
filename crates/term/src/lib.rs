@@ -419,6 +419,18 @@ impl Terminal {
         self.emulator.history_size()
     }
 
+    /// A counter that grows with every input and output, for telling whether
+    /// the terminal was used between two reads.
+    pub fn activity_mark(&self) -> u64 {
+        self.pty.activity_mark()
+    }
+
+    /// Inspect the process tree now; blocking. `Some(true)` only when the
+    /// shell itself is in the foreground and has no child process.
+    pub fn idle_shell(&self) -> Option<bool> {
+        self.pty.idle_shell()
+    }
+
     /// Read host process exit state without consuming renderer damage.
     pub fn exited(&self) -> bool {
         self.pty.exited()

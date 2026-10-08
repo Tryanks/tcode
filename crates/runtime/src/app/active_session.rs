@@ -14,6 +14,7 @@ pub struct QueuedMessage {
     pub id: u64,
     pub(super) delivery_key: Option<String>,
     pub author: Option<Author>,
+    pub origin: MessageOrigin,
     pub text: String,
     /// Provider-only context for the first turn after a relay. The canonical
     /// user event continues to record only `text`.
@@ -451,6 +452,7 @@ impl ActiveSession {
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
+            origin: MessageOrigin::Human,
             id,
             text,
             relay_transcript: None,
@@ -498,6 +500,7 @@ impl ActiveSession {
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
+            origin: MessageOrigin::Agent,
             id,
             text,
             relay_transcript: None,
