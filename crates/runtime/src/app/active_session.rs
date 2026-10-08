@@ -39,10 +39,15 @@ pub struct QueuedMessage {
     pub(super) kind: QueuedMessageKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum QueuedMessageKind {
     User,
     OrchestrateCallback,
+    /// A watched pull request's news, acknowledged on its watch once the provider accepts it.
+    PullRequestWake {
+        key: tcode_core::pull_request::PullRequestKey,
+        id: String,
+    },
 }
 
 impl QueuedMessage {
@@ -510,6 +515,29 @@ impl ActiveSession {
             context_len: None,
             context_window_changed: None,
             kind: QueuedMessageKind::OrchestrateCallback,
+        });
+        id
+    }
+
+    /// Queue a host-authored turn behind any running turn; it is never steered.
+    pub(super) fn push_server_message(&mut self, text: String, kind: QueuedMessageKind) -> u64 {
+        self.idle_since = None;
+        let id = self.next_queue_id;
+        self.next_queue_id += 1;
+        let options = self.turn_options();
+        self.queue.push(QueuedMessage {
+            delivery_key: None,
+            author: None,
+            origin: MessageOrigin::Server,
+            id,
+            text,
+            relay_transcript: None,
+            attachments: Vec::new(),
+            not_before: None,
+            options,
+            context_len: None,
+            context_window_changed: None,
+            kind,
         });
         id
     }

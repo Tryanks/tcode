@@ -16,13 +16,14 @@ pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, Th
 pub use event::{
     AcpMarketplaceItem, AgentStatus, ArchivedSessions, EventEnvelope, ExternalImportState,
     ExternalImportStatus, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    IndexSummary, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge,
-    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog,
-    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
-    SessionEventRecord, SessionPlan, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, Topic,
+    IndexSummary, InjectedPullRequestTools, MergeWorktreeFailure, NoticeSeverity,
+    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
+    PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
+    ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
+    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice,
@@ -85,6 +86,8 @@ pub use wire::{
 // uses the historical top-level human / dispatched child agent fallback.
 // Unreleased: adds the SetProjectRoot command and the WorkingDirectoryMissing
 // runtime error.
+// Unreleased: a pull request watch on linked PRs; the WatchPullRequest command,
+// the PullRequestWatch toast and SessionStatus.pull_request_tools.
 // Unreleased: SessionActivity.agent carries a dispatched child's execution,
 // delivery and latest run start and end, and waiting also covers a finished
 // child awaiting settle;

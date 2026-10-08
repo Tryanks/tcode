@@ -1458,6 +1458,20 @@ impl ChatView {
                     {
                         column = column
                             .child(self.compose_callback_row(index, &entry.id, &callback, cx));
+                    } else if let Some((number, notice)) =
+                        tcode_core::pull_request_watch::parse_message(user_visible_text(
+                            text,
+                            context_len,
+                        ))
+                        .filter(|_| steering.is_none())
+                    {
+                        // A watch's message is the host's, never a user bubble.
+                        column = column.child(self.compose_watch_update(
+                            (index, &entry.id, text, context_len),
+                            number,
+                            &notice,
+                            cx,
+                        ));
                     } else {
                         column = column.child(self.compose_user(
                             (
@@ -1825,6 +1839,44 @@ impl ChatView {
                 cx,
             ))
             .child(bubble)
+            .into_any_element()
+    }
+
+    fn compose_watch_update(
+        &self,
+        (turn, entry_id, text, context_len): (usize, &str, &str, Option<usize>),
+        number: u64,
+        notice: &tcode_core::pull_request_watch::WatchNotice,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let context = context_len
+            .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
+            .map(|len| &text[..len]);
+        let label = crate::tr!(
+            "pull_requests.update_label",
+            number = number.to_string(),
+            kinds = crate::pull_requests::watch_notice_kinds(notice)
+        )
+        .into_owned();
+        v_flex()
+            .w_full()
+            .gap_2()
+            .when_some(context, |column, context| {
+                column.child(self.compose_disclosure(
+                    turn,
+                    format!("orchestrate-context-{entry_id}"),
+                    injected_context_label(context).into(),
+                    context,
+                    cx,
+                ))
+            })
+            .child(self.compose_disclosure(
+                turn,
+                format!("pull-request-update-{entry_id}"),
+                label.into(),
+                user_visible_text(text, context_len),
+                cx,
+            ))
             .into_any_element()
     }
 

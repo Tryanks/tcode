@@ -35,6 +35,7 @@ use tcode_client::host::ClientHost;
 use tcode_core::ui::RightTab;
 use tcode_protocol::{
     RuntimeEffect, RuntimeError, RuntimeNotification as RuntimeEvent, RuntimeOperationId,
+    RuntimeToast,
 };
 
 use crate::attachment::{Attachment, LocalTransport, same_target};
@@ -1147,6 +1148,9 @@ pub fn handle_back(cx: &mut App) -> bool {
         .unwrap_or(false)
 }
 
+/// The per-thread notification slot for its pull request watch.
+struct PullRequestWatchNotice;
+
 // ---------------------------------------------------------------------------
 // Toasts and runtime events
 // ---------------------------------------------------------------------------
@@ -1195,6 +1199,14 @@ impl AppShell {
                     RuntimeEventSeverity::Success => Notification::success(presented.message),
                 };
                 window.push_notification(notification, cx);
+                return;
+            }
+            RuntimeEvent::Toast(RuntimeToast::PullRequestWatch {
+                session_id,
+                number,
+                notice,
+            }) => {
+                self.present_pull_request_watch(session_id, *number, notice, window, cx);
                 return;
             }
             RuntimeEvent::Toast(toast) => toast,
@@ -1247,6 +1259,58 @@ impl AppShell {
             (presented.title, presented.detail, presented.progress),
             action,
             window,
+            cx,
+        );
+    }
+
+    /// One slot per thread: a newer wake or end of its watch replaces the older notice.
+    fn present_pull_request_watch(
+        &mut self,
+        session_id: &str,
+        number: u64,
+        notice: &tcode_core::pull_request_watch::WatchNotice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        // The open thread's transcript already shows the message.
+        if window.is_window_active()
+            && store.read(cx).active_session_id().as_deref() == Some(session_id)
+        {
+            return;
+        }
+        let title = store
+            .read(cx)
+            .thread_meta(session_id)
+            .map(|meta| meta.title.clone())
+            .unwrap_or_default();
+        let (kind, message) = crate::pull_requests::watch_notice_toast(number, notice);
+        let id = session_id.to_owned();
+        window.push_notification(
+            Notification::new()
+                .id1::<PullRequestWatchNotice>(SharedString::from(id.clone()))
+                .title(title)
+                .message(message)
+                .with_type(kind)
+                .action(move |_, _, _| {
+                    use crate::sizing::Sizable as _;
+                    let store = store.clone();
+                    let id = id.clone();
+                    crate::widgets::button::Button::new("pull-request-watch-open-thread")
+                        .small()
+                        .outline()
+                        .label(crate::tr!("pull_requests.open_thread"))
+                        .on_click(move |_, window, cx| {
+                            window.remove_notification1::<PullRequestWatchNotice>(
+                                SharedString::from(id.clone()),
+                                cx,
+                            );
+                            store.update(cx, |store, _| store.select_session(id.clone()));
+                        })
+                })
+                .autohide(true),
             cx,
         );
     }
@@ -5312,6 +5376,7 @@ mod tests {
             native_rewind_prefill_available: false,
             model_pending_restart: false,
             options_pending_restart: false,
+            pull_request_tools: None,
         }
     }
 

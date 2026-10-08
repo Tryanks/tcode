@@ -22,8 +22,16 @@ impl AppState {
         meta.native_subagent.is_some()
     }
 
+    /// The host's own wakes are not the user's to steer or drop.
     pub(super) fn queued_message_editable(active: &ActiveSession, id: u64) -> bool {
         active.delivery_in_flight != Some(id)
+            && !active.queue.iter().any(|message| {
+                message.id == id
+                    && matches!(
+                        message.kind,
+                        super::active_session::QueuedMessageKind::PullRequestWake { .. }
+                    )
+            })
     }
 
     /// Validate retained conversation writes before the pipe acknowledges ownership.
@@ -206,6 +214,7 @@ impl AppState {
                 | Command::MarkSessionUnread { .. }
                 | Command::MarkSessionRead { .. }
                 | Command::ForkThread { .. }
+                | Command::WatchPullRequest { .. }
         ) {
             return if self.sessions.iter().any(|meta| meta.id == session_id)
                 || self.resident(session_id).is_some()

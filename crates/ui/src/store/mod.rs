@@ -1968,15 +1968,20 @@ impl WorkspaceStore {
             .and_then(|status| status.github_repository.clone())
     }
 
+    /// The thread's index entry.
+    pub fn thread_meta(&self, session_id: &str) -> Option<&SessionMeta> {
+        self.index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+    }
+
     /// The thread's links as its index entry carries them.
     pub fn pull_requests(
         &self,
         session_id: &str,
     ) -> &[tcode_core::pull_request::ThreadPullRequestLink] {
-        self.index_replica
-            .0
-            .iter()
-            .find(|meta| meta.id == session_id)
+        self.thread_meta(session_id)
             .map_or(&[], |meta| meta.pull_requests.as_slice())
     }
 

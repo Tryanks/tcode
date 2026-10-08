@@ -100,7 +100,7 @@ impl AppState {
         } else {
             None
         };
-        let pull_request_registration = if meta.provider.caps().mcp_servers {
+        let pull_request_registration = if self.pull_request_tools_offered(meta.provider) {
             self.pull_request_registration_for(&meta)
         } else {
             None

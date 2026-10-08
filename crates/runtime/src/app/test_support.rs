@@ -6,6 +6,13 @@ use std::rc::{Rc, Weak};
 use crate::host::HostFn;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
 
+#[path = "../../../services/tests/support/github.rs"]
+#[allow(
+    dead_code,
+    reason = "The same HTTP fixture also supplies exchange helpers to services tests."
+)]
+pub(super) mod github_fixture;
+
 pub(super) struct TestStore(SessionStore);
 
 impl TestStore {
