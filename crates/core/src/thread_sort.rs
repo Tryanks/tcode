@@ -31,15 +31,6 @@ pub fn settled_timestamp(meta: &SessionMeta) -> u64 {
     meta.settled_at.unwrap_or(meta.updated_at)
 }
 
-/// The key a thread is arranged by within its section, if it has one.
-pub fn order_key(meta: &SessionMeta) -> Option<&str> {
-    match thread_section(meta) {
-        ThreadSection::Pinned => meta.pin_order.as_deref(),
-        ThreadSection::Active => meta.active_order.as_deref(),
-        ThreadSection::Settled => None,
-    }
-}
-
 /// Pinned threads by key, then keyless ones newest created first. Active
 /// threads without a key (new and reopened ones) newest created or reopened
 /// first, then arranged ones by key. Settled threads newest settled first.
