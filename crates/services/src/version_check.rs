@@ -23,7 +23,13 @@ pub fn fetch_latest_tcode_release_json(
             ..Default::default()
         },
     )
-    .map(|response| response.body)
+    .and_then(|response| {
+        if response.truncated {
+            Err(GitHubError::BodyTooLarge)
+        } else {
+            Ok(response.body)
+        }
+    })
     .map_err(|error| match error {
         GitHubError::RateLimited { status, .. } => FetchError::RateLimited { status },
         GitHubError::Paused { .. } => FetchError::RateLimited { status: 429 },

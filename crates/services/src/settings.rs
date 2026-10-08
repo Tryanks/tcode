@@ -10,12 +10,22 @@ use tcode_core::settings::Settings;
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode, TraverseSetting};
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Secrets {
+    version: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     github: BTreeMap<String, String>,
-    #[serde(flatten)]
+    #[serde(default)]
     profiles: BTreeMap<String, BTreeMap<String, String>>,
+}
+impl Default for Secrets {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            github: BTreeMap::new(),
+            profiles: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,16 +59,40 @@ impl SettingsStore {
         }
     }
 
-    /// Every stored secret, keyed by provider key then variable name.
-    fn read_secrets(&self) -> Secrets {
-        fs::read(&self.secrets_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    fn read_secrets(&self) -> std::io::Result<Secrets> {
+        let bytes = match fs::read(&self.secrets_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Secrets::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let invalid =
+            || std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid secrets file");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        // Legacy root values are profile maps, so a numeric version cannot collide
+        // with a provider id (including profiles named github, profiles or version).
+        if let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) {
+            if version != 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Unsupported secrets version",
+                ));
+            }
+            serde_json::from_value(value).map_err(|_| invalid())
+        } else {
+            Ok(Secrets {
+                profiles: serde_json::from_value(value).map_err(|_| invalid())?,
+                ..Default::default()
+            })
+        }
     }
 
+    /// Every stored provider secret, keyed by profile id then variable name.
     pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
-        self.read_secrets().profiles
+        self.read_secrets()
+            .map(|all| all.profiles)
+            .unwrap_or_default()
     }
 
     /// The sensitive env values for one profile id: a built-in profile's
@@ -67,13 +101,13 @@ impl SettingsStore {
         self.load_secrets().remove(profile_id).unwrap_or_default()
     }
 
-    pub fn github_token(&self, host: &str) -> Option<String> {
-        self.read_secrets().github.get(host).cloned()
+    pub(crate) fn github_token(&self, host: &str) -> Option<String> {
+        self.read_secrets().ok()?.github.get(host).cloned()
     }
 
     pub fn set_github_token(&self, host: &str, token: Option<&str>) -> std::io::Result<()> {
         let host = crate::github::normalize_host(host).map_err(std::io::Error::other)?;
-        let mut all = self.read_secrets();
+        let mut all = self.read_secrets()?;
         match token.map(str::trim).filter(|token| !token.is_empty()) {
             Some(token) => {
                 all.github.insert(host, token.to_owned());
@@ -92,12 +126,7 @@ impl SettingsStore {
         name: &str,
         value: Option<&str>,
     ) -> std::io::Result<()> {
-        let mut all = self.read_secrets();
-        if profile_id == "github" {
-            return Err(std::io::Error::other(
-                "github is a reserved secrets section",
-            ));
-        }
+        let mut all = self.read_secrets()?;
         let entry = all.profiles.entry(profile_id.to_string()).or_default();
         match value {
             Some(value) => {
@@ -115,7 +144,7 @@ impl SettingsStore {
 
     /// Drop every secret stored for a profile id (used when deleting a profile).
     pub fn clear_profile_secrets(&self, profile_id: &str) -> std::io::Result<()> {
-        let mut all = self.read_secrets();
+        let mut all = self.read_secrets()?;
         if all.profiles.remove(profile_id).is_some() {
             return self.write_secrets(&all);
         }

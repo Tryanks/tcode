@@ -739,9 +739,47 @@ fn body_cap_and_deadline_cover_streaming_after_headers() {
         "",
         &vec![b'a'; 8 * 1024 * 1024 + 1],
     );
+    let response = answer.unwrap();
+    assert!(response.truncated);
+    assert_eq!(response.body.len(), 8 * 1024 * 1024);
+    assert_eq!(
+        response.json::<serde_json::Value>().unwrap_err(),
+        GitHubError::BodyTooLarge
+    );
+    let bounded = RequestOptions {
+        body_limit: 16,
+        ..Default::default()
+    };
+    let (answer, _, _) = fixture.call(
+        || api.graphql("github.com", &document(), &bounded),
+        200,
+        "",
+        b"{\"data\":{}}                 {\"errors\":[{}]}",
+    );
     assert_eq!(answer.unwrap_err(), GitHubError::BodyTooLarge);
+    let (answer, _, _) = fixture.call(
+        || api.graphql("github.com", &document(), &bounded),
+        429,
+        "",
+        b"a refusal whose body exceeds the cap",
+    );
+    assert!(matches!(
+        answer,
+        Err(GitHubError::RateLimited { status: 429, .. })
+    ));
+    let (answer, _, _) = fixture.call(
+        || tcode_services::version_check::fetch_latest_tcode_release_json(&api),
+        200,
+        "",
+        &vec![b'a'; 1024 * 1024 + 1],
+    );
+    assert_eq!(
+        answer.unwrap_err(),
+        tcode_services::version_check::FetchError::ResponseTooLarge
+    );
     let timeout = RequestOptions {
         timeout: Duration::from_millis(200),
+        interactive: true,
         ..Default::default()
     };
     thread::scope(|scope| {

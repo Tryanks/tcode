@@ -10428,6 +10428,24 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
 fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-github-secret-command");
+    let settings_store = SettingsStore::new(store.root().clone());
+    let persisted = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(store.root().join("secrets.json")).unwrap()).unwrap()
+    };
+    let mut legacy_settings = Settings::default();
+    for id in ["github", "profiles", "version"] {
+        legacy_settings.profiles.insert(
+            id.into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings::default(),
+            },
+        );
+    }
+    settings_store.save(&legacy_settings).unwrap();
+    std::fs::write(store.root().join("secrets.json"),
+        r#"{"github":{"ANTHROPIC_API_KEY":"legacy-provider-secret"},"profiles":{"KEY":"legacy-profiles-secret"},"version":{"KEY":"legacy-version-secret"}}"#,
+    ).unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
         state.github = tcode_services::github::GitHubApi::host(
@@ -10442,12 +10460,36 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             token: Some("github-writer-secret".into()),
         },
     );
+    cx.run_until(|_| persisted()["github"]["github.com"] == "github-writer-secret");
+    assert_eq!(
+        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        "legacy-provider-secret"
+    );
+    assert_eq!(
+        settings_store.profile_secrets("profiles")["KEY"],
+        "legacy-profiles-secret"
+    );
+    assert_eq!(
+        settings_store.profile_secrets("version")["KEY"],
+        "legacy-version-secret"
+    );
+    state.dispatch_command(
+        cx,
+        642,
+        Command::SetProfileSecret {
+            profile_id: "github".into(),
+            name: "ANTHROPIC_API_KEY".into(),
+            value: Some("provider-replacement-secret".into()),
+        },
+    );
     cx.run_until(|_| {
-        SettingsStore::new(store.root().clone())
-            .github_token("github.com")
-            .as_deref()
-            == Some("github-writer-secret")
+        settings_store
+            .profile_secrets("github")
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str)
+            == Some("provider-replacement-secret")
     });
+    assert_eq!(persisted()["github"]["github.com"], "github-writer-secret");
     state.dispatch_command(
         cx,
         639,
@@ -10488,6 +10530,11 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     let secret_file: serde_json::Value =
         serde_json::from_slice(&std::fs::read(store.root().join("secrets.json")).unwrap()).unwrap();
     assert_eq!(secret_file["github"]["github.com"], "github-writer-secret");
+    assert_eq!(secret_file["version"], 1);
+    assert_eq!(
+        secret_file["profiles"]["github"]["ANTHROPIC_API_KEY"],
+        "provider-replacement-secret"
+    );
     state.dispatch_command(
         cx,
         641,
@@ -10496,11 +10543,21 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             token: None,
         },
     );
-    cx.run_until(|_| {
-        SettingsStore::new(store.root().clone())
-            .github_token("github.com")
-            .is_none()
-    });
+    cx.run_until(|_| persisted()["github"]["github.com"].is_null());
+    assert_eq!(
+        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        "provider-replacement-secret"
+    );
+    state.dispatch_command(
+        cx,
+        643,
+        Command::SetProfileSecret {
+            profile_id: "github".into(),
+            name: "ANTHROPIC_API_KEY".into(),
+            value: None,
+        },
+    );
+    cx.run_until(|_| settings_store.profile_secrets("github").is_empty());
     let outgoing = cx.drain_outgoing();
     assert!(
         !serde_json::to_string(&outgoing)
@@ -10511,5 +10568,30 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         !std::fs::read_to_string(store.root().join("settings.json"))
             .unwrap()
             .contains("github-writer-secret")
+    );
+    let unsupported = r#"{"version":2,"github":{"github.com":"future-secret"},"profiles":{}}"#;
+    std::fs::write(store.root().join("secrets.json"), unsupported).unwrap();
+    state.dispatch_command(
+        cx,
+        644,
+        Command::SetGitHubToken {
+            host: "github.com".into(),
+            token: Some("replacement".into()),
+        },
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        cx.run_until_parked();
+        if cx.drain_outgoing().iter().any(|message| matches!(message, HostMessage::Ack { id: 644, result: Err(error) } if error.code == "settings_write_failed")) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "secret write failure acknowledged"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(store.root().join("secrets.json")).unwrap(),
+        unsupported
     );
 }

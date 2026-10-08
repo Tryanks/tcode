@@ -112,9 +112,14 @@ pub struct Response {
     pub status: u16,
     pub headers: Headers,
     pub body: Vec<u8>,
+    /// REST exposes bounded bytes; structured consumers must reject a cut response.
+    pub truncated: bool,
 }
 impl Response {
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, GitHubError> {
+        if self.truncated {
+            return Err(GitHubError::BodyTooLarge);
+        }
         serde_json::from_slice(&self.body).map_err(|_| GitHubError::InvalidResponse)
     }
 }
@@ -450,9 +455,8 @@ impl GitHubApi {
         if started.elapsed() >= timeout {
             return Err(GitHubError::Deadline);
         }
-        if body.len() > cap {
-            return Err(GitHubError::BodyTooLarge);
-        }
+        let truncated = body.len() > cap;
+        body.truncate(cap);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
         let errors = graphql
             .and_then(|_| parsed.get("errors").and_then(|errors| errors.as_array()))
@@ -516,14 +520,18 @@ impl GitHubApi {
             return Err(GitHubError::Response { status, messages });
         }
         if (200..300).contains(&status) || (status == 304 && input.if_none_match.is_some()) {
+            self.ledger.lock().unwrap().succeeded(host, scope, lease);
+            if graphql.is_some() && truncated {
+                return Err(GitHubError::BodyTooLarge);
+            }
             if graphql.is_some() && !parsed.is_object() {
                 return Err(GitHubError::InvalidResponse);
             }
-            self.ledger.lock().unwrap().succeeded(host, scope, lease);
             return Ok(Response {
                 status,
                 headers,
                 body,
+                truncated,
             });
         }
         let mut messages = parsed
