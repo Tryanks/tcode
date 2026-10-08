@@ -258,7 +258,12 @@ impl HostLink {
 
     /// Restore before starting the pump or admitting new work.
     pub fn restore_outbox(&self, storage: Arc<dyn outbox::Storage>) -> Result<(), ProtocolError> {
-        let entries = storage.load()?;
+        let mut entries = storage.load()?;
+        let original_count = entries.len();
+        entries.retain(|entry| !entry.command.contains_secret());
+        if entries.len() != original_count {
+            storage.save(&entries)?;
+        }
         if entries.len() > outbox::MAX_ITEMS
             || serde_json::to_vec(&entries)
                 .map_err(outbox::storage_error)?
@@ -357,6 +362,20 @@ impl HostLink {
     }
 
     fn enqueue(&self, id: u64, command: Command) -> Result<(), ProtocolError> {
+        let state = command
+            .contains_secret()
+            .then(|| self.inner.connection_state.lock().unwrap());
+        if state.as_ref().is_some_and(|state| {
+            !matches!(
+                **state,
+                ConnectionState::Connected { .. } | ConnectionState::Syncing { .. }
+            )
+        }) {
+            return Err(error(
+                "disconnected",
+                "Saving a secret requires a connection",
+            ));
+        }
         let entry = outbox::Entry {
             key: uuid::Uuid::new_v4().to_string(),
             command,
@@ -411,6 +430,7 @@ impl HostLink {
             delivery.failed.pop_front();
         }
         drop(delivery);
+        drop(state);
         let _ = self.inner.delivery_changes.0.try_send(());
         let mut rejected = false;
         for write in evicted {
@@ -906,6 +926,7 @@ fn snapshot(delivery: &Delivery) -> Vec<outbox::Entry> {
     delivery
         .writes
         .iter()
+        .filter(|write| !write.entry.command.contains_secret())
         .map(|write| write.entry.clone())
         .collect()
 }
@@ -1021,6 +1042,92 @@ mod tests {
             *self.0.lock().unwrap() = entries.to_vec();
             Ok(())
         }
+    }
+
+    #[test]
+    fn secrets_keep_reconnect_delivery_keys_without_entering_the_persisted_outbox() {
+        let storage = Arc::new(MemoryStorage::default());
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        link.restore_outbox(storage.clone()).unwrap();
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut pump = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
+        for command in [
+            Command::SetGitHubToken {
+                host: "github.com".into(),
+                token: Some("fixture-private-token".into()),
+            },
+            Command::SetProfileSecret {
+                profile_id: "claude".into(),
+                name: "KEY".into(),
+                value: Some("fixture-private-token".into()),
+            },
+            Command::CreateThirdPartyProfile {
+                name: "sample".into(),
+                base_url: "https://example.com".into(),
+                model: None,
+                api_key: "fixture-private-token".into(),
+            },
+        ] {
+            link.dispatch(command.clone()).unwrap();
+            let request =
+                tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+            assert!(request.key.is_some());
+            assert_eq!(request.payload, ClientPayload::Command(command));
+            assert!(storage.0.lock().unwrap().is_empty());
+            link.set_connection_state(ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            });
+            link.set_connection_state(ConnectionState::Syncing { path: None });
+            let replay = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+            assert_eq!(replay.key, request.key);
+            assert_eq!(replay.payload, request.payload);
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Ack {
+                        id: replay.id,
+                        result: Ok(CommandResponse::Unit),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            assert!(pump.as_mut().poll(&mut cx).is_pending());
+            assert!(link.pending_commands().is_empty());
+            assert!(storage.0.lock().unwrap().is_empty());
+        }
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
+        assert!(
+            link.dispatch(Command::SetGitHubToken {
+                host: "github.com".into(),
+                token: Some("fixture-private-token".into())
+            })
+            .is_err()
+        );
+        assert!(storage.0.lock().unwrap().is_empty());
+        // Older clients persisted provider secrets. Restore removes those copies
+        // rather than replaying them after a process restart.
+        storage.0.lock().unwrap().push(outbox::Entry {
+            key: "old-secret".into(),
+            command: Command::SetProfileSecret {
+                profile_id: "claude".into(),
+                name: "KEY".into(),
+                value: Some("fixture-private-token".into()),
+            },
+        });
+        let (send, receive) = async_channel::unbounded();
+        let (_send, receive_host) = async_channel::unbounded();
+        let restored = HostLink::new(send, receive_host);
+        restored.restore_outbox(storage.clone()).unwrap();
+        restored.set_connection_state(ConnectionState::Syncing { path: None });
+        assert!(receive.try_recv().is_err());
+        assert!(storage.0.lock().unwrap().is_empty());
+        link.close();
+        assert!(pump.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]

@@ -10423,3 +10423,93 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     assert!(!early, "an append nobody folded forgot the index");
     assert_eq!(window, whole);
 }
+
+#[test]
+fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-github-secret-command");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        state.github = tcode_services::github::GitHubApi::host(
+            tcode_services::github::Credentials::new(SettingsStore::new(store.root().clone()), []),
+        );
+    });
+    state.dispatch_command(
+        cx,
+        638,
+        Command::SetGitHubToken {
+            host: "GITHUB.COM".into(),
+            token: Some("github-writer-secret".into()),
+        },
+    );
+    cx.run_until(|_| {
+        SettingsStore::new(store.root().clone())
+            .github_token("github.com")
+            .as_deref()
+            == Some("github-writer-secret")
+    });
+    state.dispatch_command(
+        cx,
+        639,
+        Command::PatchSettings {
+            patch: SettingsPatch::GitHubHost {
+                host: "github.com".into(),
+                enabled: Some(false),
+                account: Some(Some("sample".into())),
+            },
+        },
+    );
+    state.dispatch_command(
+        cx,
+        640,
+        Command::PatchSettings {
+            patch: SettingsPatch::GitHubHost {
+                host: "git.example.com".into(),
+                enabled: Some(true),
+                account: None,
+            },
+        },
+    );
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        let snapshot = state.settings_snapshot();
+        assert!(!snapshot.github.hosts["github.com"].enabled);
+        assert_eq!(
+            snapshot.github.hosts["github.com"].account.as_deref(),
+            Some("sample")
+        );
+        assert!(snapshot.github.hosts["git.example.com"].enabled);
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("github-writer-secret")
+        );
+    });
+    let secret_file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.root().join("secrets.json")).unwrap()).unwrap();
+    assert_eq!(secret_file["github"]["github.com"], "github-writer-secret");
+    state.dispatch_command(
+        cx,
+        641,
+        Command::SetGitHubToken {
+            host: "github.com".into(),
+            token: None,
+        },
+    );
+    cx.run_until(|_| {
+        SettingsStore::new(store.root().clone())
+            .github_token("github.com")
+            .is_none()
+    });
+    let outgoing = cx.drain_outgoing();
+    assert!(
+        !serde_json::to_string(&outgoing)
+            .unwrap()
+            .contains("github-writer-secret")
+    );
+    assert!(
+        !std::fs::read_to_string(store.root().join("settings.json"))
+            .unwrap()
+            .contains("github-writer-secret")
+    );
+}

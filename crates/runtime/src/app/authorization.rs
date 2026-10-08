@@ -290,6 +290,8 @@ impl AppState {
                 | Command::AutoArchiveSweep { .. }
                 | Command::PreviewReply { .. }
                 | Command::ReloadProvider
+                | Command::SetGitHubToken { .. }
+                | Command::RefreshGitHubCredentials
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
                 | Command::CreateThirdPartyProfile { .. }
