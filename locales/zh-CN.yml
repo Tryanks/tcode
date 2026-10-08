@@ -1607,6 +1607,7 @@ pull_requests:
     viewed_failed: "无法更新已查看的文件：%{reason}"
     loading_lines: "正在加载行…"
     side_missing: "此文件的这一侧在 %{revision} 处不可用。"
+    text_failed: "无法加载 %{revision} 处的 %{path}：%{reason}"
     too_large_to_expand: "文件过大，无法展开（超过 1 MiB）。"
     binary: "二进制文件，不显示内容。"
     oversized: "此差异过大，无法显示（%{size}）。"

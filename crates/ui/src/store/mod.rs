@@ -41,6 +41,7 @@ pub(crate) mod images;
 mod intents;
 pub(crate) use images::{
     MediaState, host_image, item_image, pull_request_media, pull_request_media_state,
+    retry_failed_pull_request_media,
 };
 mod snapshots;
 
@@ -1159,6 +1160,7 @@ impl WorkspaceStore {
                 self.index_replica
                     .0
                     .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
+                self.close_unshown_pull_requests();
             }
             (Topic::Index, ServerEvent::IndexUpsertProject(project)) => {
                 images::invalidate_project_icon(project, cx);
@@ -1186,6 +1188,7 @@ impl WorkspaceStore {
                 self.fallback_reviews.remove(session_id);
                 self.conversation_ui
                     .remove(&ConversationDestination::Thread(session_id.clone()));
+                self.open_pull_requests.remove(session_id);
             }
             (Topic::Index, ServerEvent::IndexRemoveProject { project_id }) => {
                 self.index_replica
@@ -1220,6 +1223,7 @@ impl WorkspaceStore {
                     }
                 }
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
+                self.close_unshown_pull_requests();
                 // Client state for a conversation the index no longer lists has
                 // nothing left to return to: a deleted project takes its draft's
                 // state, a deleted or archived thread its own.
@@ -1996,6 +2000,18 @@ impl WorkspaceStore {
         session_id: &str,
     ) -> Option<&tcode_core::pull_request::PullRequestKey> {
         self.open_pull_requests.get(session_id)
+    }
+
+    /// A pull request the thread no longer shows, unlinked or out of its stack, is not read
+    /// on through it: its view closes back to the list.
+    fn close_unshown_pull_requests(&mut self) {
+        let open = std::mem::take(&mut self.open_pull_requests);
+        self.open_pull_requests = open
+            .into_iter()
+            .filter(|(session_id, key)| {
+                tcode_core::pull_request::shown(self.pull_requests(session_id), key)
+            })
+            .collect();
     }
 
     pub fn set_open_pull_request(

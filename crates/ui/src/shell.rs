@@ -1981,6 +1981,12 @@ impl AppShell {
         });
         if let (Some(session), Some(key)) = (session, key) {
             view.update(cx, |view, cx| view.show(session, key, cx));
+        } else if self.destination(cx) == Destination::PullRequest {
+            // The thread no longer shows the pull request: back to the thread.
+            let window_state = self.window_state.clone();
+            window.defer(cx, move |_, cx| {
+                window_state.update(cx, |state, cx| state.back(cx));
+            });
         }
         let (title, actions) = view.update(cx, |view, cx| (view.nav_title(), view.nav_actions(cx)));
         v_flex()

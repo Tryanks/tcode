@@ -232,51 +232,41 @@ impl PullRequestView {
         self.files_of()?.iter().position(|file| file.path == path)
     }
 
-    /// Reads the file's text at the head, and reconstructs its base side from the patch,
-    /// which is the side the hunks were cut against; the base revision's own text is read
-    /// only when that fails.
+    /// Reads the file's text at the head and reverse-applies the patch to it for the base
+    /// side, which is the merge base the hunks were cut against, not the base branch's tip.
     fn read_text(&mut self, file: usize, cx: &mut Context<Self>) {
         let Some(head) = self.head() else { return };
         let Some(entry) = self.files_of().and_then(|files| files.get(file)).cloned() else {
             return;
         };
-        let base = self
-            .page()
-            .and_then(|page| page.files.data.as_ref())
-            .map(|files| files.base.clone())
-            .unwrap_or_default();
-        let Some(page) = self.page_mut() else { return };
-        page.files_view
-            .texts
-            .insert(entry.path.clone(), TextState::Loading);
         let path = entry.path.clone();
         let patch = match &entry.patch {
             PullRequestPatch::Hunks(hunks) => hunks.clone(),
             _ => String::new(),
         };
-        let deleted = entry.kind == FileChangeKind::Delete;
-        let (revision, side_path) = if deleted {
-            (
-                base.clone(),
-                entry.previous_path.clone().unwrap_or_else(|| path.clone()),
-            )
-        } else {
-            (head.clone(), path.clone())
-        };
+        let Some(page) = self.page_mut() else { return };
+        // A deleted file has no head side; its whole base side is the patch.
+        if entry.kind == FileChangeKind::Delete {
+            let state = match reconstruct_from_text(String::new(), &patch) {
+                Some((old, new)) => TextState::Loaded { old, new },
+                None => TextState::Unreadable,
+            };
+            page.files_view.texts.insert(path, state);
+            cx.notify();
+            return;
+        }
+        page.files_view
+            .texts
+            .insert(entry.path.clone(), TextState::Loading);
         let read = PullRequestRead::FileText {
-            revision: revision.clone(),
-            path: side_path,
+            revision: head.clone(),
+            path: path.clone(),
         };
         let created = entry.kind == FileChangeKind::Create;
         self.read(read, cx, move |page, result| {
             let state = match result {
                 Ok((PullRequestReadResponse::FileText(PullRequestFileText::Text(text)), _)) => {
-                    if deleted {
-                        TextState::Loaded {
-                            old: text,
-                            new: String::new(),
-                        }
-                    } else if created {
+                    if created {
                         TextState::Loaded {
                             old: String::new(),
                             new: text,
@@ -295,15 +285,23 @@ impl PullRequestView {
                     TextState::Oversized
                 }
                 Ok(_) => TextState::Unreadable,
-                Err(_) => {
+                Err(error) => {
                     page.files_view.texts.remove(&path);
                     page.files_view.pending_expand = None;
+                    page.files_view.text_failure = Some(
+                        crate::tr!(
+                            "pull_requests.files.text_failed",
+                            path = path,
+                            revision = head.get(..7).unwrap_or(&head).to_owned(),
+                            reason = reason(&error)
+                        )
+                        .into_owned(),
+                    );
                     return;
                 }
             };
             page.files_view.texts.insert(path, state);
         });
-        let _ = revision;
     }
 
     /// Redraws a file once its text arrived, then applies the expansion that asked for it.
@@ -757,30 +755,48 @@ impl PullRequestView {
         )
     }
 
-    fn toolbar(&self, wide_column: bool, cx: &mut Context<Self>) -> AnyElement {
-        let compact = self.compact(cx);
-        let page = self.page();
-        let files = page.and_then(|page| page.files.data.as_ref());
+    /// "%{count} files", with a "+" while pages remain.
+    fn count_label(&self) -> String {
+        let files = self.page().and_then(|page| page.files.data.as_ref());
         let count = files.map_or(0, |files| files.files.len());
-        let more = files.is_some_and(|files| files.next_page.is_some());
-        let count_label = if more {
+        if files.is_some_and(|files| files.next_page.is_some()) {
             crate::tr!("pull_requests.files.count_more", count = count.to_string())
         } else if count == 1 {
             crate::tr!("pull_requests.files.count_one")
         } else {
             crate::tr!("pull_requests.files.count", count = count.to_string())
         }
-        .into_owned();
+        .into_owned()
+    }
+
+    fn toolbar(&self, wide_column: bool, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.compact(cx);
+        let page = self.page();
+        let files = page.and_then(|page| page.files.data.as_ref());
+        let count_label = self.count_label();
         let viewed_counter = files.map(|files| {
-            let viewed = files
-                .files
-                .iter()
-                .filter(|file| self.viewed_state(&file.path) == Viewed::Marked)
+            // Marks GitHub reports for files not paged in yet count too, out of every file.
+            let mut paths: std::collections::HashSet<&str> = page
+                .and_then(|page| page.viewed.data.as_ref())
+                .into_iter()
+                .flat_map(|viewed| viewed.files.iter().map(|(path, _)| path.as_str()))
+                .collect();
+            paths.extend(
+                page.into_iter()
+                    .flat_map(|page| page.viewed_marks.keys().map(String::as_str)),
+            );
+            let viewed = paths
+                .into_iter()
+                .filter(|path| self.viewed_state(path) == Viewed::Marked)
                 .count();
+            let total = files.changed_files.max(files.files.len() as u64);
             let unknown = files
                 .files
                 .iter()
-                .any(|file| self.viewed_state(&file.path) == Viewed::Unknown);
+                .any(|file| self.viewed_state(&file.path) == Viewed::Unknown)
+                || page
+                    .and_then(|page| page.viewed.data.as_ref())
+                    .is_some_and(|viewed| !viewed.complete);
             let tooltip = if unknown {
                 crate::tr!("pull_requests.files.viewed_unknown")
             } else {
@@ -796,7 +812,7 @@ impl PullRequestView {
                     crate::tr!(
                         "pull_requests.files.viewed_count",
                         viewed = viewed.to_string(),
-                        total = files.files.len().to_string()
+                        total = total.to_string()
                     )
                     .into_owned(),
                 )
@@ -1135,7 +1151,7 @@ impl PullRequestView {
     fn file_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let input = self.filter_input(window, cx);
         let filter = input.read(cx).value().to_string();
-        let count = self.files_of().map_or(0, <[PullRequestFile]>::len);
+        let count = self.count_label();
         v_flex()
             .flex_none()
             .w(px(280.))
@@ -1149,10 +1165,7 @@ impl PullRequestView {
                     .px_2()
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(
-                        crate::tr!("pull_requests.files.count", count = count.to_string())
-                            .into_owned(),
-                    ),
+                    .child(count),
             )
             .child(Input::new(&input).small())
             .child(self.file_list("pr-file-column-rows", &filter, false, cx))
@@ -1166,6 +1179,12 @@ impl PullRequestView {
     ) -> AnyElement {
         self.ensure_list(cx);
         self.apply_text(cx);
+        if let Some(failure) = self
+            .page_mut()
+            .and_then(|page| page.files_view.text_failure.take())
+        {
+            window.push_notification(Notification::warning(failure), cx);
+        }
         let Some(page) = self.page() else {
             return div().into_any_element();
         };

@@ -40,28 +40,11 @@ enum Item {
     Event(PullRequestState, String),
 }
 
-/// Whether the client reads a URL through the host: GitHub's own hosts, where a credential
-/// may decide the answer. Every other image keeps loading by its URL.
-fn host_read(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|url| {
-        url.scheme() == "https"
-            && url.host_str().is_some_and(|host| {
-                let host = host.to_ascii_lowercase();
-                host == "github.com"
-                    || host == "www.github.com"
-                    || host.ends_with(".githubusercontent.com")
-            })
-    })
-}
-
 /// The body without HTML comments, which GitHub templates leave behind; `None` when nothing
 /// is left to show.
-fn visible_body(body: &str) -> Option<String> {
-    // GitHub stores bodies with CRLF; a carriage return reaching the markdown view's
-    // single-line shaping is drawn as a line break it cannot hold.
-    let body = body.replace("\r\n", "\n").replace('\r', "\n");
+pub(super) fn visible_body(body: &str) -> Option<String> {
     let mut visible = String::new();
-    let mut rest = body.as_str();
+    let mut rest = body;
     while let Some(start) = rest.find("<!--") {
         visible.push_str(&rest[..start]);
         rest = rest[start..]
@@ -176,20 +159,19 @@ impl PullRequestView {
         cx.notify();
     }
 
+    /// Every image the conversation shows goes to the host, which decides how it is read.
     fn resolver(&self) -> Option<ImageResolver> {
         let (session, key) = self.current.clone()?;
         let account = self.page()?.conversation.data.as_ref()?.account.clone();
         let source = {
             let (session, key, account) = (session.clone(), key.clone(), account.clone());
             Rc::new(move |url: &str| {
-                host_read(url).then(|| {
-                    pull_request_media(
-                        session.clone(),
-                        key.clone(),
-                        account.clone(),
-                        url.to_owned(),
-                    )
-                })
+                Some(pull_request_media(
+                    session.clone(),
+                    key.clone(),
+                    account.clone(),
+                    url.to_owned(),
+                ))
             })
         };
         let pending = Rc::new(
@@ -198,9 +180,6 @@ impl PullRequestView {
                   window: &mut Window,
                   cx: &mut App|
                   -> Option<AnyElement> {
-                if !host_read(url) {
-                    return None;
-                }
                 let state = pull_request_media_state(&session, &key, &account, url, window, cx);
                 media_stand_in(state, url, title, cx)
             },

@@ -97,6 +97,8 @@ pub(super) struct FilesView {
     pub(super) collapsed: HashMap<String, bool>,
     /// A gap the reader expanded while its file's text was being read.
     pub(super) pending_expand: Option<(String, u32, crate::diff::model::ExpandDir)>,
+    /// A file text read that failed, told once on the next draw.
+    pub(super) text_failure: Option<String>,
     pub(super) off_diff_open: bool,
 }
 
@@ -144,6 +146,8 @@ pub(super) struct PullRequestPage {
     pub(super) viewed_batch: HashMap<String, bool>,
     pub(super) viewed_flush: Option<Task<()>>,
     pub(super) refreshing: bool,
+    /// A manual refresh reads Files again from page 1, whatever was paged in.
+    pub(super) restart_files: bool,
 }
 
 pub struct PullRequestView {
@@ -338,7 +342,16 @@ impl PullRequestView {
                     page.files.expires_at = expires_at;
                     page.files.error = None;
                     page.files.loaded_at = now();
-                    if page.files.data.as_ref() != Some(&files) {
+                    // A re-read answers page 1 only: the pages read after it, the scroll and the
+                    // completeness stay while the revisions and page 1 are what they were.
+                    let restart = std::mem::take(&mut page.restart_files);
+                    let continued = page.files.data.as_ref().is_some_and(|held| {
+                        !restart
+                            && held.files.len() > files.files.len()
+                            && (&held.head, &held.base) == (&files.head, &files.base)
+                            && held.files[..files.files.len()] == files.files[..]
+                    });
+                    if !continued && page.files.data.as_ref() != Some(&files) {
                         let head_moved = page
                             .files
                             .data
@@ -401,6 +414,21 @@ impl PullRequestView {
                     page.conversation.expires_at = expires_at;
                     page.conversation.error = None;
                     page.conversation.loaded_at = now();
+                    let account_changed = page
+                        .conversation
+                        .data
+                        .as_ref()
+                        .is_some_and(|held| held.account != conversation.account);
+                    if account_changed {
+                        // What the previous account read is its own: read it all again.
+                        page.files = Read::default();
+                        page.files_view = FilesView::default();
+                        page.viewed = Read::default();
+                        page.viewed_marks.clear();
+                        page.viewed_batch.clear();
+                        page.viewed_flush = None;
+                        page.conversation_view.replies.clear();
+                    }
                     page.conversation.data = Some(conversation);
                 }
                 Ok(_) => {}
@@ -433,6 +461,9 @@ impl PullRequestView {
     /// Starts the reads the visible view needs, and wakes when the soonest of them expires.
     fn ensure_reads(&mut self, cx: &mut Context<Self>) {
         let tab = self.tab(cx);
+        let Some(key) = self.current.as_ref().map(|(_, key)| key.clone()) else {
+            return;
+        };
         let Some(page) = self.page_mut() else { return };
         let now = now();
         let (files_due, conversation_due, viewed_due) = (
@@ -440,6 +471,10 @@ impl PullRequestView {
             page.conversation.due(now),
             page.viewed.due(now),
         );
+        if conversation_due && page.conversation.data.is_some() {
+            // Media that failed is asked again along with the conversation that names it.
+            crate::store::retry_failed_pull_request_media(&key, cx);
+        }
         let mut expiries = vec![page.conversation.expires_at];
         if tab == Tab::Files {
             expiries.extend([page.files.expires_at, page.viewed.expires_at]);
@@ -486,8 +521,10 @@ impl PullRequestView {
             return;
         };
         let tab = self.tab(cx);
+        crate::store::retry_failed_pull_request_media(&key, cx);
         let Some(page) = self.page_mut() else { return };
         page.refreshing = true;
+        page.restart_files = true;
         page.files.error = None;
         page.conversation.error = None;
         page.viewed.error = None;
@@ -1140,9 +1177,18 @@ impl PullRequestView {
             link.as_ref()
                 .and_then(|link| link.snapshot.as_ref().map(|s| s.changed_files))
         });
-        let conversation_count = page
-            .and_then(|page| page.conversation.data.as_ref())
-            .map(|conversation| conversation.comments.len());
+        let conversation_count =
+            page.and_then(|page| page.conversation.data.as_ref())
+                .map(|conversation| {
+                    conversation
+                        .comments
+                        .iter()
+                        .filter(|comment| {
+                            comment.review_state.is_none()
+                                || super::conversation::visible_body(&comment.body).is_some()
+                        })
+                        .count()
+                });
         let label = |plain: &str, counted: &str, count: Option<u64>| match count {
             Some(count) => crate::tr!(counted, count = count.to_string()).into_owned(),
             None => crate::tr!(plain).into_owned(),
@@ -1487,5 +1533,217 @@ impl Render for PullRequestView {
             .child(self.switch(cx))
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+    use tcode_protocol::{
+        ClientPayload, HostMessage, PullRequestComment, PullRequestPatch, Query, QueryResponse,
+        decode_client_line, encode_line,
+    };
+
+    const HEAD: &str = "2222222222222222222222222222222222222222";
+
+    fn files(range: std::ops::Range<usize>, next_page: Option<u32>) -> PullRequestFiles {
+        PullRequestFiles {
+            base: "1111111111111111111111111111111111111111".into(),
+            head: HEAD.into(),
+            files: range
+                .map(|index| PullRequestFile {
+                    path: format!("src/{index}.rs"),
+                    previous_path: None,
+                    kind: agent::FileChangeKind::Modify,
+                    additions: 1,
+                    deletions: 0,
+                    patch: PullRequestPatch::Hunks("@@ -1 +1,2 @@\n a\n+b\n".into()),
+                })
+                .collect(),
+            next_page,
+            complete: next_page.is_none(),
+            changed_files: 150,
+        }
+    }
+
+    /// The pull request reads the view has asked for and the host has not answered.
+    fn reads(requests: &async_channel::Receiver<String>) -> Vec<(u64, PullRequestRead)> {
+        std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|line| decode_client_line(&line).unwrap())
+            .filter_map(|request| match request.payload {
+                ClientPayload::Query(Query::PullRequest { read, .. }) => Some((request.id, read)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn answer(
+        incoming: &async_channel::Sender<String>,
+        id: u64,
+        response: PullRequestReadResponse,
+        expires_at: u64,
+    ) {
+        incoming
+            .try_send(
+                encode_line(&HostMessage::QueryResult {
+                    id,
+                    result: Ok(QueryResponse::PullRequest {
+                        response: Box::new(response),
+                        expires_at,
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    fn settle(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+    }
+
+    #[gpui::test]
+    fn an_expiry_reread_keeps_the_pages_read_after_page_one_and_the_scroll(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (view, cx) = cx
+            .add_window_view(|_, cx| PullRequestView::new(store.clone(), window_state.clone(), cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        view.update(cx, |view, cx| {
+            view.show(
+                "session".into(),
+                PullRequestKey::new("github.com", "octo/repo", 7),
+                cx,
+            )
+        });
+        settle(cx);
+
+        let later = now() + 3600;
+        let mut reread = None;
+        for (id, read) in reads(&requests) {
+            match read {
+                // Page 1 lands as its expiry passes, so the view reads it again at once.
+                PullRequestRead::Files { page: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..100, Some(2))),
+                    now(),
+                ),
+                PullRequestRead::Conversation => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Conversation(PullRequestConversation {
+                        description: PullRequestComment {
+                            id: "PR_7".into(),
+                            author: None,
+                            body: String::new(),
+                            created_at: "2026-10-01T00:00:00Z".into(),
+                            edited_at: None,
+                            url: None,
+                            review_state: None,
+                            reactions: Vec::new(),
+                        },
+                        comments: Vec::new(),
+                        threads: Vec::new(),
+                        complete: true,
+                        account: "account".into(),
+                    }),
+                    later,
+                ),
+                PullRequestRead::ViewedFiles => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::ViewedFiles(PullRequestViewedFiles {
+                        files: Vec::new(),
+                        complete: true,
+                    }),
+                    later,
+                ),
+                read => panic!("unexpected read {read:?}"),
+            }
+        }
+        settle(cx);
+        for (id, read) in reads(&requests) {
+            assert_eq!(read, PullRequestRead::Files { page: None });
+            reread = Some(id);
+        }
+        let reread = reread.expect("an expired page 1 is read again");
+
+        let scroll_to = |cx: &mut VisualTestContext, file: usize| {
+            view.update(cx, |view, _| {
+                view.page()
+                    .unwrap()
+                    .files_view
+                    .list
+                    .as_ref()
+                    .unwrap()
+                    .scroll_to_file(file)
+            });
+            settle(cx);
+        };
+        scroll_to(cx, 95);
+        let page_two = reads(&requests);
+        assert_eq!(
+            page_two.iter().map(|(_, read)| read).collect::<Vec<_>>(),
+            [&PullRequestRead::Files { page: Some(2) }],
+            "nearing the end of page 1 reads page 2"
+        );
+        answer(
+            &incoming,
+            page_two[0].0,
+            PullRequestReadResponse::Files(files(100..150, None)),
+            later,
+        );
+        settle(cx);
+        scroll_to(cx, 120);
+
+        answer(
+            &incoming,
+            reread,
+            PullRequestReadResponse::Files(files(0..100, Some(2))),
+            later,
+        );
+        settle(cx);
+        view.update(cx, |view, _| {
+            let page = view.page().unwrap();
+            let held = page.files.data.as_ref().unwrap();
+            assert_eq!(
+                (held.files.len(), held.next_page, held.complete),
+                (150, None, true),
+                "the re-read of page 1 keeps the pages read after it"
+            );
+            assert_eq!(
+                page.files_view.list.as_ref().unwrap().top_file(false),
+                Some(120),
+                "and the reader's place in them"
+            );
+        });
+        assert!(reads(&requests).is_empty());
     }
 }

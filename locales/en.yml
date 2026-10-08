@@ -1614,6 +1614,7 @@ pull_requests:
     viewed_failed: "Could not update viewed files: %{reason}"
     loading_lines: "Loading lines…"
     side_missing: "This side of the file isn't available at %{revision}."
+    text_failed: "Could not load %{path} at %{revision}: %{reason}"
     too_large_to_expand: "Too large to expand (over 1 MiB)."
     binary: "Binary file. Its contents aren't shown."
     oversized: "This diff is too large to show (%{size})."
