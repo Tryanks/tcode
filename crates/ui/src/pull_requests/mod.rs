@@ -10,6 +10,7 @@ use crate::{
         input::{Input, InputEvent, InputState},
         menu::{ContextMenuExt as _, CopyText, DropdownMenu as _, OpenUrl, PopupMenu},
     },
+    window_state::WindowState,
 };
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Context, Entity, Hsla,
@@ -19,9 +20,12 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
-use tcode_core::pull_request::{
-    self, PullRequestBadgeState, PullRequestKey, PullRequestSource, PullRequestState,
-    PullRequestSyncError, ThreadPullRequestLink,
+use tcode_core::{
+    pull_request::{
+        self, ChecksState, Mergeability, PullRequestBadgeState, PullRequestKey, PullRequestSource,
+        PullRequestState, PullRequestSyncError, ReviewDecision, ThreadPullRequestLink,
+    },
+    ui::RightTab,
 };
 use tcode_protocol::Command;
 
@@ -75,10 +79,17 @@ fn row_state(
         None => PullRequestBadgeState::Unknown,
     }
 }
+/// A single-link badge names that link.
+fn single_number(links: &[ThreadPullRequestLink]) -> Option<u64> {
+    links
+        .iter()
+        .find(|link| link.visible())
+        .map(|link| link.key.number)
+}
 pub fn badge_label(links: &[ThreadPullRequestLink], cx: &App) -> Option<String> {
     let (state, count, stacked) = pull_request::badge(links)?;
     let (_, _, label) = appearance(state, cx);
-    let number = pull_request::current_pull_request(links)?.key.number;
+    let number = single_number(links)?;
     let label = format!("{label}_lower");
     let label = if stacked {
         crate::tr!(
@@ -108,7 +119,7 @@ pub fn badge(links: &[ThreadPullRequestLink], size: f32, cx: &App) -> Option<Any
     let (state, count, stacked) = pull_request::badge(links)?;
     let (glyph, color, _) = appearance(state, cx);
     let label = badge_label(links, cx)?;
-    let number = pull_request::current_pull_request(links)?.key.number;
+    let number = single_number(links)?;
     let text = if stacked {
         count.to_string()
     } else if count > 1 {
@@ -156,7 +167,7 @@ pub fn sidebar_badge(
         cx.stop_propagation();
         store.update(cx, |store, cx| {
             store.select_session(id.clone());
-            store.open_pull_requests_panel(cx);
+            store.open_tab_for(&id, RightTab::PullRequests, cx);
         });
     })
     .child(badge);
@@ -165,13 +176,17 @@ pub fn sidebar_badge(
             .anchor(Anchor::TopLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
+                // gpui-base's HoverCard is an unstyled popup; the surface is the popover's.
                 let mut rows = v_flex()
                     .id("pr-mini-list")
                     .w(px(320.))
-                    .p_3()
-                    .gap_1()
+                    .p_2()
+                    .gap_0p5()
+                    .rounded(crate::material::radius_overlay(cx))
                     .bg(cx.theme().popover)
-                    .shadow_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .shadow_xl()
                     .child(
                         div()
                             .text_size(px(11.))
@@ -272,30 +287,23 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
         Some(PullRequestSource::Agent) => "pull_requests.source_agent",
         Some(PullRequestSource::Created) => "pull_requests.source_created",
         Some(PullRequestSource::Stack) => "pull_requests.source_stack",
-        Some(PullRequestSource::StackDismissed) => "pull_requests.source_dismissed",
+        Some(PullRequestSource::Dismissed) => "pull_requests.source_dismissed",
         None => "pull_requests.source_not_linked",
     }
 }
 fn sync_error(link: &ThreadPullRequestLink) -> String {
     match link.sync_error.as_ref() {
-        Some(PullRequestSyncError::NoCredential) => crate::tr!(
-            "pull_requests.notice_no_credential",
-            host = link.key.host.clone()
-        )
-        .into_owned(),
-        Some(PullRequestSyncError::HostDisabled) => crate::tr!(
-            "pull_requests.notice_disabled",
-            host = link.key.host.clone()
-        )
-        .into_owned(),
+        Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled) => {
+            crate::tr!(
+                "pull_requests.notice_no_credential",
+                host = link.key.host.clone()
+            )
+            .into_owned()
+        }
         Some(PullRequestSyncError::RateLimited { retry_at }) => crate::tr!(
             "pull_requests.notice_rate_limited",
-            time = chrono::DateTime::from_timestamp(*retry_at as i64, 0)
-                .map(|time| time
-                    .with_timezone(&chrono::Local)
-                    .format("%H:%M")
-                    .to_string())
-                .unwrap_or_default()
+            ago =
+                crate::time::humanize_ago(retry_at.saturating_sub(tcode_core::project::now_secs()))
         )
         .into_owned(),
         Some(PullRequestSyncError::NotFound) => crate::tr!(
@@ -328,20 +336,33 @@ struct PullRequestRow<'a> {
 }
 pub struct PullRequestsPanel {
     store: Entity<WorkspaceStore>,
+    window_state: Entity<WindowState>,
     scroll: ScrollHandle,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 impl PullRequestsPanel {
-    pub fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
-        let subscription = observe_store_topics(
-            &store,
-            &[TopicKind::SessionStatus, TopicKind::ActiveSession],
-            cx,
-        );
+    pub fn new(
+        store: Entity<WorkspaceStore>,
+        window_state: Entity<WindowState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = [
+            observe_store_topics(
+                &store,
+                &[
+                    TopicKind::Index,
+                    TopicKind::SessionStatus,
+                    TopicKind::ActiveSession,
+                ],
+                cx,
+            ),
+            cx.observe(&window_state, |_, _, cx| cx.notify()),
+        ];
         Self {
             store,
+            window_state,
             scroll: ScrollHandle::new(),
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         }
     }
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
@@ -403,32 +424,86 @@ impl PullRequestsPanel {
                 .map(str::to_owned)
                 .unwrap_or_else(|| key.repository.clone())
         });
-        let mut detail = source.clone();
-        if let Some(snapshot) = snapshot {
-            if let Some(author) = &snapshot.author {
-                detail.push_str(&format!(" · {}", author.login));
-            }
-            detail.push_str(&format!(
-                " · {} → {} · +{} −{}",
-                snapshot.head_branch, snapshot.base_branch, snapshot.additions, snapshot.deletions
-            ));
-        } else if let Some(link) = link.filter(|_| visible) {
-            detail = format!("{} · {source}", sync_error(link));
-        } else {
-            detail.push_str(&format!(" · {}", crate::tr!(state_label)));
-        }
-        if let Some((index, count)) = position {
-            let layer = crate::tr!(
+        let layer = position.map(|(index, count)| {
+            crate::tr!(
                 "pull_requests.layer_position",
                 index = index.to_string(),
                 count = count.to_string()
+            )
+            .into_owned()
+        });
+        let dot = || div().flex_none().child("·");
+        let mut detail = vec![source.clone()];
+        let line_two = if let Some(snapshot) = snapshot {
+            let author = snapshot.author.as_ref().map(|author| author.login.clone());
+            let branches = format!("{} → {}", snapshot.head_branch, snapshot.base_branch);
+            let stat = (
+                format!("+{}", snapshot.additions),
+                format!("−{}", snapshot.deletions),
             );
-            detail = if compact {
-                format!("{layer} · {detail}")
+            detail.extend(author.clone());
+            detail.push(branches.clone());
+            detail.extend(layer.clone());
+            detail.push(format!("{} {}", stat.0, stat.1));
+            // The author gives way first, so the source and the branches stay readable.
+            h_flex()
+                .gap_1()
+                .items_center()
+                .min_w_0()
+                .overflow_hidden()
+                .child(div().flex_none().child(source.clone()))
+                .when_some(author, |line, author| {
+                    line.child(dot())
+                        .child(div().min_w_0().truncate().child(author))
+                })
+                .child(dot())
+                // gpui-base has no middle truncation; the row tooltip holds the full pair.
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(gpui::relative(0.5))
+                        .truncate()
+                        .font_family("monospace")
+                        .child(branches),
+                )
+                .when_some(layer.clone(), |line, layer| {
+                    line.child(dot()).child(div().flex_none().child(layer))
+                })
+                .child(dot())
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family("monospace")
+                        .text_color(cx.theme().success)
+                        .child(stat.0),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family("monospace")
+                        .text_color(cx.theme().danger)
+                        .child(stat.1),
+                )
+                .into_any_element()
+        } else {
+            if let Some(link) = link.filter(|_| visible) {
+                detail.insert(0, sync_error(link));
             } else {
-                format!("{detail} · {layer}")
-            };
-        }
+                detail.push(crate::tr!(&format!("{state_label}_lower")).into_owned());
+                detail.extend(layer.clone());
+            }
+            h_flex()
+                .gap_1()
+                .items_center()
+                .min_w_0()
+                .when(
+                    link.is_some_and(|link| link.source == PullRequestSource::Dismissed),
+                    |line| line.child(Icon::new(IconName::Unlink).size(px(12.))),
+                )
+                .child(div().min_w_0().truncate().child(detail.join(" · ")))
+                .into_any_element()
+        };
+        let detail = detail.join(" · ");
         let action = ChangeLink {
             key: key.clone(),
             url: url.clone(),
@@ -461,19 +536,19 @@ impl PullRequestsPanel {
         };
         let mut signals = h_flex().gap_1().flex_none();
         if let Some(snapshot) = snapshot.filter(|s| s.state == PullRequestState::Open) {
-            if let Some(check) = &snapshot.checks_state {
-                let (icon, color, label) = match check.as_str() {
-                    "success" | "passing" => (
+            if let Some(check) = snapshot.checks_state {
+                let (icon, color, label) = match check {
+                    ChecksState::Passing => (
                         IconName::CircleCheck,
                         cx.theme().success,
                         "pull_requests.checks_passing",
                     ),
-                    "failure" | "error" | "failing" => (
+                    ChecksState::Failing => (
                         IconName::CircleX,
                         cx.theme().danger,
                         "pull_requests.checks_failing",
                     ),
-                    _ => (
+                    ChecksState::Pending => (
                         IconName::CircleDashed,
                         cx.theme().warning,
                         "pull_requests.checks_pending",
@@ -489,19 +564,19 @@ impl PullRequestsPanel {
                         }),
                 );
             }
-            if let Some(review) = &snapshot.review_decision {
-                let (icon, color, label) = match review.as_str() {
-                    "approved" => (
+            if let Some(review) = snapshot.review_decision {
+                let (icon, color, label) = match review {
+                    ReviewDecision::Approved => (
                         IconName::BadgeCheck,
                         cx.theme().success,
                         "pull_requests.review_approved",
                     ),
-                    "changes_requested" | "changes-requested" => (
+                    ReviewDecision::ChangesRequested => (
                         IconName::MessageSquareWarning,
                         cx.theme().danger,
                         "pull_requests.review_changes_requested",
                     ),
-                    _ => (
+                    ReviewDecision::Required => (
                         IconName::MessageSquareMore,
                         cx.theme().muted_foreground,
                         "pull_requests.review_required",
@@ -517,7 +592,7 @@ impl PullRequestsPanel {
                         }),
                 );
             }
-            if snapshot.mergeability.as_deref() == Some("conflicting") {
+            if snapshot.mergeability == Mergeability::Conflicting {
                 signals = signals.child(
                     div()
                         .id("pr-conflict")
@@ -639,83 +714,15 @@ impl PullRequestsPanel {
                         .child(signals),
                 )
                 .child(
-                    // gpui-base has no middle truncation; the tooltip retains the complete branch pair.
                     div()
                         .id("pr-detail")
-                        .truncate()
+                        .min_w_0()
                         .text_size(px(if compact { 13. } else { 11. }))
                         .text_color(cx.theme().muted_foreground)
-                        .tooltip({
-                            let detail = detail.clone();
-                            move |window, cx| {
-                                crate::widgets::tooltip::Tooltip::new(detail.clone())
-                                    .build(window, cx)
-                            }
+                        .tooltip(move |window, cx| {
+                            crate::widgets::tooltip::Tooltip::new(detail.clone()).build(window, cx)
                         })
-                        .child(if let Some(snapshot) = snapshot {
-                            let layer = position.map(|(index, count)| {
-                                crate::tr!(
-                                    "pull_requests.layer_position",
-                                    index = index.to_string(),
-                                    count = count.to_string()
-                                )
-                                .into_owned()
-                            });
-                            h_flex()
-                                .gap_1()
-                                .items_center()
-                                .min_w_0()
-                                .when(compact, |line| {
-                                    line.children(layer.clone())
-                                        .when(layer.is_some(), |line| line.child("·"))
-                                })
-                                .child(div().min_w_0().truncate().child(match &snapshot.author {
-                                    Some(author) => format!("{source} · {}", author.login),
-                                    None => source.clone(),
-                                }))
-                                .child("·")
-                                // gpui-base has no middle truncation; the full pair is in the parent tooltip.
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .max_w(gpui::relative(0.4))
-                                        .truncate()
-                                        .font_family("monospace")
-                                        .child(format!(
-                                            "{} → {}",
-                                            snapshot.head_branch, snapshot.base_branch
-                                        )),
-                                )
-                                .when(!compact, |line| {
-                                    line.when(layer.is_some(), |line| line.child("·"))
-                                        .children(layer)
-                                })
-                                .child("·")
-                                .child(
-                                    div()
-                                        .font_family("monospace")
-                                        .text_color(cx.theme().success)
-                                        .child(format!("+{}", snapshot.additions)),
-                                )
-                                .child(
-                                    div()
-                                        .font_family("monospace")
-                                        .text_color(cx.theme().danger)
-                                        .child(format!("−{}", snapshot.deletions)),
-                                )
-                                .into_any_element()
-                        } else {
-                            h_flex()
-                                .gap_1()
-                                .when(
-                                    link.is_some_and(|link| {
-                                        link.source == PullRequestSource::StackDismissed
-                                    }),
-                                    |line| line.child(Icon::new(IconName::Unlink).size(px(12.))),
-                                )
-                                .child(div().min_w_0().truncate().child(detail))
-                                .into_any_element()
-                        }),
+                        .child(line_two),
                 ),
         )
         .child(
@@ -776,71 +783,77 @@ impl PullRequestsPanel {
     }
 }
 impl Render for PullRequestsPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.store.read(cx).session_status().cloned();
-        let links = status
-            .as_ref()
-            .map(|status| status.pull_requests.as_slice())
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let store = self.store.read(cx);
+        let session = store.active_session_id();
+        let links = session
+            .as_deref()
+            .map(|id| store.pull_requests(id).to_vec())
             .unwrap_or_default();
-        let compact = window.viewport_size().width < px(760.);
-        let mut rows = v_flex()
-            .id("pull-request-rows")
-            .w_full()
-            .min_w_0()
-            .gap_1()
-            .p_2();
+        let read_only = store
+            .session_status()
+            .is_none_or(|status| status.conversation_read_only);
+        let compact = self.window_state.read(cx).compact;
+        let mut rows = v_flex().id("pull-request-rows").w_full().min_w_0().gap_1();
         let mut notice_hosts = std::collections::HashSet::new();
         for link in links
             .iter()
             .filter(|link| link.visible() && link.snapshot.is_none())
         {
-            if matches!(
+            let credential = matches!(
                 link.sync_error,
-                Some(PullRequestSyncError::NoCredential | PullRequestSyncError::RateLimited { .. })
-            ) && notice_hosts.insert(link.key.host.clone())
-            {
-                rows = rows.child(
-                    h_flex()
-                        .px_3()
-                        .py_2()
-                        .gap_2()
-                        .rounded_md()
-                        .bg(cx.theme().muted)
-                        .text_size(px(12.))
-                        .child(div().flex_1().child(sync_error(link)))
-                        .when(
-                            matches!(link.sync_error, Some(PullRequestSyncError::NoCredential)),
-                            |notice| {
-                                notice.child(
-                                    Button::new(SharedString::from(format!(
-                                        "pr-settings-{}",
-                                        link.key.host
-                                    )))
-                                    .ghost()
-                                    .xsmall()
-                                    .label(crate::tr!("pull_requests.open_settings"))
-                                    .on_click(
-                                        |_, window, cx| {
-                                            window.dispatch_action(Box::new(OpenSourceControl), cx)
-                                        },
-                                    ),
-                                )
-                            },
-                        ),
-                );
+                Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled)
+            );
+            let rate_limited = matches!(
+                link.sync_error,
+                Some(PullRequestSyncError::RateLimited { .. })
+            );
+            if !(credential || rate_limited) || !notice_hosts.insert(link.key.host.clone()) {
+                continue;
             }
+            rows = rows.child(
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .items_center()
+                    .rounded_md()
+                    .bg(cx.theme().muted)
+                    .text_size(px(12.))
+                    .child(div().flex_1().child(sync_error(link)))
+                    .when(credential, |notice| {
+                        notice.child(
+                            Button::new(SharedString::from(format!(
+                                "pr-settings-{}",
+                                link.key.host
+                            )))
+                            .ghost()
+                            .xsmall()
+                            .label(crate::tr!("pull_requests.open_settings"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenSourceControl), cx)
+                            }),
+                        )
+                    }),
+            );
         }
-        let groups = pull_request::groups(links);
-        for group in groups {
+        for group in pull_request::groups(&links) {
             if let Some(stack) = group.stack {
                 rows = rows.child(
                     h_flex()
+                        .id(SharedString::from(format!("pr-stack-{}", stack.id)))
                         .h(px(28.))
                         .px_3()
                         .gap_2()
                         .items_center()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
+                        .tooltip(|window, cx| {
+                            crate::widgets::tooltip::Tooltip::new(
+                                crate::tr!("pull_requests.stack_tooltip").into_owned(),
+                            )
+                            .build(window, cx)
+                        })
                         .child(Icon::new(IconName::Layers).xsmall())
                         .child(
                             crate::tr!(
@@ -889,6 +902,37 @@ impl Render for PullRequestsPanel {
             }
         }
         let count = links.iter().filter(|link| link.visible()).count();
+        let link_button = |id: &'static str| {
+            let store = self.store.clone();
+            let session = session.clone();
+            Button::new(id)
+                .outline()
+                .small()
+                .icon(IconName::Plus)
+                .label(crate::tr!("pull_requests.link_menu"))
+                .on_click(move |_, window, cx| {
+                    if let Some(id) = &session {
+                        open_link_dialog(store.clone(), id.clone(), window, cx);
+                    }
+                })
+        };
+        if count == 0 {
+            let empty = crate::material::empty_state(
+                Icon::new(IconName::GitPullRequest),
+                crate::tr!("pull_requests.empty_title").into_owned(),
+                crate::tr!("pull_requests.empty_desc").into_owned(),
+                cx,
+            )
+            .when(!read_only, |empty| {
+                empty.child(div().pt_1().child(link_button("link-pr-empty")))
+            });
+            return v_flex()
+                .size_full()
+                .on_action(cx.listener(Self::change_link))
+                .child(rows.p_2())
+                .child(empty)
+                .into_any_element();
+        }
         let open = links
             .iter()
             .filter(|link| {
@@ -899,41 +943,6 @@ impl Render for PullRequestsPanel {
                         .is_some_and(|s| s.state == PullRequestState::Open)
             })
             .count();
-        let store = self.store.clone();
-        let id = status.as_ref().map(|status| status.session_id.clone());
-        let button = Button::new("link-pr")
-            .outline()
-            .small()
-            .icon(IconName::Plus)
-            .label(crate::tr!("pull_requests.link_menu"))
-            .on_click(move |_, window, cx| {
-                if let Some(id) = &id {
-                    open_link_dialog(store.clone(), id.clone(), window, cx);
-                }
-            });
-        let read_only = status
-            .as_ref()
-            .is_none_or(|status| status.conversation_read_only);
-        if count == 0 {
-            rows = rows.child(
-                v_flex()
-                    .p_6()
-                    .gap_3()
-                    .items_center()
-                    .child(
-                        Icon::new(IconName::GitPullRequest)
-                            .size(px(24.))
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(crate::tr!("pull_requests.empty_title"))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("pull_requests.empty_desc")),
-                    ),
-            );
-        }
         let mut summary = format!(
             "{} · {}",
             crate::tr!("pull_requests.summary_open", count = open.to_string()),
@@ -956,34 +965,22 @@ impl Render for PullRequestsPanel {
         }
         let summary = div()
             .flex_1()
-            .text_size(px(11.))
+            .text_size(px(if compact { 13. } else { 11. }))
             .text_color(cx.theme().muted_foreground)
             .child(summary);
-        let footer = if compact {
-            v_flex()
+        if compact {
+            // The bottom sheet scrolls its own content, so the list keeps its natural height.
+            return v_flex()
+                .w_full()
                 .gap_3()
-                .px_3()
-                .py_2()
+                .on_action(cx.listener(Self::change_link))
+                .child(rows)
                 .child(summary)
-                .when(!read_only, |footer| footer.child(button.w_full()))
-                .into_any_element()
-        } else {
-            h_flex()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .h(px(32.))
-                .child(summary)
-                .when(!read_only, |footer| {
-                    footer.child(
-                        button
-                            .ghost()
-                            .xsmall()
-                            .label(crate::tr!("pull_requests.link_short")),
-                    )
+                .when(!read_only, |sheet| {
+                    sheet.child(link_button("link-pr").w_full())
                 })
-                .into_any_element()
-        };
+                .into_any_element();
+        }
         v_flex()
             .size_full()
             .min_w_0()
@@ -993,17 +990,30 @@ impl Render for PullRequestsPanel {
                     .id("pr-scroll")
                     .flex_1()
                     .min_h_0()
-                    .child(rows)
+                    .child(rows.p_2())
                     .overflow_y_scroll_area()
                     .track_scroll(&self.scroll),
             )
             .child(
-                div()
+                h_flex()
                     .flex_none()
+                    .h(px(32.))
+                    .px_2()
+                    .gap_2()
+                    .items_center()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(footer),
+                    .child(summary)
+                    .when(!read_only, |footer| {
+                        footer.child(
+                            link_button("link-pr")
+                                .ghost()
+                                .xsmall()
+                                .label(crate::tr!("pull_requests.link_short")),
+                        )
+                    }),
             )
+            .into_any_element()
     }
 }
 
@@ -1065,13 +1075,19 @@ impl LinkDialog {
 }
 impl Render for LinkDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let description = match self.store.read(cx).github_repository(&self.id) {
+            Some(repository) => {
+                crate::tr!("pull_requests.dialog_desc_repo", repository = repository)
+            }
+            None => crate::tr!("pull_requests.dialog_desc_url"),
+        };
         v_flex()
             .gap_3()
             .child(
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("pull_requests.dialog_desc_url").into_owned()),
+                    .child(description.into_owned()),
             )
             .child(Input::new(&self.input).disabled(self.pending))
             .child(

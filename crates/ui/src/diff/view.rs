@@ -274,8 +274,13 @@ impl DiffPanel {
         window_state: Entity<WindowState>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pull_requests =
-            cx.new(|cx| crate::pull_requests::PullRequestsPanel::new(workspace_store.clone(), cx));
+        let pull_requests = cx.new(|cx| {
+            crate::pull_requests::PullRequestsPanel::new(
+                workspace_store.clone(),
+                window_state.clone(),
+                cx,
+            )
+        });
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
         let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
             let comments = store.read(cx).review_comments();
@@ -692,16 +697,16 @@ impl DiffPanel {
         let store_close = self.workspace_store.clone();
         let store_diff = self.workspace_store.clone();
         let store_plan = self.workspace_store.clone();
-        let store_preview = self.workspace_store.clone();
         let store_pr = self.workspace_store.clone();
         let muted = cx.theme().muted_foreground;
         let tab_active = cx.theme().tab_active;
 
-        let tab = |id: &'static str,
-                   icon: IconName,
-                   label: gpui::SharedString,
-                   is_active: bool,
-                   cx: &mut Context<Self>|
+        let labelled = |id: &'static str,
+                        icon: IconName,
+                        label: gpui::SharedString,
+                        content: AnyElement,
+                        is_active: bool,
+                        cx: &mut Context<Self>|
          -> gpui_base::Tab {
             material::tab(id, label.clone(), is_active, cx)
                 .h(px(28.))
@@ -715,7 +720,17 @@ impl DiffPanel {
                     s.text_color(muted).hover(|s| s.bg(cx.theme().muted))
                 })
                 .child(Icon::new(icon).xsmall().text_color(muted))
-                .child(label)
+                .child(content)
+        };
+        let tab = |id, icon, label: gpui::SharedString, is_active, cx: &mut Context<Self>| {
+            labelled(
+                id,
+                icon,
+                label.clone(),
+                label.into_any_element(),
+                is_active,
+                cx,
+            )
         };
 
         gpui_base::Tabs::new("right-panel-tabs")
@@ -762,49 +777,57 @@ impl DiffPanel {
                     });
                 }),
             )
-            .child(
-                tab(
-                    "preview-tab",
-                    IconName::Globe,
-                    crate::tr!("preview.title").into_owned().into(),
-                    active == RightTab::Preview,
-                    cx,
-                )
-                .on_click(move |_, _, cx| {
-                    store_preview.update(cx, |store, cx| store.set_right_tab(RightTab::Preview, cx))
-                }),
-            )
-            .child(
-                tab(
-                    "pull-requests-tab",
-                    IconName::GitPullRequest,
-                    {
-                        let count =
-                            self.workspace_store
-                                .read(cx)
-                                .session_status()
-                                .map_or(0, |status| {
-                                    status
-                                        .pull_requests
-                                        .iter()
-                                        .filter(|link| link.visible())
-                                        .count()
-                                });
-                        if count == 0 {
-                            crate::tr!("pull_requests.title").into_owned().into()
-                        } else {
-                            format!("{} · {count}", crate::tr!("pull_requests.title")).into()
-                        }
-                    },
-                    active == RightTab::PullRequests,
-                    cx,
-                )
+            .child({
+                let count = self
+                    .workspace_store
+                    .read(cx)
+                    .active_session_id()
+                    .map_or(0, |id| {
+                        self.workspace_store
+                            .read(cx)
+                            .pull_requests(&id)
+                            .iter()
+                            .filter(|link| link.visible())
+                            .count()
+                    });
+                let title = crate::tr!("pull_requests.title").into_owned();
+                let is_active = active == RightTab::PullRequests;
+                if count == 0 {
+                    tab(
+                        "pull-requests-tab",
+                        IconName::GitPullRequest,
+                        title.into(),
+                        is_active,
+                        cx,
+                    )
+                } else {
+                    // The localized pattern places the count; only the count is muted.
+                    let pattern =
+                        crate::tr!("pull_requests.tab_count", count = "\u{0}").into_owned();
+                    let (before, after) = pattern.split_once('\u{0}').unwrap_or((&pattern, ""));
+                    let content = h_flex()
+                        .gap_1()
+                        .children((!before.trim().is_empty()).then(|| before.trim().to_owned()))
+                        .child(div().text_color(muted).child(count.to_string()))
+                        .children((!after.trim().is_empty()).then(|| after.trim().to_owned()))
+                        .into_any_element();
+                    labelled(
+                        "pull-requests-tab",
+                        IconName::GitPullRequest,
+                        crate::tr!("pull_requests.tab_count", count = count.to_string())
+                            .into_owned()
+                            .into(),
+                        content,
+                        is_active,
+                        cx,
+                    )
+                }
                 .on_click(move |_, _, cx| {
                     store_pr.update(cx, |store, cx| {
                         store.set_right_tab(RightTab::PullRequests, cx)
                     })
-                }),
-            )
+                })
+            })
             // The gap between the tabs and the icon cluster holds nothing, so
             // it doubles as the window's drag handle: `window_drag_area` for the
             // app-owned move (macOS), `drag_region` for native HTCAPTION

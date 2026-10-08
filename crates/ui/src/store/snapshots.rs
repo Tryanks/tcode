@@ -210,7 +210,6 @@ mod tests {
 
     fn session_status() -> SessionStatus {
         SessionStatus {
-            pull_requests: Vec::new(),
             session_id: "session-1".into(),
             title: "Test".into(),
             cwd: PathBuf::from("/workspace"),

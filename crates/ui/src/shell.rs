@@ -5111,7 +5111,6 @@ mod tests {
     /// wholesale, so the fields the panel does not read stay at their zero.
     fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::SessionStatus {
         tcode_protocol::SessionStatus {
-            pull_requests: Vec::new(),
             session_id: session.into(),
             title: "Compact panel".into(),
             cwd: cwd.to_path_buf(),
