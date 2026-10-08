@@ -439,9 +439,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         Topic::Settings,
         Topic::Providers,
         Topic::RuntimeEvents,
-        Topic::Preview {
-            session_id: "a".into(),
-        },
+        Topic::Preview,
         Topic::ExternalImport {
             project_id: host.a.id.clone(),
         },

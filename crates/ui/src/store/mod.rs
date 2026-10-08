@@ -80,7 +80,7 @@ impl From<&Topic> for TopicKind {
             Topic::GitStatus { .. } => Self::GitStatus,
             Topic::RuntimeEvents => Self::RuntimeEvents,
             Topic::Terminal { .. } => Self::Terminal,
-            Topic::Preview { .. } => Self::Preview,
+            Topic::Preview => Self::Preview,
             Topic::ExternalImport { .. } => Self::ExternalImport,
         }
     }
@@ -699,6 +699,16 @@ impl WorkspaceStore {
                 ] {
                     let _ = self.host.subscribe(Subscription { topic, after: None });
                 }
+                // A client with no preview backend must not become a competing
+                // owner of the preview: it would win requests it can only
+                // refuse. It still answers `unsupported` for anything that
+                // reaches it through an already-open subscription.
+                if crate::preview_panel::PREVIEW_BACKEND {
+                    let _ = self.host.subscribe(Subscription {
+                        topic: Topic::Preview,
+                        after: None,
+                    });
+                }
                 if let Some(id) = self.selected_session_id.take() {
                     self.select_session(id);
                 }
@@ -1078,7 +1088,7 @@ impl WorkspaceStore {
                 Topic::Settings
                     | Topic::Providers
                     | Topic::RuntimeEvents
-                    | Topic::Preview { .. }
+                    | Topic::Preview
                     | Topic::ExternalImport { .. }
             )
         {
@@ -1111,15 +1121,7 @@ impl WorkspaceStore {
             _ => {}
         }
         match (topic, &envelope.event) {
-            (
-                Topic::Preview { session_id },
-                ServerEvent::PreviewRequest {
-                    session_id: requested,
-                    ..
-                },
-            ) if session_id == requested
-                && self.selected_session_id.as_ref() == Some(session_id) =>
-            {
+            (Topic::Preview, ServerEvent::PreviewRequest { .. }) => {
                 let _ = self.remote_preview.0.try_send(envelope.clone());
             }
             (
@@ -3677,8 +3679,10 @@ pub(crate) mod tests {
                         let scope = worker_scope.lock().unwrap().clone();
                         let response = match request.payload {
                             ClientPayload::Subscribe(subscription)
-                                if subscription.topic == Topic::RuntimeEvents
-                                    && scope == Scope::Full =>
+                                if matches!(
+                                    subscription.topic,
+                                    Topic::RuntimeEvents | Topic::Preview
+                                ) && scope == Scope::Full =>
                             {
                                 HostMessage::Ack {
                                     id: request.id,
@@ -4006,7 +4010,7 @@ pub(crate) mod tests {
                             | Topic::Settings
                             | Topic::Providers
                             | Topic::RuntimeEvents
-                            | Topic::Preview { .. }
+                            | Topic::Preview
                             | Topic::ExternalImport { .. },
                         ..
                     })
@@ -4215,6 +4219,48 @@ pub(crate) mod tests {
         cx.update(|cx| assert_eq!(store.read(cx).preview_proxy().unwrap().unwrap().0, host));
         assert_eq!(client.load_hosts()[0].addrs, ["192.168.31.5:47420"]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn preview_requests_for_an_unviewed_thread_reach_the_panel(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (to_host, _requests) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let requests = store.read_with(cx, |store, _| store.remote_preview_requests());
+        store.update(cx, |store, cx| {
+            store.selected_session_id = Some("viewed".into());
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Preview,
+                    event: ServerEvent::PreviewRequest {
+                        request_id: 7,
+                        session_id: "background".into(),
+                        request: tcode_protocol::PreviewRequest::Status,
+                    },
+                },
+                cx,
+            );
+        });
+        let forwarded = requests
+            .try_recv()
+            .expect("the panel answers for a background thread");
+        assert!(matches!(
+            forwarded.event,
+            ServerEvent::PreviewRequest { request_id: 7, ref session_id, .. } if session_id == "background"
+        ));
     }
 
     #[gpui::test]
