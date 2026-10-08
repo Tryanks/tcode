@@ -1,3 +1,4 @@
+use rushdown::parser::ParserExtension as _;
 use std::borrow::Cow;
 
 use rushdown::ast::{
@@ -22,7 +23,8 @@ pub(crate) fn parse(source: &str) -> BlockNode {
 pub(crate) fn parse_document(source: &str) -> ParsedDocument {
     let parser = rushdown::parser::Parser::with_extensions(
         rushdown::parser::Options::default(),
-        rushdown::parser::gfm(rushdown::parser::GfmOptions::default()),
+        rushdown::parser::gfm(rushdown::parser::GfmOptions::default())
+            .and(super::math_parse::MathParser),
     );
     let mut reader = rushdown::text::BasicReader::new(source);
     let (arena, doc_ref) = parser.parse(&mut reader);
@@ -62,7 +64,7 @@ fn block_node(
             if paragraph.children.is_empty() {
                 return None;
             }
-            BlockNode::Paragraph(paragraph)
+            split_math_blocks(paragraph)
         }
         KindData::Heading(heading) => BlockNode::Heading {
             level: heading.level(),
@@ -113,6 +115,38 @@ fn block_node(
         _ => BlockNode::Unknown,
     };
     Some(block)
+}
+
+fn split_math_blocks(paragraph: Paragraph) -> BlockNode {
+    if !paragraph
+        .children
+        .iter()
+        .any(|node| node.math.as_ref().is_some_and(|math| math.display))
+    {
+        return BlockNode::Paragraph(paragraph);
+    }
+    let mut blocks = Vec::new();
+    let mut pending = Paragraph::default();
+    for node in paragraph.children {
+        if let Some(math) = node.math.as_ref().filter(|math| math.display) {
+            if !pending.text().trim().is_empty() {
+                blocks.push(BlockNode::Paragraph(std::mem::take(&mut pending)));
+            } else {
+                pending = Paragraph::default();
+            }
+            blocks.push(BlockNode::CodeBlock(CodeBlock {
+                code: math.source.clone().into(),
+                lang: Some("latex".into()),
+                ..Default::default()
+            }));
+        } else {
+            pending.children.push(node);
+        }
+    }
+    if !pending.text().trim().is_empty() {
+        blocks.push(BlockNode::Paragraph(pending));
+    }
+    BlockNode::Root { children: blocks }
 }
 
 fn block_children(
@@ -205,6 +239,18 @@ fn parse_inline(
     source: &str,
 ) -> String {
     match arena[node_ref].kind_data() {
+        KindData::Extension(extension) => {
+            let Some(math) = extension
+                .as_any()
+                .downcast_ref::<super::math_parse::MathSpan>()
+            else {
+                return String::new();
+            };
+            let mut node = plain_inline(math.source.clone());
+            node.math = Some(math.clone());
+            paragraph.children.push(node);
+            math.source.clone()
+        }
         KindData::Text(text) => {
             let mut value = decode_entities(text.str(source));
             if text.has_qualifiers(TextQualifier::SOFT_LINE_BREAK)
@@ -295,6 +341,11 @@ fn merge_children_with_mark(
         let mut child_paragraph = Paragraph::default();
         text.push_str(&parse_inline(&mut child_paragraph, arena, child, source));
         for node in child_paragraph.children {
+            if node.math.is_some() {
+                push_merged(paragraph, &mut merged_text, &mut merged_marks, mark.clone());
+                paragraph.children.push(node);
+                continue;
+            }
             let offset = merged_text.len();
             merged_text.push_str(&node.text);
             merged_marks.extend(
@@ -450,6 +501,61 @@ mod tests {
             panic!("expected paragraph");
         };
         paragraph
+    }
+
+    #[test]
+    fn math_delimiters_preserve_tex_inside_markdown() {
+        for source in [
+            r"before \(x_i^2+\frac{1}{2}\) after",
+            r"before $x_i^2+\frac{1}{2}$ after",
+            r"before **\(x_i^2+\frac{1}{2}\)** after",
+        ] {
+            let p = paragraph(source);
+            let formulas: Vec<_> = p
+                .children
+                .iter()
+                .filter_map(|node| node.math.as_ref())
+                .collect();
+            assert_eq!(formulas.len(), 1, "{source}");
+            assert_eq!(formulas[0].source, r"x_i^2+\frac{1}{2}");
+            assert_eq!(p.text(), r"before x_i^2+\frac{1}{2} after");
+        }
+        for source in [
+            r"Cost $5 and $10.",
+            r"`$x$` and `\(y\)`",
+            r"\$x\$",
+            r"unfinished \(x_i",
+        ] {
+            assert!(
+                paragraph(source)
+                    .children
+                    .iter()
+                    .all(|node| node.math.is_none()),
+                "{source}"
+            );
+        }
+        let source = r"1. Hessian
+
+   \[
+   H=\begin{pmatrix}
+   x&-y\\
+   -y&-x
+   \end{pmatrix}
+   \]
+
+   Next paragraph.";
+        let document = parse(source);
+        assert!(
+            document.text().contains(
+                r"H=\begin{pmatrix}
+x&-y\\
+-y&-x
+\end{pmatrix}"
+            ),
+            "{}",
+            document.text()
+        );
+        assert!(document.text().contains("Next paragraph."));
     }
 
     #[test]

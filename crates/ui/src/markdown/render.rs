@@ -155,7 +155,12 @@ pub(super) fn push_root_items(blocks: &[BlockNode], first_block: usize, items: &
     for (offset, block) in blocks.iter().enumerate() {
         let block_ix = first_block + offset;
         let (len, per_item) = match block {
-            BlockNode::CodeBlock(code) if mermaid::is_mermaid(code.lang.as_deref()) => (0, 1),
+            BlockNode::CodeBlock(code)
+                if mermaid::is_mermaid(code.lang.as_deref())
+                    || super::math::is_math(code.lang.as_deref()) =>
+            {
+                (0, 1)
+            }
             BlockNode::CodeBlock(code) => (code_lines(&code.code).len(), CODE_LINES_PER_ITEM),
             BlockNode::List { children, .. } => (children.len(), LIST_ITEMS_PER_ITEM),
             _ => (0, 1),
@@ -240,6 +245,7 @@ pub(super) fn block_span(block: &BlockNode, start: Option<usize>, end: Option<us
                 code: lines.get(span).unwrap_or_default().join("\n").into(),
                 lang: code.lang.clone(),
                 line_states: Arc::new(Mutex::new(states)),
+                formula: Default::default(),
             })
         }
         BlockNode::List {
@@ -581,11 +587,14 @@ fn render_paragraph(
         .children
         .iter()
         .any(|child| super::image_link::for_node(child).is_some());
-    if (has_image && has_text) || has_image_link {
+    if (has_image && has_text)
+        || has_image_link
+        || paragraph.children.iter().any(|child| child.math.is_some())
+    {
         return InlineFlow::new(
             id.to_string(),
             view.clone(),
-            inline_flow_items(paragraph, cx),
+            inline_flow_items(paragraph, id, cx),
         )
         .into_any_element();
     }
@@ -729,7 +738,7 @@ fn marks_for_node(marks: &[(Range<usize>, TextMark)], offset: usize, cx: &mut Ap
     (links, highlights, fonts)
 }
 
-fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem> {
+fn inline_flow_items(paragraph: &Paragraph, id: &str, cx: &mut App) -> Vec<InlineFlowItem> {
     let mut items = Vec::new();
     let mut text = String::new();
     let mut links = Vec::new();
@@ -761,7 +770,23 @@ fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem>
                 code_style: None,
             });
         };
-    for child in &paragraph.children {
+    for (ix, child) in paragraph.children.iter().enumerate() {
+        if let Some(math) = &child.math {
+            flush_text(
+                &mut items,
+                &mut text,
+                &mut links,
+                &mut highlights,
+                &mut fonts,
+                &mut segment_state,
+            );
+            items.push(InlineFlowItem::Math {
+                math: math.clone(),
+                state: child.state.clone(),
+                path: format!("{id}-math-{ix}"),
+            });
+            continue;
+        }
         if let Some(link) = super::image_link::for_node(child) {
             flush_text(
                 &mut items,
@@ -1093,7 +1118,7 @@ fn render_code_block(
         .to_string();
     let context_view = view.clone();
     // One button per fence, on the item that paints its first line.
-    let copy = first.then(|| {
+    let copy = (first && !super::math::is_math(code.lang.as_deref())).then(|| {
         let copied = view.read(cx).copied.is(&options.path);
         let compact = crate::window_seam::window_is_compact(window, cx);
         let (view, path, code) = (view.clone(), options.path.clone(), whole_code.clone());
@@ -1124,7 +1149,7 @@ fn render_code_block(
         };
         corner
     });
-    div()
+    let content = div()
         .id(span_id(&options.path, &span))
         .when(last && !options.is_last, |block| block.pb(rems(1.)))
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
@@ -1145,7 +1170,20 @@ fn render_code_block(
                 .child(v_flex().w_full().children(rendered_lines))
                 .children(copy),
         )
-        .into_any_element()
+        .into_any_element();
+    if super::math::is_math(code.lang.as_deref()) {
+        super::math::block(
+            code_text,
+            &code.formula,
+            content,
+            &options.path,
+            view,
+            window,
+            cx,
+        )
+    } else {
+        content
+    }
 }
 
 /// A Mermaid fence whose source laid out: the picture replaces the code, and

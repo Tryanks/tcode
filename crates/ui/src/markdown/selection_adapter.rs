@@ -361,7 +361,7 @@ impl MarkdownSelectionAdapter {
         window_point: Point<Pixels>,
     ) -> Vec<(Arc<Mutex<InlineState>>, usize)> {
         let frame = self.frame.borrow();
-        frame
+        let mut runs = frame
             .runs
             .iter()
             .zip(&frame.run_states)
@@ -369,6 +369,17 @@ impl MarkdownSelectionAdapter {
                 let bounds = run.bounds();
                 bounds.top() <= window_point.y && window_point.y < bounds.bottom()
             })
+            .collect::<Vec<_>>();
+        // A formula and mixed inline content have several runs on the same
+        // row; the endpoint belongs to the closest run, not the first one.
+        runs.sort_by_key(|(run, _)| {
+            let bounds = run.bounds();
+            let distance = (bounds.left() - window_point.x)
+                .max(window_point.x - bounds.right())
+                .max(px(0.));
+            distance.as_f32().to_bits()
+        });
+        runs.into_iter()
             .map(|(run, state)| (state.clone(), nearest_boundary(run, window_point)))
             .collect()
     }

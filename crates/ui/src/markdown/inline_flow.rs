@@ -48,6 +48,11 @@ pub(super) struct InlineFlow {
 }
 
 pub(super) enum InlineFlowItem {
+    Math {
+        math: super::math_parse::MathSpan,
+        state: Arc<Mutex<InlineState>>,
+        path: String,
+    },
     Text {
         state: Arc<Mutex<InlineState>>,
         text: SharedString,
@@ -256,6 +261,11 @@ impl Element for InlineFlow {
                     .into_any_element();
                     Some(badge.layout_as_root(AvailableSpace::min_size(), window, cx))
                 }
+                InlineFlowItem::Math { math, state, path } => {
+                    let mut element =
+                        super::math::inline(math, state, path, &self.view, window, cx);
+                    Some(element.layout_as_root(AvailableSpace::min_size(), window, cx))
+                }
                 InlineFlowItem::Text { .. } => None,
             })
             .collect::<Vec<_>>();
@@ -404,6 +414,9 @@ impl Element for InlineFlow {
                         .w(fragment_size.width)
                         .h(fragment_size.height)
                         .into_any_element(),
+                        InlineFlowItem::Math { math, state, path } => {
+                            super::math::inline(math, state, path, &self.view, window, cx)
+                        }
                         InlineFlowItem::Text { .. } => unreachable!(),
                     };
                     element.prepaint_as_root(
@@ -455,7 +468,7 @@ impl From<&InlineFlowItem> for MeasureItem {
                 font_overrides: font_overrides.clone(),
                 code_style: code_style.clone(),
             },
-            InlineFlowItem::Image { .. } => Self::Image,
+            InlineFlowItem::Math { .. } | InlineFlowItem::Image { .. } => Self::Image,
             InlineFlowItem::ImageLink { .. } => Self::ImageLink,
         }
     }

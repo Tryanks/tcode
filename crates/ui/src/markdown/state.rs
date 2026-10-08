@@ -49,6 +49,7 @@ pub struct MarkdownState {
     pub(super) pending_context: Option<PendingContextTarget>,
     /// Keyed by the copied code block's root path.
     pub(super) copied: CopiedMark,
+    pub(super) math_sources: std::collections::HashSet<String>,
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
     pub(super) link_press_origin: Option<Point<Pixels>>,
@@ -91,6 +92,7 @@ impl MarkdownState {
             link_targets: LinkTargetCache::default(),
             pending_context: None,
             copied: CopiedMark::default(),
+            math_sources: Default::default(),
             link_press_origin: None,
             is_selecting: false,
             text: text.to_string(),
@@ -128,6 +130,7 @@ impl MarkdownState {
         if self.text == text {
             return;
         }
+        self.math_sources.clear();
         self.text.clear();
         self.text.push_str(text);
         self.has_potential_link_reference_definition =
@@ -217,6 +220,23 @@ impl MarkdownState {
             None => path,
         };
         crate::store::host_image(path)
+    }
+
+    pub(super) fn set_math_source(&mut self, path: &str, source: bool, cx: &mut Context<Self>) {
+        self.prepare_reparse(cx);
+        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.selection_adapter
+            .virtual_blocks
+            .borrow_mut()
+            .forget_positions();
+        if source {
+            self.math_sources.insert(path.into());
+        } else {
+            self.math_sources.remove(path);
+        }
+        self.list_state.reset(self.items.len());
+        self.measured_content_height = None;
+        cx.notify();
     }
 
     pub(super) fn copy_code(&mut self, path: String, code: String, cx: &mut Context<Self>) {

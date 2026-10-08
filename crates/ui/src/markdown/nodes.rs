@@ -66,7 +66,10 @@ impl BlockNode {
                 .join("\n"),
             Self::Paragraph(paragraph) => paragraph.text(),
             Self::Heading { children, .. } => children.text(),
-            Self::CodeBlock(code) => rendered_code_text(&code.code),
+            Self::CodeBlock(code) => code
+                .formula
+                .text()
+                .unwrap_or_else(|| rendered_code_text(&code.code)),
             Self::Table(table) => table
                 .children
                 .iter()
@@ -125,18 +128,26 @@ impl BlockNode {
         let mut leaves = Vec::new();
         self.collect_text_leaves(&mut leaves);
         leaves.iter().enumerate().find_map(|(leaf, node)| {
-            let line = match node {
+            let (line, offset) = match node {
                 Self::Paragraph(paragraph)
                 | Self::Heading {
                     children: paragraph,
                     ..
-                } => Arc::ptr_eq(&paragraph.state, state).then_some(0)?,
-                Self::CodeBlock(code) => code
-                    .line_states
-                    .lock()
-                    .ok()?
-                    .iter()
-                    .position(|line| Arc::ptr_eq(line, state))?,
+                } => (0, paragraph.offset_of(state, offset)?),
+                Self::CodeBlock(code) => {
+                    if let Some(offset) = code.formula.offset_of(state, offset) {
+                        (0, offset)
+                    } else {
+                        (
+                            code.line_states
+                                .lock()
+                                .ok()?
+                                .iter()
+                                .position(|line| Arc::ptr_eq(line, state))?,
+                            offset,
+                        )
+                    }
+                }
                 _ => return None,
             };
             Some(TextPosition {
@@ -206,10 +217,17 @@ impl BlockNode {
                 children: children.detached(),
             },
             Self::CodeBlock(code) => Self::CodeBlock(CodeBlock {
-                code: code.code.clone(),
+                code: code
+                    .formula
+                    .text()
+                    .map(Into::into)
+                    .unwrap_or_else(|| code.code.clone()),
+                formula: Default::default(),
                 lang: code.lang.clone(),
                 line_states: Arc::new(Mutex::new(
-                    rendered_code_text(&code.code)
+                    code.formula
+                        .text()
+                        .unwrap_or_else(|| rendered_code_text(&code.code))
                         .split('\n')
                         .map(|line| InlineState::shared(line.to_string().into()))
                         .collect(),
@@ -427,23 +445,35 @@ impl PartialEq for ImageNode {
 pub(crate) struct InlineNode {
     pub(crate) text: SharedString,
     pub(crate) image: Option<ImageNode>,
+    pub(super) math: Option<super::math_parse::MathSpan>,
     pub(crate) marks: Vec<(Range<usize>, TextMark)>,
     pub(super) state: Arc<Mutex<InlineState>>,
 }
 
 impl PartialEq for InlineNode {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.image == other.image && self.marks == other.marks
+        self.text == other.text
+            && self.image == other.image
+            && self.math == other.math
+            && self.marks == other.marks
     }
 }
 
 impl InlineNode {
+    fn rendered_text(&self) -> String {
+        self.math
+            .as_ref()
+            .and_then(|math| math.selection.text())
+            .unwrap_or_else(|| self.text.to_string())
+    }
+
     pub(crate) fn new(text: impl Into<SharedString>) -> Self {
         let text = text.into();
         Self {
             state: InlineState::shared(text.clone()),
             text,
             image: None,
+            math: None,
             marks: vec![],
         }
     }
@@ -473,6 +503,27 @@ impl PartialEq for Paragraph {
 }
 
 impl Paragraph {
+    fn offset_of(&self, state: &Arc<Mutex<InlineState>>, offset: usize) -> Option<usize> {
+        if Arc::ptr_eq(&self.state, state) {
+            return Some(offset);
+        }
+        let mut start = 0;
+        for child in &self.children {
+            if let Some(offset) = child
+                .math
+                .as_ref()
+                .and_then(|math| math.selection.offset_of(state, offset))
+            {
+                return Some(start + offset);
+            }
+            if Arc::ptr_eq(&child.state, state) {
+                return Some(start + offset);
+            }
+            start += child.rendered_text().len();
+        }
+        None
+    }
+
     /// A copy with fresh selection state, the whole text in `state`.
     fn detached(&self) -> Self {
         Self {
@@ -480,7 +531,9 @@ impl Paragraph {
                 .children
                 .iter()
                 .map(|child| InlineNode {
-                    state: InlineState::shared(child.text.clone()),
+                    text: child.rendered_text().into(),
+                    state: InlineState::shared(child.rendered_text().into()),
+                    math: None,
                     ..child.clone()
                 })
                 .collect(),
@@ -491,14 +544,22 @@ impl Paragraph {
     pub(crate) fn text(&self) -> String {
         self.children
             .iter()
-            .map(|node| node.text.as_ref())
+            .map(|node| node.rendered_text())
             .collect()
     }
 
     pub(super) fn selected_text(&self) -> String {
         let mut text = String::new();
         for child in &self.children {
-            append_selection(&mut text, &child.state);
+            if let Some(selected) = child
+                .math
+                .as_ref()
+                .and_then(|math| math.selection.selected_text())
+            {
+                text.push_str(&selected);
+            } else {
+                append_selection(&mut text, &child.state);
+            }
         }
         append_selection(&mut text, &self.state);
         text
@@ -506,6 +567,9 @@ impl Paragraph {
 
     pub(super) fn clear_selection(&self) {
         for child in &self.children {
+            if let Some(math) = &child.math {
+                math.selection.clear();
+            }
             clear_inline_selection(&child.state);
         }
         clear_inline_selection(&self.state);
@@ -514,6 +578,7 @@ impl Paragraph {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CodeBlock {
+    pub(super) formula: super::math_layout::FormulaSelection,
     pub(crate) code: SharedString,
     pub(crate) lang: Option<SharedString>,
     pub(super) line_states: Arc<Mutex<Vec<Arc<Mutex<InlineState>>>>>,
@@ -554,6 +619,9 @@ impl CodeBlock {
     }
 
     fn selected_text(&self) -> String {
+        if let Some(text) = self.formula.selected_text() {
+            return text;
+        }
         let Ok(states) = self.line_states.lock() else {
             return String::new();
         };
@@ -584,6 +652,7 @@ impl CodeBlock {
     }
 
     fn clear_selection(&self) {
+        self.formula.clear();
         if let Ok(states) = self.line_states.lock() {
             states.iter().for_each(clear_inline_selection);
         }
