@@ -73,7 +73,8 @@ pub use wire::{
 // Unreleased: replaces SessionActivity.background_only with waiting, which
 // also covers unfinished child threads; adds the CreateNewProject and
 // StartScratchDraft commands; adds per-host GitHub settings, credential source
-// discovery, SetGitHubToken and RefreshGitHubCredentials.
+// discovery, SetGitHubToken and RefreshGitHubCredentials; adds the
+// SetProjectRoot command.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]
