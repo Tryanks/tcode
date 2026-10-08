@@ -904,7 +904,9 @@ impl PullRequestsPanel {
                                 } else {
                                     cx.theme().muted_foreground
                                 })
-                                .when(snapshot.is_none(), |title| title.font_family(cx.theme().mono_font_family.clone()))
+                                .when(snapshot.is_none(), |title| {
+                                    title.font_family(cx.theme().mono_font_family.clone())
+                                })
                                 .child(title),
                         )
                         .when(

@@ -1006,6 +1006,14 @@ impl AppShell {
                 .update(cx, |state, cx| state.close_palette(cx));
             return true;
         }
+        // An agent is reached from its lead, so Back returns there first.
+        if self.window_state.read(cx).compact
+            && self.destination(cx) == Destination::Thread
+            && let Some((store, parent)) = self.agent_lead(cx)
+        {
+            store.update(cx, |store, _| store.select_session(parent));
+            return true;
+        }
         // Everything below is one history: settings detail, settings root, a
         // Hosts visit, Pair, and the workspace pages all pop the same way.
         // Leaving a page never touches the attachment.
@@ -1536,10 +1544,35 @@ fn compact_label(key: &str) -> String {
 }
 
 impl AppShell {
+    /// The lead thread of the open agent, when one is open.
+    fn agent_lead(&self, cx: &App) -> Option<(Entity<WorkspaceStore>, String)> {
+        let store = self.attachment.as_ref()?.link.store.clone();
+        let parent = {
+            let store = store.read(cx);
+            let active = store.active_session_id()?;
+            let sessions = store.sidebar_sessions();
+            let parent = sessions
+                .iter()
+                .find(|meta| meta.id == active)?
+                .parent_session_id
+                .clone()?;
+            sessions
+                .iter()
+                .any(|meta| meta.id == parent)
+                .then_some(parent)?
+        };
+        Some((store, parent))
+    }
+
     /// Back to whatever is under this page, labelled with that destination's
     /// short fixed label. `None` at the root, where the platform owns Back.
     fn back_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let label = self.window_state.read(cx).parent()?.back_label();
+        let label = if self.destination(cx) == Destination::Thread && self.agent_lead(cx).is_some()
+        {
+            crate::tr!("mobile.thread").into_owned().into()
+        } else {
+            self.window_state.read(cx).parent()?.back_label()
+        };
         Some(
             back_button("compact-back", label, cx)
                 .debug_selector(|| "compact-back".into())
@@ -5314,6 +5347,7 @@ mod tests {
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
+                agent: None,
             },
             stopping: false,
             native_rewind_blocked: false,

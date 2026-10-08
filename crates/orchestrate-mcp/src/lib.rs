@@ -24,7 +24,6 @@ pub enum OrchestrateOp {
         brief: String,
         cwd: Option<String>,
         worktree: Option<bool>,
-        archive_on_complete: Option<bool>,
         result_max_chars: Option<u32>,
         /// Per-dispatch override of the profile's fast-mode setting.
         fast: Option<bool>,
@@ -48,9 +47,10 @@ pub enum OrchestrateOp {
         parent_id: String,
         thread_id: String,
     },
-    Archive {
+    /// The lead accepts a finished child's result: settling it is the delivery.
+    Settle {
         parent_id: String,
-        thread_ids: Vec<String>,
+        thread_id: String,
     },
     Approve {
         parent_id: String,

@@ -18,11 +18,13 @@ const CALLBACK_TITLE_MAX_CHARS: usize = 24;
 const DISCLOSURE_LINE_HEIGHT: f32 = 20.;
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
 
+/// `on_open` opens the child the callback reports on, while it still exists.
 pub(crate) fn callback_row(
     entry_id: &str,
     callback: &OrchestrateCallback,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_open: Option<super::subagent::ClickHandler>,
     cx: &App,
 ) -> AnyElement {
     let title = truncate_chars(&callback.title, CALLBACK_TITLE_MAX_CHARS);
@@ -35,14 +37,29 @@ pub(crate) fn callback_row(
     } else {
         callback.body.clone()
     };
-    disclosure(
-        &format!("orchestrate-callback-{entry_id}"),
-        label,
-        &body,
-        expanded,
-        on_toggle,
-        cx,
-    )
+    let key = format!("orchestrate-callback-{entry_id}");
+    let open = on_open.map(|on_open| {
+        crate::material::accessible_clickable(
+            h_flex(),
+            SharedString::from(format!("callback-open-{entry_id}")),
+            Role::Link,
+            SharedString::from(crate::tr!("agents.open").into_owned()),
+            cx,
+        )
+        .flex_none()
+        .h(px(24.))
+        .px_1p5()
+        .items_center()
+        .rounded(crate::material::radius_button(cx))
+        .text_size(px(11.))
+        .text_color(cx.theme().primary)
+        .cursor_pointer()
+        .hover(|link| link.bg(cx.theme().accent))
+        .on_click(on_open)
+        .child(crate::tr!("agents.open_child"))
+        .into_any_element()
+    });
+    disclosure_with(&key, label, &body, expanded, on_toggle, open, cx)
 }
 
 /// A centered disclosure notification with a height-capped verbatim body: the
@@ -55,6 +72,18 @@ pub(crate) fn disclosure(
     full_text: &str,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    disclosure_with(key, label, full_text, expanded, on_toggle, None, cx)
+}
+
+fn disclosure_with(
+    key: &str,
+    label: SharedString,
+    full_text: &str,
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    trailing: Option<AnyElement>,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -87,6 +116,7 @@ pub(crate) fn disclosure(
         .gap_2()
         .child(super::dividers::divider_stub(cx))
         .child(toggle)
+        .children(trailing)
         .child(super::dividers::divider_stub(cx));
 
     let mut block = v_flex().w_full().gap_1().child(row);
@@ -131,7 +161,7 @@ fn localized_callback_state(state: &str) -> Cow<'static, str> {
     }
 }
 
-fn truncate_chars(text: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     let text = one_line(text);
     if text.chars().count() <= max {
         return text;

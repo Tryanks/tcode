@@ -1,5 +1,6 @@
 mod acp_panel;
 mod add_project_dialog;
+mod agents_panel;
 pub mod assets;
 /// The window's link to a host: its transport tasks and workspace store.
 pub mod attachment;
