@@ -7,6 +7,9 @@ pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_r
 
 #[derive(Default)]
 pub(super) struct McpWiring {
+    pub(super) pull_request_url: Option<String>,
+    pub(super) pull_request_tokens: Option<pull_request_mcp::TokenRegistry>,
+    pub(super) pull_request_registrations: HashMap<String, agent::McpRegistration>,
     pub(super) preview_url: Option<String>,
     pub(super) preview_tokens: Option<preview_mcp::TokenRegistry>,
     pub(super) preview_registrations: HashMap<String, agent::McpRegistration>,
@@ -392,6 +395,8 @@ impl AppState {
             cx,
         );
         self.upsert_session_in_memory(meta.clone());
+        self.discover_pull_requests(Some(meta.id.clone()), false, cx)
+            .detach();
         let id = meta.id.clone();
         let provider_commands = self.cached_provider_commands_for(&meta);
         let mut child = Self::build_draft_session(

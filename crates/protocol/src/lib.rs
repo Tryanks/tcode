@@ -74,6 +74,9 @@ pub use wire::{
 // also covers unfinished child threads; adds the CreateNewProject and
 // StartScratchDraft commands; adds per-host GitHub settings, credential source
 // discovery, SetGitHubToken and RefreshGitHubCredentials.
+// Unreleased: linked PRs in SessionMeta/SessionStatus; LinkPullRequest, UnlinkPullRequest
+// and RefreshPullRequests commands, the PullRequestLinked command result and
+// PullRequestRepository query for the manual link dialog.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

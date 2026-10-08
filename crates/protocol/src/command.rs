@@ -92,6 +92,17 @@ pub enum Command {
         token: Option<String>,
     },
     RefreshGitHubCredentials,
+    LinkPullRequest {
+        session_id: String,
+        reference: String,
+    },
+    UnlinkPullRequest {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+    },
+    RefreshPullRequests {
+        session_id: String,
+    },
     SetProfileSecret {
         profile_id: String,
         name: String,
@@ -428,6 +439,10 @@ pub enum Command {
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum CommandResponse {
     Unit,
+    PullRequestLinked {
+        key: tcode_core::pull_request::PullRequestKey,
+        already_linked: bool,
+    },
     ProjectId(Option<String>),
     SessionId(Option<String>),
     PendingRelaunchSection {
@@ -442,7 +457,10 @@ impl Command {
     /// The thread whose state this command addresses, for delivery navigation.
     pub fn session_id(&self) -> Option<&str> {
         match self {
-            Self::OrchestrateTurn { session_id, .. }
+            Self::LinkPullRequest { session_id, .. }
+            | Self::UnlinkPullRequest { session_id, .. }
+            | Self::RefreshPullRequests { session_id }
+            | Self::OrchestrateTurn { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }
             | Self::SetTerminalHeight { session_id, .. }
@@ -507,6 +525,7 @@ impl Command {
                 | Self::PreviewReply { .. }
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
+                | Self::RefreshPullRequests { .. }
                 | Self::RefreshGitHubCredentials
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage

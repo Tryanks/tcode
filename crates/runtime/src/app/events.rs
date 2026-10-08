@@ -8,6 +8,7 @@ impl AppState {
             serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
         );
 
+        self.observe_pull_request_event(session_id, &event, cx);
         if self.reroute_native_subagent_event(session_id, &event, cx) {
             return;
         }

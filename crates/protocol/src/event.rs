@@ -407,6 +407,8 @@ pub struct SessionPlan {
 /// Host-owned runtime and full-history facts for one resident session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStatus {
+    #[serde(default)]
+    pub pull_requests: Vec<tcode_core::pull_request::ThreadPullRequestLink>,
     pub session_id: String,
     pub title: String,
     pub cwd: PathBuf,

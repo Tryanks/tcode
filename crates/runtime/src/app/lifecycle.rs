@@ -100,6 +100,10 @@ impl AppState {
         } else {
             None
         };
+        let pull_request_registration = self.pull_request_registration_for(&meta);
+        if let Some(active) = self.resident_mut(session_id) {
+            active.pull_request_tools = pull_request_registration.is_some();
+        }
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
@@ -135,6 +139,8 @@ impl AppState {
                 orchestrate_report_registration,
                 computer_use_registration,
             );
+            let mut opts = opts;
+            opts.mcp_servers.extend(pull_request_registration);
             let result = provider_launcher.launch(meta.provider, opts).await;
             host_cx.enqueue(move |state, cx| {
                 let matches_active = state.residents.live.get(&session_id).is_some_and(|active| {
@@ -318,6 +324,14 @@ impl AppState {
     }
 
     pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+        let discover = self
+            .sessions
+            .iter()
+            .find(|old| old.id == meta.id)
+            .is_none_or(|old| {
+                (old.archived_at.is_some() && meta.archived_at.is_none())
+                    || (old.settled_at.is_some() && meta.settled_at.is_none())
+            });
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),
@@ -330,6 +344,10 @@ impl AppState {
         // and re-parsing every session's meta would stall the mailbox.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
+        if discover {
+            self.discover_pull_requests(Some(meta.id.clone()), true, cx)
+                .detach();
+        }
     }
 
     pub(crate) fn shutdown_active(&mut self, target_id: &str, cx: &mut HostCx) {
@@ -356,6 +374,7 @@ impl AppState {
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
         self.stop_diff_pass();
+        self.stop_pull_request_workers();
         for id in self
             .mcp
             .computer_use_registrations
@@ -549,6 +568,7 @@ impl AppState {
     }
 
     pub(super) fn revoke_preview_registration(&mut self, session_id: &str) {
+        self.revoke_pull_request_registration(session_id);
         if let Some(registration) = self.mcp.preview_registrations.remove(session_id)
             && let Some(tokens) = &self.mcp.preview_tokens
         {

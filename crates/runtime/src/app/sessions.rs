@@ -1654,7 +1654,9 @@ impl AppState {
                 },
                 cx,
             );
+            let id = meta.id.clone();
             self.upsert_session_in_memory(meta);
+            self.discover_pull_requests(Some(id), false, cx).detach();
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)

@@ -747,6 +747,7 @@ impl AppState {
                 }
             });
         Some(SessionStatus {
+            pull_requests: meta.pull_requests.clone(),
             session_id: session_id.to_string(),
             title: meta.title.clone(),
             cwd: meta.cwd.clone(),

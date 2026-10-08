@@ -2350,10 +2350,18 @@ fn collaboration_starts_a_peer_discussion_with_native_permission() {
     let test_store = TestStore::new("tcode-peer-collaboration-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
     state.update(cx, |state, cx| {
-        let parent = SessionMeta::new(
+        let mut parent = SessionMeta::new(
             ProviderKind::ClaudeCode,
             PathBuf::from("/workspace"),
             Some("claude-fable-5-1".into()),
+        );
+        tcode_core::pull_request::link_pull_request(
+            &mut parent.pull_requests,
+            tcode_core::pull_request::PullRequestKey::new("github.com", "sample/project", 1),
+            "https://github.com/sample/project/pull/1".into(),
+            tcode_core::pull_request::PullRequestSource::Agent,
+            1,
+            true,
         );
         let parent_id = parent.id.clone();
         state.sessions.push(parent);
@@ -2383,6 +2391,7 @@ fn collaboration_starts_a_peer_discussion_with_native_permission() {
         let id = result["thread_id"].as_str().unwrap();
         assert_eq!(result["permission"], "auto_review");
         let child = state.resident(id).unwrap();
+        assert!(child.meta.pull_requests.is_empty());
         assert_eq!(child.meta.model.as_deref(), Some("gpt-6-astra"));
         assert_eq!(
             child.meta.parent_session_id.as_deref(),
@@ -5402,30 +5411,85 @@ fn send_routing_matrix() {
 /// sent as typed.
 #[test]
 fn skill_mentions_use_the_providers_native_invocation() {
-    let command = |name: &str, kind| ProviderCommand {
-        name: name.into(),
+    let command = |kind| ProviderCommand {
+        name: "review".into(),
         description: None,
         kind,
     };
-    let claude = [
-        command("review", ProviderCommandKind::Command),
-        command("review", ProviderCommandKind::Skill),
-    ];
-    let codex = [command("review", ProviderCommandKind::Skill)];
-    assert_eq!(
-        native_skill_invocation("$review the diff".into(), &claude),
-        "/review the diff"
-    );
-    assert_eq!(
-        native_skill_invocation("$review".into(), &claude),
-        "/review"
-    );
-    assert_eq!(
-        native_skill_invocation("$review the diff".into(), &codex),
-        "$review the diff"
-    );
-    for text in ["$HOME is set", "please $review", "$"] {
-        assert_eq!(native_skill_invocation(text.into(), &claude), text);
+    for (provider, input, expected) in [
+        (
+            ProviderKind::ClaudeCode,
+            "$review the diff",
+            "/review the diff",
+        ),
+        (ProviderKind::ClaudeCode, "$review", "/review"),
+        (ProviderKind::Codex, "$review the diff", "$review the diff"),
+        (ProviderKind::ClaudeCode, "$HOME is set", "$HOME is set"),
+        (ProviderKind::ClaudeCode, "please $review", "please $review"),
+        (ProviderKind::ClaudeCode, "$", "$"),
+    ] {
+        for tools in [false, true] {
+            let store = TestStore::new("tcode-native-skill-delivery");
+            let mut cx = TestAppContext::default();
+            let state = cx.new_entity(TestClientState::new((*store).clone()));
+            let (sender, receiver) = smol::channel::unbounded();
+            state.update(&mut cx, |state, _| {
+                let mut active = live_session(provider, sender);
+                active.meta.id = "skill".into();
+                active.provider_commands = if provider == ProviderKind::ClaudeCode {
+                    vec![
+                        command(ProviderCommandKind::Command),
+                        command(ProviderCommandKind::Skill),
+                    ]
+                } else {
+                    vec![command(ProviderCommandKind::Skill)]
+                };
+                active.pull_request_tools = tools;
+                active.push_queued(input.into(), Vec::new());
+                assert_eq!(active.dispatch_next_pending(), Ok(true));
+                state.sessions.push(active.meta.clone());
+                state.install_selected(active);
+            });
+            let SessionCommand::SendTurn {
+                text, delivery_id, ..
+            } = receiver.try_recv().unwrap()
+            else {
+                panic!("expected provider delivery")
+            };
+            if tools {
+                assert_eq!(
+                    text.strip_prefix(pull_requests::LINKING_INSTRUCTIONS),
+                    Some(expected)
+                );
+            } else {
+                assert_eq!(text, expected);
+            }
+            state.update(&mut cx, |state, cx| {
+                state.on_event("skill", AgentEvent::TurnAccepted { delivery_id }, cx)
+            });
+            cx.run_until_parked();
+            let recorded = store.read_events("skill").unwrap();
+            let message = recorded
+                .iter()
+                .find_map(|event| match &event.event {
+                    AgentEvent::ItemCompleted(item) => match &item.content {
+                        ItemContent::UserMessage {
+                            text, context_len, ..
+                        } => Some((text, context_len)),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .unwrap();
+            if tools {
+                let boundary = message.1.unwrap();
+                assert!(message.0[..boundary].contains("link_pull_request"));
+                assert_eq!(&message.0[boundary..], input);
+            } else {
+                assert_eq!(message.0, input);
+                assert_eq!(*message.1, None);
+            }
+        }
     }
 }
 
@@ -6001,6 +6065,14 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         base: "main".into(),
         branch: "tcode/source".into(),
     });
+    tcode_core::pull_request::link_pull_request(
+        &mut source.pull_requests,
+        tcode_core::pull_request::PullRequestKey::new("github.com", "sample/project", 1),
+        "https://github.com/sample/project/pull/1".into(),
+        tcode_core::pull_request::PullRequestSource::Manual,
+        1,
+        true,
+    );
     store.upsert_meta(&source).unwrap();
     store
         .append_event(
@@ -6056,6 +6128,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         let fork = &active.meta;
         assert_ne!(fork.id, source.id);
         assert!(fork.pending_fork);
+        assert!(fork.pull_requests.is_empty());
         assert_eq!(
             fork.resume_cursor.as_ref().unwrap().0["thread_id"],
             "native-source"

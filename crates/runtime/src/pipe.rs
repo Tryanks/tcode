@@ -29,6 +29,7 @@ pub struct HostServices {
     /// URL/tokens and the broker receiver stay host-side. Requests reach
     /// subscribed WebViews through the preview reverse-RPC topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
+    pub pull_requests: Option<pull_request_mcp::PullRequestMcpServer>,
     /// Deliberate construction-time local handle. The broker receiver stays
     /// entirely on the host executor; a remote transport must expose the same
     /// operations as correlated RPC instead of moving the channel.
@@ -145,6 +146,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.attach_computer_use_mcp(server.url, server.tokens);
             }
             let mut cx = HostCx::new(mailbox_tx, event_tx);
+            state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
+            state.start_pull_request_workers(&mut cx);
             state.pump_orchestrate_requests(&mut cx);
             state.pump_preview_requests(preview_requests, &mut cx);
             if services.background_startup_probes {
@@ -422,6 +425,23 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             attachment_paths,
         } => app.orchestrate_turn(&session_id, text, attachment_paths, cx),
         Command::ReloadProvider => app.reload_provider(cx),
+        Command::LinkPullRequest {
+            session_id,
+            reference,
+        } => {
+            return CommandOutcome::Pending(app.link_pull_request(
+                &session_id,
+                reference,
+                tcode_core::pull_request::PullRequestSource::Manual,
+                cx,
+            ));
+        }
+        Command::UnlinkPullRequest { session_id, key } => {
+            app.unlink_pull_request(&session_id, &key, cx);
+        }
+        Command::RefreshPullRequests { session_id } => {
+            app.refresh_thread_pull_requests(&session_id, cx)
+        }
         Command::RefreshGitHubCredentials => app.refresh_github_credentials(cx),
         Command::SetGitHubToken { host, token } => {
             return CommandOutcome::Pending(app.set_github_token(host, token, cx));
@@ -765,6 +785,7 @@ fn dispatch_query(
             ))
         }),
         Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
+        Query::PullRequestRepository { session_id } => app.pull_request_repository(&session_id, cx),
         Query::ListActiveWorkspace { session_id } => {
             let cwd = app
                 .resident(&session_id)

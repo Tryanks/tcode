@@ -137,10 +137,12 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         // Preview requests travel to whichever client shows the session's
         // preview panel, so the headless host serves it too.
         services.preview = Some(preview_mcp::start(&mut mcp_host));
+        services.pull_requests = Some(pull_request_mcp::start(&mut mcp_host));
         if let Err(error) = mcp_host.start() {
             eprintln!("tcode-headless: MCP servers unavailable: {error}");
             services.orchestrate = None;
             services.preview = None;
+            services.pull_requests = None;
         }
     }
     let host =

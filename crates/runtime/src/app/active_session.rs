@@ -26,10 +26,9 @@ pub struct QueuedMessage {
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
     pub(super) options: TurnOptions,
-    /// Byte length of an injected context prefix folded into `text` (set only for
-    /// an `/orchestrate` send). Threaded into the recorded user-message event so
-    /// the timeline can split the prefix from the user's own words; `None` for
-    /// every ordinary send.
+    /// Byte length of visible context folded into `text`, including orchestration
+    /// context and per-turn pull-request instructions. The recorded event uses
+    /// it to split the injected prefix from the user's own words.
     pub(super) context_len: Option<usize>,
     /// Context-window selection changed while the provider was live.
     pub(super) context_window_changed: Option<u64>,
@@ -140,6 +139,7 @@ pub struct ActiveSession {
     pub timeline: Timeline,
     /// Git branch of the session cwd, if it is a git repo (display-only).
     pub git_branch: Option<String>,
+    pub(super) pull_request_tools: bool,
     /// Local branches for the checkout-row picker, loaded lazily when the
     /// popover opens (empty until then / when not a git repo).
     pub branches: Vec<String>,
@@ -216,6 +216,7 @@ impl ActiveSession {
             meta,
             timeline: Timeline::default(),
             git_branch: None,
+            pull_request_tools: false,
             branches: Vec::new(),
             draft,
             draft_device_id: None,
@@ -539,7 +540,7 @@ impl ActiveSession {
             return Ok(false);
         };
         let now = SystemTime::now();
-        let Some(send) = self
+        let Some(mut send) = self
             .queue
             .iter()
             .find(|message| message.not_before.is_none_or(|time| time <= now))
@@ -547,14 +548,34 @@ impl ActiveSession {
         else {
             return Ok(false);
         };
+        let injected = super::pull_requests::LINKING_INSTRUCTIONS;
+        let already_prefixed = send.context_len.is_some_and(|len| len >= injected.len())
+            && send.text.starts_with(injected);
+        if already_prefixed {
+            send.text = send.text[injected.len()..].to_owned();
+        }
+        let text = send.wire_text(&self.provider_commands);
+        let prefix = if self.pull_request_tools {
+            super::pull_requests::LINKING_INSTRUCTIONS
+        } else {
+            ""
+        };
+        let text = format!("{prefix}{text}");
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,
-                text: send.wire_text(&self.provider_commands),
+                text,
                 options: Some(send.options),
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
+        if !prefix.is_empty()
+            && !already_prefixed
+            && let Some(queued) = self.queue.iter_mut().find(|queued| queued.id == send.id)
+        {
+            queued.text = format!("{prefix}{}", queued.text);
+            queued.context_len = Some(prefix.len() + queued.context_len.unwrap_or(0));
+        }
         self.idle_since = None;
         self.delivery_in_flight = Some(send.id);
         Ok(true)

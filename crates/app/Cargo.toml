@@ -20,6 +20,7 @@ tcode-traverse = { path = "../traverse", features = ["native"] }
 tcode-runtime = { path = "../runtime" }
 tcode-ui = { path = "../ui" }
 preview-mcp = { path = "../preview-mcp" }
+pull-request-mcp = { path = "../pull-request-mcp" }
 orchestrate-mcp = { path = "../orchestrate-mcp" }
 computer-use-mcp = { path = "../computer-use-mcp" }
 mcp-host = { path = "../mcp-host" }
