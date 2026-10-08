@@ -58,9 +58,20 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-nextest
+        if: runner.os != 'Windows'
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
+
+      # Work around install-action's Windows bash startup failure (actions/partner-runner-images#169).
+      - name: Install cargo-nextest on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'nextest.zip'
+          Invoke-WebRequest -Uri https://get.nexte.st/latest/windows -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
+          cargo nextest --version
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
