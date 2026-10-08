@@ -598,7 +598,7 @@ impl PullRequestsPanel {
                             .flex_shrink_0()
                             .max_w(gpui::relative(0.5))
                             .truncate()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .child(branches),
                     )
                     .when_some(layer.clone(), |line, layer| {
@@ -608,14 +608,14 @@ impl PullRequestsPanel {
                     .child(
                         div()
                             .flex_none()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().success)
                             .child(stat.0),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .font_family("monospace")
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().danger)
                             .child(stat.1),
                     )
@@ -871,7 +871,7 @@ impl PullRequestsPanel {
                         .items_center()
                         .child(
                             div()
-                                .font_family("monospace")
+                                .font_family(cx.theme().mono_font_family.clone())
                                 .text_size(px(if compact { 14. } else { 12. }))
                                 .id("pr-number")
                                 .tooltip({
@@ -904,7 +904,7 @@ impl PullRequestsPanel {
                                 } else {
                                     cx.theme().muted_foreground
                                 })
-                                .when(snapshot.is_none(), |title| title.font_family("monospace"))
+                                .when(snapshot.is_none(), |title| title.font_family(cx.theme().mono_font_family.clone()))
                                 .child(title),
                         )
                         .when(
