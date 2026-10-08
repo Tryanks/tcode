@@ -136,7 +136,6 @@ sidebar:
   undo_archived_one: "Thread archived"
   undo_archived: "%{count} threads archived"
   project_thread_rules: "Thread rules…"
-  parent_unavailable: "(parent unavailable)"
   collapse: "Collapse sidebar"
   expand: "Expand sidebar"
   search: "Search"
@@ -189,7 +188,6 @@ sidebar:
   create_thread: "Create new thread"
   working: "Working"
   waiting: "Waiting"
-  child_threads: "%{count} child threads"
   waiting_approval: "Approval"
   waiting_approval_tooltip: "Waiting for approval"
   waiting_input: "Question"
@@ -460,9 +458,6 @@ orchestrate:
     always_allow_description: "Use the provider's most permissive permission value; Tcode chooses the broadest native allow option, forwarding requests without one to the lead."
     manual: "Manual approval"
     manual_description: "Use the provider's native default permission value; you answer requests in the child thread."
-  auto_archive:
-    title: "Auto-archive completed children"
-    description: "Archive a dispatched child thread automatically once its result has been delivered to the lead thread. Failed children always stay visible, a follow-up send restores an archived child, and a dispatch can override this per child with archive_on_complete."
   child_worktrees:
     title: "Isolate children in worktrees"
     description: "When a dispatch cwd is a Git repository root, create a dedicated tcode/<thread-id> branch and worktree for the child. A dispatch can override this with worktree."

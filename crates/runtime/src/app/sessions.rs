@@ -859,26 +859,6 @@ impl AppState {
         self.update_settings(settings, cx);
     }
 
-    /// Fold or unfold a parent thread's children (persisted in settings, so
-    /// every attached client renders the same list).
-    pub fn set_thread_collapsed(&mut self, session_id: &str, collapsed: bool, cx: &mut HostCx) {
-        let folded = self
-            .settings
-            .collapsed_threads
-            .iter()
-            .any(|id| id == session_id);
-        if folded == collapsed {
-            return;
-        }
-        let mut settings = self.settings.clone();
-        if collapsed {
-            settings.collapsed_threads.push(session_id.to_string());
-        } else {
-            settings.collapsed_threads.retain(|id| id != session_id);
-        }
-        self.update_settings(settings, cx);
-    }
-
     pub(crate) fn resident(&self, id: &str) -> Option<&ActiveSession> {
         self.residents.resident(id)
     }
@@ -1116,7 +1096,10 @@ impl AppState {
             return;
         };
         self.invalidate_child_callback(id);
-        if meta.settled_override.is_none() && meta.settled_at.is_none() {
+        if meta.settled_override.is_none()
+            && meta.settled_at.is_none()
+            && meta.cancelled_at.is_none()
+        {
             return;
         }
         if meta.is_settled() {
@@ -1124,51 +1107,11 @@ impl AppState {
         }
         meta.settled_override = None;
         meta.settled_at = None;
+        meta.cancelled_at = None;
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
         self.persist_meta(&meta, cx);
-    }
-
-    pub(super) fn repair_auto_archived_mirrors(
-        store: &SessionStore,
-        sessions: &mut [SessionMeta],
-    ) -> std::io::Result<()> {
-        // Older completion callbacks archived only the orchestrated thread,
-        // leaving its native mirrors visible as roots. Later activity can be
-        // an explicit restore, so it must not be overwritten by this repair.
-        let mut repairs = Vec::new();
-        for (index, meta) in sessions.iter().enumerate() {
-            if meta.native_subagent.is_none() || meta.archived_at.is_some() {
-                continue;
-            }
-            let mut parent = meta.parent_session_id.as_deref();
-            let mut visited = HashSet::from([meta.id.as_str()]);
-            while let Some(id) = parent {
-                if !visited.insert(id) {
-                    break;
-                }
-                let Some(ancestor) = sessions.iter().find(|meta| meta.id == id) else {
-                    break;
-                };
-                if let Some(archived_at) = ancestor.archived_at {
-                    if ancestor.archive_on_complete && meta.updated_at <= archived_at {
-                        repairs.push((index, archived_at));
-                    }
-                    break;
-                }
-                parent = ancestor.parent_session_id.as_deref();
-            }
-        }
-        let repairs: Vec<_> = repairs
-            .into_iter()
-            .map(|(index, archived_at)| {
-                let meta = &mut sessions[index];
-                meta.archived_at = Some(archived_at);
-                tcode_services::store::Mutation::upsert_meta(meta.clone())
-            })
-            .collect();
-        store.apply(&repairs)
     }
 
     /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
@@ -1417,9 +1360,6 @@ impl AppState {
         if terminal_preferences_changed {
             self.write_terminal_preferences(cx);
         }
-        self.settings
-            .collapsed_threads
-            .retain(|id| !deleted.contains(id.as_str()));
         if metas
             .iter()
             .any(|meta| meta.archived_at.is_some() || self.archived_sharing_affected(meta))

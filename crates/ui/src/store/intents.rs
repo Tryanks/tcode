@@ -45,7 +45,6 @@ impl WorkspaceStore {
                 | Command::CycleProjectSort
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
-                | Command::SetThreadCollapsed { .. }
                 | Command::PreviewReply { .. }
                 | Command::ReloadProvider
                 | Command::SetProfileSecret { .. }
@@ -91,19 +90,6 @@ impl WorkspaceStore {
                         self.settings_replica
                             .collapsed_projects
                             .push(project_id.clone());
-                    }
-                }
-                Command::SetThreadCollapsed {
-                    session_id,
-                    collapsed,
-                } => {
-                    self.settings_replica
-                        .collapsed_threads
-                        .retain(|id| id != session_id);
-                    if *collapsed {
-                        self.settings_replica
-                            .collapsed_threads
-                            .push(session_id.clone());
                     }
                 }
                 Command::CycleProjectSort => {
@@ -265,9 +251,6 @@ impl WorkspaceStore {
     }
     pub fn set_orchestrate_child_worktrees(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::OrchestrateChildWorktrees(value));
-    }
-    pub fn set_orchestrate_archive_on_complete(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::OrchestrateArchiveOnComplete(value));
     }
     pub fn set_computer_use_enabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ComputerUseEnabled(value));
@@ -660,18 +643,6 @@ impl WorkspaceStore {
     }
     pub fn toggle_project_collapsed(&mut self, project_id: String, cx: &mut Context<Self>) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });
-        self.local_settings_changed(cx);
-    }
-    pub fn set_thread_collapsed(
-        &mut self,
-        session_id: String,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.dispatch(Command::SetThreadCollapsed {
-            session_id,
-            collapsed,
-        });
         self.local_settings_changed(cx);
     }
     pub fn delete_project(&mut self, project_id: String) {

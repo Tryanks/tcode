@@ -5250,6 +5250,7 @@ mod tests {
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
+                agent: None,
             },
             stopping: false,
             native_rewind_blocked: false,

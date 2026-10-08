@@ -146,9 +146,10 @@ pub struct SessionMeta {
     /// Whether this session receives the tcode_orchestrate MCP registration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub orchestrate_enabled: bool,
-    /// Whether to archive this child after its terminal callback is delivered.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub archive_on_complete: bool,
+    /// Set (unix secs) when orchestrate `cancel` stopped this dispatched
+    /// child: its result is not delivered. A message admitted to it clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_at: Option<u64>,
     /// Maximum inline result characters for this child's terminal callback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_max_chars: Option<u32>,
@@ -203,6 +204,12 @@ impl SessionMeta {
     pub fn is_settled(&self) -> bool {
         self.settled_override == Some(SettledOverride::Settled)
             || (self.settled_override.is_none() && self.settled_at.is_some())
+    }
+
+    /// A dispatched orchestrate child or a provider-native subagent mirror:
+    /// reached from its parent, never listed on its own.
+    pub fn is_subagent(&self) -> bool {
+        self.parent_session_id.is_some() || self.native_subagent.is_some()
     }
 
     pub fn migrate_lifecycle(&mut self) {
@@ -272,7 +279,7 @@ impl SessionMeta {
             parent_session_id: None,
             native_subagent: None,
             orchestrate_enabled: false,
-            archive_on_complete: false,
+            cancelled_at: None,
             result_max_chars: None,
             created_at: now,
             updated_at: now,

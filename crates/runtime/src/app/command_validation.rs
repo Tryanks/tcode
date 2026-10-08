@@ -83,12 +83,16 @@ impl AppState {
                     "This terminal is no longer available.",
                 ));
             }
-            Command::SetThreadCollapsed { session_id, .. }
-                if !self.sessions.iter().any(|meta| &meta.id == session_id) =>
+            Command::CancelAgent { session_id }
+                if !self.sessions.iter().any(|meta| {
+                    &meta.id == session_id
+                        && meta.parent_session_id.is_some()
+                        && meta.native_subagent.is_none()
+                }) =>
             {
                 return Err(error(
-                    "unknown_session",
-                    "This thread is no longer available on the host.",
+                    "not_an_agent",
+                    "This thread is not an agent dispatched by another thread.",
                 ));
             }
             Command::ToggleProjectCollapsed { project_id }
@@ -192,6 +196,7 @@ impl AppState {
         if matches!(
             command,
             Command::SettleSession { .. }
+                | Command::CancelAgent { .. }
                 | Command::UnsettleSession { .. }
                 | Command::SetAutoSettle { .. }
                 | Command::ArchiveSession { .. }

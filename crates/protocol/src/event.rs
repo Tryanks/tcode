@@ -12,6 +12,7 @@ use tcode_core::{
     provider_status::ProviderSnapshot,
     session::{PendingUserInput, ReviewComment, RunningTurn, StoredEvent},
     settings::Settings,
+    settlement::{AgentDelivery, AgentExecution},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
@@ -390,7 +391,8 @@ pub enum ForkAvailability {
 pub struct SessionActivity {
     pub working: bool,
     pub turn_running: bool,
-    /// Background tasks run, or a child thread has not finished.
+    /// Background tasks run, or a child thread holds this thread: one still
+    /// runs, or a dispatched one finished and awaits its lead's settle.
     pub waiting: bool,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
@@ -398,6 +400,16 @@ pub struct SessionActivity {
     pub failed: bool,
     pub unread: bool,
     pub fork: ForkAvailability,
+    /// A dispatched orchestrate child's execution and delivery; absent for
+    /// every other thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentStatus>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStatus {
+    pub execution: AgentExecution,
+    pub delivery: AgentDelivery,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -8,6 +8,12 @@ pub enum ThreadSection {
     Settled,
 }
 
+/// Whether a thread is listed among the threads: archived threads, dispatched
+/// orchestrate children and provider-native subagents are not; forks are.
+pub fn in_roster(meta: &SessionMeta) -> bool {
+    meta.archived_at.is_none() && !meta.is_subagent()
+}
+
 pub fn thread_section(meta: &SessionMeta) -> ThreadSection {
     if meta.is_settled() {
         ThreadSection::Settled
@@ -46,4 +52,43 @@ pub fn partition_threads(sessions: &[SessionMeta]) -> (Vec<SessionMeta>, Vec<Ses
         .iter()
         .cloned()
         .partition(|meta| thread_section(meta) == ThreadSection::Active)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roster_lists_roots_and_forks_but_not_children_mirrors_or_archived_threads() {
+        let thread = |edit: fn(&mut SessionMeta)| {
+            let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/sample".into(), None);
+            edit(&mut meta);
+            in_roster(&meta)
+        };
+        assert!(thread(|_| {}), "root");
+        assert!(
+            thread(|fork| {
+                fork.pending_fork = true;
+                fork.resume_cursor = Some(agent::ResumeCursor(
+                    serde_json::json!({ "thread_id": "source" }),
+                ));
+            }),
+            "fork"
+        );
+        assert!(
+            !thread(|child| child.parent_session_id = Some("lead".into())),
+            "dispatched child"
+        );
+        assert!(
+            !thread(|mirror| {
+                mirror.parent_session_id = Some("lead".into());
+                mirror.native_subagent = Some("spawn-1".into());
+            }),
+            "native subagent"
+        );
+        assert!(
+            !thread(|archived| archived.archived_at = Some(1)),
+            "archived"
+        );
+    }
 }

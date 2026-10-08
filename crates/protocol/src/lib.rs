@@ -14,15 +14,15 @@ mod wire;
 
 pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
 pub use event::{
-    AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
-    ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot, IndexSummary,
-    MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
-    PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable,
-    ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect,
-    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
-    ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
-    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    Topic,
+    AcpMarketplaceItem, AgentStatus, ArchivedSessions, EventEnvelope, ExternalImportState,
+    ExternalImportStatus, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
+    IndexSummary, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge,
+    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog,
+    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
+    SessionEventRecord, SessionPlan, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice,
@@ -85,6 +85,12 @@ pub use wire::{
 // uses the historical top-level human / dispatched child agent fallback.
 // Unreleased: adds the SetProjectRoot command and the WorkingDirectoryMissing
 // runtime error.
+// Unreleased: SessionActivity.agent carries a dispatched child's execution
+// and delivery, and waiting also covers a finished child awaiting settle;
+// thread metadata carries cancelled_at; CancelAgent cancels a dispatched
+// child from a client; Settings.collapsed_threads,
+// SetThreadCollapsed, orchestrate archive_on_complete (settings, metadata and
+// OrchestrateArchiveOnComplete) are removed.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

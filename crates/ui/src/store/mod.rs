@@ -2028,7 +2028,7 @@ impl WorkspaceStore {
             .index_replica
             .0
             .iter()
-            .filter(|meta| meta.archived_at.is_none())
+            .filter(|meta| tcode_core::thread_sort::in_roster(meta))
             .cloned()
             .collect();
         let mut groups = group_sessions(
@@ -2275,7 +2275,7 @@ impl WorkspaceStore {
             .index_replica
             .0
             .iter()
-            .filter(|meta| meta.archived_at.is_none())
+            .filter(|meta| tcode_core::thread_sort::in_roster(meta))
             .cloned()
             .collect();
         tcode_core::thread_sort::sort_threads(&mut visible);
@@ -2297,24 +2297,27 @@ impl WorkspaceStore {
             .any(|id| id == project_id)
     }
 
-    pub fn is_thread_collapsed(&self, session_id: &str) -> bool {
-        self.settings_replica
-            .collapsed_threads
-            .iter()
-            .any(|id| id == session_id)
-    }
-
-    /// Parent thread ids whose child rows are folded, as the host holds them.
-    pub fn collapsed_threads(&self) -> HashSet<String> {
-        self.settings_replica
-            .collapsed_threads
-            .iter()
-            .cloned()
-            .collect()
-    }
-
     pub fn active_session_id(&self) -> Option<String> {
         self.selected_session_id.clone()
+    }
+
+    /// The threads-list row of the selected thread: the thread itself, or
+    /// for an agent, the lead it was reached from.
+    pub fn roster_session_id(&self) -> Option<String> {
+        let mut id = self.selected_session_id.clone()?;
+        for _ in 0..self.index_replica.0.len() {
+            match self
+                .index_replica
+                .0
+                .iter()
+                .find(|meta| meta.id == id)
+                .and_then(|meta| meta.parent_session_id.clone())
+            {
+                Some(parent) => id = parent,
+                None => break,
+            }
+        }
+        Some(id)
     }
 
     pub fn turn_running_for(&self, session_id: &str) -> bool {
@@ -4102,7 +4105,6 @@ pub(crate) mod tests {
         host.requests.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
             store.toggle_project_collapsed("shared".into(), cx);
-            store.set_thread_collapsed("shared-thread".into(), true, cx);
             store.set_sidebar_collapsed(true, cx);
             store.cycle_project_sort(cx);
             store.toggle_favorite_model("team-model".into(), cx);
@@ -4114,7 +4116,6 @@ pub(crate) mod tests {
             });
             assert!(!store.session_unread("shared-thread"));
             assert!(store.is_project_collapsed("shared"));
-            assert!(store.is_thread_collapsed("shared-thread"));
             assert!(store.settings().sidebar_collapsed);
             assert_eq!(
                 store.project_sort(),

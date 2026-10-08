@@ -136,7 +136,6 @@ sidebar:
   undo_archived_one: "对话已归档"
   undo_archived: "已归档 %{count} 个对话"
   project_thread_rules: "对话规则…"
-  parent_unavailable: "（父对话不可用）"
   collapse: "折叠侧边栏"
   expand: "展开侧边栏"
   search: "搜索"
@@ -189,7 +188,6 @@ sidebar:
   create_thread: "新建对话"
   working: "工作中"
   waiting: "等待中"
-  child_threads: "%{count} 个子对话"
   waiting_approval: "待审批"
   waiting_approval_tooltip: "正在等待审批"
   waiting_input: "待回答"
@@ -460,9 +458,6 @@ orchestrate:
     always_allow_description: "使用提供方最宽松的权限值，由 Tcode 选择请求中范围最广的允许选项，没有允许选项时交给主线程。"
     manual: "手动"
     manual_description: "使用提供方的原生默认权限值，由你在子线程中回答审批请求。"
-  auto_archive:
-    title: "自动归档已完成的子线程"
-    description: "子线程的结果送达主线程后自动将其归档。失败的子线程始终保留可见，向已归档的子线程发送 send 会自动恢复它，每次派发也可通过 archive_on_complete 单独覆盖。"
   child_worktrees:
     title: "在工作树中隔离子线程"
     description: "派发目录为 Git 仓库根目录时，为子线程创建专用的 tcode/<thread-id> 分支和工作树。每次派发可通过 worktree 单独覆盖。"
