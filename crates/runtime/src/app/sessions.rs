@@ -923,6 +923,7 @@ impl AppState {
     pub fn update_settings(&mut self, settings: Settings, cx: &mut HostCx) {
         let settlement_changed = self.settings.auto_settle_after_days
             != settings.auto_settle_after_days
+            || self.settings.auto_settle_on_merge != settings.auto_settle_on_merge
             || self.settings.project_settlement_overrides != settings.project_settlement_overrides;
         self.enqueue_settings(&settings, cx);
         if ProviderKind::NATIVE
