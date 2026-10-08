@@ -1427,7 +1427,6 @@ source_control:
   enabled: "Enabled"
   host_placeholder: "github.example.com"
   add_host: "Add host"
-  refresh: "Refresh credentials"
   token_placeholder: "Paste a token"
   token_set: "Saved token is set"
   token_unset: "No saved token"

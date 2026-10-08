@@ -258,12 +258,7 @@ impl HostLink {
 
     /// Restore before starting the pump or admitting new work.
     pub fn restore_outbox(&self, storage: Arc<dyn outbox::Storage>) -> Result<(), ProtocolError> {
-        let mut entries = storage.load()?;
-        let original_count = entries.len();
-        entries.retain(|entry| !entry.command.contains_secret());
-        if entries.len() != original_count {
-            storage.save(&entries)?;
-        }
+        let entries = storage.load()?;
         if entries.len() > outbox::MAX_ITEMS
             || serde_json::to_vec(&entries)
                 .map_err(outbox::storage_error)?
@@ -1108,23 +1103,6 @@ mod tests {
             })
             .is_err()
         );
-        assert!(storage.0.lock().unwrap().is_empty());
-        // Older clients persisted provider secrets. Restore removes those copies
-        // rather than replaying them after a process restart.
-        storage.0.lock().unwrap().push(outbox::Entry {
-            key: "old-secret".into(),
-            command: Command::SetProfileSecret {
-                profile_id: "claude".into(),
-                name: "KEY".into(),
-                value: Some("fixture-private-token".into()),
-            },
-        });
-        let (send, receive) = async_channel::unbounded();
-        let (_send, receive_host) = async_channel::unbounded();
-        let restored = HostLink::new(send, receive_host);
-        restored.restore_outbox(storage.clone()).unwrap();
-        restored.set_connection_state(ConnectionState::Syncing { path: None });
-        assert!(receive.try_recv().is_err());
         assert!(storage.0.lock().unwrap().is_empty());
         link.close();
         assert!(pump.as_mut().poll(&mut cx).is_ready());

@@ -10433,19 +10433,19 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         serde_json::from_slice(&std::fs::read(store.root().join("secrets.json")).unwrap()).unwrap()
     };
     let mut legacy_settings = Settings::default();
-    for id in ["github", "profiles", "version"] {
-        legacy_settings.profiles.insert(
-            id.into(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings::default(),
-            },
-        );
-    }
+    legacy_settings.profiles.insert(
+        "github".into(),
+        ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: ProviderSettings::default(),
+        },
+    );
     settings_store.save(&legacy_settings).unwrap();
-    std::fs::write(store.root().join("secrets.json"),
-        r#"{"github":{"ANTHROPIC_API_KEY":"legacy-provider-secret"},"profiles":{"KEY":"legacy-profiles-secret"},"version":{"KEY":"legacy-version-secret"}}"#,
-    ).unwrap();
+    std::fs::write(
+        store.root().join("secrets.json"),
+        r#"{"github":{"ANTHROPIC_API_KEY":"legacy-provider-secret"}}"#,
+    )
+    .unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
         state.github = tcode_services::github::GitHubApi::host(
@@ -10460,18 +10460,15 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             token: Some("github-writer-secret".into()),
         },
     );
-    cx.run_until(|_| persisted()["github"]["github.com"] == "github-writer-secret");
+    cx.run_until(|_| persisted()["@github"]["github.com"] == "github-writer-secret");
+    // Older builds read secrets.json as profile maps and keep entries they do not know.
+    serde_json::from_value::<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    >(persisted())
+    .unwrap();
     assert_eq!(
         settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
         "legacy-provider-secret"
-    );
-    assert_eq!(
-        settings_store.profile_secrets("profiles")["KEY"],
-        "legacy-profiles-secret"
-    );
-    assert_eq!(
-        settings_store.profile_secrets("version")["KEY"],
-        "legacy-version-secret"
     );
     state.dispatch_command(
         cx,
@@ -10489,7 +10486,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             .map(String::as_str)
             == Some("provider-replacement-secret")
     });
-    assert_eq!(persisted()["github"]["github.com"], "github-writer-secret");
+    assert_eq!(persisted()["@github"]["github.com"], "github-writer-secret");
     state.dispatch_command(
         cx,
         639,
@@ -10527,14 +10524,6 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
                 .contains("github-writer-secret")
         );
     });
-    let secret_file: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(store.root().join("secrets.json")).unwrap()).unwrap();
-    assert_eq!(secret_file["github"]["github.com"], "github-writer-secret");
-    assert_eq!(secret_file["version"], 1);
-    assert_eq!(
-        secret_file["profiles"]["github"]["ANTHROPIC_API_KEY"],
-        "provider-replacement-secret"
-    );
     state.dispatch_command(
         cx,
         641,
@@ -10543,7 +10532,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             token: None,
         },
     );
-    cx.run_until(|_| persisted()["github"]["github.com"].is_null());
+    cx.run_until(|_| persisted().get("@github").is_none());
     assert_eq!(
         settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
         "provider-replacement-secret"
@@ -10569,8 +10558,8 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
             .unwrap()
             .contains("github-writer-secret")
     );
-    let unsupported = r#"{"version":2,"github":{"github.com":"future-secret"},"profiles":{}}"#;
-    std::fs::write(store.root().join("secrets.json"), unsupported).unwrap();
+    let unreadable = r#"{"version":1,"profiles":{"claude":{"KEY":"unread-secret"}}}"#;
+    std::fs::write(store.root().join("secrets.json"), unreadable).unwrap();
     state.dispatch_command(
         cx,
         644,
@@ -10592,6 +10581,6 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     }
     assert_eq!(
         std::fs::read_to_string(store.root().join("secrets.json")).unwrap(),
-        unsupported
+        unreadable
     );
 }

@@ -195,6 +195,12 @@ on a copy of real data.
 pairs from the command line with the `tcode://pair?…` link a machine shows, and `--preview-smoke` / `--cu-smoke` run the
 preview and computer-use smoke phases against the live desktop.
 
+**Phone geometry without pairing**:
+`TCODE_DATA_DIR=$(mktemp -d) cargo run -p tcode-ui --example phone -- --local`
+attaches the phone shell to an in-process host on that profile instead of a
+paired machine, for screenshots from synthetic data
+([#649](https://github.com/Tryanks/tcode/issues/649)).
+
 Native platform behaviour — macOS permission grants, input delivery, camera
 pairing on a phone — is only established by exercising it on that platform.
 Ignored tests that need a desktop slot or credentials say so in their reason;

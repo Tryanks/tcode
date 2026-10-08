@@ -496,9 +496,10 @@ impl AppState {
         let settings_store = SettingsStore::new(store.root().clone());
         let mut settings = settings_store.load();
         settings.collapsed_threads = startup_collapsed_threads(&sessions);
-        let github = tcode_services::github::GitHubApi::host(
-            tcode_services::github::Credentials::new(settings_store.clone(), std::env::vars()),
-        );
+        let credentials =
+            tcode_services::github::Credentials::new(settings_store.clone(), std::env::vars());
+        credentials.configure(settings.github.hosts.clone());
+        let github = tcode_services::github::GitHubApi::host(credentials);
         let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
