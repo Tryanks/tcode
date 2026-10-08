@@ -1034,7 +1034,11 @@ impl PullRequestsPanel {
             .children(tools.tools.iter().map(|(name, description)| {
                 v_flex()
                     .gap_0p5()
-                    .child(div().font_family("monospace").child(name.clone()))
+                    .child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(name.clone()),
+                    )
                     .child(div().text_color(muted).child(description.clone()))
             }))
             .child(caption("pull_requests.agent_instructions"))

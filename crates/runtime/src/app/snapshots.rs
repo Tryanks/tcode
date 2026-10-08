@@ -847,12 +847,12 @@ impl AppState {
             native_rewind_prefill_available: false,
             model_pending_restart: session.model_changed_while_live(),
             options_pending_restart: session.options_changed_while_live(),
-            pull_request_tools: self.pull_request_instructions(session_id).then(|| {
-                tcode_protocol::InjectedPullRequestTools {
+            pull_request_tools: self
+                .pull_request_tools_offered(session.meta.provider)
+                .then(|| tcode_protocol::InjectedPullRequestTools {
                     tools: pull_request_mcp::tool_descriptions().to_vec(),
                     instructions: tcode_core::pull_request::LINKING_INSTRUCTIONS.to_owned(),
-                }
-            }),
+                }),
         })
     }
 

@@ -115,6 +115,10 @@ impl AppState {
             .insert(meta.id.clone(), registration.clone());
         Some(registration)
     }
+    /// Whether a provider of this kind receives the pull request tools when it starts.
+    pub(super) fn pull_request_tools_offered(&self, provider: ProviderKind) -> bool {
+        provider.caps().mcp_servers && self.mcp.pull_request_url.is_some()
+    }
     /// Turns carry the linking block while the tools are registered, the same gate as launch.
     pub(super) fn pull_request_instructions(&self, session_id: &str) -> bool {
         self.mcp.pull_request_registrations.contains_key(session_id)
