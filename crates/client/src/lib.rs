@@ -48,9 +48,11 @@ impl ConnectionState {
 }
 
 /// Transport-neutral cause of a connection failure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionFailure {
-    Unreachable,
+    /// The transport's own account of why, when it can tell; a browser does
+    /// not expose why a WebSocket failed.
+    Unreachable(Option<String>),
     Timeout,
     AuthenticationRejected,
     ProtocolMismatch,
@@ -58,7 +60,7 @@ pub enum ConnectionFailure {
 }
 
 impl ConnectionFailure {
-    pub fn is_terminal(self) -> bool {
+    pub fn is_terminal(&self) -> bool {
         matches!(self, Self::AuthenticationRejected | Self::ProtocolMismatch)
     }
 
@@ -67,7 +69,7 @@ impl ConnectionFailure {
         match reason {
             Some("token") => Self::AuthenticationRejected,
             Some("protocol") => Self::ProtocolMismatch,
-            _ => Self::Unreachable,
+            reason => Self::Unreachable(reason.map(str::to_owned)),
         }
     }
 }
@@ -1374,12 +1376,15 @@ mod tests {
         for (wire, expected) in [
             (Some("token"), ConnectionFailure::AuthenticationRejected),
             (Some("protocol"), ConnectionFailure::ProtocolMismatch),
-            (None, ConnectionFailure::Unreachable),
+            (None, ConnectionFailure::Unreachable(None)),
             (
                 Some("invalid hello or token"),
-                ConnectionFailure::Unreachable,
+                ConnectionFailure::Unreachable(Some("invalid hello or token".into())),
             ),
-            (Some("future reason"), ConnectionFailure::Unreachable),
+            (
+                Some("future reason"),
+                ConnectionFailure::Unreachable(Some("future reason".into())),
+            ),
         ] {
             assert_eq!(ConnectionFailure::hello_rejected(wire), expected);
         }

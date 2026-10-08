@@ -1230,6 +1230,7 @@ remote:
     offline: "Offline"
   failure:
     unreachable: "Host unreachable"
+    unreachable_cause: "Host unreachable: %{reason}"
     timeout: "Connection timed out"
     authentication_rejected: "Access rejected · Pair again"
     protocol_mismatch: "Protocol mismatch · Update the app"
@@ -1267,7 +1268,7 @@ hosts:
     rejected: "The machine rejected this invitation. Check that Accept new devices is on and use a new invitation."
     unconfirmed: "The pairing result could not be confirmed. Create a new invitation on the machine and try again."
     disabled: "This machine is not accepting new device pairings. Turn on Accept new devices there and try again."
-    network_error: "Could not reach %{address}."
+    network_error: "Could not reach %{address}: %{reason}"
     failed: "Could not add the machine: %{reason}"
 
 mobile:

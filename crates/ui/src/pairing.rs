@@ -134,6 +134,7 @@ pub fn joined_message(host: &PairedHost) -> Option<String> {
 /// advice can be localized. The wording is `PairError`'s `Display` in
 /// `crates/traverse/src/client.rs`; anything else is shown as it is.
 pub fn pair_error(error: &str, address: &str) -> String {
+    const UNREACHABLE: &str = "could not connect to the machine";
     let lower = error.to_ascii_lowercase();
     match lower.trim() {
         "invalid or expired invitation" => crate::tr!("hosts.pair.rejected").into_owned(),
@@ -143,8 +144,14 @@ pub fn pair_error(error: &str, address: &str) -> String {
         _ if lower.starts_with("invalid pairing response") => {
             crate::tr!("hosts.pair.unconfirmed").into_owned()
         }
-        _ if lower.starts_with("could not connect to the machine") => {
-            crate::tr!("hosts.pair.network_error", address = address).into_owned()
+        _ if lower.starts_with(UNREACHABLE) => {
+            let reason = error[UNREACHABLE.len()..].trim_start_matches(':').trim();
+            crate::tr!(
+                "hosts.pair.network_error",
+                address = address,
+                reason = reason
+            )
+            .into_owned()
         }
         _ => crate::tr!("hosts.pair.failed", reason = error).into_owned(),
     }
@@ -174,10 +181,17 @@ mod tests {
         }
         assert_eq!(
             pair_error(
-                "could not connect to the machine: connection timed out",
-                "ab12cd34"
+                "could not connect to the machine: No addressing information available: \
+                 Address lookup failed",
+                "Studio"
             ),
-            crate::tr!("hosts.pair.network_error", address = "ab12cd34").into_owned()
+            crate::tr!(
+                "hosts.pair.network_error",
+                address = "Studio",
+                reason = "No addressing information available: Address lookup failed"
+            )
+            .into_owned(),
+            "an unreachable machine keeps the transport's cause"
         );
         assert_eq!(
             pair_error(

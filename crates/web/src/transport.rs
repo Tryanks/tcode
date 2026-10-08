@@ -225,7 +225,7 @@ async fn connection_loop(
         while events.try_recv().is_ok() {}
         let mut immediate = false;
         let mut stable_ms = 0;
-        reason = Some(ConnectionFailure::Unreachable);
+        reason = Some(ConnectionFailure::Unreachable(None));
         if let Ok(socket) = Socket::new(&tx) {
             let mut timer = Some(Timer::new(15000, tx.clone()));
             let mut ready = false;
