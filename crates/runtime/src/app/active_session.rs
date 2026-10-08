@@ -387,6 +387,12 @@ impl ActiveSession {
             || self.background_task_count > 0
     }
 
+    /// Whether a parent still has to wait for this thread: it has work, or its
+    /// provider is still starting up.
+    pub(super) fn is_unfinished(&self) -> bool {
+        self.has_work() || matches!(self.runtime, Runtime::Starting { .. })
+    }
+
     /// Where a send gesture should go, given what the session is doing right
     /// now. This is the whole steering-vs-queueing policy in one place.
     pub(super) fn route(&self, steer: bool) -> SendRouting {

@@ -5115,7 +5115,7 @@ mod tests {
             activity: tcode_protocol::SessionActivity {
                 working: false,
                 turn_running: false,
-                background_only: false,
+                waiting: false,
                 waiting_for_approval: false,
                 waiting_for_input: false,
                 unread: false,

@@ -390,7 +390,8 @@ pub enum ForkAvailability {
 pub struct SessionActivity {
     pub working: bool,
     pub turn_running: bool,
-    pub background_only: bool,
+    /// Background tasks run, or a child thread has not finished.
+    pub waiting: bool,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
     pub unread: bool,

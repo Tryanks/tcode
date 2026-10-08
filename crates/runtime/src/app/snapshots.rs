@@ -621,6 +621,18 @@ impl AppState {
         )
     }
 
+    /// Whether any descendant thread still runs or is itself waiting.
+    fn children_unfinished(&self, parent_id: &str) -> bool {
+        self.sessions
+            .iter()
+            .filter(|meta| meta.parent_session_id.as_deref() == Some(parent_id))
+            .any(|child| {
+                self.resident(&child.id)
+                    .is_some_and(ActiveSession::is_unfinished)
+                    || self.children_unfinished(&child.id)
+            })
+    }
+
     pub(super) fn session_activity(
         &self,
         meta: &SessionMeta,
@@ -632,12 +644,8 @@ impl AppState {
         SessionActivity {
             working: resident.is_some_and(ActiveSession::has_work),
             turn_running: resident.is_some_and(|session| session.turn_in_flight),
-            background_only: resident.is_some_and(|session| {
-                session.background_task_count > 0
-                    && !session.turn_in_flight
-                    && session.delivery_in_flight.is_none()
-                    && session.queue.is_empty()
-            }),
+            waiting: resident.is_some_and(|session| session.background_task_count > 0)
+                || self.children_unfinished(&meta.id),
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
             unread: self.session_unread(meta),

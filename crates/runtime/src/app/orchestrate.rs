@@ -984,13 +984,9 @@ impl AppState {
         meta: &SessionMeta,
         timeline: &Timeline,
     ) -> (&'static str, String, Option<agent::TokenUsage>) {
-        let running = self.resident(&meta.id).is_some_and(|child| {
-            child.turn_in_flight
-                || child.delivery_in_flight.is_some()
-                || !child.queue.is_empty()
-                || child.background_task_count > 0
-                || matches!(child.runtime, Runtime::Starting { .. })
-        });
+        let running = self
+            .resident(&meta.id)
+            .is_some_and(ActiveSession::is_unfinished);
         let state = if running {
             "running"
         } else if trailing_start_error(timeline).is_some() {
