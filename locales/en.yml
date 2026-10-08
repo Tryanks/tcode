@@ -1617,6 +1617,7 @@ pull_requests:
     too_large_to_expand: "Too large to expand (over 1 MiB)."
     binary: "Binary file. Its contents aren't shown."
     oversized: "This diff is too large to show (%{size})."
+    withheld: "GitHub doesn't show this file's diff."
     line_changes: "%{count} changed lines"
     loading_more: "Loading more files…"
     rest_failed: "The rest of this diff could not be loaded."

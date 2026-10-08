@@ -1610,6 +1610,7 @@ pull_requests:
     too_large_to_expand: "文件过大，无法展开（超过 1 MiB）。"
     binary: "二进制文件，不显示内容。"
     oversized: "此差异过大，无法显示（%{size}）。"
+    withheld: "GitHub 未显示此文件的差异。"
     line_changes: "%{count} 行更改"
     loading_more: "正在加载更多文件…"
     rest_failed: "无法加载此差异的其余部分。"

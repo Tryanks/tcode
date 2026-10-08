@@ -68,6 +68,9 @@ pub enum PullRequestPatch {
     Binary,
     /// GitHub withheld the hunks of a file too large to show.
     Oversized,
+    /// GitHub listed the file without hunks or counts: binary, or past its own diff limits,
+    /// which the files listing does not tell apart.
+    Withheld,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

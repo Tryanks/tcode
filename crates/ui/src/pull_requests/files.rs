@@ -990,7 +990,9 @@ impl PullRequestView {
         };
         let availability = match file.patch {
             PullRequestPatch::Binary => Some((IconName::Binary, muted)),
-            PullRequestPatch::Oversized => Some((IconName::FileX, muted)),
+            PullRequestPatch::Oversized | PullRequestPatch::Withheld => {
+                Some((IconName::FileX, muted))
+            }
             PullRequestPatch::Hunks(_) => None,
         };
         let tooltip = file
@@ -1317,6 +1319,10 @@ impl PullRequestView {
                     .into_owned()
                 )
                 .into_owned(),
+            ),
+            PullRequestPatch::Withheld => (
+                IconName::FileX,
+                crate::tr!("pull_requests.files.withheld").into_owned(),
             ),
             PullRequestPatch::Hunks(_) => return div().into_any_element(),
         };

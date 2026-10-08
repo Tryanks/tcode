@@ -57,8 +57,11 @@ fn host_read(url: &str) -> bool {
 /// The body without HTML comments, which GitHub templates leave behind; `None` when nothing
 /// is left to show.
 fn visible_body(body: &str) -> Option<String> {
+    // GitHub stores bodies with CRLF; a carriage return reaching the markdown view's
+    // single-line shaping is drawn as a line break it cannot hold.
+    let body = body.replace("\r\n", "\n").replace('\r', "\n");
     let mut visible = String::new();
-    let mut rest = body;
+    let mut rest = body.as_str();
     while let Some(start) = rest.find("<!--") {
         visible.push_str(&rest[..start]);
         rest = rest[start..]
@@ -988,6 +991,9 @@ impl PullRequestView {
 
 /// What stands in for host media until it can be drawn.
 fn media_stand_in(state: MediaState, url: &str, title: &str, cx: &App) -> Option<AnyElement> {
+    // Alt text may run over lines; these rows truncate on one.
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = title.as_str();
     let muted = cx.theme().muted_foreground;
     let open = |label: &'static str, url: String| {
         Button::new(SharedString::from(format!("pr-media-open-{url}")))

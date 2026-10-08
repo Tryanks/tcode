@@ -606,6 +606,23 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_paragraph_flowing_text_around_an_image_lays_out_across_line_breaks(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        // As GitHub stores a pull request body: CRLF breaks inside one paragraph.
+        let source = "Before ![shot](https://example.invalid/shot.png)\r\nafter the image\nand on";
+        let (_, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(source, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| _ = window.draw(cx));
+        }
+    }
+
+    #[gpui::test]
     fn drag_across_a_long_code_block_copies_lines_never_painted(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);

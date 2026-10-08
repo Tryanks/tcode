@@ -827,14 +827,15 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
     let additions = row["additions"].as_u64().unwrap_or(0);
     let deletions = row["deletions"].as_u64().unwrap_or(0);
     // The files API gives no reason for a missing patch: changed lines without one were
-    // withheld for size, and a file with none is binary unless it is empty or only renamed.
+    // withheld for size. A file with neither is empty, renamed alone, binary, or past GitHub's
+    // diff limits, and only the first two can be told apart here.
     let patch = match row["patch"].as_str().filter(|patch| !patch.is_empty()) {
         Some(patch) => PullRequestPatch::Hunks(patch.to_owned()),
         None if additions + deletions > 0 => PullRequestPatch::Oversized,
         None if kind == FileChangeKind::Rename || row["sha"].as_str() == Some(EMPTY_BLOB) => {
             PullRequestPatch::Hunks(String::new())
         }
-        None => PullRequestPatch::Binary,
+        None => PullRequestPatch::Withheld,
     };
     Some(PullRequestFile {
         previous_path: matches!(status, "renamed" | "copied")

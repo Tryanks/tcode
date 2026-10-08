@@ -313,7 +313,11 @@ fn a_refused_whole_diff_pages_the_changed_files_and_names_withheld_patches() {
         "a full page names the next one"
     );
     assert_eq!(first.files[0].patch, PullRequestPatch::Oversized);
-    assert_eq!(first.files[1].patch, PullRequestPatch::Binary);
+    assert_eq!(
+        first.files[1].patch,
+        PullRequestPatch::Withheld,
+        "the files listing cannot tell a binary from a file past GitHub's limits"
+    );
     assert_eq!(
         (
             &first.files[2].patch,

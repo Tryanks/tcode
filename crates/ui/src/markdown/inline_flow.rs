@@ -739,6 +739,13 @@ fn shape_line(
     runs: &[TextRun],
     window: &mut Window,
 ) -> ShapedLine {
+    // GPUI shapes one line and panics on a break; a break inside a flowed paragraph is a
+    // space of the same byte length, so the runs keep their offsets.
+    let text = if text.contains(['\n', '\r']) {
+        text.replace(['\n', '\r'], " ").into()
+    } else {
+        text
+    };
     window.text_system().shape_line(text, font_size, runs, None)
 }
 
