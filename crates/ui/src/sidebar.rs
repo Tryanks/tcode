@@ -151,6 +151,8 @@ struct ThreadRowState {
     renaming: Option<Entity<InputState>>,
     menu_can_fork: bool,
     title_generating: bool,
+    /// Numbers of the pull requests a watch keeps this thread waiting on.
+    watching: Vec<u64>,
 }
 
 impl ThreadRowState {
@@ -2258,6 +2260,9 @@ impl SessionsSidebar {
             active_direct_children: render_state.active_direct_children,
             menu_can_fork: meta.provider.caps().supports_fork,
             title_generating: self.store.read(cx).title_generating(&meta.id),
+            watching: tcode_core::pull_request::watched(&meta.pull_requests)
+                .map(|link| link.key.number)
+                .collect(),
         }
     }
 
@@ -2466,6 +2471,25 @@ impl SessionsSidebar {
                         Tooltip::new(crate::tr!("sidebar.failed_tooltip")).build(window, cx)
                     })
                 })
+                .when(
+                    !working && !state.failed && !state.waiting() && !state.watching.is_empty(),
+                    |badge| {
+                        let tooltip = match state.watching.as_slice() {
+                            [number] => crate::tr!(
+                                "sidebar.watching_pull_request",
+                                number = number.to_string()
+                            ),
+                            numbers => crate::tr!(
+                                "sidebar.watching_pull_requests",
+                                count = numbers.len().to_string()
+                            ),
+                        }
+                        .into_owned();
+                        badge.tooltip(move |window, cx| {
+                            Tooltip::new(tooltip.clone()).build(window, cx)
+                        })
+                    },
+                )
                 .into_any_element(),
         )
     }

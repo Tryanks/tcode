@@ -1,6 +1,6 @@
 use crate::{
     icon::{Icon, IconName},
-    overlay::{Notification, OverlayExt as _},
+    overlay::{Notification, NotificationType, OverlayExt as _},
     scroll::ScrollableElement as _,
     sizing::Sizable as _,
     store::{TopicKind, WorkspaceStore, observe_store_topics},
@@ -25,6 +25,7 @@ use tcode_core::{
         self, ChecksState, Mergeability, PullRequestBadgeState, PullRequestKey, PullRequestSource,
         PullRequestState, PullRequestSyncError, ReviewDecision, ThreadPullRequestLink,
     },
+    pull_request_watch::{WatchChangeKind, WatchNotice},
     ui::RightTab,
 };
 use tcode_protocol::Command;
@@ -281,6 +282,74 @@ pub fn sidebar_badge(
     )
 }
 
+/// What a watch message reports, localized and joined for its notice and transcript row.
+pub fn watch_notice_kinds(notice: &WatchNotice) -> String {
+    let parts: Vec<_> = match notice {
+        WatchNotice::Update { kinds, stopped } => kinds
+            .iter()
+            .map(|kind| match kind {
+                WatchChangeKind::ChecksFailed => "pull_requests.kind_checks_failed",
+                WatchChangeKind::ChecksPassed => "pull_requests.kind_checks_passed",
+                WatchChangeKind::NewComments => "pull_requests.kind_new_comments",
+                WatchChangeKind::MergeConflict => "pull_requests.kind_merge_conflict",
+            })
+            .chain(stopped.then_some("pull_requests.kind_stopped"))
+            .collect(),
+        WatchNotice::Closed => vec!["pull_requests.kind_closed"],
+        WatchNotice::Unreadable => vec!["pull_requests.kind_unreadable"],
+    };
+    parts
+        .into_iter()
+        .map(|key| crate::tr!(key).into_owned())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The toast a watch's wake or end raises: its kind and message.
+pub fn watch_notice_toast(number: u64, notice: &WatchNotice) -> (NotificationType, String) {
+    let number = number.to_string();
+    match notice {
+        WatchNotice::Update {
+            stopped: false,
+            kinds,
+        } => (
+            if kinds.iter().any(|kind| {
+                matches!(
+                    kind,
+                    WatchChangeKind::ChecksFailed | WatchChangeKind::MergeConflict
+                )
+            }) {
+                NotificationType::Warning
+            } else if kinds
+                .iter()
+                .all(|kind| *kind == WatchChangeKind::ChecksPassed)
+            {
+                NotificationType::Success
+            } else {
+                NotificationType::Info
+            },
+            crate::tr!(
+                "pull_requests.watch_update",
+                number = number,
+                kinds = watch_notice_kinds(notice)
+            )
+            .into_owned(),
+        ),
+        WatchNotice::Update { stopped: true, .. } => (
+            NotificationType::Info,
+            crate::tr!("pull_requests.watch_comment_limit", number = number).into_owned(),
+        ),
+        WatchNotice::Closed => (
+            NotificationType::Info,
+            crate::tr!("pull_requests.watch_closed", number = number).into_owned(),
+        ),
+        WatchNotice::Unreadable => (
+            NotificationType::Error,
+            crate::tr!("pull_requests.watch_unreadable", number = number).into_owned(),
+        ),
+    }
+}
+
 fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
     match link.map(|link| link.source) {
         Some(PullRequestSource::Manual) => "pull_requests.source_manual",
@@ -325,6 +394,13 @@ struct ChangeLink {
     linking: bool,
 }
 
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace=tcode_pull_requests,no_json)]
+struct ChangeWatch {
+    key: PullRequestKey,
+    watching: bool,
+}
+
 struct PullRequestRow<'a> {
     key: PullRequestKey,
     url: String,
@@ -333,11 +409,16 @@ struct PullRequestRow<'a> {
     state: Option<PullRequestState>,
     position: Option<(usize, usize)>,
     depth: usize,
+    /// The thread may start a watch: not settled, archived or a subagent.
+    watchable: bool,
 }
 pub struct PullRequestsPanel {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     scroll: ScrollHandle,
+    /// The watched row whose eye the pointer is over, which then shows what a click does.
+    eye_hovered: Option<PullRequestKey>,
+    agent_tools_open: bool,
     _subscriptions: [Subscription; 2],
 }
 impl PullRequestsPanel {
@@ -362,8 +443,44 @@ impl PullRequestsPanel {
             store,
             window_state,
             scroll: ScrollHandle::new(),
+            eye_hovered: None,
+            agent_tools_open: false,
             _subscriptions: subscriptions,
         }
+    }
+    fn change_watch(&mut self, action: &ChangeWatch, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session_id) = self.store.read(cx).active_session_id() else {
+            return;
+        };
+        let number = action.key.number;
+        let task = self.store.update(cx, |store, cx| {
+            store.command(
+                Command::WatchPullRequest {
+                    session_id,
+                    key: action.key.clone(),
+                    watching: action.watching,
+                },
+                cx,
+            )
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            if let Err(error) = task.await {
+                _ = cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::warning(
+                            crate::tr!(
+                                "pull_requests.watch_failed",
+                                number = number.to_string(),
+                                reason = error.message
+                            )
+                            .into_owned(),
+                        ),
+                        cx,
+                    )
+                });
+            }
+        })
+        .detach();
     }
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session_id) = self.store.read(cx).active_session_id() else {
@@ -407,8 +524,17 @@ impl PullRequestsPanel {
             state,
             position,
             depth,
+            watchable,
         } = row;
         let visible = link.is_some_and(|link| link.visible());
+        let watched = link.is_some_and(|link| link.visible() && link.watch.is_some());
+        // A merged pull request cannot reopen; a saved closed one may have.
+        let can_watch = visible
+            && !watched
+            && watchable
+            && link
+                .and_then(|link| link.snapshot.as_ref())
+                .is_none_or(|snapshot| snapshot.state != PullRequestState::Merged);
         let snapshot = link
             .filter(|link| link.visible())
             .and_then(|link| link.snapshot.as_ref());
@@ -522,6 +648,7 @@ impl PullRequestsPanel {
         let open = url.clone();
         let copy = url.clone();
         let source_is_stack = link.is_some_and(|link| link.source == PullRequestSource::Stack);
+        let watch_key = key.clone();
         let menu = move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
             menu.menu(
                 crate::tr!("pull_requests.open_on_github").into_owned(),
@@ -531,6 +658,20 @@ impl PullRequestsPanel {
                 crate::tr!("pull_requests.copy_link").into_owned(),
                 Box::new(CopyText(copy.clone())),
             )
+            .when(watched || can_watch, |menu| {
+                menu.menu(
+                    crate::tr!(if watched {
+                        "pull_requests.stop_watching"
+                    } else {
+                        "pull_requests.watch"
+                    })
+                    .into_owned(),
+                    Box::new(ChangeWatch {
+                        key: watch_key.clone(),
+                        watching: !watched,
+                    }),
+                )
+            })
             .separator()
             .menu(
                 crate::tr!(if action.linking {
@@ -544,7 +685,65 @@ impl PullRequestsPanel {
                 Box::new(action.clone()),
             )
         };
-        let mut signals = h_flex().gap_1().flex_none();
+        let mut signals = h_flex().gap_1().flex_none().items_center();
+        // The eye leads while the pull request is open or not yet read; the host ends the watch
+        // once it merges or closes.
+        if watched && snapshot.is_none_or(|s| s.state == PullRequestState::Open) {
+            let tooltip = crate::tr!("pull_requests.watching_tooltip").into_owned();
+            signals = signals.child(if compact {
+                // A 14px target is below touch size: the more menu stops it on a phone.
+                Icon::new(IconName::Eye)
+                    .size(px(14.))
+                    .text_color(cx.theme().muted_foreground)
+                    .into_any_element()
+            } else {
+                let hovered = self.eye_hovered.as_ref() == Some(&key);
+                let hover_key = key.clone();
+                let stop = ChangeWatch {
+                    key: key.clone(),
+                    watching: false,
+                };
+                Button::new(SharedString::from(format!(
+                    "pr-eye-{}-{}-{}",
+                    key.host, key.repository, key.number
+                )))
+                .ghost()
+                .xsmall()
+                .icon(
+                    Icon::new(if hovered {
+                        IconName::EyeOff
+                    } else {
+                        IconName::Eye
+                    })
+                    .size(px(14.))
+                    .text_color(if hovered {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    }),
+                )
+                .aria_label(
+                    crate::tr!(
+                        "pull_requests.stop_watching_number",
+                        number = key.number.to_string()
+                    )
+                    .into_owned(),
+                )
+                .tooltip(tooltip)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    let key = hovered.then(|| hover_key.clone());
+                    if this.eye_hovered != key {
+                        this.eye_hovered = key;
+                        cx.notify();
+                    }
+                }))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(Box::new(stop.clone()), cx);
+                })
+                .into_any_element()
+            });
+        }
         if let Some(snapshot) = snapshot.filter(|s| s.state == PullRequestState::Open) {
             if let Some(check) = snapshot.checks_state {
                 let (icon, color, label) = match check {
@@ -792,6 +991,67 @@ impl PullRequestsPanel {
         row.context_menu(menu).into_any_element()
     }
 }
+impl PullRequestsPanel {
+    /// What the host injects into this thread's provider for pull requests, before any call.
+    fn agent_tools(
+        &self,
+        tools: &tcode_protocol::InjectedPullRequestTools,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.agent_tools_open;
+        let muted = cx.theme().muted_foreground;
+        let label = crate::tr!("pull_requests.agent_sees").into_owned();
+        let caption = |key: &'static str| {
+            div()
+                .text_size(px(11.))
+                .text_color(muted)
+                .child(crate::tr!(key))
+        };
+        let header = crate::material::accessible_clickable(
+            h_flex(),
+            "pr-agent-tools",
+            gpui::Role::Button,
+            label.clone(),
+            cx,
+        )
+        .aria_expanded(open)
+        .gap_1()
+        .items_center()
+        .text_size(px(12.))
+        .text_color(muted)
+        .cursor_pointer()
+        .child(Icon::new(IconName::Bot).size(px(12.)))
+        .child(label)
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.agent_tools_open = !this.agent_tools_open;
+            cx.notify();
+        }));
+        let body = v_flex()
+            .pt_1()
+            .gap_2()
+            .text_size(px(12.))
+            .child(caption("pull_requests.agent_tools"))
+            .children(tools.tools.iter().map(|(name, description)| {
+                v_flex()
+                    .gap_0p5()
+                    .child(div().font_family("monospace").child(name.clone()))
+                    .child(div().text_color(muted).child(description.clone()))
+            }))
+            .child(caption("pull_requests.agent_instructions"))
+            .child(crate::chat::components::disclosure::disclosure_body(
+                "pr-agent-instructions",
+                &tools.instructions,
+                cx,
+            ));
+        v_flex()
+            .flex_none()
+            .px_3()
+            .py_2()
+            .child(header)
+            .child(gpui_base::Collapsible::new().open(open).content(body))
+            .into_any_element()
+    }
+}
 impl Render for PullRequestsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
@@ -803,6 +1063,15 @@ impl Render for PullRequestsPanel {
         let read_only = store
             .session_status()
             .is_none_or(|status| status.conversation_read_only);
+        let watchable = session
+            .as_deref()
+            .and_then(|id| store.thread_meta(id))
+            .is_some_and(|meta| {
+                !meta.is_settled() && meta.archived_at.is_none() && meta.parent_session_id.is_none()
+            });
+        let agent_tools = store
+            .session_status()
+            .and_then(|status| status.pull_request_tools.clone());
         let compact = self.window_state.read(cx).compact;
         let mut rows = v_flex().id("pull-request-rows").w_full().min_w_0().gap_1();
         let mut notice_hosts = std::collections::HashSet::new();
@@ -888,6 +1157,7 @@ impl Render for PullRequestsPanel {
                             state: Some(layer.state),
                             position: Some((index + 1, stack.layers.len())),
                             depth: index,
+                            watchable,
                         },
                         compact,
                         cx,
@@ -904,6 +1174,7 @@ impl Render for PullRequestsPanel {
                             state: None,
                             position: None,
                             depth: index,
+                            watchable,
                         },
                         compact,
                         cx,
@@ -911,6 +1182,7 @@ impl Render for PullRequestsPanel {
                 }
             }
         }
+        let agent_tools = agent_tools.map(|tools| self.agent_tools(&tools, cx));
         let count = links.iter().filter(|link| link.visible()).count();
         let link_button = |id: &'static str| {
             let store = self.store.clone();
@@ -939,8 +1211,10 @@ impl Render for PullRequestsPanel {
             return v_flex()
                 .size_full()
                 .on_action(cx.listener(Self::change_link))
+                .on_action(cx.listener(Self::change_watch))
                 .child(rows.p_2())
                 .child(empty)
+                .children(agent_tools)
                 .into_any_element();
         }
         let open = links
@@ -984,8 +1258,10 @@ impl Render for PullRequestsPanel {
                 .w_full()
                 .gap_3()
                 .on_action(cx.listener(Self::change_link))
+                .on_action(cx.listener(Self::change_watch))
                 .child(rows)
                 .child(summary)
+                .children(agent_tools)
                 .when(!read_only, |sheet| {
                     sheet.child(link_button("link-pr").w_full())
                 })
@@ -995,6 +1271,7 @@ impl Render for PullRequestsPanel {
             .size_full()
             .min_w_0()
             .on_action(cx.listener(Self::change_link))
+            .on_action(cx.listener(Self::change_watch))
             .child(
                 div()
                     .id("pr-scroll")
@@ -1004,6 +1281,7 @@ impl Render for PullRequestsPanel {
                     .overflow_y_scroll_area()
                     .track_scroll(&self.scroll),
             )
+            .children(agent_tools)
             .child(
                 h_flex()
                     .flex_none()
