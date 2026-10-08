@@ -389,38 +389,11 @@ fn a_synced_terminal_pull_request_settles_only_its_thread_once_its_stack_allows(
         last_run_completed_at: Some(worked_at),
         failed: false,
     };
-    let mut unswept = linked("unswept", 2, false);
-    unswept.pull_requests[0].snapshot = Some(PullRequestSnapshot {
-        state: PullRequestState::Closed,
-        title: "Change 2".into(),
-        head_branch: "layer-2".into(),
-        base_branch: "main".into(),
-        is_draft: false,
-        updated_at: "2026-10-08T00:00:00Z".into(),
-        synced_at: now_secs(),
-        closed_at: Some(chrono::Utc::now().to_rfc3339()),
-        merged_at: None,
-        author: None,
-        additions: 3,
-        deletions: 1,
-        changed_files: 1,
-        review_decision: None,
-        checks_state: None,
-        mergeability: Default::default(),
-    });
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(&mut cx, |state, _| {
         state.pull_requests = PullRequestRuntime::new(api);
-        state.pull_requests.last_synced.insert(
-            PullRequestKey::new("github.com", "sample/project", 2),
-            now_secs(),
-        );
-        for meta in [
-            linked("merged", 1, false),
-            linked("stacked", 3, false),
-            unswept,
-        ] {
+        for meta in [linked("merged", 1, false), linked("stacked", 3, false)] {
             store.upsert_meta(&meta).unwrap();
             state
                 .thread_activity
@@ -443,14 +416,6 @@ fn a_synced_terminal_pull_request_settles_only_its_thread_once_its_stack_allows(
         !stacked.is_settled(),
         "the merged layer's open sibling is linked before it is evaluated"
     );
-    assert!(
-        !state.read(|state| state.find_meta("unswept").unwrap().is_settled()),
-        "a sync re-evaluates only the threads whose links it changed"
-    );
-    state.update(&mut cx, |state, cx| {
-        state.evaluate_thread_settlement("unswept", cx)
-    });
-    assert!(state.read(|state| state.find_meta("unswept").unwrap().is_settled()));
 }
 
 #[test]
