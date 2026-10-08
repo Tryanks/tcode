@@ -74,6 +74,13 @@ pub use wire::{
 // also covers unfinished child threads; adds the CreateNewProject and
 // StartScratchDraft commands; adds per-host GitHub settings, credential source
 // discovery, SetGitHubToken and RefreshGitHubCredentials.
+// Unreleased: Settled/Active overrides and lifecycle timestamps on thread
+// metadata; UnsettleSession replaces MakeSessionActive, SetAutoSettle controls
+// the durable per-thread disable; global and per-project settlement settings;
+// SessionActivity.failed. Idle AutoArchiveSweep/ArchivedCount and the
+// idle-auto-archive settings are removed.
+// Unreleased: stored messages carry human/agent/server origin; absent origin
+// uses the historical top-level human / dispatched child agent fallback.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

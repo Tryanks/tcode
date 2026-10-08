@@ -11,5 +11,7 @@ pub mod provider_status;
 pub mod relay;
 pub mod session;
 pub mod settings;
+pub mod settlement;
+pub mod thread_sort;
 pub mod ui;
 pub mod usage;

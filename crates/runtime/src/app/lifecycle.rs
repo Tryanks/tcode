@@ -161,8 +161,16 @@ impl AppState {
                         let pump = HostCx::spawn_background(cx, async move {
                             while let Ok(event) = events.recv().await {
                                 let event_session = pump_session.clone();
+                                let event_commands = pump_commands.clone();
                                 pump_cx.enqueue(move |state, cx| {
-                                    state.on_event(&event_session, event, cx);
+                                    // A provider detached to idle may still have events
+                                    // queued; they must not reach a restarted one.
+                                    let current = state.resident(&event_session).is_some_and(
+                                        |session| matches!(&session.runtime, Runtime::Live(live) if live.same_channel(&event_commands)),
+                                    );
+                                    if current {
+                                        state.on_event(&event_session, event, cx);
+                                    }
                                 });
                             }
                             pump_cx.enqueue(move |state, cx| {
@@ -261,6 +269,7 @@ impl AppState {
                                 }
                                 state.deliver_child_callback(&session_id, TurnStatus::Failed, cx);
                             }
+                            state.evaluate_thread_settlement(&session_id, cx);
                             state.report_error(
                                 RuntimeError::ProviderStart {
                                     error: err.to_string(),
@@ -318,6 +327,7 @@ impl AppState {
     }
 
     pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+        self.advance_decision_revision(&meta.id);
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),
@@ -330,6 +340,36 @@ impl AppState {
         // and re-parsing every session's meta would stall the mailbox.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
+    }
+
+    /// Close what this thread's provider leaves open before it goes away: the
+    /// persisted turn and requests, and its native subagent mirrors. Execution
+    /// children own independent providers and keep running.
+    pub(super) fn retire_provider_work(&mut self, id: &str, cx: &mut HostCx) {
+        let has_open_work = self.resident(id).is_some_and(|session| {
+            !session.draft
+                && !matches!(session.runtime, Runtime::Idle)
+                && (session.turn_in_flight
+                    || session.delivery_in_flight.is_some()
+                    || session.background_task_count > 0
+                    || session.timeline.turn_running
+                    || !session.timeline.pending_approvals.is_empty()
+                    || session.timeline.pending_user_input.is_some())
+        });
+        if has_open_work {
+            self.record_event(id, &AgentEvent::SessionClosed { reason: None }, cx);
+        }
+        self.interrupt_native_subagent_work(id, cx);
+        self.clear_approvals(id);
+    }
+
+    /// Detach this thread's provider and keep the thread resident. Events the
+    /// old provider still has queued are dropped by the pump's channel check.
+    pub(super) fn detach_provider_to_idle(&mut self, id: &str, cx: &mut HostCx) {
+        self.retire_provider_work(id, cx);
+        if let Some(session) = self.resident_mut(id) {
+            session.shutdown_to_idle();
+        }
     }
 
     pub(crate) fn shutdown_active(&mut self, target_id: &str, cx: &mut HostCx) {

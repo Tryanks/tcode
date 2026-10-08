@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::settings::SettingsPatch;
 
 impl AppState {
     pub(super) fn native_rewind_blocked(&self, active: &ActiveSession) -> bool {
@@ -36,6 +37,23 @@ impl AppState {
             message: message.into(),
         };
         self.validate_plugin_command(command)?;
+        if let Command::PatchSettings { patch } = command {
+            if let SettingsPatch::ProjectSettlement { project_id, .. } = patch
+                && !self
+                    .projects
+                    .iter()
+                    .any(|project| &project.id == project_id)
+            {
+                return Err(error(
+                    "unknown_project",
+                    "This project is no longer available.",
+                ));
+            }
+            self.settings
+                .clone()
+                .apply(patch.clone())
+                .map_err(|message| error("invalid_settings", message))?;
+        }
         match command {
             Command::SetGitHubToken { host, .. }
             | Command::PatchSettings {
@@ -151,17 +169,30 @@ impl AppState {
         let Some(session_id) = command.session_id() else {
             return Ok(());
         };
-        if matches!(command, Command::SettleSession { .. }) && self.settle_family_busy(session_id) {
+        if matches!(
+            command,
+            Command::SettleSession { .. } | Command::UnsettleSession { .. }
+        ) && self
+            .find_meta(session_id)
+            .is_some_and(|meta| meta.archived_at.is_some())
+        {
+            return Err(error(
+                "archived_session",
+                "Unarchive this thread before changing its lifecycle.",
+            ));
+        }
+        if matches!(command, Command::SettleSession { .. }) && self.settle_thread_busy(session_id) {
             return Err(error(
                 "thread_busy",
-                "Wait for this thread and its children to finish before settling.",
+                "Wait for this thread to finish before settling.",
             ));
         }
         // Index mutations operate on stored sessions, without requiring a live provider.
         if matches!(
             command,
             Command::SettleSession { .. }
-                | Command::MakeSessionActive { .. }
+                | Command::UnsettleSession { .. }
+                | Command::SetAutoSettle { .. }
                 | Command::ArchiveSession { .. }
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }
