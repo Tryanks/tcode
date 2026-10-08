@@ -46,7 +46,6 @@ impl WorkspaceStore {
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
                 | Command::SetThreadCollapsed { .. }
-                | Command::AutoArchiveSweep { .. }
                 | Command::PreviewReply { .. }
                 | Command::ReloadProvider
                 | Command::SetProfileSecret { .. }
@@ -155,7 +154,7 @@ impl WorkspaceStore {
         }
     }
 
-    pub(super) fn command(
+    pub(crate) fn command(
         &self,
         command: Command,
         cx: &mut App,
@@ -255,18 +254,6 @@ impl WorkspaceStore {
     pub fn set_fallback_review_advisor(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::FallbackReviewAdvisor(value));
     }
-    pub fn set_auto_archive_disabled(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::AutoArchiveDisabled(value));
-    }
-    pub fn set_auto_archive_max_idle_days(&mut self, value: u32) {
-        self.patch_settings(SettingsPatch::AutoArchiveMaxIdleDays(value));
-    }
-    pub fn set_auto_archive_keep_count(&mut self, value: usize) {
-        self.patch_settings(SettingsPatch::AutoArchiveKeepCount(value));
-    }
-    pub fn set_auto_archive_notice_shown(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::AutoArchiveNoticeShown(value));
-    }
     pub fn set_orchestrate_decision_models(&mut self, value: Vec<OrchestrateChildModel>) {
         self.patch_settings(SettingsPatch::OrchestrateDecisionModels(value));
     }
@@ -349,8 +336,24 @@ impl WorkspaceStore {
     pub fn settle_session(&mut self, session_id: String) {
         self.dispatch(Command::SettleSession { session_id });
     }
+    pub fn set_auto_settle(&mut self, session_id: String, enabled: bool) {
+        self.dispatch(Command::SetAutoSettle {
+            session_id,
+            enabled,
+        });
+    }
+    pub fn set_auto_settle_after_days(&mut self, days: Option<f64>) {
+        self.patch_settings(SettingsPatch::AutoSettleAfterDays(days));
+    }
+    pub fn set_project_settlement(
+        &mut self,
+        project_id: String,
+        value: Option<tcode_core::settings::ProjectSettlementSettings>,
+    ) {
+        self.patch_settings(SettingsPatch::ProjectSettlement { project_id, value });
+    }
     pub fn make_session_active(&mut self, session_id: String) {
-        self.dispatch(Command::MakeSessionActive { session_id });
+        self.dispatch(Command::UnsettleSession { session_id });
     }
     pub fn archive_session(&mut self, session_id: String) {
         self.dispatch(Command::ArchiveSession { session_id });
@@ -358,13 +361,7 @@ impl WorkspaceStore {
     pub fn unarchive_session(&mut self, session_id: String) {
         self.dispatch(Command::UnarchiveSession { session_id });
     }
-    pub fn auto_archive_sweep(
-        &self,
-        project_id: String,
-        cx: &mut App,
-    ) -> Task<Result<CommandResponse, ProtocolError>> {
-        self.command(Command::AutoArchiveSweep { project_id }, cx)
-    }
+
     pub fn rename_session(&mut self, session_id: String, title: String) {
         self.dispatch(Command::RenameSession { session_id, title });
     }

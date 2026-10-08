@@ -151,7 +151,9 @@ impl Render for DestinationView {
                     Destination::Thread => shell.render_thread_page(window, cx),
                     Destination::Panel => shell.render_panel_page(window, cx),
                     Destination::Settings => shell.render_settings_page(false, window, cx),
-                    Destination::SettingsSection => shell.render_settings_page(true, window, cx),
+                    Destination::SettingsSection | Destination::SettingsThreadRules => {
+                        shell.render_settings_page(true, window, cx)
+                    }
                 })
             })
             .unwrap_or_else(|| div().into_any_element())
@@ -1088,6 +1090,18 @@ pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut
     });
 }
 
+pub(crate) fn undo_thread_action(action: &crate::sidebar::ThreadUndo, cx: &mut App) {
+    let Some((window, shell)) = current_window_shell(cx) else {
+        return;
+    };
+    let action = action.clone();
+    cx.defer(move |cx| {
+        let _ = window.update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| shell.on_thread_undo(&action, window, cx));
+        });
+    });
+}
+
 /// Point this window at another host.
 pub(crate) fn switch_current(target: AttachmentTarget, window: &mut Window, cx: &mut App) {
     let Some(shell) = current_shell(cx) else {
@@ -1247,6 +1261,19 @@ impl AppShell {
                 });
             })
             .detach();
+        }
+    }
+
+    fn on_thread_undo(
+        &mut self,
+        _: &crate::sidebar::ThreadUndo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(attachment) = &self.attachment {
+            attachment
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.undo_lifecycle(window, cx));
         }
     }
 
@@ -1506,7 +1533,7 @@ impl AppShell {
             return div().into_any_element();
         };
         let title = if detail {
-            settings.read(cx).section_title()
+            settings.read(cx).section_title(cx)
         } else {
             crate::tr!("settings.title").into_owned().into()
         };
@@ -1919,6 +1946,8 @@ impl AppShell {
             .text_size(px(16.))
             .line_height(px(22.))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .key_context("TcodeShell")
+            .on_action(cx.listener(Self::on_thread_undo))
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
@@ -2079,6 +2108,8 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
+                .key_context("TcodeShell")
+                .on_action(cx.listener(Self::on_thread_undo))
                 .child(
                     div()
                         .id("workspace")
@@ -2107,6 +2138,8 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
+                .key_context("TcodeShell")
+                .on_action(cx.listener(Self::on_thread_undo))
                 .child(
                     h_flex()
                         .id("workspace")
@@ -2355,6 +2388,8 @@ impl AppShell {
             })
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
+            .key_context("TcodeShell")
+            .on_action(cx.listener(Self::on_thread_undo))
             .child(
                 div()
                     .id("workspace")
@@ -4143,21 +4178,28 @@ mod tests {
             state,
             current_host: None,
         }));
-        let (shell, cx) = cx.add_window_view(move |window, cx| {
+        let mounted = Rc::new(RefCell::new(None));
+        let capture = mounted.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
             let window_state = cx.new(|_| WindowState::new(false));
-            AppShell::new(
-                window_state,
-                ShellSetup {
-                    local: Some(Rc::new(move || {
-                        transport.borrow_mut().take().expect("one attachment")
-                    })),
-                    initial,
-                    ..Default::default()
-                },
-                window,
-                cx,
-            )
+            let shell = cx.new(|cx| {
+                AppShell::new(
+                    window_state,
+                    ShellSetup {
+                        local: Some(Rc::new(move || {
+                            transport.borrow_mut().take().expect("one attachment")
+                        })),
+                        initial,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            });
+            *capture.borrow_mut() = Some(shell.clone());
+            gpui_base::Root::new(shell, window, cx)
         });
+        let shell = mounted.borrow_mut().take().unwrap();
         if let Some(store) = shell.read_with(cx, |shell, _| shell.store()) {
             crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         }
@@ -4406,7 +4448,6 @@ mod tests {
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
             state.sessions = vec![meta];
-            state.settings.auto_archive_disabled = true;
         }))
         .unwrap();
         let (shell, _transport, cx) = mount(cx);
@@ -4493,7 +4534,6 @@ mod tests {
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
             state.sessions = sessions;
-            state.settings.auto_archive_disabled = true;
         }))
         .unwrap();
         let (shell, _transport, cx) = mount(cx);
@@ -4576,6 +4616,61 @@ mod tests {
             Some("second"),
             "compact navigation uses the same shortcuts"
         );
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
+        resize(cx, 1200.);
+        draw(cx);
+        let row = cx
+            .debug_bounds("sidebar-thread-second")
+            .expect("second row");
+        let settle = gpui::point(row.right() - px(18.), row.top() + px(14.));
+        cx.simulate_mouse_move(settle, None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(settle, gpui::Modifiers::default());
+        await_restore_update(&shell, cx, |store| {
+            store
+                .sidebar_sessions()
+                .iter()
+                .any(|meta| meta.id == "second" && meta.is_settled())
+        });
+        draw(cx);
+        assert!(cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
+        let undo_key = if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        };
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        let input = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        cx.update(|window, cx| input.focus(window, cx));
+        draw(cx);
+        cx.simulate_keystrokes("x");
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "x"
+        );
+        cx.simulate_keystrokes(undo_key);
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            ""
+        );
+        assert!(store.read_with(cx, |store, _| {
+            store
+                .sidebar_sessions()
+                .iter()
+                .any(|meta| meta.id == "second" && meta.is_settled())
+        }));
+        cx.update(|window, cx| window.blur(cx));
+        draw(cx);
+        cx.simulate_keystrokes(undo_key);
+        await_restore_update(&shell, cx, |store| {
+            store
+                .sidebar_sessions()
+                .iter()
+                .any(|meta| meta.id == "second" && !meta.is_settled())
+        });
+        assert!(!cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
         host.shutdown_blocking().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5118,6 +5213,7 @@ mod tests {
                 waiting: false,
                 waiting_for_approval: false,
                 waiting_for_input: false,
+                failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
             },

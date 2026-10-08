@@ -231,6 +231,7 @@ fn without_diffs(line: &[u8]) -> io::Result<Option<(Vec<u8>, StoredEvent)>> {
             ts,
             &stored.event,
             stored.author.as_ref(),
+            stored.origin,
         )),
         None => serde_json::to_vec(&stored.event),
     }

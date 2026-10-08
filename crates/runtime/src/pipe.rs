@@ -160,6 +160,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.start_diff_pass(&mut cx);
             }
             state.sync_terminal_handles();
+            state.start_settlement_sweeps(&mut cx);
             let _ = ready_tx.send(Ok(()));
             let mut state = smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
             if let Err(error) = state.close_store() {
@@ -238,6 +239,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         principal,
     } = message;
     cx.principal = principal.unwrap_or(Principal::Full);
+    cx.origin = Some(tcode_core::session::MessageOrigin::Human);
     cx.author = match &cx.principal {
         Principal::Full => None,
         Principal::Space {
@@ -267,6 +269,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         cx.send_message(reply);
         cx.principal = Principal::Full;
         cx.author = None;
+        cx.origin = None;
         return;
     }
     match payload {
@@ -286,6 +289,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
                     cx.send_message(HostMessage::Ack { id, result });
                     cx.principal = Principal::Full;
                     cx.author = None;
+                    cx.origin = None;
                     return;
                 }
             }
@@ -345,6 +349,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
     }
     cx.principal = Principal::Full;
     cx.author = None;
+    cx.origin = None;
 }
 
 fn complete_command(
@@ -648,12 +653,13 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.set_thread_collapsed(&session_id, collapsed, cx),
         Command::PatchSettings { patch } => app.patch_settings(patch, cx),
         Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
-        Command::MakeSessionActive { session_id } => app.make_session_active(&session_id, cx),
+        Command::SetAutoSettle {
+            session_id,
+            enabled,
+        } => app.set_auto_settle(&session_id, enabled, cx),
+        Command::UnsettleSession { session_id } => app.unsettle_session(&session_id, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
-        Command::AutoArchiveSweep { project_id } => {
-            response = CommandResponse::ArchivedCount(app.auto_archive_sweep(&project_id, cx));
-        }
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)
@@ -1767,6 +1773,7 @@ mod tests {
                 "{:?}",
                 Timeline::fold_events(legacy_events().into_iter().map(|(ts, event)| {
                     StoredEvent {
+                        origin: None,
                         author: None,
                         ts,
                         event,

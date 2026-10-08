@@ -220,6 +220,16 @@ impl AppState {
                 },
                 cx,
             );
+            // The mirror no longer holds the thread whose provider runs it.
+            let mut owner = self.find_meta(mirror_id);
+            while let Some(meta) = owner.take_if(|meta| meta.native_subagent.is_some()) {
+                owner = meta
+                    .parent_session_id
+                    .and_then(|parent| self.find_meta(&parent));
+            }
+            if let Some(owner) = owner {
+                self.evaluate_thread_settlement(&owner.id, cx);
+            }
         }
     }
 
@@ -318,12 +328,30 @@ impl AppState {
     ) {
         self.nested_subagent_spawns
             .retain(|(session_id, _), _| session_id != parent_session_id);
-        let descendants = descendant_session_ids(&self.sessions, parent_session_id);
+        // Mirrors belong to this provider. An execution child has its own
+        // provider and remains independent when this one is intentionally detached.
+        let mut native_children: HashMap<&str, Vec<&str>> = HashMap::new();
+        for meta in &self.sessions {
+            if meta.native_subagent.is_some()
+                && let Some(parent) = meta.parent_session_id.as_deref()
+            {
+                native_children.entry(parent).or_default().push(&meta.id);
+            }
+        }
+        let mut descendants = HashSet::new();
+        let mut pending = vec![parent_session_id];
+        while let Some(parent) = pending.pop() {
+            for child in native_children.get(parent).into_iter().flatten() {
+                if descendants.insert(*child) {
+                    pending.push(child);
+                }
+            }
+        }
         let running: Vec<_> = self
             .sessions
             .iter()
             .filter(|meta| {
-                descendants.contains(&meta.id)
+                descendants.contains(meta.id.as_str())
                     && self.native_subagent_turns.get(&meta.id) == Some(&true)
             })
             .filter_map(|meta| Some((meta.id.clone(), meta.native_subagent.clone()?)))
