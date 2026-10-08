@@ -172,13 +172,15 @@ impl Attachment {
     }
 }
 
-/// Whether two targets name the same host. A remote host is identified by its
-/// id, not by the address a particular record happens to carry.
+/// Whether two targets name the same pairing: the machine by its id, not by
+/// the address a particular record happens to carry, and the space it was
+/// joined through, since a full pairing and a space membership of the same
+/// machine are different links.
 pub fn same_target(left: &AttachmentTarget, right: &AttachmentTarget) -> bool {
     match (left, right) {
         (AttachmentTarget::Local, AttachmentTarget::Local) => true,
         (AttachmentTarget::Remote(left), AttachmentTarget::Remote(right)) => {
-            left.host_id == right.host_id
+            left.host_id == right.host_id && left.space_id == right.space_id
         }
         _ => false,
     }
