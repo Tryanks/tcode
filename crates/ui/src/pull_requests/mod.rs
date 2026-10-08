@@ -436,6 +436,7 @@ impl PullRequestsPanel {
         };
         let open = url.clone();
         let copy = url.clone();
+        let source_is_stack = link.is_some_and(|link| link.source == PullRequestSource::Stack);
         let menu = move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
             menu.menu(
                 crate::tr!("pull_requests.open_on_github").into_owned(),
@@ -449,7 +450,7 @@ impl PullRequestsPanel {
             .menu(
                 crate::tr!(if action.linking {
                     "pull_requests.relink"
-                } else if link.is_some_and(|link| link.source == PullRequestSource::Stack) {
+                } else if source_is_stack {
                     "pull_requests.dismiss"
                 } else {
                     "pull_requests.unlink"
