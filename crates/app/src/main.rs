@@ -384,7 +384,10 @@ impl LocalKernel {
 }
 
 fn main() {
-    env_logger::init();
+    // ureq debug traces include full URLs; GitHub logs only sanitized paths.
+    env_logger::Builder::from_default_env()
+        .filter_module("ureq", log::LevelFilter::Off)
+        .init();
 
     if std::env::args().any(|arg| arg == "--cu-smoke") {
         use std::io::Write as _;

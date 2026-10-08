@@ -690,7 +690,14 @@ impl AppState {
         for id in changed {
             self.providers.invalidate_usage(&id);
         }
+        let github_changed = self.settings.github.hosts != settings.github.hosts;
         self.settings = settings;
+        self.github
+            .credentials()
+            .configure(self.settings.github.hosts.clone());
+        if github_changed {
+            self.refresh_github_credentials(cx);
+        }
         self.forget_disabled_plugin_catalogs(cx);
         self.providers.provider_secret_names =
             provider_secret_names(&self.settings, &self.settings_store);
