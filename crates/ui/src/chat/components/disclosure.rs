@@ -126,7 +126,7 @@ fn disclosure_with(
     block.into_any_element()
 }
 
-fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
+pub(crate) fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
     div()
         .w_full()

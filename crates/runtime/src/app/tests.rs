@@ -8008,7 +8008,9 @@ fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutd
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let mut host = mcp_host::Host::bind().unwrap();
     let server = computer_use_mcp::start(&mut host);
-    let (session, commands) = fake_live_session(std::env::temp_dir());
+    let (mut session, commands) = fake_live_session(std::env::temp_dir());
+    // Stop is only offered while a turn runs.
+    session.turn_in_flight = true;
     state.update(cx, |state, cx| {
         state
             .host

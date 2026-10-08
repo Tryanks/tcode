@@ -1044,6 +1044,7 @@ impl AppState {
         }
         meta.settled_override = Some(SettledOverride::Settled);
         meta.unsettled_at = None;
+        self.end_pull_request_watches(&mut meta);
         self.detach_provider_to_idle(id, cx);
         if let Some(session) = self.resident_mut(id) {
             session
@@ -1210,7 +1211,8 @@ impl AppState {
                 meta
             })
             .collect();
-        for meta in changed {
+        for mut meta in changed {
+            self.end_pull_request_watches(&mut meta);
             self.persist_meta(&meta, cx);
         }
     }

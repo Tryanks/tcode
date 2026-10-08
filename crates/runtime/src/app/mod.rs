@@ -254,6 +254,7 @@ mod options;
 mod orchestrate;
 mod plugins;
 mod providers;
+mod pull_request_watch;
 mod pull_requests;
 mod send;
 mod sessions;
@@ -333,6 +334,7 @@ pub struct AppState {
     github: Arc<tcode_services::github::GitHubApi>,
     github_generation: u64,
     pull_requests: pull_requests::PullRequestRuntime,
+    pull_request_watches: pull_request_watch::WatchRuntime,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
     store_write_failures: smol::channel::Sender<StoreWriteFailure>,
@@ -529,6 +531,7 @@ impl AppState {
             github: github.clone(),
             github_generation: 0,
             pull_requests: pull_requests::PullRequestRuntime::new(github.clone()),
+            pull_request_watches: pull_request_watch::WatchRuntime::new(github.clone()),
             store_writes,
             store_write_receiver: Some(store_write_receiver),
             store_write_failures,

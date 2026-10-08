@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Prepended to each turn while the pull request tools are registered; the transcript shows it.
-pub const LINKING_INSTRUCTIONS: &str = "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests .\n</pull_request_linking>\n\n";
+pub const LINKING_INSTRUCTIONS: &str = "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests .\n</pull_request_linking>\n\n";
 
 /// The rest of a turn's injected context when it leads with [`LINKING_INSTRUCTIONS`].
 pub fn strip_linking_instructions(context: &str) -> Option<&str> {
@@ -162,6 +162,8 @@ pub struct ThreadPullRequestLink {
     pub stack: PullRequestStackState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_error: Option<PullRequestSyncError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<crate::pull_request_watch::PullRequestWatch>,
 }
 
 fn is_unknown(stack: &PullRequestStackState) -> bool {
@@ -172,6 +174,13 @@ impl ThreadPullRequestLink {
     pub fn visible(&self) -> bool {
         self.source != PullRequestSource::Dismissed
     }
+}
+
+/// The visible links a watch holds, which keep their thread waiting between wakes.
+pub fn watched(links: &[ThreadPullRequestLink]) -> impl Iterator<Item = &ThreadPullRequestLink> {
+    links
+        .iter()
+        .filter(|link| link.visible() && link.watch.is_some())
 }
 
 pub fn link_pull_request(
@@ -194,6 +203,7 @@ pub fn link_pull_request(
             snapshot: None,
             stack: PullRequestStackState::Unknown,
             sync_error: None,
+            watch: None,
         };
     } else {
         links.push(ThreadPullRequestLink {
@@ -204,6 +214,7 @@ pub fn link_pull_request(
             snapshot: None,
             stack: PullRequestStackState::Unknown,
             sync_error: None,
+            watch: None,
         });
     }
     true
@@ -225,6 +236,7 @@ pub fn unlink_pull_request(links: &mut [ThreadPullRequestLink], key: &PullReques
         snapshot: None,
         stack: PullRequestStackState::Unknown,
         sync_error: None,
+        watch: None,
     };
     true
 }
@@ -467,6 +479,7 @@ mod tests {
             }),
             stack: PullRequestStackState::Unknown,
             sync_error: None,
+            watch: None,
         }
     }
     #[test]

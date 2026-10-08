@@ -5,12 +5,7 @@ use std::sync::Mutex;
 use tcode_core::pull_request::PullRequestStack;
 use tcode_services::{github::Credentials, settings::SettingsStore};
 
-#[path = "../../../services/tests/support/github.rs"]
-#[allow(
-    dead_code,
-    reason = "The same HTTP fixture also supplies exchange helpers to services tests."
-)]
-mod fixture;
+use crate::app::test_support::github_fixture as fixture;
 
 struct HostReply {
     state: &'static str,
@@ -913,6 +908,35 @@ fn registered_tools_prefix_each_turn_except_a_native_command() {
             disclosed.and_then(pull_request::strip_linking_instructions),
             instructed.then_some(""),
             "the disclosure holds exactly the pull request instructions"
+        );
+    }
+}
+
+#[test]
+fn the_agent_tools_are_disclosed_before_the_first_turn() {
+    let store = TestStore::new("tcode-pr-tools-disclosed");
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut host = mcp_host::Host::bind().unwrap();
+    let server = pull_request_mcp::start(&mut host);
+    state.update(&mut cx, |state, cx| {
+        state.pump_pull_request_requests(Some(server), cx)
+    });
+    for (provider, disclosed) in [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)] {
+        let tools = state.update(&mut cx, |state, _| {
+            let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
+            let id = meta.id.clone();
+            state.sessions.push(meta.clone());
+            state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+            state
+                .session_status_snapshot(&id)
+                .unwrap()
+                .pull_request_tools
+        });
+        assert_eq!(
+            tools.is_some(),
+            disclosed,
+            "{provider:?}: shown exactly when its provider would receive the tools"
         );
     }
 }

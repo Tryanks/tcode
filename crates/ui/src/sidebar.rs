@@ -109,6 +109,8 @@ struct ThreadRowState {
     renaming: Option<Entity<InputState>>,
     menu_can_fork: bool,
     title_generating: bool,
+    /// Numbers of the pull requests a watch keeps this thread waiting on.
+    watching: Vec<u64>,
 }
 
 impl ThreadRowState {
@@ -118,8 +120,9 @@ impl ThreadRowState {
 }
 
 /// What a Waiting thread waits on, from the agents its host reports: those
-/// still running, those awaiting its settle, or else its own background work.
-fn waiting_reason(store: &WorkspaceStore, session_id: &str) -> String {
+/// still running, those awaiting its settle, the pull requests it watches, or
+/// else its own background work.
+fn waiting_reason(store: &WorkspaceStore, session_id: &str, watching: &[u64]) -> String {
     let (mut running, mut unsettled) = (0, 0);
     for meta in store.sidebar_sessions() {
         if meta.parent_session_id.as_deref() != Some(session_id) {
@@ -145,6 +148,19 @@ fn waiting_reason(store: &WorkspaceStore, session_id: &str) -> String {
         count => {
             parts.push(crate::tr!("sidebar.waiting_agents_unsettled", count = count).into_owned())
         }
+    }
+    match watching {
+        [] => {}
+        [number] => parts.push(
+            crate::tr!("sidebar.watching_pull_request", number = number.to_string()).into_owned(),
+        ),
+        numbers => parts.push(
+            crate::tr!(
+                "sidebar.watching_pull_requests",
+                count = numbers.len().to_string()
+            )
+            .into_owned(),
+        ),
     }
     if parts.is_empty() {
         parts.push(crate::tr!("sidebar.waiting_background").into_owned());
@@ -2117,6 +2133,9 @@ impl SessionsSidebar {
             show_unread: own_flags.unread && !own_flags.working,
             menu_can_fork: meta.provider.caps().supports_fork,
             title_generating: self.store.read(cx).title_generating(&meta.id),
+            watching: tcode_core::pull_request::watched(&meta.pull_requests)
+                .map(|link| link.key.number)
+                .collect(),
         }
     }
 
@@ -2301,11 +2320,13 @@ impl SessionsSidebar {
         element: gpui::Stateful<gpui::Div>,
         store: &Entity<WorkspaceStore>,
         session_id: &str,
+        watching: &[u64],
     ) -> gpui::Stateful<gpui::Div> {
         let store = store.clone();
         let session_id = session_id.to_owned();
+        let watching = watching.to_vec();
         element.tooltip(move |window, cx| {
-            Tooltip::new(waiting_reason(store.read(cx), &session_id)).build(window, cx)
+            Tooltip::new(waiting_reason(store.read(cx), &session_id, &watching)).build(window, cx)
         })
     }
 
@@ -2323,7 +2344,7 @@ impl SessionsSidebar {
                     state.session_id
                 )))
                 .when(waiting, |badge| {
-                    Self::waiting_tooltip(badge, store, &state.session_id)
+                    Self::waiting_tooltip(badge, store, &state.session_id, &state.watching)
                 })
                 .flex_none()
                 .items_center()
@@ -2703,6 +2724,9 @@ impl SessionsSidebar {
                 });
 
             let has_project = project_name.is_some();
+            let watching: Vec<u64> = tcode_core::pull_request::watched(&meta.pull_requests)
+                .map(|link| link.key.number)
+                .collect();
             let line_two = h_flex()
                 .w_full()
                 .min_w_0()
@@ -2717,7 +2741,7 @@ impl SessionsSidebar {
                             .flex_none()
                             .text_color(color)
                             .when(waiting, |status| {
-                                Self::waiting_tooltip(status, &self.store, &session_id)
+                                Self::waiting_tooltip(status, &self.store, &session_id, &watching)
                             })
                             .child(label),
                     )
