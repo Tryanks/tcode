@@ -2298,11 +2298,11 @@ impl WorkspaceStore {
             .is_some_and(|activity| activity.working)
     }
 
-    pub fn background_only_for(&self, session_id: &str) -> bool {
+    pub fn waiting_for(&self, session_id: &str) -> bool {
         self.index_summary
             .activity
             .get(session_id)
-            .is_some_and(|activity| activity.background_only)
+            .is_some_and(|activity| activity.waiting)
     }
 
     pub fn session_unread(&self, session_id: &str) -> bool {

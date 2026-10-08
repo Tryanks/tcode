@@ -168,7 +168,7 @@ sidebar:
     got_it: "Got it"
     open_settings: "Open Settings"
   working: "Working"
-  background_tasks: "Background"
+  waiting: "Waiting"
   child_threads: "%{count} child threads"
   waiting_approval: "Approval"
   waiting_approval_tooltip: "Waiting for approval"

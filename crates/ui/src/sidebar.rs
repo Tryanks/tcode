@@ -144,8 +144,8 @@ struct ThreadFlags {
     waiting_for_approval: bool,
     waiting_for_input: bool,
     working: bool,
-    /// Working only because background tasks remain; the turn has finished.
-    background: bool,
+    /// Background tasks run, or a child thread has not finished.
+    waiting: bool,
 }
 
 #[derive(Clone)]
@@ -154,7 +154,7 @@ struct ThreadRowState {
     row_key: String,
     waiting_for_approval: bool,
     waiting_for_input: bool,
-    background: bool,
+    waiting: bool,
     is_worktree: bool,
     is_child: bool,
     show_unread: bool,
@@ -672,7 +672,7 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     waiting_for_approval: store.pending_approval_for(&meta.id),
                     waiting_for_input: store.pending_user_input_for(&meta.id),
                     working: store.turn_running_for(&meta.id),
-                    background: store.background_only_for(&meta.id),
+                    waiting: store.waiting_for(&meta.id),
                 },
             )
         })
@@ -2292,7 +2292,7 @@ impl SessionsSidebar {
             row_key,
             waiting_for_approval: own_flags.waiting_for_approval,
             waiting_for_input: own_flags.waiting_for_input,
-            background: own_flags.background,
+            waiting: own_flags.waiting,
             is_worktree: meta.worktree.is_some(),
             is_child: render_state.is_child,
             show_unread: render_state.show_unread,
@@ -2463,11 +2463,8 @@ impl SessionsSidebar {
             Some((cx.theme().warning, crate::tr!("sidebar.waiting_approval")))
         } else if state.waiting_for_input {
             Some((cx.theme().warning, crate::tr!("sidebar.waiting_input")))
-        } else if working && state.background {
-            Some((
-                cx.theme().muted_foreground,
-                crate::tr!("sidebar.background_tasks"),
-            ))
+        } else if state.waiting {
+            Some((cx.theme().muted_foreground, crate::tr!("sidebar.waiting")))
         } else if working {
             Some((cx.theme().primary, crate::tr!("sidebar.working")))
         } else {
@@ -3901,8 +3898,8 @@ fn compact_status_glyph(
             )
             .into_any_element();
     }
-    if working {
-        let color = if state.background {
+    if working || state.waiting {
+        let color = if state.waiting {
             cx.theme().muted_foreground
         } else {
             cx.theme().primary
@@ -3936,11 +3933,8 @@ fn compact_status_line(
         Some((crate::tr!("mobile.approval"), cx.theme().warning))
     } else if state.waiting_for_input {
         Some((crate::tr!("mobile.answer"), cx.theme().primary))
-    } else if working && state.background {
-        Some((
-            crate::tr!("sidebar.background_tasks"),
-            cx.theme().muted_foreground,
-        ))
+    } else if state.waiting {
+        Some((crate::tr!("sidebar.waiting"), cx.theme().muted_foreground))
     } else if working {
         Some((crate::tr!("mobile.working"), cx.theme().primary))
     } else if state.show_unread {
@@ -4395,7 +4389,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_thread_distinguishes_host_background_activity(cx: &mut TestAppContext) {
+    fn compact_thread_distinguishes_host_waiting_activity(cx: &mut TestAppContext) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, IndexSummary, ServerEvent, SessionActivity,
             Topic, encode_line,
@@ -4417,13 +4411,13 @@ mod tests {
                 )
                 .unwrap();
         };
-        let summary = |background_only: bool| IndexSummary {
+        let summary = |waiting: bool| IndexSummary {
             activity: HashMap::from([(
                 "background".into(),
                 SessionActivity {
                     working: true,
-                    turn_running: !background_only,
-                    background_only,
+                    turn_running: !waiting,
+                    waiting,
                     waiting_for_approval: false,
                     waiting_for_input: false,
                     unread: false,
@@ -4472,10 +4466,10 @@ mod tests {
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(size(px(393.), px(852.)));
-        for (background_only, expected) in [(true, "Background"), (false, "Working")] {
+        for (waiting, expected) in [(true, "Waiting"), (false, "Working")] {
             send(
                 Topic::Index,
-                ServerEvent::IndexSummaryReplaced(summary(background_only)),
+                ServerEvent::IndexSummaryReplaced(summary(waiting)),
             );
             cx.run_until_parked();
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
@@ -4499,7 +4493,7 @@ mod tests {
                 assert_eq!(label, expected);
                 assert_eq!(
                     color,
-                    if background_only {
+                    if waiting {
                         cx.theme().muted_foreground
                     } else {
                         cx.theme().primary
@@ -4908,7 +4902,7 @@ mod tests {
                         tcode_protocol::SessionActivity {
                             working: false,
                             turn_running: false,
-                            background_only: false,
+                            waiting: false,
                             waiting_for_approval: true,
                             waiting_for_input: false,
                             unread: false,
@@ -4920,7 +4914,7 @@ mod tests {
                         tcode_protocol::SessionActivity {
                             working: true,
                             turn_running: true,
-                            background_only: false,
+                            waiting: false,
                             waiting_for_approval: false,
                             waiting_for_input: false,
                             unread: false,
@@ -4947,7 +4941,7 @@ mod tests {
                         tcode_protocol::SessionActivity {
                             working: false,
                             turn_running: false,
-                            background_only: false,
+                            waiting: false,
                             waiting_for_approval: false,
                             waiting_for_input: true,
                             unread: false,
@@ -4959,7 +4953,7 @@ mod tests {
                         tcode_protocol::SessionActivity {
                             working: true,
                             turn_running: true,
-                            background_only: false,
+                            waiting: false,
                             waiting_for_approval: false,
                             waiting_for_input: false,
                             unread: false,
@@ -6464,7 +6458,7 @@ mod tests {
                         tcode_protocol::SessionActivity {
                             working: true,
                             turn_running: true,
-                            background_only: false,
+                            waiting: false,
                             waiting_for_approval: false,
                             waiting_for_input: false,
                             unread: false,
