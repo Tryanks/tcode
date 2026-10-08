@@ -866,13 +866,10 @@ mod tests {
 
         repair(&moved, std::slice::from_ref(&created.path)).unwrap();
         run_git(&created.path, &["status", "--porcelain"]).unwrap();
-        assert_eq!(
-            porcelain_worktree_paths(&moved).unwrap(),
-            [
-                moved.canonicalize().unwrap(),
-                created.path.canonicalize().unwrap()
-            ]
-        );
+        let registered = porcelain_worktree_paths(&moved).unwrap();
+        assert_eq!(registered.len(), 2);
+        assert!(same_existing_path(&registered[0], &moved));
+        assert!(same_existing_path(&registered[1], &created.path));
         let _ = std::fs::remove_dir_all(temp);
     }
 
