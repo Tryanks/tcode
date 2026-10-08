@@ -14,6 +14,48 @@ use orchestrate_legacy::LegacyOrchestrateModel;
 mod orchestrate_fleet;
 mod orchestrate_legacy;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubSettings {
+    #[serde(default)]
+    pub hosts: BTreeMap<String, GitHubHostSettings>,
+    /// Host-authored discovery; never persisted in settings.json.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub status: BTreeMap<String, GitHubCredentialStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubHostSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+impl Default for GitHubHostSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            account: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubCredentialSource {
+    Saved,
+    Env,
+    Gh,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubCredentialStatus {
+    pub token_set: bool,
+    pub source: Option<GitHubCredentialSource>,
+    pub accounts: Vec<String>,
+    pub env_overrides_account: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
@@ -732,6 +774,11 @@ impl PluginManagementSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum SettingsPatch {
+    GitHubHost {
+        host: String,
+        enabled: Option<bool>,
+        account: Option<Option<String>>,
+    },
     Language(Option<String>),
     ThemeMode(ThemeMode),
     WordWrapDiffs(bool),
@@ -822,6 +869,8 @@ impl BrowserSettings {
 // agent crate derives only `PartialEq` for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub github: GitHubSettings,
     /// None follows the operating-system language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
@@ -988,6 +1037,7 @@ fn deserialize_days_override<'de, D: serde::Deserializer<'de>>(
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            github: GitHubSettings::default(),
             language: None,
             providers: BTreeMap::new(),
             profiles: BTreeMap::new(),
@@ -1034,6 +1084,23 @@ impl Settings {
     /// Apply one field-scoped mutation without replacing sibling fields.
     pub fn apply(&mut self, patch: SettingsPatch) {
         match patch {
+            SettingsPatch::GitHubHost {
+                host,
+                enabled,
+                account,
+            } => {
+                let entry = self
+                    .github
+                    .hosts
+                    .entry(host.trim().to_ascii_lowercase())
+                    .or_default();
+                if let Some(enabled) = enabled {
+                    entry.enabled = enabled;
+                }
+                if let Some(account) = account {
+                    entry.account = account.filter(|value| !value.trim().is_empty());
+                }
+            }
             SettingsPatch::Language(value) => self.language = value,
             SettingsPatch::ThemeMode(value) => self.theme_mode = value,
             SettingsPatch::WordWrapDiffs(value) => self.word_wrap_diffs = value,

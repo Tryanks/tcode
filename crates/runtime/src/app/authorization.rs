@@ -291,6 +291,8 @@ impl AppState {
                 | Command::SetThreadCollapsed { .. }
                 | Command::PreviewReply { .. }
                 | Command::ReloadProvider
+                | Command::SetGitHubToken { .. }
+                | Command::RefreshGitHubCredentials
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
                 | Command::CreateThirdPartyProfile { .. }

@@ -247,6 +247,7 @@ mod events;
 mod git;
 mod history;
 use history::{Hydration, Joined, SessionLog};
+mod github;
 mod lifecycle;
 mod options;
 mod orchestrate;
@@ -327,6 +328,8 @@ pub struct AppState {
     store: SessionStore,
     user_directories: user_files::UserDirectories,
     settings_store: SettingsStore,
+    github: Arc<tcode_services::github::GitHubApi>,
+    github_generation: u64,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
     store_write_failures: smol::channel::Sender<StoreWriteFailure>,
@@ -500,6 +503,10 @@ impl AppState {
         let settings_store = SettingsStore::new(store.root().clone());
         let mut settings = settings_store.load();
         settings.collapsed_threads = startup_collapsed_threads(&sessions);
+        let credentials =
+            tcode_services::github::Credentials::new(settings_store.clone(), std::env::vars());
+        credentials.configure(settings.github.hosts.clone());
+        let github = tcode_services::github::GitHubApi::host(credentials);
         let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
@@ -540,6 +547,8 @@ impl AppState {
             store,
             user_directories,
             settings_store,
+            github,
+            github_generation: 0,
             store_writes,
             store_write_receiver: Some(store_write_receiver),
             store_write_failures,
@@ -687,7 +696,9 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
-        match serde_json::to_vec_pretty(settings) {
+        let mut settings = settings.clone();
+        settings.github.status.clear();
+        match serde_json::to_vec_pretty(&settings) {
             Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
             Err(err) => self.report_error(
                 RuntimeError::PersistSettings {

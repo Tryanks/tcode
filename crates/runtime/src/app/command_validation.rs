@@ -64,6 +64,16 @@ impl AppState {
             }
         }
         match command {
+            Command::SetGitHubToken { host, .. }
+            | Command::PatchSettings {
+                patch: tcode_core::settings::SettingsPatch::GitHubHost { host, .. },
+            } if tcode_services::github::normalize_host(host).is_err() => {
+                return Err(error(
+                    "invalid_github_host",
+                    "Use a GitHub hostname without a URL or path.",
+                ));
+            }
+
             Command::DeleteProfile { profile_id }
                 if Settings::is_builtin_profile_id(profile_id) =>
             {

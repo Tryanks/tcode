@@ -9,6 +9,7 @@
 //! ```sh
 //! cargo run -p tcode-ui --example phone            # 393×852
 //! cargo run -p tcode-ui --example phone -- --android  # 412×915
+//! TCODE_DATA_DIR=$(mktemp -d) cargo run -p tcode-ui --example phone -- --local
 //! ```
 
 use std::borrow::Cow;
@@ -18,7 +19,10 @@ use gpui::{Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, poin
 use tcode_client::host::ClientHost;
 use tcode_ui::{ShellOptions, ShellSetup};
 
+type LocalTransport = Rc<dyn Fn() -> tcode_client::host::Transport>;
+
 fn main() {
+    let local = std::env::args().any(|arg| arg == "--local");
     let android = std::env::args().any(|arg| arg == "--android");
     gpui_platform::application()
         .with_assets(tcode_ui::assets::Assets)
@@ -34,6 +38,25 @@ fn main() {
                 data_dir,
                 tcode_traverse::native_host::default_device_name(),
             ));
+            let local_transport: Option<LocalTransport> = local.then(|| {
+                let store = tcode_services::store::SessionStore::open_at(
+                    tcode_services::store::data_dir().expect("data directory"),
+                )
+                .expect("open local host");
+                let host = tcode_runtime::pipe::spawn_host(store, Default::default())
+                    .expect("start local host");
+                let mux = tcode_traverse::HostMux::new(host.to_host, host.from_host);
+                Rc::new(move || {
+                    let connection = mux.attach(tcode_protocol::Principal::Full);
+                    let (_, state) = async_channel::unbounded();
+                    tcode_client::host::Transport {
+                        to_host: connection.to_host.into(),
+                        from_host: connection.from_host,
+                        state,
+                        current_host: None,
+                    }
+                }) as LocalTransport
+            });
             tcode_ui::run_shell(
                 cx,
                 host.clone(),
@@ -51,11 +74,15 @@ fn main() {
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
                     setup: ShellSetup {
-                        initial: tcode_ui::last_host_target(host.as_ref()),
+                        initial: if local {
+                            Some(tcode_ui::remote::AttachmentTarget::Local)
+                        } else {
+                            tcode_ui::last_host_target(host.as_ref())
+                        },
                         initial_pairing_error: None,
                         client_host: Some(host),
-                        local: None,
-                        seed_blocking: false,
+                        local: local_transport,
+                        seed_blocking: local,
                         restore_navigation: true,
                     },
                     ..Default::default()

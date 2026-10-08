@@ -11335,3 +11335,164 @@ fn cancelling_provider_retires_its_requests_and_native_work_without_stopping_ind
         "cancellation survives a cold fold"
     );
 }
+
+#[test]
+fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-github-secret-command");
+    let settings_store = SettingsStore::new(store.root().clone());
+    let persisted = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(store.root().join("secrets.json")).unwrap()).unwrap()
+    };
+    let mut legacy_settings = Settings::default();
+    legacy_settings.profiles.insert(
+        "github".into(),
+        ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: ProviderSettings::default(),
+        },
+    );
+    settings_store.save(&legacy_settings).unwrap();
+    std::fs::write(
+        store.root().join("secrets.json"),
+        r#"{"github":{"ANTHROPIC_API_KEY":"legacy-provider-secret"}}"#,
+    )
+    .unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        state.github = tcode_services::github::GitHubApi::host(
+            tcode_services::github::Credentials::new(SettingsStore::new(store.root().clone()), []),
+        );
+    });
+    state.dispatch_command(
+        cx,
+        638,
+        Command::SetGitHubToken {
+            host: "GITHUB.COM".into(),
+            token: Some("github-writer-secret".into()),
+        },
+    );
+    cx.run_until(|_| persisted()["@github"]["github.com"] == "github-writer-secret");
+    // Older builds read secrets.json as profile maps and keep entries they do not know.
+    serde_json::from_value::<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    >(persisted())
+    .unwrap();
+    assert_eq!(
+        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        "legacy-provider-secret"
+    );
+    state.dispatch_command(
+        cx,
+        642,
+        Command::SetProfileSecret {
+            profile_id: "github".into(),
+            name: "ANTHROPIC_API_KEY".into(),
+            value: Some("provider-replacement-secret".into()),
+        },
+    );
+    cx.run_until(|_| {
+        settings_store
+            .profile_secrets("github")
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str)
+            == Some("provider-replacement-secret")
+    });
+    assert_eq!(persisted()["@github"]["github.com"], "github-writer-secret");
+    state.dispatch_command(
+        cx,
+        639,
+        Command::PatchSettings {
+            patch: SettingsPatch::GitHubHost {
+                host: "github.com".into(),
+                enabled: Some(false),
+                account: Some(Some("sample".into())),
+            },
+        },
+    );
+    state.dispatch_command(
+        cx,
+        640,
+        Command::PatchSettings {
+            patch: SettingsPatch::GitHubHost {
+                host: "git.example.com".into(),
+                enabled: Some(true),
+                account: None,
+            },
+        },
+    );
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        let snapshot = state.settings_snapshot();
+        assert!(!snapshot.github.hosts["github.com"].enabled);
+        assert_eq!(
+            snapshot.github.hosts["github.com"].account.as_deref(),
+            Some("sample")
+        );
+        assert!(snapshot.github.hosts["git.example.com"].enabled);
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("github-writer-secret")
+        );
+    });
+    state.dispatch_command(
+        cx,
+        641,
+        Command::SetGitHubToken {
+            host: "github.com".into(),
+            token: None,
+        },
+    );
+    cx.run_until(|_| persisted().get("@github").is_none());
+    assert_eq!(
+        settings_store.profile_secrets("github")["ANTHROPIC_API_KEY"],
+        "provider-replacement-secret"
+    );
+    state.dispatch_command(
+        cx,
+        643,
+        Command::SetProfileSecret {
+            profile_id: "github".into(),
+            name: "ANTHROPIC_API_KEY".into(),
+            value: None,
+        },
+    );
+    cx.run_until(|_| settings_store.profile_secrets("github").is_empty());
+    let outgoing = cx.drain_outgoing();
+    assert!(
+        !serde_json::to_string(&outgoing)
+            .unwrap()
+            .contains("github-writer-secret")
+    );
+    assert!(
+        !std::fs::read_to_string(store.root().join("settings.json"))
+            .unwrap()
+            .contains("github-writer-secret")
+    );
+    let unreadable = r#"{"version":1,"profiles":{"claude":{"KEY":"unread-secret"}}}"#;
+    std::fs::write(store.root().join("secrets.json"), unreadable).unwrap();
+    state.dispatch_command(
+        cx,
+        644,
+        Command::SetGitHubToken {
+            host: "github.com".into(),
+            token: Some("replacement".into()),
+        },
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        cx.run_until_parked();
+        if cx.drain_outgoing().iter().any(|message| matches!(message, HostMessage::Ack { id: 644, result: Err(error) } if error.code == "settings_write_failed")) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "secret write failure acknowledged"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(store.root().join("secrets.json")).unwrap(),
+        unreadable
+    );
+}

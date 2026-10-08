@@ -428,6 +428,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             attachment_paths,
         } => app.orchestrate_turn(&session_id, text, attachment_paths, cx),
         Command::ReloadProvider => app.reload_provider(cx),
+        Command::RefreshGitHubCredentials => app.refresh_github_credentials(cx),
+        Command::SetGitHubToken { host, token } => {
+            return CommandOutcome::Pending(app.set_github_token(host, token, cx));
+        }
         Command::SetProfileSecret {
             profile_id,
             name,

@@ -10,6 +10,13 @@ use tcode_core::settings::Settings;
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode, TraverseSetting};
 
+type Secrets = BTreeMap<String, BTreeMap<String, String>>;
+
+/// GitHub tokens by host. Profile ids are built-in ids or slugs of ASCII
+/// alphanumerics and hyphens, so this key never names a profile, and a build
+/// that predates it keeps the entry as an unknown profile's secrets.
+const GITHUB_SECRETS: &str = "@github";
+
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
@@ -40,18 +47,52 @@ impl SettingsStore {
         }
     }
 
-    /// Every stored secret, keyed by provider key then variable name.
+    /// Fails on an unreadable file so a write never replaces secrets it could not read.
+    fn read_secrets(&self) -> std::io::Result<Secrets> {
+        match fs::read(&self.secrets_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Secrets::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every stored provider secret, keyed by profile id then variable name.
     pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
-        fs::read(&self.secrets_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        let mut all = self.read_secrets().unwrap_or_default();
+        all.remove(GITHUB_SECRETS);
+        all
     }
 
     /// The sensitive env values for one profile id: a built-in profile's
     /// [`Settings::builtin_profile_id`] or a user profile's slug.
     pub fn profile_secrets(&self, profile_id: &str) -> BTreeMap<String, String> {
         self.load_secrets().remove(profile_id).unwrap_or_default()
+    }
+
+    pub(crate) fn github_token(&self, host: &str) -> Option<String> {
+        self.read_secrets()
+            .ok()?
+            .remove(GITHUB_SECRETS)?
+            .remove(host)
+    }
+
+    pub fn set_github_token(&self, host: &str, token: Option<&str>) -> std::io::Result<()> {
+        let host = crate::github::normalize_host(host).map_err(std::io::Error::other)?;
+        let mut all = self.read_secrets()?;
+        let tokens = all.entry(GITHUB_SECRETS.to_owned()).or_default();
+        match token.map(str::trim).filter(|token| !token.is_empty()) {
+            Some(token) => {
+                tokens.insert(host, token.to_owned());
+            }
+            None => {
+                tokens.remove(&host);
+            }
+        }
+        if tokens.is_empty() {
+            all.remove(GITHUB_SECRETS);
+        }
+        self.write_secrets(&all)
     }
 
     /// Store (`Some`) or clear (`None`) one profile secret, by profile id.
@@ -61,7 +102,7 @@ impl SettingsStore {
         name: &str,
         value: Option<&str>,
     ) -> std::io::Result<()> {
-        let mut all = self.load_secrets();
+        let mut all = self.read_secrets()?;
         let entry = all.entry(profile_id.to_string()).or_default();
         match value {
             Some(value) => {
@@ -79,22 +120,28 @@ impl SettingsStore {
 
     /// Drop every secret stored for a profile id (used when deleting a profile).
     pub fn clear_profile_secrets(&self, profile_id: &str) -> std::io::Result<()> {
-        let mut all = self.load_secrets();
+        let mut all = self.read_secrets()?;
         if all.remove(profile_id).is_some() {
             return self.write_secrets(&all);
         }
         Ok(())
     }
 
-    fn write_secrets(
-        &self,
-        all: &BTreeMap<String, BTreeMap<String, String>>,
-    ) -> std::io::Result<()> {
+    fn write_secrets(&self, all: &Secrets) -> std::io::Result<()> {
         let data = serde_json::to_vec_pretty(all)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let tmp = self.secrets_path.with_extension("json.tmp");
-        fs::write(&tmp, data)?;
+        use std::io::Write as _;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
         restrict_permissions(&tmp)?;
+        file.write_all(&data)?;
         fs::rename(&tmp, &self.secrets_path)?;
         restrict_permissions(&self.secrets_path)
     }

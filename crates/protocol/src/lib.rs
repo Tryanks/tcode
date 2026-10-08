@@ -73,7 +73,8 @@ pub use wire::{
 // Unreleased: MessageAdmitted/RunRequested events carry host admission/dispatch activity.
 // Unreleased: replaces SessionActivity.background_only with waiting, which
 // also covers unfinished child threads; adds the CreateNewProject and
-// StartScratchDraft commands.
+// StartScratchDraft commands; adds per-host GitHub settings, credential source
+// discovery, SetGitHubToken and RefreshGitHubCredentials.
 // Unreleased: Settled/Active overrides and lifecycle/pin/order timestamps;
 // UnsettleSession replaces MakeSessionActive, SetAutoSettle controls durable
 // disable, global/project settlement settings, and event-derived activity clocks.

@@ -55,6 +55,11 @@ pub(super) enum StoreWrite {
         key: String,
         value: Option<String>,
     },
+    SetGitHubToken {
+        host: String,
+        token: Option<String>,
+        completion: smol::channel::Sender<Result<(), String>>,
+    },
     ClearProfileSecrets(String),
     /// [`SessionStore::drop_superseded_diffs`] for one thread, answered with
     /// what it did and how long it held the writer.
@@ -190,6 +195,10 @@ impl StoreWrite {
             StoreWrite::RemoveProject(_) => (|error| RuntimeError::DeleteProject { error }, None),
             StoreWrite::Fork { completion, .. } => (
                 |error| RuntimeError::PersistSession { error },
+                Some(completion),
+            ),
+            StoreWrite::SetGitHubToken { completion, .. } => (
+                |error| RuntimeError::PersistSettings { error },
                 Some(completion),
             ),
             StoreWrite::Flush(completion) => (
@@ -397,6 +406,18 @@ impl StoreWriter {
                 .set_profile_secret(&profile_id, &key, value.as_deref())
                 .err()
                 .map(settings_failure),
+            StoreWrite::SetGitHubToken {
+                host,
+                token,
+                completion,
+            } => {
+                let result = self
+                    .settings_store
+                    .set_github_token(&host, token.as_deref())
+                    .map_err(|error| error.to_string());
+                let _ = completion.try_send(result);
+                None
+            }
             StoreWrite::ClearProfileSecrets(profile_id) => self
                 .settings_store
                 .clear_profile_secrets(&profile_id)

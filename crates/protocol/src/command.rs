@@ -87,6 +87,11 @@ pub enum Command {
         attachment_paths: Vec<PathBuf>,
     },
     ReloadProvider,
+    SetGitHubToken {
+        host: String,
+        token: Option<String>,
+    },
+    RefreshGitHubCredentials,
     SetProfileSecret {
         profile_id: String,
         name: String,
@@ -488,6 +493,16 @@ impl Command {
         }
     }
 
+    /// Secret-bearing payloads may be retained in memory, never on disk.
+    pub fn contains_secret(&self) -> bool {
+        matches!(
+            self,
+            Self::SetGitHubToken { .. }
+                | Self::SetProfileSecret { .. }
+                | Self::CreateThirdPartyProfile { .. }
+        )
+    }
+
     /// Idempotent controls and reads do not need retained delivery.
     /// All other variants are retained writes, including settings assignments:
     /// repeating an old assignment after a newer one would undo user intent.
@@ -498,6 +513,7 @@ impl Command {
                 | Self::PreviewReply { .. }
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
+                | Self::RefreshGitHubCredentials
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage
                 | Self::CheckProviderVersions

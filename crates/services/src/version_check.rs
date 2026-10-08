@@ -1,43 +1,40 @@
 //! Update assessments and their host-facing adapters.
 
-use std::io::Read as _;
 use std::time::Duration;
 
+use crate::github::{GitHubApi, GitHubError, RequestOptions, RestRequest, api::Authentication};
 use serde::Deserialize;
 
 pub mod provider_updates;
 
-const TCODE_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Tryanks/tcode/releases/latest";
-const MAX_RELEASE_RESPONSE_BYTES: u64 = 1024 * 1024;
-
-/// Fetch the GitHub release payload consumed by [`check`].
-///
-/// This is an adapter, separate from the assessment function, so callers and
-/// tests can supply already-fetched bytes to the same check interface.
-pub fn fetch_latest_tcode_release_json() -> Result<Vec<u8>, FetchError> {
-    let response = ureq::get(TCODE_LATEST_RELEASE_URL)
-        .set("Accept", "application/vnd.github+json")
-        .set("X-GitHub-Api-Version", "2022-11-28")
-        .set("User-Agent", "tcode-update-check")
-        .timeout(Duration::from_secs(10))
-        .call()
-        .map_err(|error| match error {
-            ureq::Error::Status(status, _) if matches!(status, 403 | 429) => {
-                FetchError::RateLimited { status }
-            }
-            ureq::Error::Status(status, _) => FetchError::Http { status },
-            ureq::Error::Transport(_) => FetchError::Network,
-        })?;
-    let mut body = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_RELEASE_RESPONSE_BYTES + 1)
-        .read_to_end(&mut body)
-        .map_err(|_| FetchError::Read)?;
-    if body.len() as u64 > MAX_RELEASE_RESPONSE_BYTES {
-        return Err(FetchError::ResponseTooLarge);
-    }
-    Ok(body)
+pub fn fetch_latest_tcode_release_json(api: &GitHubApi) -> Result<Vec<u8>, FetchError> {
+    api.rest(
+        "github.com",
+        RestRequest::get("/repos/Tryanks/tcode/releases/latest"),
+        &RequestOptions {
+            authentication: Authentication::Anonymous,
+            operation: "LatestRelease",
+            timeout: Duration::from_secs(10),
+            body_limit: 1024 * 1024,
+            ..Default::default()
+        },
+    )
+    .and_then(|response| {
+        if response.truncated {
+            Err(GitHubError::BodyTooLarge)
+        } else {
+            Ok(response.body)
+        }
+    })
+    .map_err(|error| match error {
+        GitHubError::RateLimited { status, .. } => FetchError::RateLimited { status },
+        GitHubError::Paused { .. } => FetchError::RateLimited { status: 429 },
+        GitHubError::Response { status, .. } => FetchError::Http { status },
+        GitHubError::Unauthorized => FetchError::Http { status: 401 },
+        GitHubError::NotFound => FetchError::Http { status: 404 },
+        GitHubError::BodyTooLarge => FetchError::ResponseTooLarge,
+        _ => FetchError::Network,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
