@@ -320,6 +320,11 @@ impl AppState {
                 meta.id.clone(),
                 self.session_activity(resident.map_or(meta, |s| &s.meta), resident),
             );
+            if let Some(activity) = self.thread_activity.get(&meta.id) {
+                summary
+                    .activity_clocks
+                    .insert(meta.id.clone(), activity.clone());
+            }
             if self.title_generating.contains(&meta.id) {
                 summary.title_generating.insert(meta.id.clone());
             }

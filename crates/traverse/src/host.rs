@@ -1637,18 +1637,21 @@ mod tests {
             Some(Url::from_file_path(&manifest_path).unwrap().as_str())
         );
 
+        let refresh = host.refresh.take().unwrap();
+        refresh.abort();
+        // Abort requests are asynchronous. Wait for the loop to stop before
+        // resetting its fetch clock, so it cannot claim the manual refresh.
+        block_on(async {
+            while !refresh.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        });
         std::fs::write(
             &manifest_path,
             r#"{"version":1,"relays":[{"url":"https://relay.self-hosted.test/"}],"pkarr":["https://relay.self-hosted.test/pkarr"]}"#,
         )
         .unwrap();
         let loader = host.loader.clone().unwrap();
-        // The failed startup fetch paces the next attempt; the loop would wait
-        // it out. The loop is stopped before the stamp is reset: its first
-        // pass runs as soon as the runtime schedules it, and once unpaced it
-        // would fetch the written manifest itself, leaving this refresh with
-        // nothing to return.
-        host.refresh.take().unwrap().abort();
         loader.state().last_attempt_ms = None;
         let manifest = block_on(loader.refresh()).expect("the manifest arrived");
         block_on(host.shared.apply_manifest(manifest));
