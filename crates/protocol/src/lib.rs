@@ -85,8 +85,9 @@ pub use wire::{
 // uses the historical top-level human / dispatched child agent fallback.
 // Unreleased: adds the SetProjectRoot command and the WorkingDirectoryMissing
 // runtime error.
-// Unreleased: SessionActivity.agent carries a dispatched child's execution
-// and delivery, and waiting also covers a finished child awaiting settle;
+// Unreleased: SessionActivity.agent carries a dispatched child's execution,
+// delivery and latest run start and end, and waiting also covers a finished
+// child awaiting settle;
 // thread metadata carries cancelled_at; CancelAgent cancels a dispatched
 // child from a client; Settings.collapsed_threads,
 // SetThreadCollapsed, orchestrate archive_on_complete (settings, metadata and

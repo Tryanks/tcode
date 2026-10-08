@@ -968,6 +968,8 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                         agent: Some(AgentStatus {
                             execution: AgentExecution::Finished,
                             delivery: AgentDelivery::AwaitingSettle,
+                            run_started_at: Some(1_000),
+                            run_completed_at: Some(81_000),
                         }),
                     },
                 ),
@@ -986,7 +988,8 @@ fn version_six_index_visits_output_and_elision_literal_json() {
             "fork":"available"},
             "child": {"working":false,"turn_running":false,"waiting":false,
             "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":false,
-            "fork":"available","agent":{"execution":"finished","delivery":"awaiting_settle"}}},
+            "fork":"available","agent":{"execution":"finished","delivery":"awaiting_settle",
+            "run_started_at":1000,"run_completed_at":81000}}},
             "title_generating": [], "archived_counts": {"p": 2},
             "worktree_shared": [], "archived_revision": 7, "sessions": [], "projects": []})
     );

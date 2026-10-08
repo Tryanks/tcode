@@ -410,6 +410,12 @@ pub struct SessionActivity {
 pub struct AgentStatus {
     pub execution: AgentExecution,
     pub delivery: AgentDelivery,
+    /// When its latest run started and ended (unix ms); an end before the
+    /// start belongs to an earlier run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_completed_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

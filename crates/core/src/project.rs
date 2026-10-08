@@ -212,6 +212,12 @@ impl SessionMeta {
         self.parent_session_id.is_some() || self.native_subagent.is_some()
     }
 
+    /// A child its lead dispatched through orchestrate, as opposed to a
+    /// provider-native subagent mirror.
+    pub fn is_dispatched(&self) -> bool {
+        self.parent_session_id.is_some() && self.native_subagent.is_none()
+    }
+
     pub fn migrate_lifecycle(&mut self) {
         if self.settled_override.is_none() && self.settled_at.is_some() {
             self.settled_override = Some(SettledOverride::Settled);

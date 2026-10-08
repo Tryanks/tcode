@@ -3332,6 +3332,12 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
         assert!(!text.contains("tokens:"));
         assert_eq!(text.contains("Final output tail"), truncated);
         assert_eq!(text.lines().last().unwrap(), expected_tail);
+        let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
+        assert_eq!(
+            callback.report(),
+            expected_tail,
+            "the lead's view shows the output"
+        );
     }
     let final_message = "f".repeat(3000);
     for (report, supplemented) in [
@@ -3350,6 +3356,12 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
         );
         assert!(text.contains(&format!("Result (reported via report_result):\n{report}")));
         assert_eq!(text.contains("The report is brief"), supplemented);
+        let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
+        assert_eq!(
+            callback.report(),
+            report,
+            "the lead's view shows the report alone"
+        );
         if supplemented {
             assert!(text.contains("Final output tail (3000 chars total"));
             assert_eq!(text.lines().last().unwrap(), "f".repeat(300));
@@ -6531,10 +6543,10 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
     });
 }
 
-/// A parent waits while any descendant thread still runs, even with no work
-/// of its own, and stops waiting once that thread has finished.
+/// A running grandchild keeps every thread above it waiting, not only its
+/// own lead, though none of them has work of its own.
 #[test]
-fn parent_waits_while_a_descendant_thread_runs() {
+fn a_running_grandchild_keeps_every_ancestor_waiting() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-waiting-child-test");
     let store = (*test_store).clone();
@@ -6551,7 +6563,7 @@ fn parent_waits_while_a_descendant_thread_runs() {
     grandchild.meta.parent_session_id = Some("child".into());
     grandchild.turn_in_flight = true;
 
-    state.update(cx, |state, cx| {
+    state.update(cx, |state, _| {
         for session in [&parent, &child, &grandchild] {
             state.sessions.push(session.meta.clone());
         }
@@ -6566,23 +6578,6 @@ fn parent_waits_while_a_descendant_thread_runs() {
         assert!(activity["parent"].waiting && !activity["parent"].working);
         assert!(activity["child"].waiting && !activity["child"].working);
         assert!(!activity["grandchild"].waiting && activity["grandchild"].working);
-
-        state
-            .residents
-            .parked
-            .get_mut("grandchild")
-            .unwrap()
-            .turn_in_flight = false;
-        let activity = state.index_snapshot().summary.activity;
-        assert!(
-            activity["parent"].waiting && activity["child"].waiting,
-            "a finished child awaits its lead's settle"
-        );
-
-        state.settle_session("grandchild", cx);
-        state.settle_session("child", cx);
-        let activity = state.index_snapshot().summary.activity;
-        assert!(!activity["parent"].waiting && !activity["child"].waiting);
     });
 }
 
@@ -10676,10 +10671,13 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         cx.run_until_parked();
         response.try_recv().unwrap()
     };
+    // Every run here started and ended at `stamp`.
     let agent = |execution, delivery| {
         Some(AgentStatus {
             execution,
             delivery,
+            run_started_at: Some(stamp),
+            run_completed_at: Some(stamp),
         })
     };
 
@@ -10790,6 +10788,72 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         activity(&state, "worker").agent.unwrap().delivery,
         AgentDelivery::Settled,
         "a message reopens the settled child"
+    );
+}
+
+/// Archiving an agent its lead never settled cancels it from the lead's point
+/// of view, so restoring it later (as Open in the Agents view does) shows it
+/// not delivered and never holds the lead again.
+#[test]
+fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
+    use tcode_core::settlement::{AgentDelivery, AgentExecution};
+
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("agent-archived-before-settle");
+    let stamp = now_millis() - 60_000;
+    for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_owned);
+        store.upsert_meta(&meta).unwrap();
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "run".into(),
+            },
+            persisted_assistant_event("report"),
+            AgentEvent::TurnCompleted {
+                turn_id: "run".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            store.append_event(id, stamp, &event).unwrap();
+        }
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let activity = |state: &TestEntity| state.read(|state| state.index_snapshot().summary.activity);
+    assert!(
+        activity(&state)["lead"].waiting,
+        "the finished worker awaits settle"
+    );
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::ArchiveSession {
+            session_id: "worker".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(!activity(&state)["lead"].waiting);
+
+    state.dispatch_command(
+        cx,
+        2,
+        Command::UnarchiveSession {
+            session_id: "worker".into(),
+        },
+    );
+    cx.run_until_parked();
+    let activity = activity(&state);
+    let worker = activity["worker"].agent.unwrap();
+    assert_eq!(
+        (worker.execution, worker.delivery),
+        (AgentExecution::Cancelled, AgentDelivery::NotDelivered)
+    );
+    assert!(
+        !activity["lead"].waiting,
+        "the restored worker does not hold its lead"
     );
 }
 

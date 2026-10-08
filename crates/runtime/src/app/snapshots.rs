@@ -644,7 +644,7 @@ impl AppState {
     /// A dispatched orchestrate child's execution and delivery; `None` for
     /// every other thread.
     pub(super) fn agent_status(&self, meta: &SessionMeta) -> Option<AgentStatus> {
-        if meta.parent_session_id.is_none() || meta.native_subagent.is_some() {
+        if !meta.is_dispatched() {
             return None;
         }
         let resident = self.resident(&meta.id);
@@ -679,6 +679,8 @@ impl AppState {
         Some(AgentStatus {
             execution,
             delivery: AgentDelivery::of(meta, execution),
+            run_started_at: activity.and_then(|activity| activity.last_run_started_at),
+            run_completed_at: activity.and_then(|activity| activity.last_run_completed_at),
         })
     }
 

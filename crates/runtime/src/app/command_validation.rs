@@ -84,11 +84,10 @@ impl AppState {
                 ));
             }
             Command::CancelAgent { session_id }
-                if !self.sessions.iter().any(|meta| {
-                    &meta.id == session_id
-                        && meta.parent_session_id.is_some()
-                        && meta.native_subagent.is_none()
-                }) =>
+                if !self
+                    .sessions
+                    .iter()
+                    .any(|meta| &meta.id == session_id && meta.is_dispatched()) =>
             {
                 return Err(error(
                     "not_an_agent",

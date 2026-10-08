@@ -1,4 +1,7 @@
 use super::*;
+use tcode_core::session::{
+    ORCHESTRATE_BRIEF_REPORT_LABEL, ORCHESTRATE_OUTPUT_TAIL_LABEL, ORCHESTRATE_REPORT_LABEL,
+};
 use tcode_core::settings::{OrchestrateChildModel, orchestrate_efforts};
 use tcode_core::settlement::AgentDelivery;
 
@@ -1968,7 +1971,7 @@ pub(super) fn assemble_callback_text(
             final_message.to_string()
         } else {
             format!(
-                "Final output tail ({count} chars total; the tail plus the diff is usually enough — result {child_id} has the full text):\n{}",
+                "{ORCHESTRATE_OUTPUT_TAIL_LABEL}{count} chars total; the tail plus the diff is usually enough — result {child_id} has the full text):\n{}",
                 tail_chars(final_message, 600.min(cap))
             )
         }
@@ -1976,10 +1979,10 @@ pub(super) fn assemble_callback_text(
     let body = if let Some(report) = reported.filter(|report| !report.trim().is_empty()) {
         // The child chose this text deliberately via report_result, so it is
         // delivered verbatim and never truncated.
-        let mut body = format!("Result (reported via report_result):\n{report}");
+        let mut body = format!("{ORCHESTRATE_REPORT_LABEL}{report}");
         // A brief report must not hide a more substantive final message.
         if report.chars().count() < 200 && final_message.chars().count() > report.chars().count() {
-            body.push_str("\n\nThe report is brief; the final assistant message follows:\n");
+            body.push_str(ORCHESTRATE_BRIEF_REPORT_LABEL);
             body.push_str(&digest());
         }
         body

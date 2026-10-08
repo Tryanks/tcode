@@ -1201,6 +1201,11 @@ impl AppState {
             .map(|meta| {
                 let mut meta = meta.clone();
                 meta.archived_at = Some(archived_at);
+                // To its lead, an agent archived before settle is cancelled:
+                // restoring it later must not hold the lead again.
+                if meta.is_dispatched() && !meta.is_settled() && meta.cancelled_at.is_none() {
+                    meta.cancelled_at = Some(archived_at);
+                }
                 meta
             })
             .collect();
