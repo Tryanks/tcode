@@ -29,6 +29,7 @@ type AXError = i32;
 type AXValueType = u32;
 
 const AX_SUCCESS: AXError = 0;
+const AX_ERROR_API_DISABLED: AXError = -25211;
 const AX_VALUE_CGPOINT: AXValueType = 1;
 const AX_VALUE_CGSIZE: AXValueType = 2;
 const AX_VALUE_CGRECT: AXValueType = 3;
@@ -700,7 +701,20 @@ fn locate_window_in_application(
     application: AXUIElementRef,
     root: &RootInfo,
 ) -> Result<OwnedCf, BackendError> {
-    let windows = copy_attribute_elements(application, "AXWindows", 200);
+    let windows = try_copy_attribute_elements(application, "AXWindows", 200).map_err(|code| {
+        let message = if code == AX_ERROR_API_DISABLED {
+            format!(
+                "the system refused Accessibility access for this Tcode process while listing the windows of root {} (AX error {code}); the grant is not in effect for this process even if System Settings lists it, which happens after Tcode's executable changed on disk, so restart Tcode",
+                root.ref_id
+            )
+        } else {
+            format!(
+                "could not list the windows of root {} (AX error {code}); the app may still be launching or not responding, so call find_roots and observe_ui again",
+                root.ref_id
+            )
+        };
+        BackendError::new(BackendErrorCode::RootNotFound, message)
+    })?;
     windows
         .into_iter()
         .max_by(|left, right| {
@@ -838,16 +852,29 @@ fn copy_attribute_elements(
     attribute_name: &str,
     maximum: usize,
 ) -> Vec<OwnedCf> {
+    try_copy_attribute_elements(element, attribute_name, maximum).unwrap_or_default()
+}
+
+/// Like [`copy_attribute_elements`], but reports the AX error code of a failed
+/// copy so callers can tell a refused API from an empty attribute.
+fn try_copy_attribute_elements(
+    element: AXUIElementRef,
+    attribute_name: &str,
+    maximum: usize,
+) -> Result<Vec<OwnedCf>, AXError> {
     if maximum == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let attribute = CFString::new(attribute_name);
     let mut count = 0_isize;
     let count_code = unsafe {
         AXUIElementGetAttributeValueCount(element, attribute.as_concrete_TypeRef(), &mut count)
     };
-    if count_code != AX_SUCCESS || count <= 0 {
-        return Vec::new();
+    if count_code != AX_SUCCESS {
+        return Err(count_code);
+    }
+    if count <= 0 {
+        return Ok(Vec::new());
     }
     let count = usize::try_from(count).unwrap_or(0).min(maximum);
     let mut array: CFArrayRef = ptr::null();
@@ -860,12 +887,15 @@ fn copy_attribute_elements(
             &mut array,
         )
     };
-    if code != AX_SUCCESS || array.is_null() {
-        return Vec::new();
+    if code != AX_SUCCESS {
+        return Err(code);
+    }
+    if array.is_null() {
+        return Ok(Vec::new());
     }
     // SAFETY: CopyAttributeValues returns a create-rule CFArray.
     let Some(array_owner) = (unsafe { OwnedCf::from_create(array as CFTypeRef) }) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let actual_count = unsafe { CFArrayGetCount(array) }.max(0) as usize;
     let mut values = Vec::with_capacity(actual_count);
@@ -880,7 +910,7 @@ fn copy_attribute_elements(
         }
     }
     drop(array_owner);
-    values
+    Ok(values)
 }
 
 fn copy_attribute(element: AXUIElementRef, attribute_name: &str) -> Option<OwnedCf> {
