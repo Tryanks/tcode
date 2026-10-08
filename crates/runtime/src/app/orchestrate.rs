@@ -1,5 +1,9 @@
 use super::*;
+use tcode_core::session::{
+    ORCHESTRATE_BRIEF_REPORT_LABEL, ORCHESTRATE_OUTPUT_TAIL_LABEL, ORCHESTRATE_REPORT_LABEL,
+};
 use tcode_core::settings::{OrchestrateChildModel, orchestrate_efforts};
+use tcode_core::settlement::AgentDelivery;
 
 /// Appended to every dispatched brief so the report contract reaches the child
 /// regardless of what the orchestrator wrote.
@@ -348,7 +352,6 @@ impl AppState {
         title: String,
         cwd: Option<PathBuf>,
         brief: String,
-        archive_on_complete: bool,
         result_max_chars: Option<u32>,
         cx: &mut HostCx,
     ) -> Result<String, String> {
@@ -365,7 +368,6 @@ impl AppState {
             profile_id,
             permission_selection,
             cwd,
-            archive_on_complete,
             result_max_chars,
         );
         meta.title = title;
@@ -468,7 +470,6 @@ impl AppState {
                 brief,
                 cwd,
                 worktree,
-                archive_on_complete,
                 result_max_chars,
                 fast: fast_override,
             } => {
@@ -528,8 +529,6 @@ impl AppState {
                 } else {
                     brief
                 };
-                let archive_on_complete =
-                    archive_on_complete.unwrap_or(self.settings.orchestrate.archive_on_complete);
                 let isolate =
                     !collaboration && worktree.unwrap_or(self.settings.orchestrate.child_worktrees);
                 if cwd.is_none() && !isolate {
@@ -545,7 +544,6 @@ impl AppState {
                             title,
                             None,
                             brief,
-                            archive_on_complete,
                             result_max_chars,
                             cx,
                         )
@@ -574,7 +572,6 @@ impl AppState {
                     profile_id,
                     permission_selection,
                     path.clone(),
-                    archive_on_complete,
                     result_max_chars,
                 );
                 meta.title = title;
@@ -647,8 +644,8 @@ impl AppState {
                     // A follow-up starts a new piece of work: a result reported
                     // before it must not be delivered as the answer to it.
                     self.child_reported_results.remove(&thread_id);
-                    // A follow-up revives an archived child: it returns to the
-                    // sidebar so the user can watch the retry it just received.
+                    // A follow-up revives an archived child: it returns to its
+                    // lead's Agents view so the user can watch the retry.
                     if archived {
                         self.unarchive_session(&thread_id, cx);
                     }
@@ -707,48 +704,25 @@ impl AppState {
                 parent_id,
                 thread_id,
             } => {
-                let result = (|| {
-                    self.require_child(&parent_id, &thread_id)?;
-                    self.clear_approvals(&thread_id);
-                    self.invalidate_child_callback(&thread_id);
-                    if self.residents.live.contains_key(&thread_id) {
-                        if let Some(child) = self.resident_mut(&thread_id) {
-                            child.queue.clear();
-                            child.timeline.mark_idle();
-                            child.shutdown_to_idle();
-                        }
-                    } else {
-                        self.drop_background(&thread_id, cx);
-                    }
-                    Ok(serde_json::json!({ "ok": true }))
-                })();
+                let result = self.require_child(&parent_id, &thread_id).map(|_| ());
+                let result = result.map(|()| {
+                    self.cancel_child(&thread_id, cx);
+                    serde_json::json!({ "ok": true, "delivery": AgentDelivery::NotDelivered })
+                });
                 let _ = reply.try_send(result);
             }
-            OrchestrateOp::Archive {
+            OrchestrateOp::Settle {
                 parent_id,
-                thread_ids,
+                thread_id,
             } => {
                 let result = (|| {
-                    if thread_ids.is_empty() {
-                        return Err("thread_ids must not be empty".into());
-                    }
-                    let invalid: Vec<_> = thread_ids
-                        .iter()
-                        .filter(|thread_id| self.require_child(&parent_id, thread_id).is_err())
-                        .cloned()
-                        .collect();
-                    if !invalid.is_empty() {
-                        return Err(format!(
-                            "unknown threads or not children of this parent: {}",
-                            invalid.join(", ")
-                        ));
-                    }
-                    self.archive_session_ids(&thread_ids, now_secs(), cx);
-                    Ok(serde_json::json!({
-                        "ok": true,
-                        "archived": thread_ids.len(),
-                        "thread_ids": thread_ids,
-                    }))
+                    self.require_child(&parent_id, &thread_id)?;
+                    self.validate_command_target(&tcode_protocol::Command::SettleSession {
+                        session_id: thread_id.clone(),
+                    })
+                    .map_err(|error| error.message)?;
+                    self.settle_session(&thread_id, cx);
+                    Ok(serde_json::json!({ "ok": true, "delivery": AgentDelivery::Settled }))
                 })();
                 let _ = reply.try_send(result);
             }
@@ -807,6 +781,31 @@ impl AppState {
                 let _ = reply.try_send(result);
             }
         }
+    }
+
+    /// Stop a dispatched child without delivering its result: it keeps its
+    /// transcript and no longer holds its lead.
+    pub(crate) fn cancel_child(&mut self, thread_id: &str, cx: &mut HostCx) {
+        self.clear_approvals(thread_id);
+        self.invalidate_child_callback(thread_id);
+        if self.residents.live.contains_key(thread_id) {
+            if let Some(child) = self.resident_mut(thread_id) {
+                child.queue.clear();
+                child.timeline.mark_idle();
+                child.shutdown_to_idle();
+            }
+        } else {
+            self.drop_background(thread_id, cx);
+        }
+        let Some(mut meta) = self.find_meta(thread_id) else {
+            return;
+        };
+        meta.cancelled_at = Some(now_secs());
+        meta.updated_at = now_secs();
+        if let Some(child) = self.resident_mut(thread_id) {
+            child.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
     }
 
     pub(super) fn require_child(
@@ -1066,6 +1065,7 @@ impl AppState {
             "title": meta.title,
             "provider": provider_name(meta.provider),
             "state": state,
+            "delivery": self.agent_status(meta).map(|status| status.delivery),
             "archived": meta.archived_at.is_some(),
             "waiting_approval": waiting_approval,
             "approval_request_id": approval_request_id,
@@ -1104,10 +1104,6 @@ impl AppState {
         let child_id = child_id.to_string();
         let parent_id = child.parent_session_id.clone().unwrap();
         let title = child.title;
-        // Failed and interrupted children stay visible: they are retry
-        // candidates, and archiving would hide exactly the threads that need
-        // attention.
-        let auto_archive = child.archive_on_complete && matches!(status, TurnStatus::Completed);
         let result_max_chars = child.result_max_chars;
         let generation = self.callback_generation(&child_id);
         let fold = self.folded_log(&child_id, cx);
@@ -1165,18 +1161,10 @@ impl AppState {
                         reported.as_deref(),
                         timeline.usage.as_ref(),
                         result_max_chars,
-                        auto_archive,
                     )
                 };
                 state.callback_last_turn.insert(child_id.clone(), turn);
                 state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
-                if auto_archive
-                    && state
-                        .find_meta(&child_id)
-                        .is_some_and(|meta| meta.settled_at.is_none())
-                {
-                    state.archive_session_ids(&[child_id], now_secs(), cx);
-                }
             });
         });
     }
@@ -1812,7 +1800,6 @@ pub(super) fn build_child_meta(
     profile_id: Option<String>,
     permission_selection: Option<OptionSelection>,
     cwd: PathBuf,
-    archive_on_complete: bool,
     result_max_chars: Option<u32>,
 ) -> SessionMeta {
     let mut meta = SessionMeta::new(provider, cwd, model);
@@ -1820,7 +1807,6 @@ pub(super) fn build_child_meta(
     meta.parent_session_id = Some(parent.id.clone());
     meta.profile_id = profile_id;
     meta.option_selections.extend(permission_selection);
-    meta.archive_on_complete = archive_on_complete;
     meta.result_max_chars = result_max_chars;
     if let Some(effort) = effort {
         meta.option_selections.push(OptionSelection {
@@ -1940,7 +1926,6 @@ pub(super) fn token_usage_json(usage: &agent::TokenUsage) -> serde_json::Value {
     serde_json::Value::Object(value)
 }
 
-#[allow(clippy::too_many_arguments)] // mirrors the callback's data sources
 pub(super) fn assemble_callback_text(
     child_id: &str,
     title: &str,
@@ -1949,10 +1934,8 @@ pub(super) fn assemble_callback_text(
     reported: Option<&str>,
     usage: Option<&agent::TokenUsage>,
     max_chars: Option<u32>,
-    archived: bool,
 ) -> String {
     let state = match status {
-        TurnStatus::Completed if archived => "completed (auto-archived; send revives it)",
         TurnStatus::Completed => "completed",
         TurnStatus::Failed | TurnStatus::Interrupted => "failed",
     };
@@ -1988,7 +1971,7 @@ pub(super) fn assemble_callback_text(
             final_message.to_string()
         } else {
             format!(
-                "Final output tail ({count} chars total; the tail plus the diff is usually enough — result {child_id} has the full text):\n{}",
+                "{ORCHESTRATE_OUTPUT_TAIL_LABEL}{count} chars total; the tail plus the diff is usually enough — result {child_id} has the full text):\n{}",
                 tail_chars(final_message, 600.min(cap))
             )
         }
@@ -1996,10 +1979,10 @@ pub(super) fn assemble_callback_text(
     let body = if let Some(report) = reported.filter(|report| !report.trim().is_empty()) {
         // The child chose this text deliberately via report_result, so it is
         // delivered verbatim and never truncated.
-        let mut body = format!("Result (reported via report_result):\n{report}");
+        let mut body = format!("{ORCHESTRATE_REPORT_LABEL}{report}");
         // A brief report must not hide a more substantive final message.
         if report.chars().count() < 200 && final_message.chars().count() > report.chars().count() {
-            body.push_str("\n\nThe report is brief; the final assistant message follows:\n");
+            body.push_str(ORCHESTRATE_BRIEF_REPORT_LABEL);
             body.push_str(&digest());
         }
         body

@@ -179,9 +179,9 @@ pub struct WorkspaceStore {
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     index_summary: IndexSummary,
     /// Archived threads, which the index leaves out; loaded while a view
-    /// asks for them.
+    /// holds them.
     archived_replica: Option<ArchivedSessions>,
-    archived_requested: bool,
+    archived_holds: usize,
     archived_task: Option<Task<()>>,
     /// The thread the index event being applied removed, so the destination
     /// can still follow it to its parent.
@@ -392,7 +392,7 @@ impl WorkspaceStore {
             index_replica: (Vec::new(), Vec::new()),
             index_summary: IndexSummary::default(),
             archived_replica: None,
-            archived_requested: false,
+            archived_holds: 0,
             archived_task: None,
             removed_session: None,
             settings_replica: Settings::default(),
@@ -1253,7 +1253,7 @@ impl WorkspaceStore {
                     }
                 }
                 self.apply_index_summary(&snapshot.summary, cx);
-                if self.archived_requested {
+                if self.archived_holds > 0 {
                     self.load_archived_sessions(cx);
                 }
             }
@@ -1534,7 +1534,7 @@ impl WorkspaceStore {
     /// Only the conversation on screen is reconciled, so archiving a
     /// background thread (an Orchestrate sibling completing, a sweep) never
     /// steals navigation. When the thread on screen leaves the visible index —
-    /// auto-archived on completion, archived by hand, deleted — the workspace
+    /// archived (alone or with its lead), deleted — the workspace
     /// follows its still-visible parent; with no such parent it falls back to
     /// the last interacted project's draft, which is also what an empty
     /// workspace opens.
@@ -1898,6 +1898,10 @@ impl WorkspaceStore {
         self.toggle_tab_panel(RightTab::Plan, cx);
     }
 
+    pub fn toggle_agents_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_tab_panel(RightTab::Agents, cx);
+    }
+
     pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
         if !self.scope.is_full() {
             return;
@@ -2028,7 +2032,7 @@ impl WorkspaceStore {
             .index_replica
             .0
             .iter()
-            .filter(|meta| meta.archived_at.is_none())
+            .filter(|meta| tcode_core::thread_sort::in_roster(meta))
             .cloned()
             .collect();
         let mut groups = group_sessions(
@@ -2052,7 +2056,7 @@ impl WorkspaceStore {
 
     fn apply_index_summary(&mut self, summary: &IndexSummary, cx: &mut Context<Self>) {
         self.index_summary = summary.clone();
-        if self.archived_requested
+        if self.archived_holds > 0
             && self
                 .archived_replica
                 .as_ref()
@@ -2062,9 +2066,7 @@ impl WorkspaceStore {
         }
     }
 
-    /// Fetch the archived threads, and keep them current while they are held.
-    pub fn load_archived_sessions(&mut self, cx: &mut Context<Self>) {
-        self.archived_requested = true;
+    fn load_archived_sessions(&mut self, cx: &mut Context<Self>) {
         if self.archived_task.is_some() {
             return;
         }
@@ -2089,15 +2091,32 @@ impl WorkspaceStore {
         }));
     }
 
-    /// Stop keeping the archived threads current.
+    /// Keep the archived threads current until a matching release. Every
+    /// view that shows them holds them, so one closing never empties another.
+    pub fn hold_archived_sessions(&mut self, cx: &mut Context<Self>) {
+        self.archived_holds += 1;
+        if self.archived_holds == 1 {
+            self.load_archived_sessions(cx);
+        }
+    }
+
     pub fn release_archived_sessions(&mut self) {
-        self.archived_requested = false;
-        self.archived_replica = None;
-        self.archived_task = None;
+        self.archived_holds = self.archived_holds.saturating_sub(1);
+        if self.archived_holds == 0 {
+            self.archived_replica = None;
+            self.archived_task = None;
+        }
     }
 
     pub fn archived_loading(&self) -> bool {
         self.archived_replica.is_none()
+    }
+
+    pub fn archived_sessions(&self) -> &[SessionMeta] {
+        self.archived_replica
+            .as_ref()
+            .map(|archived| archived.sessions.as_slice())
+            .unwrap_or_default()
     }
 
     /// Whether the Index baseline has arrived, including an empty Index.
@@ -2275,7 +2294,7 @@ impl WorkspaceStore {
             .index_replica
             .0
             .iter()
-            .filter(|meta| meta.archived_at.is_none())
+            .filter(|meta| tcode_core::thread_sort::in_roster(meta))
             .cloned()
             .collect();
         tcode_core::thread_sort::sort_threads(&mut visible);
@@ -2297,24 +2316,27 @@ impl WorkspaceStore {
             .any(|id| id == project_id)
     }
 
-    pub fn is_thread_collapsed(&self, session_id: &str) -> bool {
-        self.settings_replica
-            .collapsed_threads
-            .iter()
-            .any(|id| id == session_id)
-    }
-
-    /// Parent thread ids whose child rows are folded, as the host holds them.
-    pub fn collapsed_threads(&self) -> HashSet<String> {
-        self.settings_replica
-            .collapsed_threads
-            .iter()
-            .cloned()
-            .collect()
-    }
-
     pub fn active_session_id(&self) -> Option<String> {
         self.selected_session_id.clone()
+    }
+
+    /// The threads-list row of the selected thread: the thread itself, or
+    /// for an agent, the lead it was reached from.
+    pub fn roster_session_id(&self) -> Option<String> {
+        let mut id = self.selected_session_id.clone()?;
+        for _ in 0..self.index_replica.0.len() {
+            match self
+                .index_replica
+                .0
+                .iter()
+                .find(|meta| meta.id == id)
+                .and_then(|meta| meta.parent_session_id.clone())
+            {
+                Some(parent) => id = parent,
+                None => break,
+            }
+        }
+        Some(id)
     }
 
     pub fn turn_running_for(&self, session_id: &str) -> bool {
@@ -2329,6 +2351,14 @@ impl WorkspaceStore {
             .activity
             .get(session_id)
             .is_some_and(|activity| activity.failed)
+    }
+
+    /// A dispatched agent's execution and delivery, as its host reports them.
+    pub fn agent_status(&self, session_id: &str) -> Option<tcode_protocol::AgentStatus> {
+        self.index_summary
+            .activity
+            .get(session_id)
+            .and_then(|activity| activity.agent)
     }
 
     pub fn waiting_for(&self, session_id: &str) -> bool {
@@ -4102,7 +4132,6 @@ pub(crate) mod tests {
         host.requests.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
             store.toggle_project_collapsed("shared".into(), cx);
-            store.set_thread_collapsed("shared-thread".into(), true, cx);
             store.set_sidebar_collapsed(true, cx);
             store.cycle_project_sort(cx);
             store.toggle_favorite_model("team-model".into(), cx);
@@ -4114,7 +4143,6 @@ pub(crate) mod tests {
             });
             assert!(!store.session_unread("shared-thread"));
             assert!(store.is_project_collapsed("shared"));
-            assert!(store.is_thread_collapsed("shared-thread"));
             assert!(store.settings().sidebar_collapsed);
             assert_eq!(
                 store.project_sort(),
@@ -4440,7 +4468,7 @@ pub(crate) mod tests {
         };
         store.update(cx, |store, cx| {
             store.apply_domain_event(&revision_event(10), cx);
-            store.load_archived_sessions(cx);
+            store.hold_archived_sessions(cx);
         });
         cx.run_until_parked();
         let first = queries();
@@ -4529,12 +4557,20 @@ pub(crate) mod tests {
         response(reconnect[0], 1, "New host baseline");
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         cx.run_until_parked();
-        store.update(cx, |store, _| {
+        store.update(cx, |store, cx| {
             assert_eq!(
                 store.archived_replica.as_ref().unwrap().sessions[0].title,
                 "New host baseline"
             );
+            // Settings and the Agents view hold the list independently.
+            store.hold_archived_sessions(cx);
             store.release_archived_sessions();
+            assert!(
+                !store.archived_loading(),
+                "one view closing keeps another's list"
+            );
+            store.release_archived_sessions();
+            assert!(store.archived_loading());
         });
         link.close();
     }
@@ -6079,7 +6115,7 @@ pub(crate) mod tests {
                     },
                     cx,
                 );
-                store.load_archived_sessions(cx);
+                store.hold_archived_sessions(cx);
             });
             cx.run_until_parked();
             let query = std::iter::from_fn(|| requests.try_recv().ok())
@@ -6146,7 +6182,7 @@ pub(crate) mod tests {
         assert_eq!((counts, deleted), ((2, 0), vec!["parent".to_string()]));
     }
 
-    /// An Orchestrate child auto-archived on completion hands the workspace to
+    /// An Orchestrate child archived while on screen hands the workspace to
     /// its parent, keeping the parent's client-side records; archiving a thread
     /// the user is not viewing must not move them at all.
     #[gpui::test]

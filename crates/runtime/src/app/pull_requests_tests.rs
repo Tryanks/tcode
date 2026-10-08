@@ -388,6 +388,7 @@ fn a_synced_terminal_pull_request_settles_only_its_thread_once_its_stack_allows(
         last_run_started_at: Some(worked_at - 59_000),
         last_run_completed_at: Some(worked_at),
         failed: false,
+        interrupted: false,
     };
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));

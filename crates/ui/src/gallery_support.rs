@@ -140,5 +140,5 @@ pub fn model_change_divider(id: &str, cx: &App) -> AnyElement {
 }
 
 pub fn callback(id: &str, callback: &OrchestrateCallback, expanded: bool, cx: &App) -> AnyElement {
-    disclosure::callback_row(id, callback, expanded, |_, _, _| {}, cx)
+    disclosure::callback_row(id, callback, expanded, |_, _, _| {}, None, cx)
 }

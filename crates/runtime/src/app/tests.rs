@@ -875,7 +875,6 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         },
     );
     settings.collapsed_projects.push("project".into());
-    settings.collapsed_threads.push("parent".into());
     settings.favorite_models.push("gpt-5.6-sol".into());
     settings.sidebar_collapsed = true;
     settings.project_sort = tcode_core::settings::ProjectSort::NameAsc;
@@ -906,7 +905,6 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         assert_eq!(reset.claude_binary, Some(PathBuf::from("/custom/claude")));
         assert!(reset.acp_agents.contains_key("first"));
         assert_eq!(reset.collapsed_projects, vec!["project".to_string()]);
-        assert_eq!(reset.collapsed_threads, vec!["parent".to_string()]);
         assert_eq!(reset.favorite_models, vec!["gpt-5.6-sol".to_string()]);
         assert!(reset.sidebar_collapsed);
         assert_eq!(
@@ -1148,104 +1146,6 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             assert_eq!(meta.cwd, cwd);
             assert_eq!(meta.project_id.as_deref(), Some(project.id.as_str()));
         }
-    });
-}
-
-#[test]
-fn thread_fold_is_host_state_shared_over_the_pipe_and_pruned_with_the_thread() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-thread-fold-test");
-    let root = test_store.root().clone();
-    let store = (*test_store).clone();
-    for (id, parent) in [
-        ("parent", None),
-        ("child", Some("parent")),
-        ("parent-b", None),
-        ("child-b", Some("parent-b")),
-        ("grandchild-b", Some("child-b")),
-        ("plain", None),
-        ("quiet-parent", None),
-        ("orphan", Some("missing-parent")),
-        ("archived-child", Some("quiet-parent")),
-    ] {
-        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-        meta.id = id.into();
-        meta.parent_session_id = parent.map(str::to_string);
-        if id == "archived-child" {
-            meta.archived_at = Some(1);
-        }
-        store.upsert_meta(&meta).unwrap();
-    }
-    let state = cx.new_entity(TestClientState::new(store.clone()));
-    state.update(cx, |state, _| {
-        let mut folded = state.settings.collapsed_threads.clone();
-        folded.sort();
-        assert_eq!(
-            folded,
-            ["child-b", "parent", "parent-b"],
-            "only parents of visible children start folded, including nested parents"
-        );
-    });
-    cx.run_until_parked();
-    cx.drain_outgoing();
-
-    state.dispatch_command(
-        cx,
-        7,
-        Command::SetThreadCollapsed {
-            session_id: "parent".into(),
-            collapsed: false,
-        },
-    );
-    state.dispatch_command(
-        cx,
-        8,
-        Command::SetThreadCollapsed {
-            session_id: "missing".into(),
-            collapsed: true,
-        },
-    );
-    cx.run_until_parked();
-    let outgoing = cx.drain_outgoing();
-    assert!(outgoing.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack {
-            id: 7,
-            result: Ok(CommandResponse::Unit)
-        }
-    )));
-    assert!(
-        outgoing.iter().any(|message| matches!(message,
-            HostMessage::Ack { id: 8, result: Err(error) } if error.code == "unknown_session"
-        )),
-        "folding an unknown thread is rejected instead of stored"
-    );
-    assert!(
-        outgoing.iter().any(|message| matches!(message,
-            HostMessage::Event(EventEnvelope {
-                topic: Topic::Settings,
-                event: ServerEvent::SettingsReplaced(settings),
-                ..
-            }) if settings.collapsed_threads.len() == 2
-                && settings.collapsed_threads.contains(&"child-b".into())
-                && settings.collapsed_threads.contains(&"parent-b".into())
-        )),
-        "every client learns the fold from the settings topic"
-    );
-
-    state.update(cx, |state, cx| {
-        state.set_thread_collapsed("parent", true, cx);
-        let mut folded = state.settings.collapsed_threads.clone();
-        folded.sort();
-        assert_eq!(folded, ["child-b", "parent", "parent-b"]);
-        state.delete_session("parent", false, cx);
-        let mut folded = state.settings.collapsed_threads.clone();
-        folded.sort();
-        assert_eq!(
-            folded,
-            ["child-b", "parent-b"],
-            "deletion only prunes its own fold"
-        );
     });
 }
 
@@ -2311,7 +2211,6 @@ fn collaboration_starts_a_peer_discussion_with_native_permission() {
                 brief: "Challenge these alternatives".into(),
                 cwd: None,
                 worktree: Some(true),
-                archive_on_complete: None,
                 result_max_chars: Some(0),
                 fast: None,
             },
@@ -3428,12 +3327,17 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
             None,
             None,
             cap,
-            false,
         );
         assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
         assert!(!text.contains("tokens:"));
         assert_eq!(text.contains("Final output tail"), truncated);
         assert_eq!(text.lines().last().unwrap(), expected_tail);
+        let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
+        assert_eq!(
+            callback.report(),
+            expected_tail,
+            "the lead's view shows the output"
+        );
     }
     let final_message = "f".repeat(3000);
     for (report, supplemented) in [
@@ -3449,10 +3353,15 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
             Some(&report),
             None,
             Some(300),
-            false,
         );
         assert!(text.contains(&format!("Result (reported via report_result):\n{report}")));
         assert_eq!(text.contains("The report is brief"), supplemented);
+        let callback = tcode_core::session::parse_orchestrate_callback(&text).unwrap();
+        assert_eq!(
+            callback.report(),
+            report,
+            "the lead's view shows the report alone"
+        );
         if supplemented {
             assert!(text.contains("Final output tail (3000 chars total"));
             assert_eq!(text.lines().last().unwrap(), "f".repeat(300));
@@ -3470,7 +3379,6 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
         Some("  \n"),
         None,
         None,
-        false,
     );
     assert!(blank_report.ends_with("\nfinal message"));
     let short_output = assemble_callback_text(
@@ -3481,7 +3389,6 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
         Some("complete"),
         None,
         None,
-        false,
     );
     assert!(short_output.ends_with("Result (reported via report_result):\ncomplete"));
     assert!(!short_output.contains("The report is brief"));
@@ -3493,164 +3400,18 @@ fn callbacks_preserve_reports_bound_fallback_output_and_describe_completion() {
         total_processed_tokens: Some(165),
         ..Default::default()
     };
-    for (status, archived, description) in [
-        (TurnStatus::Completed, false, "completed"),
-        (
-            TurnStatus::Completed,
-            true,
-            "completed (auto-archived; send revives it)",
-        ),
-        (TurnStatus::Failed, false, "failed"),
-        (TurnStatus::Interrupted, true, "failed"),
+    for (status, description) in [
+        (TurnStatus::Completed, "completed"),
+        (TurnStatus::Failed, "failed"),
+        (TurnStatus::Interrupted, "failed"),
     ] {
         assert_eq!(
-            assemble_callback_text(
-                "child",
-                "Title",
-                status,
-                "done",
-                None,
-                Some(&usage),
-                None,
-                archived
-            ),
+            assemble_callback_text("child", "Title", status, "done", None, Some(&usage), None,),
             format!(
                 "[orchestrate] thread child (\"Title\") {description}. tokens: input 100 (+25 cached), output 40, total 165.\ndone"
             )
         );
     }
-}
-
-#[test]
-fn startup_repairs_native_mirrors_left_by_auto_archived_parents() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-archived-parent-mirror-repair");
-    for (id, parent, native, updated_at, archived_at) in [
-        ("parent", None, false, 99, Some(100)),
-        ("mirror", Some("parent"), true, 90, None),
-        ("nested", Some("mirror"), true, 95, None),
-        ("restored", Some("parent"), true, 101, None),
-        ("already-archived", Some("parent"), true, 70, Some(80)),
-        ("other", None, false, 90, None),
-    ] {
-        let mut meta = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
-        meta.id = id.into();
-        meta.parent_session_id = parent.map(str::to_owned);
-        meta.native_subagent = native.then(|| format!("spawn-{id}"));
-        meta.archive_on_complete = id == "parent";
-        meta.updated_at = updated_at;
-        meta.archived_at = archived_at;
-        test_store.upsert_meta(&meta).unwrap();
-    }
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.read(|state| {
-        for id in ["mirror", "nested"] {
-            assert_eq!(
-                state.find_meta(id).unwrap().archived_at,
-                Some(100),
-                "a legacy mirror must not become a root row when its parent was auto-archived"
-            );
-        }
-        assert_eq!(state.find_meta("restored").unwrap().archived_at, None);
-        assert_eq!(state.find_meta("other").unwrap().archived_at, None);
-        assert_eq!(
-            state.find_meta("already-archived").unwrap().archived_at,
-            Some(80)
-        );
-    });
-    let saved = test_store.load_index().unwrap();
-    for id in ["mirror", "nested"] {
-        assert_eq!(
-            saved.iter().find(|meta| meta.id == id).unwrap().archived_at,
-            Some(100)
-        );
-    }
-    state.update(cx, |state, cx| state.unarchive_session("parent", cx));
-    state.read(|state| {
-        for id in ["parent", "mirror", "nested"] {
-            assert_eq!(state.find_meta(id).unwrap().archived_at, None);
-        }
-        assert_eq!(
-            state.find_meta("already-archived").unwrap().archived_at,
-            Some(80)
-        );
-    });
-}
-
-#[test]
-fn terminal_callback_archives_only_when_requested() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-orchestrate-callback-archive-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (parent_commands, _parent_receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut parent = live_session(ProviderKind::Codex, parent_commands);
-        parent.meta.id = "parent".into();
-        parent.turn_in_flight = true;
-        state
-            .residents
-            .parked
-            .insert(parent.meta.id.clone(), parent);
-
-        for (id, archive_on_complete, status) in [
-            ("auto", true, TurnStatus::Completed),
-            ("keep", false, TurnStatus::Completed),
-            ("retry", true, TurnStatus::Failed),
-        ] {
-            let (commands, _receiver) = smol::channel::unbounded();
-            let mut child = live_session(ProviderKind::Codex, commands);
-            child.meta.id = id.into();
-            child.meta.parent_session_id = Some("parent".into());
-            child.meta.archive_on_complete = archive_on_complete;
-            child.turn_in_flight = true;
-            state.sessions.push(child.meta.clone());
-            state.residents.parked.insert(child.meta.id.clone(), child);
-
-            state.on_event(id, native_mirror_parent_item(ItemStatus::InProgress), cx);
-            state.on_event(id, native_mirror_parent_item(ItemStatus::Completed), cx);
-            state.on_event(id, persisted_assistant_event("done"), cx);
-            state.on_event(
-                id,
-                AgentEvent::TurnCompleted {
-                    turn_id: format!("turn-{id}"),
-                    status,
-                    usage: None,
-                },
-                cx,
-            );
-        }
-    });
-
-    cx.run_until(|state| {
-        ["auto", "keep", "retry"]
-            .iter()
-            .all(|id| state.callback_last_turn.contains_key(*id))
-    });
-
-    state.read(|state| {
-        for id in ["auto", "keep", "retry"] {
-            let child = state.find_meta(id).unwrap();
-            let mirror = state.sessions.iter().find(|meta| {
-                meta.parent_session_id.as_deref() == Some(id) && meta.native_subagent.is_some()
-            }).unwrap();
-            assert_eq!(mirror.archived_at, child.archived_at,
-                "a native mirror must follow its parent's archive state instead of leaking into the root list");
-        }
-        assert!(
-            state.find_meta("auto").unwrap().archived_at.is_some(),
-            "archive_on_complete child should be archived after callback delivery"
-        );
-        assert!(
-            state.find_meta("keep").unwrap().archived_at.is_none(),
-            "control child should remain unarchived"
-        );
-        assert!(
-            state.find_meta("retry").unwrap().archived_at.is_none(),
-            "failed child should stay visible for retries"
-        );
-    });
 }
 
 #[test]
@@ -3675,7 +3436,6 @@ fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
             let mut child = live_session(ProviderKind::Codex, commands);
             child.meta.id = id.into();
             child.meta.parent_session_id = Some("parent".into());
-            child.meta.archive_on_complete = false;
             child.turn_in_flight = true;
             state.sessions.push(child.meta.clone());
             state.residents.parked.insert(child.meta.id.clone(), child);
@@ -3820,7 +3580,6 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
         let mut child = live_session(ProviderKind::Codex, child_commands);
         child.meta.id = "child".into();
         child.meta.parent_session_id = Some("parent".into());
-        child.meta.archive_on_complete = false;
         child.meta.cwd = cwd.clone();
         child.meta.project_id = Some("project".into());
         child.turn_in_flight = true;
@@ -3973,68 +3732,6 @@ fn orchestrate_send_fast_switch_persists_and_schedules_restart() {
 }
 
 #[test]
-fn orchestrate_archive_is_batch_atomic_and_parent_scoped() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-orchestrate-archive-op-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        for (id, parent_id) in [
-            ("child-a", "parent"),
-            ("child-b", "parent"),
-            ("foreign", "other-parent"),
-        ] {
-            let mut meta =
-                SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
-            meta.id = id.into();
-            meta.parent_session_id = Some(parent_id.into());
-            state.sessions.push(meta);
-        }
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Archive {
-                parent_id: "parent".into(),
-                thread_ids: vec!["child-a".into(), "missing".into(), "foreign".into()],
-            },
-            reply,
-            cx,
-        );
-        let error = response.try_recv().unwrap().unwrap_err();
-        assert!(error.contains("missing"));
-        assert!(error.contains("foreign"));
-        assert!(state.find_meta("child-a").unwrap().archived_at.is_none());
-        assert!(state.find_meta("child-b").unwrap().archived_at.is_none());
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Archive {
-                parent_id: "parent".into(),
-                thread_ids: vec!["child-a".into(), "child-b".into()],
-            },
-            reply,
-            cx,
-        );
-        assert_eq!(
-            response.try_recv().unwrap().unwrap(),
-            serde_json::json!({
-                "ok": true,
-                "archived": 2,
-                "thread_ids": ["child-a", "child-b"],
-            })
-        );
-        assert!(state.find_meta("child-a").unwrap().archived_at.is_some());
-        assert!(state.find_meta("child-b").unwrap().archived_at.is_some());
-        let archived = state.find_meta("child-a").unwrap();
-        assert_eq!(
-            state.child_status_json(&archived, &Timeline::default())["archived"],
-            true
-        );
-    });
-}
-
-#[test]
 fn dispatch_launches_with_setting_permission_and_validates_native_overrides() {
     use ChildApprovalMode::{AlwaysAllow, Auto, Manual, Orchestrator};
     let cx = &mut TestAppContext::default();
@@ -4156,7 +3853,6 @@ fn dispatch_launches_with_setting_permission_and_validates_native_overrides() {
                             brief: "Inspect".into(),
                             cwd: None,
                             worktree: Some(false),
-                            archive_on_complete: None,
                             result_max_chars: None,
                             fast: None,
                         },
@@ -4203,7 +3899,6 @@ fn dispatch_launches_with_setting_permission_and_validates_native_overrides() {
                         brief: "Inspect".into(),
                         cwd: None,
                         worktree: Some(false),
-                        archive_on_complete: None,
                         result_max_chars: None,
                         fast: None,
                     },
@@ -6848,10 +6543,10 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
     });
 }
 
-/// A parent waits while any descendant thread still runs, even with no work
-/// of its own, and stops waiting once that thread has finished.
+/// A running grandchild keeps every thread above it waiting, not only its
+/// own lead, though none of them has work of its own.
 #[test]
-fn parent_waits_while_a_descendant_thread_runs() {
+fn a_running_grandchild_keeps_every_ancestor_waiting() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-waiting-child-test");
     let store = (*test_store).clone();
@@ -6883,15 +6578,6 @@ fn parent_waits_while_a_descendant_thread_runs() {
         assert!(activity["parent"].waiting && !activity["parent"].working);
         assert!(activity["child"].waiting && !activity["child"].working);
         assert!(!activity["grandchild"].waiting && activity["grandchild"].working);
-
-        state
-            .residents
-            .parked
-            .get_mut("grandchild")
-            .unwrap()
-            .turn_in_flight = false;
-        let activity = state.index_snapshot().summary.activity;
-        assert!(!activity["parent"].waiting && !activity["child"].waiting);
     });
 }
 
@@ -7296,7 +6982,6 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
                     brief: "Inspect the workspace".into(),
                     cwd: None,
                     worktree: Some(false),
-                    archive_on_complete: Some(custom),
                     result_max_chars: custom.then_some(2400),
                     fast,
                 },
@@ -7314,7 +6999,6 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
             assert_eq!(meta.model.as_deref(), Some(model));
             assert_eq!(meta.profile_id.as_deref(), profile);
             assert_eq!(meta.cwd, PathBuf::from("/tmp/project"));
-            assert_eq!(meta.archive_on_complete, custom);
             assert_eq!(meta.result_max_chars, custom.then_some(2400));
             assert_eq!(
                 meta.option_selections
@@ -7367,7 +7051,6 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
                 brief: "Inspect the workspace".into(),
                 cwd: Some(missing.to_string_lossy().into_owned()),
                 worktree: None,
-                archive_on_complete: None,
                 result_max_chars: None,
                 fast: None,
             },
@@ -7432,7 +7115,6 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
                 brief: "Inspect the workspace".into(),
                 cwd: None,
                 worktree: Some(true),
-                archive_on_complete: None,
                 result_max_chars: None,
                 fast: None,
             },
@@ -9884,7 +9566,6 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
     let mut child = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
     child.id = "child".into();
     child.parent_session_id = Some("parent".into());
-    child.archive_on_complete = false;
     store.upsert_meta(&child).unwrap();
     persist_streamed_turns(&store, "child", 1);
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -10867,7 +10548,6 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
             let mut child = live_session(ProviderKind::Codex, child_commands);
             child.meta.id = "child".into();
             child.meta.parent_session_id = Some("parent".into());
-            child.meta.archive_on_complete = false;
             state
                 .sessions
                 .extend([ancestor, parent.meta.clone(), child.meta.clone()]);
@@ -10944,6 +10624,237 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
         }
         state.read(|state| assert!(state.find_meta("ancestor").unwrap().is_settled(), "{case}"));
     }
+}
+
+#[test]
+fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
+    use tcode_core::settlement::{AgentDelivery, AgentExecution};
+    use tcode_protocol::AgentStatus;
+
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("agent-delivery");
+    let stamp = now_millis() - 10 * 86_400_000;
+    // A removed directory makes the reopened child's provider start fail
+    // instead of spawning a real CLI.
+    let gone = std::env::temp_dir().join(format!("tcode-removed-{}", uuid::Uuid::new_v4()));
+    for (id, parent) in [
+        ("lead", None),
+        ("worker", Some("lead")),
+        ("quitter", Some("lead")),
+    ] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, gone.clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_owned);
+        meta.created_at = stamp / 1000;
+        store.upsert_meta(&meta).unwrap();
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "run".into(),
+            },
+            persisted_assistant_event("report"),
+            AgentEvent::TurnCompleted {
+                turn_id: "run".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            store.append_event(id, stamp, &event).unwrap();
+        }
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let activity = |state: &TestEntity, id: &str| {
+        state.read(|state| state.index_snapshot().summary.activity[id].clone())
+    };
+    let op = |state: &TestEntity, cx: &mut TestAppContext, op| {
+        let (reply, response) = smol::channel::bounded(1);
+        state.update(cx, |state, cx| state.handle_orchestrate_op(op, reply, cx));
+        cx.run_until_parked();
+        response.try_recv().unwrap()
+    };
+    // Every run here started and ended at `stamp`.
+    let agent = |execution, delivery| {
+        Some(AgentStatus {
+            execution,
+            delivery,
+            run_started_at: Some(stamp),
+            run_completed_at: Some(stamp),
+        })
+    };
+
+    state.update(cx, |state, _| state.settings.auto_settle_after_days = None);
+    state.dispatch_command(
+        cx,
+        1,
+        Command::PatchSettings {
+            patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
+        },
+    );
+    cx.run_until(|state| {
+        ["lead", "worker", "quitter"]
+            .iter()
+            .all(|id| state.thread_activity.contains_key(*id))
+    });
+    state.read(|state| {
+        for id in ["lead", "worker", "quitter"] {
+            assert!(!state.find_meta(id).unwrap().is_settled(), "{id}");
+        }
+    });
+    assert!(activity(&state, "lead").waiting);
+    assert_eq!(
+        activity(&state, "worker").agent,
+        agent(AgentExecution::Finished, AgentDelivery::AwaitingSettle)
+    );
+    assert_eq!(activity(&state, "lead").agent, None);
+
+    let cancelled = op(
+        &state,
+        cx,
+        orchestrate_mcp::OrchestrateOp::Cancel {
+            parent_id: "lead".into(),
+            thread_id: "quitter".into(),
+        },
+    );
+    assert!(cancelled.is_ok());
+    state.read(|state| assert!(!state.find_meta("quitter").unwrap().is_settled()));
+    assert_eq!(
+        activity(&state, "quitter").agent,
+        agent(AgentExecution::Cancelled, AgentDelivery::NotDelivered)
+    );
+    assert!(
+        activity(&state, "lead").waiting,
+        "the unsettled worker still holds its lead"
+    );
+    let status = op(
+        &state,
+        cx,
+        orchestrate_mcp::OrchestrateOp::Status {
+            parent_id: "lead".into(),
+            thread_id: None,
+        },
+    )
+    .unwrap();
+    let delivery = |id: &str| {
+        status
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|child| child["thread_id"] == id)
+            .unwrap()["delivery"]
+            .clone()
+    };
+    assert_eq!(delivery("worker"), "awaiting_settle");
+    assert_eq!(delivery("quitter"), "not_delivered");
+
+    let settled = op(
+        &state,
+        cx,
+        orchestrate_mcp::OrchestrateOp::Settle {
+            parent_id: "lead".into(),
+            thread_id: "worker".into(),
+        },
+    );
+    assert!(settled.is_ok());
+    assert_eq!(
+        activity(&state, "worker").agent,
+        agent(AgentExecution::Finished, AgentDelivery::Settled)
+    );
+    assert!(!activity(&state, "lead").waiting);
+    state.dispatch_command(
+        cx,
+        2,
+        Command::PatchSettings {
+            patch: SettingsPatch::AutoSettleAfterDays(Some(2.0)),
+        },
+    );
+    cx.run_until(|state| {
+        state
+            .find_meta("lead")
+            .is_some_and(|meta| meta.settled_at == Some(stamp / 1000))
+    });
+
+    let sent = op(
+        &state,
+        cx,
+        orchestrate_mcp::OrchestrateOp::Send {
+            parent_id: "lead".into(),
+            thread_id: "worker".into(),
+            message: "One more check".into(),
+            fast: None,
+        },
+    );
+    assert!(sent.is_ok());
+    state.read(|state| assert!(!state.find_meta("worker").unwrap().is_settled()));
+    assert_ne!(
+        activity(&state, "worker").agent.unwrap().delivery,
+        AgentDelivery::Settled,
+        "a message reopens the settled child"
+    );
+}
+
+/// Archiving an agent its lead never settled cancels it from the lead's point
+/// of view, so restoring it later (as Open in the Agents view does) shows it
+/// not delivered and never holds the lead again.
+#[test]
+fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
+    use tcode_core::settlement::{AgentDelivery, AgentExecution};
+
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("agent-archived-before-settle");
+    let stamp = now_millis() - 60_000;
+    for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_owned);
+        store.upsert_meta(&meta).unwrap();
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "run".into(),
+            },
+            persisted_assistant_event("report"),
+            AgentEvent::TurnCompleted {
+                turn_id: "run".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            store.append_event(id, stamp, &event).unwrap();
+        }
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let activity = |state: &TestEntity| state.read(|state| state.index_snapshot().summary.activity);
+    assert!(
+        activity(&state)["lead"].waiting,
+        "the finished worker awaits settle"
+    );
+
+    state.dispatch_command(
+        cx,
+        1,
+        Command::ArchiveSession {
+            session_id: "worker".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(!activity(&state)["lead"].waiting);
+
+    state.dispatch_command(
+        cx,
+        2,
+        Command::UnarchiveSession {
+            session_id: "worker".into(),
+        },
+    );
+    cx.run_until_parked();
+    let activity = activity(&state);
+    let worker = activity["worker"].agent.unwrap();
+    assert_eq!(
+        (worker.execution, worker.delivery),
+        (AgentExecution::Cancelled, AgentDelivery::NotDelivered)
+    );
+    assert!(
+        !activity["lead"].waiting,
+        "the restored worker does not hold its lead"
+    );
 }
 
 #[test]

@@ -56,11 +56,6 @@ struct DispatchParams {
     worktree: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "Override the auto-archive policy for this child. By default (per Settings → Orchestrate) a completed child is archived once its terminal result reaches you; failed children always stay visible. Set false to keep a completed child in the sidebar; send to an archived child unarchives it."
-    )]
-    archive_on_complete: Option<bool>,
-    #[serde(default)]
-    #[schemars(
         description = "Character cap for the inline result text in the completion callback (default 1200; 0 = unlimited). Raise it or pass 0 when you will need the full report anyway — cheaper than a follow-up result call."
     )]
     result_max_chars: Option<u32>,
@@ -139,10 +134,6 @@ struct ThreadParams {
     thread_id: String,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ArchiveParams {
-    thread_ids: Vec<String>,
-}
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ApproveParams {
     #[schemars(description = "Child thread id from the pending approval callback.")]
     thread_id: String,
@@ -181,7 +172,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch concrete execution work to an enabled execution-model profile in a new child Tcode thread. Use collaborate for peer decision discussions. Dispatch a brief to the thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. permission selects an exact native value listed for the target profile; omit it to use the child approval setting. The response records the resolved permission value. worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
+        description = "Dispatch concrete execution work to an enabled execution-model profile in a new child Tcode thread. Use collaborate for peer decision discussions. Dispatch a brief to the thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. permission selects an exact native value listed for the target profile; omit it to use the child approval setting. The response records the resolved permission value. worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. When you accept the child's result, settle it: an unsettled finished child is not delivered and keeps your thread waiting. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
     )]
     async fn dispatch(&self, Parameters(p): Parameters<DispatchParams>) -> CallToolResult {
         run_op(
@@ -198,7 +189,6 @@ impl OrchestrateTools {
                 brief: p.brief,
                 cwd: p.cwd,
                 worktree: p.worktree,
-                archive_on_complete: p.archive_on_complete,
                 result_max_chars: p.result_max_chars,
                 fast: p.fast,
             },
@@ -224,7 +214,6 @@ impl OrchestrateTools {
                 brief: p.brief,
                 cwd: None,
                 worktree: Some(false),
-                archive_on_complete: None,
                 result_max_chars: Some(0),
                 fast: None,
             },
@@ -232,7 +221,9 @@ impl OrchestrateTools {
         .await
     }
 
-    #[tool(description = "List child thread status, optionally for one thread.")]
+    #[tool(
+        description = "List child thread status, optionally for one thread. delivery is running, awaiting_settle (finished, its result not yet accepted with settle), settled, or not_delivered (cancelled or archived)."
+    )]
     async fn status(&self, Parameters(p): Parameters<StatusParams>) -> CallToolResult {
         run_op(
             &self.broker,
@@ -245,7 +236,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Send a follow-up message to one of this session's child threads. If the child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. The response reports which (delivery: steered | queued)."
+        description = "Send a follow-up message to one of this session's child threads. If the child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. The response reports which (delivery: steered | queued). A settled, cancelled or archived child reopens and must be settled again once you accept its new result."
     )]
     async fn send(&self, Parameters(p): Parameters<SendParams>) -> CallToolResult {
         run_op(
@@ -272,7 +263,9 @@ impl OrchestrateTools {
         .await
     }
 
-    #[tool(description = "Cancel and shut down one of this session's child threads.")]
+    #[tool(
+        description = "Cancel and shut down one of this session's child threads. Its result is kept but not delivered, and it no longer keeps your thread waiting. To accept a result, use settle instead."
+    )]
     async fn cancel(&self, Parameters(p): Parameters<ThreadParams>) -> CallToolResult {
         run_op(
             &self.broker,
@@ -285,14 +278,14 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Archive a batch of this session's child threads by id. Completed children are auto-archived by default, so this is mainly for failed children you will not retry and children dispatched with archive_on_complete: false. Archived threads vanish from the user's sidebar but are fully recoverable in Settings → Archived Threads, and their transcripts remain readable via status/result. Archiving a running child shuts it down; cancel first for a clean stop."
+        description = "Settle one of this session's finished child threads once you have accepted its result. Settling is the delivery: until then a finished child is not delivered and keeps your thread waiting. The child's provider stops; send reopens it. Refused while the child still runs or waits for an answer."
     )]
-    async fn archive(&self, Parameters(p): Parameters<ArchiveParams>) -> CallToolResult {
+    async fn settle(&self, Parameters(p): Parameters<ThreadParams>) -> CallToolResult {
         run_op(
             &self.broker,
-            OrchestrateOp::Archive {
+            OrchestrateOp::Settle {
                 parent_id: self.parent_id.clone(),
-                thread_ids: p.thread_ids,
+                thread_id: p.thread_id,
             },
         )
         .await
@@ -397,7 +390,7 @@ impl ServerHandler for OrchestrateTools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, and send to continue either thread.")
+            .with_instructions("Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted.")
     }
 }
 

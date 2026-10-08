@@ -76,9 +76,15 @@ inspected or verified, and any material gaps.
 
 Each opened thread returns a `thread_id`. Reuse it with `send`; use `status` or
 `result` when needed, `approve` only within the user's authorization, and
-`cancel` or `archive` deliberately. Override fast mode only when the user
-explicitly requests it. A completion callback carries the child's status and
-report. Ask children to use `report_result` for a self-contained result, then
-evaluate that result under the acceptance responsibility above. Continue useful
-lead work while threads run or end the turn and let callbacks wake it; avoid
-polling loops.
+`cancel` deliberately. Override fast mode only when the user explicitly
+requests it. A completion callback carries the child's status and report. Ask
+children to use `report_result` for a self-contained result, then evaluate that
+result under the acceptance responsibility above. Continue useful lead work
+while threads run or end the turn and let callbacks wake it; avoid polling
+loops.
+
+Settle each child whose result you have accepted with `settle`. Settling is the
+delivery: a finished child that is not settled is not delivered, keeps your
+thread waiting, and stays in the user's Agents view as awaiting settle. `send`
+to a settled child reopens it; settle it again once you accept the new result.
+`cancel` stops a child without delivering its result.
