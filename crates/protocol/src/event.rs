@@ -668,25 +668,60 @@ pub enum RuntimeToast {
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeError {
     External(String),
-    PersistSettings { error: String },
-    TerminalStart { error: String },
-    TerminalRestart { error: String },
-    PersistProject { error: String },
-    WorktreeRemove { error: String },
-    DeleteSession { error: String },
-    DeleteProject { error: String },
+    PersistSettings {
+        error: String,
+    },
+    TerminalStart {
+        error: String,
+    },
+    TerminalRestart {
+        error: String,
+    },
+    PersistProject {
+        error: String,
+    },
+    WorktreeRemove {
+        error: String,
+    },
+    DeleteSession {
+        error: String,
+    },
+    DeleteProject {
+        error: String,
+    },
     NativeRewindBlocked,
-    PersistEvent { error: String },
-    WorktreeAdd { error: String },
-    PersistSession { error: String },
+    PersistEvent {
+        error: String,
+    },
+    WorktreeAdd {
+        error: String,
+    },
+    PersistSession {
+        error: String,
+    },
     TitleGenerationFailed,
     TitleGenerationEmpty,
     ProcessGone,
-    SteerUnsupported { agent: String },
+    SteerUnsupported {
+        agent: String,
+    },
     DirtyTree,
-    ProviderStart { error: String },
-    ProviderClosed { reason: Option<String> },
-    PersistSessionIndex { error: String },
+    ProviderStart {
+        error: String,
+    },
+    /// A provider could not start because the thread's working directory is
+    /// gone; `project_id` lets a client offer to re-point or remove the project.
+    WorkingDirectoryMissing {
+        session_id: String,
+        project_id: Option<String>,
+        cwd: PathBuf,
+    },
+    ProviderClosed {
+        reason: Option<String>,
+    },
+    PersistSessionIndex {
+        error: String,
+    },
     ProviderMessage(String),
 }
 

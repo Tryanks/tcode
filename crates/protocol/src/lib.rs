@@ -83,6 +83,8 @@ pub use wire::{
 // idle-auto-archive settings are removed.
 // Unreleased: stored messages carry human/agent/server origin; absent origin
 // uses the historical top-level human / dispatched child agent fallback.
+// Unreleased: adds the SetProjectRoot command and the WorkingDirectoryMissing
+// runtime error.
 // Unreleased: a pull request watch on linked PRs; the WatchPullRequest command,
 // the PullRequestWatch toast and SessionStatus.pull_request_tools.
 pub const PROTOCOL_VERSION: u32 = 10;

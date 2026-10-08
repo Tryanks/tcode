@@ -4,6 +4,7 @@ pub mod assets;
 /// The window's link to a host: its transport tasks and workspace store.
 pub mod attachment;
 mod attachments;
+mod change_project_root_dialog;
 pub mod chat;
 mod commit_dialog;
 mod composer;

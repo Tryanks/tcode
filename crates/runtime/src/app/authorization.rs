@@ -280,6 +280,7 @@ impl AppState {
                 | Command::CreateNewProject { .. }
                 | Command::StartScratchDraft
                 | Command::SetProjectIcon { .. }
+                | Command::SetProjectRoot { .. }
                 | Command::StartExternalImport { .. }
                 | Command::OpenLatestSession
                 | Command::ShutdownAllAndFlush

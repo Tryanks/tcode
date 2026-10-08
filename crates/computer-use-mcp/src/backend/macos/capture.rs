@@ -23,15 +23,15 @@ pub(super) fn capture_window(root: &RootInfo) -> Result<Vec<u8>, BackendError> {
         .arg("-t")
         .arg("png")
         .arg(&path)
-        .status()
+        .output()
         .map_err(|error| {
             BackendError::new(
                 BackendErrorCode::CaptureFailed,
                 format!("failed to spawn screencapture: {error}"),
             )
         })
-        .and_then(|status| {
-            if status.success() {
+        .and_then(|output| {
+            if output.status.success() {
                 let png = std::fs::read(&path).map_err(|error| {
                     BackendError::new(
                         BackendErrorCode::CaptureFailed,
@@ -40,9 +40,19 @@ pub(super) fn capture_window(root: &RootInfo) -> Result<Vec<u8>, BackendError> {
                 })?;
                 png_to_scaled_jpeg(&png)
             } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = stderr.trim();
+                let detail = if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                };
                 Err(BackendError::new(
                     BackendErrorCode::CaptureFailed,
-                    format!("screencapture exited with status {status}"),
+                    format!(
+                        "screencapture exited with {}{detail}; when Screen Recording is granted in System Settings yet capture is refused, the grant is not in effect for this Tcode process, which happens after Tcode's executable changed on disk, so restart Tcode",
+                        output.status
+                    ),
                 ))
             }
         });

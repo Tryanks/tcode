@@ -3822,6 +3822,7 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
         child.meta.parent_session_id = Some("parent".into());
         child.meta.archive_on_complete = false;
         child.meta.cwd = cwd.clone();
+        child.meta.project_id = Some("project".into());
         child.turn_in_flight = true;
         state.sessions.push(child.meta.clone());
         state.residents.parked.insert(child.meta.id.clone(), child);
@@ -3859,6 +3860,18 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
         assert!(response.try_recv().unwrap().is_ok());
     });
     cx.run_until(|_| !parent_receiver.is_empty());
+    assert!(
+        cx.drain_outgoing().iter().any(|message| matches!(
+            message,
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::Runtime(RuntimeEvent::Error(
+                    RuntimeError::WorkingDirectoryMissing { session_id, project_id: Some(project_id), cwd: missing }
+                )),
+                ..
+            }) if session_id == "child" && project_id == "project" && missing == &cwd
+        )),
+        "a missing working directory is reported with its project so a client can offer to re-point it"
+    );
 
     let Ok(SessionCommand::Steer { text, .. }) = parent_receiver.try_recv() else {
         panic!("the parent must be told the child failed to start");
