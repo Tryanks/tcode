@@ -2886,7 +2886,7 @@ fn only_a_loaded_conversation_marks_a_thread_read() {
         assert!(
             !activity.working
                 && !activity.turn_running
-                && !activity.background_only
+                && !activity.waiting
                 && !activity.waiting_for_approval
                 && !activity.waiting_for_input,
             "a thread with no live provider has no work"
@@ -6849,12 +6849,12 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             ("stale timeline", stale_timeline, false),
         ] {
             let id = session.meta.id.clone();
-            let expected_background = label == "background";
+            let expected_waiting = matches!(label, "delivery" | "background");
             state.sessions.push(session.meta.clone());
             state.install_selected(session);
             let index = state.index_snapshot();
             assert_eq!(
-                index.summary.activity[&id].background_only, expected_background,
+                index.summary.activity[&id].waiting, expected_waiting,
                 "{label}"
             );
             let active_answer = state.turn_running_for(&id);
@@ -6880,6 +6880,53 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             assert_eq!(active_answer, expected, "{label} work predicate");
             state.residents.parked.remove(&id);
         }
+    });
+}
+
+/// A parent waits while any descendant thread still runs, even with no work
+/// of its own, and stops waiting once that thread has finished.
+#[test]
+fn parent_waits_while_a_descendant_thread_runs() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-waiting-child-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(TestClientState::new(store));
+    let commands = smol::channel::unbounded().0;
+
+    let mut parent = live_session(ProviderKind::ClaudeCode, commands.clone());
+    parent.meta.id = "parent".into();
+    let mut child = live_session(ProviderKind::ClaudeCode, commands.clone());
+    child.meta.id = "child".into();
+    child.meta.parent_session_id = Some("parent".into());
+    let mut grandchild = live_session(ProviderKind::ClaudeCode, commands);
+    grandchild.meta.id = "grandchild".into();
+    grandchild.meta.parent_session_id = Some("child".into());
+    grandchild.turn_in_flight = true;
+
+    state.update(cx, |state, _| {
+        for session in [&parent, &child, &grandchild] {
+            state.sessions.push(session.meta.clone());
+        }
+        state.install_selected(parent);
+        state.residents.parked.insert("child".into(), child);
+        state
+            .residents
+            .parked
+            .insert("grandchild".into(), grandchild);
+
+        let activity = state.index_snapshot().summary.activity;
+        assert!(activity["parent"].waiting && !activity["parent"].working);
+        assert!(activity["child"].waiting && !activity["child"].working);
+        assert!(!activity["grandchild"].waiting && activity["grandchild"].working);
+
+        state
+            .residents
+            .parked
+            .get_mut("grandchild")
+            .unwrap()
+            .turn_in_flight = false;
+        let activity = state.index_snapshot().summary.activity;
+        assert!(!activity["parent"].waiting && !activity["child"].waiting);
     });
 }
 

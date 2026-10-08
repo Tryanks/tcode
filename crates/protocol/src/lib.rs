@@ -70,7 +70,8 @@ pub use wire::{
 // version 10 (v0.2.2) adds ImageRead, ToolCall.image_reads metadata and
 // ReadItemImage for fetching model-read image bytes outside timeline windows.
 //
-// Unreleased: (none)
+// Unreleased: replaces SessionActivity.background_only with waiting, which
+// also covers unfinished child threads.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]
