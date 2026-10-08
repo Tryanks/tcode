@@ -13,6 +13,7 @@ use std::{
 
 pub type Headers = BTreeMap<String, String>;
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
+const MAX_BODY_LIMIT: usize = 16_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHubError {
@@ -439,7 +440,7 @@ impl GitHubApi {
             number(&headers, "x-ratelimit-reset"),
             graphql.map(super::digest).unwrap_or_default()
         );
-        let cap = options.body_limit.min(BODY_LIMIT);
+        let cap = options.body_limit.min(MAX_BODY_LIMIT);
         let mut body = Vec::new();
         response
             .into_reader()

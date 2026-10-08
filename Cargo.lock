@@ -8516,6 +8516,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pull-request-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "mcp-host",
+ "rmcp",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10836,6 +10848,7 @@ dependencies = [
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
+ "pull-request-mcp",
  "smol",
  "tcode-client",
  "tcode-protocol",
@@ -10887,6 +10900,7 @@ name = "tcode-core"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "chrono",
  "log",
  "serde",
  "serde_json",
@@ -10901,6 +10915,7 @@ dependencies = [
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
+ "pull-request-mcp",
  "qrcode",
  "serde",
  "serde_json",
@@ -10952,6 +10967,7 @@ dependencies = [
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
+ "pull-request-mcp",
  "serde",
  "serde_json",
  "smol",
@@ -10961,6 +10977,7 @@ dependencies = [
  "tcode-services",
  "tcode-traverse",
  "term",
+ "ureq",
  "uuid",
 ]
 
