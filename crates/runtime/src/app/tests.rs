@@ -11005,6 +11005,7 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
         meta.created_at = stamp / 1000;
+        meta.updated_at = stamp / 1000;
         meta.settled_at = settled.then_some(stamp / 1000);
         meta.settled_override = settled.then_some(SettledOverride::Settled);
         store.upsert_meta(&meta).unwrap();
@@ -11104,6 +11105,22 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
         },
     )
     .unwrap();
+    command(
+        &state,
+        cx,
+        9,
+        Command::ReorderPinned {
+            session_id: "idle".into(),
+            order_key: "p".into(),
+        },
+    )
+    .unwrap();
+    state.read(|state| {
+        for id in ["idle", "arranged"] {
+            let meta = state.find_meta(id).unwrap();
+            assert_eq!(meta.updated_at, stamp / 1000, "arranging is not activity");
+        }
+    });
 
     state.dispatch_command(
         cx,
@@ -11125,7 +11142,6 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
         );
         let idle = state.find_meta("idle").unwrap();
         assert!(!idle.is_settled(), "a pinned thread is exempt");
-        assert!(!state.find_meta("parked").unwrap().is_settled());
     });
 
     command(
@@ -11144,6 +11160,11 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
             parked.settled_override,
             Some(SettledOverride::Active),
             "unpinning keeps the thread active"
+        );
+        assert_eq!(
+            parked.updated_at,
+            stamp / 1000,
+            "pinning and unpinning are not activity"
         );
     });
     command(

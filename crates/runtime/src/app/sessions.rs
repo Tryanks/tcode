@@ -1097,7 +1097,6 @@ impl AppState {
             meta.settled_override = Some(SettledOverride::Active);
             meta.settled_at = None;
         }
-        meta.updated_at = now_secs();
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1115,7 +1114,6 @@ impl AppState {
         }
         meta.pinned_at = None;
         meta.pin_order = None;
-        meta.updated_at = now_secs();
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1141,10 +1139,6 @@ impl AppState {
             return;
         }
         *slot = Some(order_key);
-        // Arranging the active list is not thread activity.
-        if section == ThreadSection::Pinned {
-            meta.updated_at = now_secs();
-        }
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
