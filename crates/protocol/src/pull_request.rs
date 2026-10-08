@@ -27,8 +27,9 @@ pub enum PullRequestRead {
         after: String,
     },
     ViewedFiles,
-    /// Media the pull request's conversation points at on GitHub, or an author's avatar.
-    /// `validator` is the one a previous answer carried, to revalidate a cached copy.
+    /// An image URL from the pull request's conversation or an author's avatar; the host decides
+    /// whether it reads it. `validator` is the one a previous answer carried, to revalidate a
+    /// cached copy.
     Media {
         url: String,
         validator: Option<String>,
@@ -198,6 +199,8 @@ pub enum PullRequestMedia {
     NotModified { expires_at: u64 },
     /// Video and audio open in the browser until a range-capable read exists.
     External { mime: String },
+    /// Not media on GitHub's own hosts: the client draws it by its URL, as a browser would.
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

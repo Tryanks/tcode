@@ -11,11 +11,7 @@ use super::{
 };
 use agent::FileChangeKind;
 use serde_json::{Value, json};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tcode_core::{pull_request::PullRequestKey, session::ReviewSide};
 use tcode_protocol::{
     PullRequestActor, PullRequestComment, PullRequestConversation, PullRequestFile,
@@ -46,6 +42,8 @@ struct Revisions {
     base: String,
     head: String,
     changed_files: u64,
+    /// The pull request's GraphQL id, which the viewed mutation names.
+    node_id: String,
 }
 
 pub struct PullRequestReads {
@@ -56,8 +54,6 @@ pub struct PullRequestReads {
     conversations: ReadCache<PullRequestConversation>,
     replies: ReadCache<PullRequestThreadReplies>,
     viewed: ReadCache<PullRequestViewedFiles>,
-    /// Node ids for the viewed mutation, per pull request and account.
-    node_ids: Mutex<HashMap<(PullRequestKey, String), String>>,
 }
 
 struct Reader<'a> {
@@ -141,6 +137,10 @@ impl Reader<'_> {
             base: sha("base")?,
             head: sha("head")?,
             changed_files: raw["changed_files"].as_u64().unwrap_or(0),
+            node_id: raw["node_id"]
+                .as_str()
+                .ok_or(GitHubError::InvalidResponse)?
+                .to_owned(),
         };
         let ttl = if raw["merged_at"].is_string() {
             MERGED_TTL
@@ -339,8 +339,8 @@ impl Reader<'_> {
         })
     }
 
-    fn viewed_files(&self) -> Result<(PullRequestViewedFiles, Option<String>), GitHubError> {
-        let query = "query PullRequestViewedFiles($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id files(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { path viewerViewedState } } } } }";
+    fn viewed_files(&self) -> Result<PullRequestViewedFiles, GitHubError> {
+        let query = "query PullRequestViewedFiles($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { files(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { path viewerViewedState } } } } }";
         let read = graphql::pages(
             None,
             Some(VIEWED_PAGES),
@@ -354,12 +354,11 @@ impl Reader<'_> {
             |page| next_cursor(&page["data"]["repository"]["pullRequest"]["files"]),
             |_| false,
         )?;
-        let node_id = read.pages.first().and_then(|page| {
-            page["data"]["repository"]["pullRequest"]["id"]
-                .as_str()
-                .map(str::to_owned)
-        });
-        if node_id.is_none() {
+        if read
+            .pages
+            .first()
+            .is_none_or(|page| page["data"]["repository"]["pullRequest"].is_null())
+        {
             return Err(GitHubError::NotFound);
         }
         let files = read
@@ -375,13 +374,10 @@ impl Reader<'_> {
                 Some((node["path"].as_str()?.to_owned(), state))
             })
             .collect();
-        Ok((
-            PullRequestViewedFiles {
-                files,
-                complete: !read.truncated,
-            },
-            node_id,
-        ))
+        Ok(PullRequestViewedFiles {
+            files,
+            complete: !read.truncated,
+        })
     }
 }
 
@@ -395,7 +391,6 @@ impl PullRequestReads {
             conversations: ReadCache::new(16 * 1024 * 1024),
             replies: ReadCache::new(4 * 1024 * 1024),
             viewed: ReadCache::new(4 * 1024 * 1024),
-            node_ids: Mutex::new(HashMap::new()),
         })
     }
 
@@ -427,10 +422,7 @@ impl PullRequestReads {
             return Err(GitHubError::InvalidInput);
         }
         let reader = self.reader(key)?;
-        let revisions = self
-            .revisions
-            .read(reader.read_key("revisions"), || reader.revisions(), |_| 128)?
-            .value;
+        let revisions = self.revisions(&reader)?;
         self.files.read(
             reader.read_key(format!("files {page:?}")),
             || {
@@ -438,6 +430,15 @@ impl PullRequestReads {
                     None => reader.whole_diff(&revisions)?,
                     Some(page) => reader.files_page(&revisions, page)?,
                 };
+                // Files that disagree with the count read beside the revisions were listed
+                // after a push the revisions predate; the next read asks for them again.
+                let listed = files.files.len() as u64
+                    + page.map_or(0, |page| (page as u64 - 1) * FILES_PER_PAGE as u64);
+                if listed > revisions.changed_files
+                    || (files.next_page.is_none() && listed != revisions.changed_files)
+                {
+                    self.revisions.invalidate(key);
+                }
                 Ok((files, READ_TTL))
             },
             |files| {
@@ -454,6 +455,13 @@ impl PullRequestReads {
                     .sum()
             },
         )
+    }
+
+    fn revisions(&self, reader: &Reader<'_>) -> Result<Arc<Revisions>, GitHubError> {
+        Ok(self
+            .revisions
+            .read(reader.read_key("revisions"), || reader.revisions(), |_| 256)?
+            .value)
     }
 
     /// A file's text at a commit of the pull request's repository.
@@ -510,16 +518,7 @@ impl PullRequestReads {
         let reader = self.reader(key)?;
         self.viewed.read(
             reader.read_key("viewed"),
-            || {
-                let (files, node_id) = reader.viewed_files()?;
-                if let Some(node_id) = node_id {
-                    self.node_ids
-                        .lock()
-                        .unwrap()
-                        .insert((key.clone(), reader.account.clone()), node_id);
-                }
-                Ok((files, VIEWED_TTL))
-            },
+            || Ok((reader.viewed_files()?, VIEWED_TTL)),
             |viewed| viewed.files.iter().map(|(path, _)| path.len() + 8).sum(),
         )
     }
@@ -543,24 +542,7 @@ impl PullRequestReads {
     }
 
     fn mark(&self, reader: &Reader<'_>, paths: &[String], viewed: bool) -> Result<(), GitHubError> {
-        let cached = self
-            .node_ids
-            .lock()
-            .unwrap()
-            .get(&(reader.key.clone(), reader.account.clone()))
-            .cloned();
-        let node_id = match cached {
-            Some(node_id) => node_id,
-            None => reader
-                .query(
-                    "PullRequestNodeId",
-                    "query PullRequestNodeId($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } } }".into(),
-                    [],
-                )?["data"]["repository"]["pullRequest"]["id"]
-                .as_str()
-                .ok_or(GitHubError::NotFound)?
-                .to_owned(),
-        };
+        let node_id = self.revisions(reader)?.node_id.clone();
         let items: Vec<_> = paths
             .iter()
             .enumerate()
@@ -600,33 +582,35 @@ impl PullRequestReads {
         Ok(())
     }
 
-    /// Media is read only where the pull request's conversation points at it, so this is not a
-    /// way to read anything else the account can see.
+    /// Media on GitHub's hosts is read only where the pull request's conversation points at it,
+    /// so this is not a way to read anything else the account can see.
     pub fn media(
         &self,
         key: &PullRequestKey,
         url: &str,
         validator: Option<&str>,
     ) -> Result<PullRequestMedia, GitHubError> {
+        let Some(source) = media::classify(url) else {
+            return Ok(PullRequestMedia::Unsupported);
+        };
         let conversation = self.conversation(key)?.value;
-        let mentioned = conversation_bodies(&conversation).any(|body| body.contains(url))
-            || conversation_comments(&conversation).any(|comment| {
+        let replies = self.replies.held(key);
+        let mut comments = conversation_comments(&conversation)
+            .chain(replies.iter().flat_map(|replies| replies.comments.iter()));
+        let named = match source {
+            media::MediaSource::Avatar(_) => comments.any(|comment| {
                 comment
                     .author
                     .as_ref()
                     .and_then(|author| author.avatar_url.as_deref())
                     == Some(url)
-            })
-            || self
-                .replies
-                .held(key)
-                .iter()
-                .flat_map(|replies| replies.comments.iter())
-                .any(|comment| comment.body.contains(url));
-        if !mentioned {
+            }),
+            _ => comments.any(|comment| comment.body.contains(url)),
+        };
+        if !named {
             return Err(GitHubError::InvalidInput);
         }
-        media::fetch(&self.api, url, validator)
+        media::fetch(&self.api, &source, validator)
     }
 
     /// Drops every answer about the pull request, for a change the sync observed.
@@ -650,10 +634,6 @@ fn conversation_comments(
                 .iter()
                 .flat_map(|thread| thread.comments.iter()),
         )
-}
-
-fn conversation_bodies(conversation: &PullRequestConversation) -> impl Iterator<Item = &str> {
-    conversation_comments(conversation).map(|comment| comment.body.as_str())
 }
 
 fn comment_bytes(comment: &PullRequestComment) -> usize {

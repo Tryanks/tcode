@@ -176,6 +176,18 @@ impl ThreadPullRequestLink {
     }
 }
 
+/// Whether the thread shows the pull request: a visible link, or a layer of the native stack
+/// a visible link carries.
+pub fn shown(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> bool {
+    links.iter().filter(|link| link.visible()).any(|link| {
+        link.key == *key
+            || matches!(&link.stack, PullRequestStackState::Native(stack)
+                if link.key.host == key.host
+                    && link.key.repository == key.repository
+                    && stack.layers.iter().any(|layer| layer.number == key.number))
+    })
+}
+
 /// The visible links a watch holds, which keep their thread waiting between wakes.
 pub fn watched(links: &[ThreadPullRequestLink]) -> impl Iterator<Item = &ThreadPullRequestLink> {
     links

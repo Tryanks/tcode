@@ -25,22 +25,51 @@ const EXPIRY: Duration = Duration::from_secs(3600);
 const MAX_SIDE: u32 = 8192;
 const MAX_PIXELS: u64 = 24_000_000;
 
-/// The URL to read for `source`, or `None` when it is not media GitHub hosts behind a
-/// credential: an upload, a legacy upload, or a repository file.
-pub fn asset_url(source: &str) -> Option<Url> {
+/// How the host reads a URL a pull request names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaSource {
+    /// An upload, a legacy upload or a repository file, which a private repository serves only
+    /// with the github.com credential.
+    Credentialed(Url),
+    /// Bytes GitHub serves without a credential: a legacy `user-images` upload, a signed
+    /// `private-user-images` link, or a camo proxy.
+    Public(Url),
+    /// An author's avatar, public, and read only for an author the conversation names.
+    Avatar(Url),
+}
+
+impl MediaSource {
+    pub fn url(&self) -> &Url {
+        match self {
+            Self::Credentialed(url) | Self::Public(url) | Self::Avatar(url) => url,
+        }
+    }
+}
+
+/// The URL to read for `source`, or `None` when it is not media on GitHub's own hosts. Port,
+/// userinfo and fragment say nothing about which bytes GitHub serves.
+pub fn classify(source: &str) -> Option<MediaSource> {
     let url = Url::parse(source).ok()?;
     if url.scheme() != "https" {
         return None;
     }
     let host = url.host_str()?.to_ascii_lowercase();
     let path = url.path();
-    if host == "raw.githubusercontent.com" || host == "media.githubusercontent.com" {
+    let canonical = || {
         let mut canonical = Url::parse(&format!("https://{host}{path}")).ok()?;
         canonical.set_query(url.query());
-        return Some(canonical);
-    }
-    if host != "github.com" && host != "www.github.com" {
-        return None;
+        Some(canonical)
+    };
+    match host.as_str() {
+        "raw.githubusercontent.com" | "media.githubusercontent.com" => {
+            return canonical().map(MediaSource::Credentialed);
+        }
+        "user-images.githubusercontent.com"
+        | "private-user-images.githubusercontent.com"
+        | "camo.githubusercontent.com" => return canonical().map(MediaSource::Public),
+        "avatars.githubusercontent.com" => return canonical().map(MediaSource::Avatar),
+        "github.com" | "www.github.com" => {}
+        _ => return None,
     }
     let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
     let token = |value: &str| {
@@ -57,7 +86,9 @@ pub fn asset_url(source: &str) -> Option<Url> {
                 && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) && token(id)
     );
     if upload || legacy {
-        return Url::parse(&format!("https://github.com{path}")).ok();
+        return Url::parse(&format!("https://github.com{path}"))
+            .ok()
+            .map(MediaSource::Credentialed);
     }
     // `blob` and `raw` both address file bytes; the raw host is the one that honours the token.
     match segments.as_slice() {
@@ -71,6 +102,7 @@ pub fn asset_url(source: &str) -> Option<Url> {
                 rest.join("/")
             ))
             .ok()
+            .map(MediaSource::Credentialed)
         }
         _ => None,
     }
@@ -111,30 +143,17 @@ fn type_from_name(url: &Url) -> Option<&'static str> {
     })
 }
 
-/// An author's avatar, which GitHub serves publicly and never with the credential.
-fn avatar_url(source: &str) -> Option<Url> {
-    let url = Url::parse(source).ok()?;
-    (url.scheme() == "https"
-        && url
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case("avatars.githubusercontent.com")))
-    .then_some(url)
-}
-
 pub(super) fn fetch(
     api: &GitHubApi,
-    source: &str,
+    source: &MediaSource,
     validator: Option<&str>,
 ) -> Result<PullRequestMedia, GitHubError> {
-    let mut target = asset_url(source)
-        .or_else(|| avatar_url(source))
-        .ok_or(GitHubError::InvalidInput)?;
+    let mut target = source.url().clone();
     // Without a github.com credential a public asset still loads, and a private one fails as
     // it does in a browser that is not signed in.
-    let token = api
-        .credentials()
-        .get("github.com")
-        .ok()
+    let token = matches!(source, MediaSource::Credentialed(_))
+        .then(|| api.credentials().get("github.com").ok())
+        .flatten()
         .map(|credential| credential.token);
     let started = Instant::now();
     let _permit = api.gate.acquire();
@@ -156,8 +175,14 @@ pub(super) fn fetch(
             if let (true, Some(token)) = (credentialed, &token) {
                 request = request.set("Authorization", &format!("Bearer {token}"));
             }
+            // An entity tag is quoted; anything else is the Last-Modified date it came from.
             if let Some(validator) = validator {
-                request = request.set("If-None-Match", validator);
+                let header = if validator.starts_with('"') || validator.starts_with("W/") {
+                    "If-None-Match"
+                } else {
+                    "If-Modified-Since"
+                };
+                request = request.set(header, validator);
             }
             let response = match request.call() {
                 Ok(response) => response,
@@ -202,7 +227,7 @@ pub(super) fn fetch(
         .header("content-type")
         .and_then(media_type)
         .or_else(|| type_from_name(&target).map(str::to_owned))
-        .or_else(|| type_from_name(&asset_url(source)?).map(str::to_owned))
+        .or_else(|| type_from_name(source.url()).map(str::to_owned))
         .ok_or(GitHubError::UnsupportedMedia)?;
     if !mime.starts_with("image/") {
         return Ok(PullRequestMedia::External { mime });

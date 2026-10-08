@@ -293,19 +293,16 @@ impl AppState {
             });
         });
     }
-    /// Reads answer only for a pull request linked to the thread, so a client reads nothing
-    /// through a thread it can see that the thread does not show.
+    /// Reads answer only for a pull request the thread shows, linked or a layer of a linked
+    /// stack, so a client reads nothing through a thread it can see that the thread does not
+    /// show.
     fn linked_pull_request(
         &self,
         session_id: &str,
         key: &PullRequestKey,
     ) -> Result<(), ProtocolError> {
         self.find_meta(session_id)
-            .filter(|meta| {
-                meta.pull_requests
-                    .iter()
-                    .any(|link| link.visible() && link.key == *key)
-            })
+            .filter(|meta| pull_request::shown(&meta.pull_requests, key))
             .map(|_| ())
             .ok_or_else(|| ProtocolError {
                 code: "pull_request_not_linked".into(),
@@ -358,7 +355,8 @@ impl AppState {
                         | tcode_protocol::PullRequestMedia::NotModified { expires_at } => {
                             UNIX_EPOCH + Duration::from_secs(*expires_at)
                         }
-                        tcode_protocol::PullRequestMedia::External { .. } => SystemTime::now(),
+                        tcode_protocol::PullRequestMedia::External { .. }
+                        | tcode_protocol::PullRequestMedia::Unsupported => SystemTime::now(),
                     };
                     (PullRequestReadResponse::Media(media), expires_at)
                 }

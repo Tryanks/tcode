@@ -1056,4 +1056,36 @@ fn reads_answer_only_a_linked_pull_request_and_a_synced_change_reads_it_fresh() 
     });
     read(&mut cx, 1).unwrap();
     assert_eq!(conversations(), 2, "a change the sync saw is read fresh");
+
+    // The thread shows every layer of the native stack its link carries.
+    state.update(&mut cx, |state, _| {
+        let layer = |number: u64| tcode_core::pull_request::PullRequestStackLayer {
+            url: format!("https://github.com/sample/project/pull/{number}"),
+            number,
+            head_branch: format!("layer-{number}"),
+            state: PullRequestState::Open,
+        };
+        let meta = state
+            .sessions
+            .iter_mut()
+            .find(|meta| meta.id == "active")
+            .unwrap();
+        meta.pull_requests[0].stack = PullRequestStackState::Native(PullRequestStack {
+            id: "stack".into(),
+            number: 7,
+            url: "https://github.com/sample/project/stacks/7".into(),
+            base: "main".into(),
+            layers: vec![layer(1), layer(3)],
+        });
+    });
+    assert!(
+        read(&mut cx, 3).is_ok(),
+        "a layer of the linked pull request's stack is read through the thread"
+    );
+    assert_eq!(
+        read(&mut cx, 4).unwrap_err().code,
+        "pull_request_not_linked",
+        "a pull request in no stack the thread shows is still refused"
+    );
+    assert_eq!(conversations(), 3);
 }

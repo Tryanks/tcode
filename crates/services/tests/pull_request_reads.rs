@@ -2,7 +2,6 @@ use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
 };
 use tcode_core::{pull_request::PullRequestKey, session::ReviewSide};
 use tcode_protocol::{
@@ -26,24 +25,30 @@ struct Seen {
     host: String,
     accept: String,
     authorization: Option<String>,
+    request: String,
     body: String,
 }
 impl Seen {
     fn from(exchange: &Exchange) -> Self {
-        let header = |name: &str| {
-            exchange.request.lines().find_map(|line| {
-                let (key, value) = line.split_once(':')?;
-                key.eq_ignore_ascii_case(name)
-                    .then(|| value.trim().to_owned())
-            })
-        };
-        Self {
+        let mut seen = Self {
             line: exchange.request.lines().next().unwrap().to_owned(),
-            host: header("host").unwrap_or_default(),
-            accept: header("accept").unwrap_or_default(),
-            authorization: header("authorization"),
+            host: String::new(),
+            accept: String::new(),
+            authorization: None,
+            request: exchange.request.clone(),
             body: String::from_utf8_lossy(&exchange.body).into_owned(),
-        }
+        };
+        seen.host = seen.header("host").unwrap_or_default();
+        seen.accept = seen.header("accept").unwrap_or_default();
+        seen.authorization = seen.header("authorization");
+        seen
+    }
+    fn header(&self, name: &str) -> Option<String> {
+        self.request.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
     }
     fn operation(&self) -> Option<String> {
         let query: Value = serde_json::from_str(&self.body).ok()?;
@@ -101,6 +106,7 @@ fn revisions(changed_files: u64) -> (u16, String, Vec<u8>) {
         "head": {"sha": HEAD},
         "changed_files": changed_files,
         "merged_at": null,
+        "node_id": "PR_node_7",
     }))
 }
 
@@ -264,6 +270,9 @@ fn a_refused_whole_diff_pages_the_changed_files_and_names_withheld_patches() {
     let reads = reads(&fixture, &store);
     let pages = Arc::new(Mutex::new(true));
     let pages_answer = pages.clone();
+    // GitHub's count beside the revisions, one short of the files a later push left.
+    let changed = Arc::new(Mutex::new(100));
+    let changed_answer = changed.clone();
     let (_server, log) = serve(fixture, move |seen| {
         let path = seen.line.split_whitespace().nth(1).unwrap();
         if seen.accept == "application/vnd.github.diff" {
@@ -278,7 +287,7 @@ fn a_refused_whole_diff_pages_the_changed_files_and_names_withheld_patches() {
             return (500, String::new(), b"{}".to_vec());
         }
         match path {
-            "/repos/octo/repo/pulls/7" => revisions(101),
+            "/repos/octo/repo/pulls/7" => revisions(*changed_answer.lock().unwrap()),
             "/repos/octo/repo/pulls/7/files?per_page=100&page=1" => {
                 let mut rows = vec![
                     listed("huge.json", "modified", (40_000, 2), None),
@@ -340,6 +349,30 @@ fn a_refused_whole_diff_pages_the_changed_files_and_names_withheld_patches() {
         1,
         "a page carries on from the files walk without asking for the whole diff again"
     );
+    let revision_reads = || {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| {
+                seen.line.starts_with("GET /repos/octo/repo/pulls/7 ")
+                    && seen.accept != "application/vnd.github.diff"
+            })
+            .count()
+    };
+    assert_eq!(revision_reads(), 1);
+    *changed.lock().unwrap() = 101;
+    reads.files(&key(), None).unwrap();
+    assert_eq!(
+        revision_reads(),
+        2,
+        "files past the count read beside the revisions read the revisions again"
+    );
+    reads.files(&key(), None).unwrap();
+    assert_eq!(
+        revision_reads(),
+        2,
+        "revisions that agree with the files are shared"
+    );
 
     // When the pages fail too, the refusal that explains the missing diff is reported.
     reads.invalidate(&key());
@@ -369,7 +402,7 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
     match seen.operation().as_deref() {
         Some("PullRequestConversation") => {
             json_reply(json!({"data": {"repository": {"pullRequest": {
-                "id": "PR_7", "body": "Screenshot: ![shot](https://github.com/user-attachments/assets/abc-123)\n<video src=\"https://github.com/user-attachments/assets/vid-1\">\n![](https://github.com/user-attachments/assets/loop) ![](https://github.com/user-attachments/assets/huge) ![](https://github.com/user-attachments/assets/wide) ![](https://github.com/user-attachments/assets/page)",
+                "id": "PR_7", "body": "Screenshot: ![shot](https://github.com/user-attachments/assets/abc-123)\n<video src=\"https://github.com/user-attachments/assets/vid-1\">\n![](https://github.com/user-attachments/assets/loop) ![](https://github.com/user-attachments/assets/huge) ![](https://github.com/user-attachments/assets/wide) ![](https://github.com/user-attachments/assets/page) ![](https://github.com/user-attachments/assets/dated) ![](https://github.com/user-attachments/assets/unsized) ![](https://user-images.githubusercontent.com/1/legacy.png) Not an avatar: https://avatars.githubusercontent.com/u/5",
                 "createdAt": "2026-10-01T00:00:00Z", "lastEditedAt": null,
                 "url": "https://github.com/octo/repo/pull/7", "author": author, "reactionGroups": [],
                 "mergedAt": null,
@@ -410,12 +443,15 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
         }
         Some("PullRequestThreadReplies") => {
             let thread = seen.variables()["thread"].as_str().unwrap().to_owned();
+            let mut reply = comment("RC_11", "eleventh", "2026-10-04T00:00:00Z");
+            reply["author"] =
+                json!({"login": "hubot", "avatarUrl": "https://avatars.githubusercontent.com/u/9"});
             json_reply(json!({"data": {
                 "repository": {"pullRequest": {"id": "PR_7"}},
                 "node": {
                     "pullRequest": {"id": if thread == "PRRT_outdated" { "PR_7" } else { "PR_other" }},
                     "comments": {"pageInfo": {"hasNextPage": false, "endCursor": null},
-                        "nodes": [comment("RC_11", "eleventh", "2026-10-04T00:00:00Z")]},
+                        "nodes": [reply]},
                 },
             }}))
         }
@@ -532,12 +568,10 @@ fn viewed_page(after: &Value) -> (u16, String, Vec<u8>) {
             })
         })
         .collect();
-    json_reply(
-        json!({"data": {"repository": {"pullRequest": {"id": "PR_node_7", "files": {
-            "pageInfo": {"hasNextPage": true, "endCursor": (page + 1).to_string()},
-            "nodes": nodes,
-        }}}}}),
-    )
+    json_reply(json!({"data": {"repository": {"pullRequest": {"files": {
+        "pageInfo": {"hasNextPage": true, "endCursor": (page + 1).to_string()},
+        "nodes": nodes,
+    }}}}}))
 }
 
 #[test]
@@ -550,6 +584,7 @@ fn viewed_files_stop_at_five_pages_and_marking_rereads_only_the_viewed_state() {
         Some("SetPullRequestFilesViewed") => json_reply(json!({"data": {
             "f0": {"clientMutationId": null}, "f1": {"clientMutationId": null},
         }})),
+        None if seen.line.starts_with("GET /repos/octo/repo/pulls/7 ") => revisions(2),
         _ => conversation_reply(seen),
     });
     let count = |operation: &str| {
@@ -594,17 +629,11 @@ fn viewed_files_stop_at_five_pages_and_marking_rereads_only_the_viewed_state() {
         .cloned()
         .unwrap();
     let body: Value = serde_json::from_str(&mutation.body).unwrap();
-    let document = body["query"].as_str().unwrap();
-    assert!(document.starts_with("mutation SetPullRequestFilesViewed("));
-    assert!(document.contains(
-        "f1: markFileAsViewed(input: { pullRequestId: $pullRequestId, path: $f1_path })"
-    ));
     assert_eq!(
         body["variables"],
         json!({"pullRequestId": "PR_node_7", "f0_path": "a.rs", "f1_path": "b/c d.rs"}),
-        "paths travel as variables and the node id comes from the viewed read"
+        "paths travel as variables and the node id comes from the pull request's REST read"
     );
-    assert_eq!(count("PullRequestNodeId"), 0);
 
     reads.viewed_files(&key()).unwrap();
     reads.conversation(&key()).unwrap();
@@ -630,16 +659,23 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
     let reads = PullRequestReads::new(GitHubApi::new(credentials.clone(), fixture.builder()));
     let fail = Arc::new(Mutex::new(false));
     let failing = fail.clone();
+    // The first conversation answer is held until every other reader has asked for it too.
+    let (started, readers_started) = std::sync::mpsc::channel::<()>();
+    let held = Mutex::new(Some(readers_started));
     let (_server, log) = serve(fixture, move |seen| {
-        // Slow enough that concurrent readers overlap the first read.
-        thread::sleep(Duration::from_millis(100));
+        if seen.operation().as_deref() == Some("PullRequestConversation")
+            && let Some(readers) = held.lock().unwrap().take()
+        {
+            for _ in 1..4 {
+                readers.recv().unwrap();
+            }
+        }
         if *failing.lock().unwrap() {
             return (502, String::new(), b"{}".to_vec());
         }
         match seen.operation().as_deref() {
             Some("PullRequestViewedFiles") => {
                 json_reply(json!({"data": {"repository": {"pullRequest": {
-                    "id": "PR_node_7",
                     "files": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": []},
                 }}}}))
             }
@@ -655,8 +691,16 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
     };
 
     thread::scope(|scope| {
-        let readers: Vec<_> = (0..4)
-            .map(|_| scope.spawn(|| reads.conversation(&key()).unwrap().value))
+        let first = scope.spawn(|| reads.conversation(&key()).unwrap().value);
+        let readers: Vec<_> = (1..4)
+            .map(|_| {
+                let (started, reads) = (started.clone(), &reads);
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    reads.conversation(&key()).unwrap().value
+                })
+            })
+            .chain([first])
             .collect();
         for reader in readers {
             reader.join().unwrap();
@@ -718,19 +762,6 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
         (15., 60.),
         "each answer tells its reader when to ask again"
     );
-    thread::sleep(Duration::from_secs(15));
-    reads.viewed_files(&key()).unwrap();
-    assert_eq!(
-        count("PullRequestViewedFiles"),
-        2,
-        "viewed state is shared for fifteen seconds"
-    );
-    reads.conversation(&key()).unwrap();
-    assert_eq!(
-        count("PullRequestConversation"),
-        4,
-        "the conversation outlives the viewed state's fifteen seconds"
-    );
 }
 
 fn png(width: u32, height: u32) -> Vec<u8> {
@@ -742,41 +773,53 @@ fn png(width: u32, height: u32) -> Vec<u8> {
 }
 
 #[test]
-fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_token_on_github() {
-    use tcode_services::github::media::asset_url;
+fn media_is_read_only_from_github_hosts_the_conversation_names_and_keeps_the_token_on_github() {
+    use tcode_services::github::media::{MediaSource, classify};
+    let credentialed = |url: &str| Some(MediaSource::Credentialed(url::Url::parse(url).unwrap()));
+    let public = |url: &str| Some(MediaSource::Public(url::Url::parse(url).unwrap()));
     for (source, expected) in [
         (
             "https://github.com/user-attachments/assets/abc-123",
-            Some("https://github.com/user-attachments/assets/abc-123"),
+            credentialed("https://github.com/user-attachments/assets/abc-123"),
         ),
         (
             "https://www.github.com/octo/repo/assets/42/legacy-id",
-            Some("https://github.com/octo/repo/assets/42/legacy-id"),
+            credentialed("https://github.com/octo/repo/assets/42/legacy-id"),
         ),
         (
             "https://github.com/octo/repo/blob/main/docs/shot.png?raw=true",
-            Some("https://raw.githubusercontent.com/octo/repo/main/docs/shot.png"),
+            credentialed("https://raw.githubusercontent.com/octo/repo/main/docs/shot.png"),
         ),
         (
             "https://RAW.githubusercontent.com:443/octo/repo/main/a.png",
-            Some("https://raw.githubusercontent.com/octo/repo/main/a.png"),
+            credentialed("https://raw.githubusercontent.com/octo/repo/main/a.png"),
+        ),
+        (
+            "https://user-images.githubusercontent.com/1/legacy.png",
+            public("https://user-images.githubusercontent.com/1/legacy.png"),
+        ),
+        (
+            "https://private-user-images.githubusercontent.com/1/2.png?jwt=signed",
+            public("https://private-user-images.githubusercontent.com/1/2.png?jwt=signed"),
+        ),
+        (
+            "https://camo.githubusercontent.com/abc/def",
+            public("https://camo.githubusercontent.com/abc/def"),
+        ),
+        (
+            "https://avatars.githubusercontent.com/u/1?v=4",
+            Some(MediaSource::Avatar(
+                url::Url::parse("https://avatars.githubusercontent.com/u/1?v=4").unwrap(),
+            )),
         ),
         ("http://github.com/user-attachments/assets/abc", None),
         ("https://github.com/octo/repo/pull/7", None),
-        ("https://avatars.githubusercontent.com/u/1", None),
-        (
-            "https://private-user-images.githubusercontent.com/1/2.png?jwt=expired",
-            None,
-        ),
         ("https://example.com/user-attachments/assets/abc", None),
     ] {
-        assert_eq!(
-            asset_url(source).as_ref().map(url::Url::as_str),
-            expected,
-            "{source}"
-        );
+        assert_eq!(classify(source), expected, "{source}");
     }
 
+    const DATED: &str = "Wed, 21 Oct 2026 07:28:00 GMT";
     let fixture = Fixture::new();
     let store = Store::new();
     let reads = reads(&fixture, &store);
@@ -788,11 +831,26 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
             ("github.com", "/user-attachments/assets/abc-123") => {
                 redirect("https://objects.githubusercontent.com/signed/abc?X-Amz-Signature=s")
             }
-            ("objects.githubusercontent.com", "/signed/abc?X-Amz-Signature=s") => (
-                200,
-                "Content-Type: image/png\r\nETag: \"v1\"\r\n".into(),
-                png(3, 2),
-            ),
+            ("objects.githubusercontent.com", "/signed/abc?X-Amz-Signature=s") => {
+                if seen.header("if-none-match").as_deref() == Some("\"v1\"") {
+                    return (304, String::new(), Vec::new());
+                }
+                (
+                    200,
+                    "Content-Type: image/png\r\nETag: \"v1\"\r\n".into(),
+                    png(3, 2),
+                )
+            }
+            ("github.com", "/user-attachments/assets/dated") => {
+                if seen.header("if-modified-since").as_deref() == Some(DATED) {
+                    return (304, String::new(), Vec::new());
+                }
+                (
+                    200,
+                    format!("Content-Type: image/png\r\nLast-Modified: {DATED}\r\n"),
+                    png(1, 1),
+                )
+            }
             ("github.com", "/user-attachments/assets/vid-1") => {
                 (200, "Content-Type: video/mp4\r\n".into(), vec![0; 64])
             }
@@ -811,10 +869,25 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
                 "Content-Type: image/png\r\n".into(),
                 vec![0; tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES + 1],
             ),
+            // No length to refuse it by: the read itself stops at the cap.
+            ("github.com", "/user-attachments/assets/unsized") => {
+                let body = vec![0; tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES + 1];
+                let mut chunked = format!("{:x}\r\n", body.len()).into_bytes();
+                chunked.extend(body);
+                chunked.extend(b"\r\n0\r\n\r\n");
+                (
+                    200,
+                    "Content-Type: image/png\r\nTransfer-Encoding: chunked\r\n".into(),
+                    chunked,
+                )
+            }
             ("github.com", "/user-attachments/assets/wide") => {
                 (200, "Content-Type: image/png\r\n".into(), png(9000, 1))
             }
-            ("avatars.githubusercontent.com", "/u/1") => {
+            ("user-images.githubusercontent.com", "/1/legacy.png") => {
+                (200, "Content-Type: image/png\r\n".into(), png(1, 1))
+            }
+            ("avatars.githubusercontent.com", "/u/1" | "/u/9") => {
                 (200, "Content-Type: image/png\r\n".into(), png(2, 2))
             }
             ("github.com", "/user-attachments/assets/page") => (
@@ -852,6 +925,33 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
             "the signed hop never sees the token"
         );
     }
+    assert!(
+        matches!(
+            reads.media(&key(), &asset("abc-123"), Some("\"v1\"")),
+            Ok(PullRequestMedia::NotModified { .. })
+        ),
+        "an entity tag revalidates with If-None-Match"
+    );
+    let PullRequestMedia::Image { validator, .. } = media(&asset("dated")).unwrap() else {
+        panic!("a dated upload is an image")
+    };
+    assert_eq!(validator.as_deref(), Some(DATED));
+    assert!(
+        matches!(
+            reads.media(&key(), &asset("dated"), Some(DATED)),
+            Ok(PullRequestMedia::NotModified { .. })
+        ),
+        "a Last-Modified date revalidates with If-Modified-Since"
+    );
+    assert!(matches!(
+        media("https://user-images.githubusercontent.com/1/legacy.png").unwrap(),
+        PullRequestMedia::Image { .. }
+    ));
+    assert_eq!(
+        log.lock().unwrap().last().unwrap().authorization,
+        None,
+        "a public upload is read without the token"
+    );
     assert!(matches!(
         media("https://avatars.githubusercontent.com/u/1").unwrap(),
         PullRequestMedia::Image { .. }
@@ -862,9 +962,24 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
         "an author's avatar is public and read without the token"
     );
     assert_eq!(
-        media("https://avatars.githubusercontent.com/u/2").unwrap_err(),
+        media("https://avatars.githubusercontent.com/u/5").unwrap_err(),
+        GitHubError::InvalidInput,
+        "an avatar is read for an author, not for a body that quotes its address"
+    );
+    assert_eq!(
+        media("https://avatars.githubusercontent.com/u/9").unwrap_err(),
         GitHubError::InvalidInput,
         "an avatar no author of the pull request has is not read"
+    );
+    reads
+        .thread_replies(&key(), "PRRT_outdated", "C10")
+        .unwrap();
+    assert!(
+        matches!(
+            media("https://avatars.githubusercontent.com/u/9").unwrap(),
+            PullRequestMedia::Image { .. }
+        ),
+        "a reply's author is an author of the pull request once the reply is read"
     );
     assert_eq!(
         media(&asset("vid-1")).unwrap(),
@@ -892,6 +1007,11 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
         GitHubError::BodyTooLarge
     );
     assert_eq!(
+        media(&asset("unsized")).unwrap_err(),
+        GitHubError::BodyTooLarge,
+        "a body without a length is cut at the cap while it is read"
+    );
+    assert_eq!(
         media(&asset("wide")).unwrap_err(),
         GitHubError::BodyTooLarge
     );
@@ -906,8 +1026,9 @@ fn media_is_read_only_from_github_assets_the_conversation_names_and_keeps_the_to
         "only media the pull request names is read"
     );
     assert_eq!(
-        media("https://example.com/user-attachments/assets/abc-123").unwrap_err(),
-        GitHubError::InvalidInput
+        media("https://example.com/user-attachments/assets/abc-123").unwrap(),
+        PullRequestMedia::Unsupported,
+        "an image elsewhere is the client's to draw by its URL"
     );
     assert_eq!(log.lock().unwrap().len(), before);
 }

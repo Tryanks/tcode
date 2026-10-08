@@ -28,11 +28,16 @@ pub(crate) struct Exchange {
     pub(crate) stream: TcpStream,
 }
 impl Exchange {
+    /// A reply whose `headers` declare a transfer encoding carries no length of its own.
     pub(crate) fn reply(mut self, status: u16, headers: &str, body: &[u8]) {
+        let length = if headers.to_ascii_lowercase().contains("transfer-encoding:") {
+            String::new()
+        } else {
+            format!("Content-Length: {}\r\n", body.len())
+        };
         write!(
             self.stream,
-            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
-            body.len()
+            "HTTP/1.1 {status} Fixture\r\n{length}Connection: close\r\n{headers}\r\n"
         )
         .unwrap();
         let _ = self.stream.write_all(body);
