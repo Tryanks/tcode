@@ -35,7 +35,7 @@ pub enum Topic {
     RuntimeEvents,
 
     Terminal { terminal_id: u64 },
-    Preview { session_id: String },
+    Preview,
     ExternalImport { project_id: String },
 }
 

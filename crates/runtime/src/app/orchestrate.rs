@@ -57,14 +57,21 @@ impl AppState {
         timeout: Duration,
         cx: &mut HostCx,
     ) {
+        // The agent's thread need not be on anyone's screen: any client with a
+        // preview browser answers. Without one, waiting out the timeout only
+        // delays the same answer.
+        if !self.subscriptions.contains(&Topic::Preview) {
+            let _ = broker.reply.try_send(Err(
+                "preview is unavailable: no connected client has a preview browser".into(),
+            ));
+            return;
+        }
         self.next_preview_request += 1;
         let request_id = self.next_preview_request;
         self.preview_pending.insert(request_id, broker.reply);
         cx.emit(HostEvent::Domain(EventEnvelope {
             request_id: None,
-            topic: Topic::Preview {
-                session_id: broker.session_id.clone(),
-            },
+            topic: Topic::Preview,
             event: ServerEvent::PreviewRequest {
                 request_id,
                 session_id: broker.session_id,

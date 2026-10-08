@@ -92,6 +92,8 @@ pub use wire::{
 // child from a client; Settings.collapsed_threads,
 // SetThreadCollapsed, orchestrate archive_on_complete (settings, metadata and
 // OrchestrateArchiveOnComplete) are removed.
+// Unreleased: the Preview topic no longer names a session, so a subscriber
+// answers automation for threads it is not viewing.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

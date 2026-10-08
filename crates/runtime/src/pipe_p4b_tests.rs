@@ -61,20 +61,21 @@ pub(super) fn next(
 }
 
 #[test]
-fn preview_mux_request_reply_first_responder_and_no_subscriber_timeout() {
-    let (host, mux, link, session_id) = fixture();
+fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscriber_refusal() {
+    let (host, mux, link, _viewed) = fixture();
     let second = linked(&mux);
     for client in [&link, &second] {
         client
             .subscribe(Subscription {
-                topic: Topic::Preview {
-                    session_id: session_id.clone(),
-                },
+                topic: Topic::Preview,
                 after: None,
             })
             .unwrap();
         client.command_blocking(Command::OpenLatestSession).unwrap(); // subscription barrier
     }
+    // Neither client views `background`: the agent's thread may be off every
+    // screen while it drives the preview.
+    let session_id = "background".to_string();
     let events = link.events();
     let other_events = second.events();
     let (requests, receiver) = async_channel::unbounded();
@@ -136,7 +137,7 @@ fn preview_mux_request_reply_first_responder_and_no_subscriber_timeout() {
     smol::block_on(host.update_state_for_test(move |state, cx| {
         state.route_preview_with_timeout(
             preview_mcp::BrokerRequest {
-                session_id: "unviewed-session".into(),
+                session_id: session_id.clone(),
                 op: preview_mcp::PreviewOp::Status,
                 reply,
             },
@@ -151,6 +152,41 @@ fn preview_mux_request_reply_first_responder_and_no_subscriber_timeout() {
             .unwrap()
             .unwrap_err()
             .contains("timed out")
+    );
+    for events in [&events, &other_events] {
+        next(
+            events,
+            |event| matches!(event, ServerEvent::PreviewRequest { request, .. } if *request == tcode_protocol::PreviewRequest::Status),
+        );
+    }
+    for client in [&link, &second] {
+        client
+            .unsubscribe(Subscription {
+                topic: Topic::Preview,
+                after: None,
+            })
+            .unwrap();
+        client.command_blocking(Command::OpenLatestSession).unwrap(); // unsubscription barrier
+    }
+    let (reply, answer) = async_channel::bounded(1);
+    smol::block_on(host.update_state_for_test(move |state, cx| {
+        state.route_preview_with_timeout(
+            preview_mcp::BrokerRequest {
+                session_id: "background".into(),
+                op: preview_mcp::PreviewOp::Status,
+                reply,
+            },
+            Duration::from_secs(60),
+            cx,
+        )
+    }))
+    .unwrap();
+    assert!(
+        answer
+            .recv_blocking()
+            .unwrap()
+            .unwrap_err()
+            .contains("no connected client has a preview browser")
     );
     assert!(events.try_recv().is_err());
     link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
