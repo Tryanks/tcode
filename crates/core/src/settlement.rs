@@ -166,7 +166,7 @@ pub fn automatic_settlement_at(
     }
     let activity = input.activity;
     if !activity.failed
-        && activity.last_human_message_at.is_some_and(|message| {
+        && activity.last_message_at.is_some_and(|message| {
             now_ms.abs_diff(message) <= 120_000
                 && [
                     activity.last_run_requested_at,
@@ -329,6 +329,12 @@ mod tests {
         }];
         candidate.activity = &fresh;
         candidate.pull_requests = &merged;
+        assert_eq!(automatic_settlement_at(&candidate, now, None, true), None);
+        let automatic_message = ThreadActivity {
+            last_human_message_at: None,
+            ..fresh.clone()
+        };
+        candidate.activity = &automatic_message;
         assert_eq!(automatic_settlement_at(&candidate, now, None, true), None);
     }
 }
