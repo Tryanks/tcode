@@ -2992,22 +2992,6 @@ impl WorkspaceStore {
         )
     }
 
-    pub(crate) fn pull_request_repository(
-        &self,
-        session_id: String,
-        cx: &mut App,
-    ) -> Task<Option<String>> {
-        let host = self.host.clone();
-        cx.spawn(async move |_| {
-            match host
-                .query(Query::PullRequestRepository { session_id })
-                .await
-            {
-                Ok(QueryResponse::PullRequestRepository(repo)) => repo,
-                _ => None,
-            }
-        })
-    }
     pub fn hosting(
         &self,
         action: tcode_protocol::HostingAction,

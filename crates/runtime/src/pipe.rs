@@ -785,7 +785,6 @@ fn dispatch_query(
             ))
         }),
         Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
-        Query::PullRequestRepository { session_id } => app.pull_request_repository(&session_id, cx),
         Query::ListActiveWorkspace { session_id } => {
             let cwd = app
                 .resident(&session_id)

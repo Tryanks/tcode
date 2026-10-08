@@ -19,6 +19,7 @@ gpui_component_assets::icon_assets!(
         BadgeCheck,
         MessageSquareMore,
         MessageSquareWarning,
+        Unlink,
     ]
 );
 

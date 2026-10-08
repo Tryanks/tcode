@@ -75,8 +75,7 @@ pub use wire::{
 // StartScratchDraft commands; adds per-host GitHub settings, credential source
 // discovery, SetGitHubToken and RefreshGitHubCredentials.
 // Unreleased: linked PRs in SessionMeta/SessionStatus; LinkPullRequest, UnlinkPullRequest
-// and RefreshPullRequests commands, the PullRequestLinked command result and
-// PullRequestRepository query for the manual link dialog.
+// and RefreshPullRequests commands, and the PullRequestLinked command result.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

@@ -1501,7 +1501,6 @@ pull_requests:
   already_linked: "Already linked to this thread"
   link_failed: "Could not link: %{reason}"
   dialog_title: "Link pull request"
-  dialog_desc_repo: "Paste a pull request URL, or enter a number from %{repository}."
   dialog_desc_url: "Paste a pull request URL."
   dialog_placeholder: "https://github.com/owner/repo/pull/123 or #123"
   dialog_link: "Link"

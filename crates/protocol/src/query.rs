@@ -14,9 +14,6 @@ pub enum Query {
     /// Read the agent host's system grants without requesting access.
     ComputerUsePermissions,
     Ping,
-    PullRequestRepository {
-        session_id: String,
-    },
     /// Records strictly before the absolute event cursor, oldest first.
     SessionHistoryPage {
         session_id: String,
@@ -119,7 +116,6 @@ pub enum QueryResponse {
     Hosting(HostingState),
     ComputerUsePermissions(tcode_core::permissions::ComputerUsePermissions),
     Pong,
-    PullRequestRepository(Option<String>),
     /// Records standing for the log cursors `from..end`, with the same
     /// merging as [`crate::ServerEvent::SessionSnapshot`].
     SessionHistoryPage {

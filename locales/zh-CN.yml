@@ -1494,7 +1494,6 @@ pull_requests:
   already_linked: "已关联到此对话"
   link_failed: "无法关联：%{reason}"
   dialog_title: "关联拉取请求"
-  dialog_desc_repo: "粘贴拉取请求链接，或输入 %{repository} 中的编号。"
   dialog_desc_url: "粘贴拉取请求链接。"
   dialog_placeholder: "https://github.com/owner/repo/pull/123 或 #123"
   dialog_link: "关联"

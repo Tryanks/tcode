@@ -82,21 +82,6 @@ fn resolve_reference(
     Ok((repository.key(number), repository.url(number)))
 }
 impl AppState {
-    pub(crate) fn pull_request_repository(
-        &self,
-        id: &str,
-        cx: &HostCx,
-    ) -> HostTask<Result<tcode_protocol::QueryResponse, ProtocolError>> {
-        let cwd = self
-            .find_meta(id)
-            .map(|meta| self.pull_request_project_cwd(&meta));
-        cx.unblock(move || {
-            Ok(tcode_protocol::QueryResponse::PullRequestRepository(
-                cwd.and_then(|cwd| repository::resolve(&cwd))
-                    .map(|repo| format!("{}/{}/{}", repo.host, repo.owner, repo.name)),
-            ))
-        })
-    }
     pub(crate) fn pump_pull_request_requests(
         &mut self,
         server: Option<pull_request_mcp::PullRequestMcpServer>,

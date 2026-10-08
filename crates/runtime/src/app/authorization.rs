@@ -322,7 +322,6 @@ impl AppState {
                     Ok(())
                 }
                 Query::SessionHistoryPage { session_id, .. }
-                | Query::PullRequestRepository { session_id }
                 | Query::ListActiveWorkspace { session_id }
                 | Query::GenerateCommitMessage { session_id, .. }
                 | Query::RenderThreadExport { session_id, .. }

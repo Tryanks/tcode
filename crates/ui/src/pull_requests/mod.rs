@@ -519,9 +519,23 @@ impl PullRequestsPanel {
             }
             if snapshot.mergeability.as_deref() == Some("conflicting") {
                 signals = signals.child(
-                    Icon::new(IconName::GitMergeConflict)
-                        .size(px(14.))
-                        .text_color(cx.theme().warning),
+                    div()
+                        .id("pr-conflict")
+                        .child(
+                            Icon::new(IconName::GitMergeConflict)
+                                .size(px(14.))
+                                .text_color(cx.theme().warning),
+                        )
+                        .tooltip({
+                            let base = snapshot.base_branch.clone();
+                            move |window, cx| {
+                                crate::widgets::tooltip::Tooltip::new(
+                                    crate::tr!("pull_requests.conflict", base = base.clone())
+                                        .into_owned(),
+                                )
+                                .build(window, cx)
+                            }
+                        }),
                 );
             }
         }
@@ -691,7 +705,16 @@ impl PullRequestsPanel {
                                 )
                                 .into_any_element()
                         } else {
-                            div().child(detail).into_any_element()
+                            h_flex()
+                                .gap_1()
+                                .when(
+                                    link.is_some_and(|link| {
+                                        link.source == PullRequestSource::StackDismissed
+                                    }),
+                                    |line| line.child(Icon::new(IconName::Unlink).size(px(12.))),
+                                )
+                                .child(div().min_w_0().truncate().child(detail))
+                                .into_any_element()
                         }),
                 ),
         )
@@ -990,7 +1013,6 @@ struct LinkDialog {
     input: Entity<InputState>,
     pending: bool,
     error: Option<String>,
-    repository: Option<String>,
     _subscription: Subscription,
 }
 impl LinkDialog {
@@ -1049,16 +1071,7 @@ impl Render for LinkDialog {
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(self.repository.as_ref().map_or_else(
-                        || crate::tr!("pull_requests.dialog_desc_url").into_owned(),
-                        |repository| {
-                            crate::tr!(
-                                "pull_requests.dialog_desc_repo",
-                                repository = repository.clone()
-                            )
-                            .into_owned()
-                        },
-                    )),
+                    .child(crate::tr!("pull_requests.dialog_desc_url").into_owned()),
             )
             .child(Input::new(&self.input).disabled(self.pending))
             .child(
@@ -1123,22 +1136,8 @@ pub fn open_link_dialog(
             input: input.clone(),
             pending: false,
             error: None,
-            repository: None,
             _subscription: subscription,
         }
-    });
-    let id = dialog.read(cx).id.clone();
-    let store = dialog.read(cx).store.clone();
-    let repo = store.update(cx, |store, cx| store.pull_request_repository(id, cx));
-    dialog.update(cx, |_, cx| {
-        cx.spawn_in(window, async move |this, cx| {
-            let repository = repo.await;
-            _ = this.update_in(cx, |this, _, cx| {
-                this.repository = repository;
-                cx.notify();
-            });
-        })
-        .detach()
     });
     window.open_dialog(cx, move |base, _, cx| {
         base.title(crate::tr!("pull_requests.dialog_title").into_owned())
