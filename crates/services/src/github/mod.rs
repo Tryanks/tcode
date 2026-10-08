@@ -3,9 +3,12 @@
 pub mod api;
 pub mod credentials;
 pub mod graphql;
+pub mod media;
+pub mod pull_request_reads;
 pub mod pull_request_watch;
 pub mod pull_requests;
 mod quota;
+mod read_cache;
 pub mod repository;
 
 pub use api::{GitHubApi, GitHubError, RequestOptions, Response, RestRequest};

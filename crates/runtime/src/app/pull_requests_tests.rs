@@ -940,3 +940,120 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
         );
     }
 }
+
+#[test]
+fn reads_answer_only_a_linked_pull_request_and_a_synced_change_reads_it_fresh() {
+    let store = TestStore::new("tcode-pr-read");
+    let fixture = fixture::Fixture::new();
+    let api = client(&store, &fixture);
+    // The pull request's last update, and every GraphQL operation the host sent.
+    let model = Arc::new(Mutex::new(("2026-10-08T00:00:00Z", Vec::<String>::new())));
+    let responding = model.clone();
+    let _server = fixture.serve(move |exchange| {
+        let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
+        let operation = sent["query"]
+            .as_str()
+            .unwrap()
+            .split(['(', ' '])
+            .nth(1)
+            .unwrap();
+        let mut model = responding.lock().unwrap();
+        model.1.push(operation.to_owned());
+        let reply = match operation {
+            "PullRequestSummaries" => {
+                let mut row = pr(1, "OPEN", false);
+                row["updatedAt"] = json!(model.0);
+                json!({"data": {"s0": {"pullRequest": row}}})
+            }
+            "PullRequestConversation" => json!({"data": {"repository": {"pullRequest": {
+                "id": "PR_1", "body": "Description", "createdAt": "2026-10-01T00:00:00Z",
+                "url": "https://github.com/sample/project/pull/1", "author": {"login": "octocat"},
+                "comments": {"pageInfo": {"hasNextPage": false}, "nodes": []},
+                "reviews": {"pageInfo": {"hasNextPage": false}, "nodes": []},
+            }}}}),
+            _ => json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "pageInfo": {"hasNextPage": false}, "nodes": [],
+            }}}}}),
+        };
+        exchange.reply(200, "", &serde_json::to_vec(&reply).unwrap());
+    });
+    let conversations = || {
+        model
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .filter(|operation| *operation == "PullRequestConversation")
+            .count()
+    };
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        let meta = linked("active", 1, false);
+        store.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+    });
+    let mut next_id = 0;
+    let mut read = |cx: &mut TestAppContext, number: u64| {
+        next_id += 1;
+        state.deliver(
+            cx,
+            next_id,
+            tcode_protocol::ClientPayload::Query(tcode_protocol::Query::PullRequest {
+                session_id: "active".into(),
+                key: PullRequestKey::new("github.com", "sample/project", number),
+                read: tcode_protocol::PullRequestRead::Conversation,
+            }),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if let Some(result) =
+                cx.drain_outgoing()
+                    .into_iter()
+                    .find_map(|message| match message {
+                        tcode_protocol::HostMessage::QueryResult { id, result }
+                            if id == next_id =>
+                        {
+                            Some(result)
+                        }
+                        _ => None,
+                    })
+            {
+                return result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the read was answered"
+            );
+        }
+    };
+
+    sweep(&state, &mut cx);
+    assert!(read(&mut cx, 1).is_ok());
+    assert!(read(&mut cx, 1).is_ok());
+    assert_eq!(conversations(), 1, "a second read within the TTL is shared");
+    assert_eq!(
+        read(&mut cx, 2).unwrap_err().code,
+        "pull_request_not_linked",
+        "a pull request the thread does not link is not read through it"
+    );
+    assert_eq!(conversations(), 1);
+
+    sweep(&state, &mut cx);
+    read(&mut cx, 1).unwrap();
+    assert_eq!(conversations(), 1, "an unchanged pull request stays shared");
+    model.lock().unwrap().0 = "2026-10-09T00:00:00Z";
+    state.update(&mut cx, |state, cx| {
+        state.request_pull_request_sync(PullRequestKey::new("github.com", "sample/project", 1), cx)
+    });
+    cx.run_until(|state| {
+        state.find_meta("active").unwrap().pull_requests[0]
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.updated_at == "2026-10-09T00:00:00Z")
+    });
+    read(&mut cx, 1).unwrap();
+    assert_eq!(conversations(), 2, "a change the sync saw is read fresh");
+}

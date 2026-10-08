@@ -3,15 +3,19 @@ use tcode_core::pull_request::{
     self, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestStackState,
     PullRequestState, PullRequestSyncError,
 };
-use tcode_protocol::{CommandResponse, ProtocolError};
+use tcode_protocol::{
+    CommandResponse, ProtocolError, PullRequestRead, PullRequestReadResponse, QueryResponse,
+};
 use tcode_services::github::{
-    GitHubApi, GitHubError,
+    CredentialError, GitHubApi, GitHubError,
+    pull_request_reads::PullRequestReads,
     pull_requests::{PullRequests, Summary},
     repository::{self, Repository},
 };
 
 pub(super) struct PullRequestRuntime {
     service: Arc<PullRequests>,
+    reads: Arc<PullRequestReads>,
     last_synced: HashMap<PullRequestKey, u64>,
     requested: HashMap<PullRequestKey, u64>,
     generation: u64,
@@ -27,7 +31,8 @@ pub(super) struct PullRequestRuntime {
 impl PullRequestRuntime {
     pub(super) fn new(api: Arc<GitHubApi>) -> Self {
         Self {
-            service: PullRequests::new(api),
+            service: PullRequests::new(api.clone()),
+            reads: PullRequestReads::new(api),
             last_synced: HashMap::new(),
             requested: HashMap::new(),
             generation: 0,
@@ -53,6 +58,25 @@ fn failure(message: impl Into<String>) -> ProtocolError {
     ProtocolError {
         code: "pull_request_failed".into(),
         message: message.into(),
+    }
+}
+/// Codes a client localizes; the message is the transport's display, which carries no request
+/// values.
+fn read_error(error: GitHubError) -> ProtocolError {
+    let code = match &error {
+        GitHubError::Credential(CredentialError::Disabled) => "pull_request_host_disabled",
+        GitHubError::Credential(_) | GitHubError::Unauthorized => "pull_request_no_credential",
+        GitHubError::RateLimited { .. } | GitHubError::Paused { .. } => "pull_request_rate_limited",
+        GitHubError::NotFound => "pull_request_not_found",
+        GitHubError::BodyTooLarge => "pull_request_too_large",
+        GitHubError::InvalidInput => "pull_request_invalid_read",
+        GitHubError::UnsupportedMedia => "pull_request_unsupported_media",
+        GitHubError::Deadline => "pull_request_deadline",
+        _ => "pull_request_failed",
+    };
+    ProtocolError {
+        code: code.into(),
+        message: error.to_string(),
     }
 }
 fn resolve_reference(
@@ -268,6 +292,85 @@ impl AppState {
                 let _ = request.reply.try_send(result);
             });
         });
+    }
+    /// Reads answer only for a pull request linked to the thread, so a client reads nothing
+    /// through a thread it can see that the thread does not show.
+    fn linked_pull_request(
+        &self,
+        session_id: &str,
+        key: &PullRequestKey,
+    ) -> Result<(), ProtocolError> {
+        self.find_meta(session_id)
+            .filter(|meta| {
+                meta.pull_requests
+                    .iter()
+                    .any(|link| link.visible() && link.key == *key)
+            })
+            .map(|_| ())
+            .ok_or_else(|| ProtocolError {
+                code: "pull_request_not_linked".into(),
+                message: "The pull request is not linked to this thread.".into(),
+            })
+    }
+    pub(crate) fn read_pull_request(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        read: PullRequestRead,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        if let Err(error) = self.linked_pull_request(session_id, &key) {
+            return cx.spawn_background(async move { Err(error) });
+        }
+        let reads = self.pull_requests.reads.clone();
+        let task = cx.unblock(move || {
+            Ok(match read {
+                PullRequestRead::Files { page } => {
+                    PullRequestReadResponse::Files((*reads.files(&key, page)?).clone())
+                }
+                PullRequestRead::FileText { revision, path } => PullRequestReadResponse::FileText(
+                    (*reads.file_text(&key, &revision, &path)?).clone(),
+                ),
+                PullRequestRead::Conversation => {
+                    PullRequestReadResponse::Conversation((*reads.conversation(&key)?).clone())
+                }
+                PullRequestRead::ThreadReplies { thread_id, after } => {
+                    PullRequestReadResponse::ThreadReplies(
+                        (*reads.thread_replies(&key, &thread_id, &after)?).clone(),
+                    )
+                }
+                PullRequestRead::ViewedFiles => {
+                    PullRequestReadResponse::ViewedFiles((*reads.viewed_files(&key)?).clone())
+                }
+                PullRequestRead::Media { url, validator } => {
+                    PullRequestReadResponse::Media(reads.media(&key, &url, validator.as_deref())?)
+                }
+            })
+        });
+        cx.spawn_background(async move {
+            task.await
+                .map(|response| QueryResponse::PullRequest(Box::new(response)))
+                .map_err(read_error)
+        })
+    }
+    pub fn set_pull_request_files_viewed(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        paths: Vec<String>,
+        viewed: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<CommandResponse, ProtocolError>> {
+        if let Err(error) = self.linked_pull_request(session_id, &key) {
+            return cx.spawn_background(async move { Err(error) });
+        }
+        let reads = self.pull_requests.reads.clone();
+        let task = cx.unblock(move || reads.set_viewed(&key, &paths, viewed));
+        cx.spawn_background(async move {
+            task.await
+                .map(|()| CommandResponse::Unit)
+                .map_err(read_error)
+        })
     }
     fn pull_request_project_cwd(&self, meta: &SessionMeta) -> PathBuf {
         self.projects
@@ -662,6 +765,9 @@ impl AppState {
                 .is_none_or(|s| !s.same_observation(&summary.snapshot))
                 || link.stack != stack;
             let mut changed = observation_changed;
+            if observation_changed {
+                self.pull_requests.reads.invalidate(&key);
+            }
             if !meta.is_settled()
                 && let PullRequestStackState::Native(topology) = &stack
             {

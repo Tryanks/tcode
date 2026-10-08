@@ -105,6 +105,13 @@ pub enum Command {
         key: tcode_core::pull_request::PullRequestKey,
         watching: bool,
     },
+    /// The signed-in account's viewed mark on files of a linked pull request.
+    SetPullRequestFilesViewed {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        paths: Vec<String>,
+        viewed: bool,
+    },
     SetProfileSecret {
         profile_id: String,
         name: String,
@@ -473,6 +480,7 @@ impl Command {
             Self::LinkPullRequest { session_id, .. }
             | Self::UnlinkPullRequest { session_id, .. }
             | Self::WatchPullRequest { session_id, .. }
+            | Self::SetPullRequestFilesViewed { session_id, .. }
             | Self::OrchestrateTurn { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }

@@ -93,6 +93,12 @@ pub enum Query {
     },
     /// Every archived thread, most recently archived first.
     ArchivedSessions,
+    /// A read of a pull request linked to the thread, answered from GitHub by the host.
+    PullRequest {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        read: crate::PullRequestRead,
+    },
 }
 
 /// Widths the host will render stored output at. Narrower than the low bound is
@@ -151,6 +157,7 @@ pub enum QueryResponse {
     TerminalFrame(Box<crate::terminal::TerminalFrame>),
     ItemOutput(String),
     ArchivedSessions(crate::ArchivedSessions),
+    PullRequest(Box<crate::PullRequestReadResponse>),
 }
 
 /// One content match in a stored session, addressed by the folded timeline

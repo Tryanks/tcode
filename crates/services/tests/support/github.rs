@@ -9,6 +9,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tcode_services::{github::Credentials, settings::SettingsStore};
 // The agent's documented TLS/DNS interfaces route real HTTPS requests into a loopback
 // HTTP fixture without a certificate dependency or an endpoint override in production.
 struct LoopbackTls;
@@ -157,5 +158,33 @@ impl Drop for Fixture {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(self.address);
         self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+pub(crate) struct Store {
+    pub(crate) store: SettingsStore,
+    pub(crate) root: std::path::PathBuf,
+}
+impl Store {
+    pub(crate) fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("tcode-github-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        Self {
+            store: SettingsStore::new(root.clone()),
+            root,
+        }
+    }
+    pub(crate) fn credentials(&self, environment: &[(&str, &str)]) -> Arc<Credentials> {
+        Credentials::new(
+            self.store.clone(),
+            environment
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        )
+    }
+}
+impl Drop for Store {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
