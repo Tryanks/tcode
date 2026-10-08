@@ -703,6 +703,7 @@ impl AppState {
                 link.stack = stack;
             }
             self.save_pull_request_meta(meta, cx);
+            self.evaluate_thread_settlement(&id, cx);
         }
     }
     /// `None` sweeps every eligible thread without refresh; otherwise each listed thread

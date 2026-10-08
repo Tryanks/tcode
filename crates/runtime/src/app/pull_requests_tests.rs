@@ -13,6 +13,7 @@ struct HostReply {
     requests: Vec<Value>,
 }
 fn pr(number: u64, state: &str, stack: bool) -> Value {
+    let terminal = chrono::Utc::now().to_rfc3339();
     json!({
         "number": number,
         "url": format!("https://github.com/sample/project/pull/{number}"),
@@ -22,6 +23,8 @@ fn pr(number: u64, state: &str, stack: bool) -> Value {
         "headRefName": format!("layer-{number}"),
         "baseRefName": "main",
         "updatedAt": "2026-10-08T00:00:00Z",
+        "mergedAt": (state == "MERGED").then_some(&terminal),
+        "closedAt": (state != "OPEN").then_some(&terminal),
         "additions": 3,
         "deletions": 1,
         "changedFiles": 1,
@@ -343,6 +346,71 @@ fn native_stack_sync_preserves_dismissals_and_explicit_restore() {
         restored.stack,
         PullRequestStackState::Native(PullRequestStack { number: 7, .. })
     ));
+}
+
+#[test]
+fn a_synced_terminal_pull_request_settles_only_its_thread_once_its_stack_allows() {
+    let store = TestStore::new("tcode-pr-settlement");
+    let fixture = fixture::Fixture::new();
+    let api = client(&store, &fixture);
+    let _server = fixture.serve(|exchange| {
+        if exchange.request.starts_with("GET ") {
+            exchange.reply(
+                200,
+                "",
+                br#"[{"id":"stack-7","number":7,"url":"https://github.com/sample/project/stack/7","base":{"ref":"main"},"pull_requests":[{"number":3,"head":{"ref":"layer-3"},"state":"merged"},{"number":4,"head":{"ref":"layer-4"},"state":"open"}]}]"#,
+            );
+        } else {
+            let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
+            let mut data = serde_json::Map::new();
+            for (name, number) in sent["variables"].as_object().unwrap() {
+                if let Some(alias) = name.strip_suffix("_number") {
+                    let number = number.as_u64().unwrap();
+                    let state = if number == 4 { "OPEN" } else { "MERGED" };
+                    data.insert(
+                        alias.into(),
+                        json!({"pullRequest": pr(number, state, number >= 3)}),
+                    );
+                }
+            }
+            exchange.reply(200, "", &serde_json::to_vec(&json!({"data":data})).unwrap());
+        }
+    });
+    let worked_at = now_millis() - 3_600_000;
+    let activity = tcode_core::settlement::ThreadActivity {
+        last_message_at: Some(worked_at - 60_000),
+        last_human_message_at: Some(worked_at - 60_000),
+        last_run_started_at: Some(worked_at - 59_000),
+        last_run_completed_at: Some(worked_at),
+        failed: false,
+    };
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        for meta in [linked("merged", 1, false), linked("stacked", 3, false)] {
+            store.upsert_meta(&meta).unwrap();
+            state
+                .thread_activity
+                .insert(meta.id.clone(), activity.clone());
+            state.sessions.push(meta);
+        }
+    });
+    sweep(&state, &mut cx);
+    cx.run_until(|state| {
+        !state.pull_requests.syncing
+            && !state.pull_requests.sync_scheduled
+            && state.pull_requests.requested.is_empty()
+    });
+    let merged = state.read(|state| state.find_meta("merged").unwrap());
+    assert!(merged.is_settled());
+    assert_eq!(merged.settled_at, Some(worked_at / 1000));
+    let stacked = state.read(|state| state.find_meta("stacked").unwrap());
+    assert_eq!(stacked.pull_requests.len(), 2);
+    assert!(
+        !stacked.is_settled(),
+        "the merged layer's open sibling is linked before it is evaluated"
+    );
 }
 
 #[test]

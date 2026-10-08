@@ -99,13 +99,38 @@ impl SettingsPage {
                     .into_any_element(),
             );
         }
+        let merge_reset = self.reset_action(
+            "reset-auto-settle-on-merge",
+            !settings.auto_settle_on_merge,
+            cx,
+            |this, _, cx| this.dispatch_settings(|store| store.set_auto_settle_on_merge(true), cx),
+        );
+        rows.push(self.toggle_row(
+            "auto-settle-on-merge",
+            crate::tr!("settings.auto_settle.on_merge"),
+            crate::tr!("settings.auto_settle.on_merge_description"),
+            settings.auto_settle_on_merge,
+            merge_reset,
+            cx,
+            |store, checked| store.set_auto_settle_on_merge(checked),
+        ));
         let projects = self.store.read(cx).projects();
         let summary = |project: &Project| -> Option<SharedString> {
-            settings
-                .project_settlement_overrides
-                .get(&project.id)?
+            let rules = settings.project_settlement_overrides.get(&project.id)?;
+            let parts: Vec<SharedString> = rules
                 .auto_settle_after_days
                 .map(days_label)
+                .into_iter()
+                .chain(rules.auto_settle_on_merge.map(|on| {
+                    crate::tr!(
+                        "settings.auto_settle.summary_merge",
+                        value = on_off_label(on).to_string()
+                    )
+                    .into_owned()
+                    .into()
+                }))
+                .collect();
+            (!parts.is_empty()).then(|| parts.join(" · ").into())
         };
         if self.window_state.read(cx).compact {
             // Phone: every project is a row that pushes its rules page; there
@@ -423,8 +448,9 @@ impl ProjectRulesEditor {
 
 impl Render for ProjectRulesEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let default = days_label(self.store.read(cx).settings().auto_settle_after_days);
-        let choices = [
+        let settings = self.store.read(cx).settings();
+        let default = days_label(settings.auto_settle_after_days);
+        let days_choices = vec![
             (
                 None,
                 crate::tr!(
@@ -445,127 +471,29 @@ impl Render for ProjectRulesEditor {
             ),
         ];
         let selected = self.draft.auto_settle_after_days;
-        let trigger_label = choices
-            .iter()
-            .find(|(value, _)| {
-                value.is_none() && selected.is_none()
-                    || matches!(
-                        (value, selected),
-                        (Some(None), Some(None)) | (Some(Some(_)), Some(Some(_)))
-                    )
-            })
-            .map(|(_, label)| label.clone())
-            .unwrap_or_default();
-        let editor = cx.entity();
-        let compact = crate::window_seam::window_is_compact(window, cx);
-        let selector = if compact {
-            // A phone page lists the choices; it opens no dropdown.
-            let rows = choices
-                .into_iter()
-                .enumerate()
-                .map(|(index, (value, label))| {
-                    let checked = trigger_label == label;
-                    let editor = editor.clone();
-                    crate::material::accessible_clickable(
-                        gpui_base::h_flex(),
-                        ("project-rules-choice", index),
-                        Role::Button,
-                        SharedString::from(label.clone()),
-                        cx,
-                    )
-                    .aria_selected(checked)
-                    .w_full()
-                    .min_h(px(44.))
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .cursor_pointer()
-                    .hover(|row| row.bg(cx.theme().list_hover))
-                    .child(div().flex_1().text_size(px(15.)).child(label))
-                    .when(checked, |row| {
-                        row.child(
-                            Icon::new(IconName::Check)
-                                .size_4()
-                                .text_color(cx.theme().primary),
-                        )
-                    })
-                    .on_click(move |_, _, cx| {
-                        editor.update(cx, |editor, cx| {
-                            editor.draft.auto_settle_after_days = value;
-                            cx.notify();
-                        })
-                    })
-                    .into_any_element()
-                })
-                .collect();
-            crate::material::grouped(rows, cx).into_any_element()
-        } else {
-            crate::material::overlay_popover("project-auto-settle", cx)
-                // The same trigger as the settings page's dropdown rows.
-                .trigger(
-                    Button::new("project-auto-settle-choice")
-                        .ghost()
-                        .outline()
-                        .compact()
-                        .child(
-                            gpui_base::h_flex()
-                                .w_full()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .text_size(px(13.))
-                                .child(trigger_label.clone())
-                                .child(
-                                    Icon::new(IconName::ChevronDown)
-                                        .xsmall()
-                                        .text_color(cx.theme().muted_foreground),
-                                ),
-                        ),
-                )
-                .content(move |_, _, cx| {
-                    let popover = cx.entity();
-                    v_flex().p_1().min_w(px(240.)).gap_0p5().children(
-                        choices
-                            .clone()
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, (value, label))| {
-                                let editor = editor.clone();
-                                let popover = popover.clone();
-                                let checked = trigger_label == label;
-                                crate::material::accessible_clickable(
-                                    gpui_base::h_flex(),
-                                    ("project-rules-option", index),
-                                    Role::MenuItem,
-                                    SharedString::from(label.clone()),
-                                    cx,
-                                )
-                                .aria_selected(checked)
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .gap_2()
-                                .items_center()
-                                .text_size(px(13.))
-                                .rounded(crate::material::radius_button(cx))
-                                .cursor_pointer()
-                                .hover(|item| item.bg(cx.theme().accent))
-                                .child(div().flex_1().child(label))
-                                .when(checked, |item| {
-                                    item.child(Icon::new(IconName::Check).xsmall())
-                                })
-                                .on_click(move |_, window, cx| {
-                                    editor.update(cx, |editor, cx| {
-                                        editor.draft.auto_settle_after_days = value;
-                                        cx.notify();
-                                    });
-                                    popover.update(cx, |popover, cx| popover.dismiss(window, cx));
-                                })
-                            }),
-                    )
-                })
-                .into_any_element()
+        let days_index = match selected {
+            None => 0,
+            Some(None) => 1,
+            Some(Some(_)) => 2,
         };
+        let merge_choices = vec![
+            (
+                None,
+                crate::tr!(
+                    "settings.auto_settle.use_default",
+                    value = on_off_label(settings.auto_settle_on_merge).to_string()
+                )
+                .into_owned(),
+            ),
+            (Some(true), on_off_label(true).into()),
+            (Some(false), on_off_label(false).into()),
+        ];
+        let merge_index = match self.draft.auto_settle_on_merge {
+            None => 0,
+            Some(true) => 1,
+            Some(false) => 2,
+        };
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let mut content = v_flex()
             .gap_3()
             .child(
@@ -573,7 +501,14 @@ impl Render for ProjectRulesEditor {
                     .text_size(px(15.))
                     .child(crate::tr!("settings.auto_settle.title")),
             )
-            .child(selector);
+            .child(rule_selector(
+                "project-auto-settle",
+                days_choices,
+                days_index,
+                |editor, value| editor.draft.auto_settle_after_days = value,
+                compact,
+                cx,
+            ));
         if matches!(self.draft.auto_settle_after_days, Some(Some(_))) {
             content = content
                 .child(
@@ -584,6 +519,20 @@ impl Render for ProjectRulesEditor {
                 )
                 .child(days_input(&self.days));
         }
+        content = content
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .child(crate::tr!("settings.auto_settle.on_merge")),
+            )
+            .child(rule_selector(
+                "project-auto-settle-merge",
+                merge_choices,
+                merge_index,
+                |editor, value| editor.draft.auto_settle_on_merge = value,
+                compact,
+                cx,
+            ));
         if compact {
             content = content.child(
                 Button::new("save-project-rules")
@@ -596,5 +545,137 @@ impl Render for ProjectRulesEditor {
         }
         content
     }
+}
+
+fn on_off_label(on: bool) -> SharedString {
+    if on {
+        crate::tr!("settings.auto_settle.on")
+    } else {
+        crate::tr!("settings.auto_settle.off")
+    }
+    .into_owned()
+    .into()
+}
+
+/// One project rule's choices: a phone page lists them; a dialog opens a dropdown.
+fn rule_selector<T: Clone + 'static>(
+    id: &'static str,
+    choices: Vec<(T, String)>,
+    selected: usize,
+    pick: fn(&mut ProjectRulesEditor, T),
+    compact: bool,
+    cx: &mut Context<ProjectRulesEditor>,
+) -> AnyElement {
+    let editor = cx.entity();
+    if compact {
+        let rows = choices
+            .into_iter()
+            .enumerate()
+            .map(|(index, (value, label))| {
+                let checked = index == selected;
+                let editor = editor.clone();
+                crate::material::accessible_clickable(
+                    gpui_base::h_flex(),
+                    (SharedString::from(format!("{id}-choice")), index),
+                    Role::Button,
+                    SharedString::from(label.clone()),
+                    cx,
+                )
+                .aria_selected(checked)
+                .w_full()
+                .min_h(px(44.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .cursor_pointer()
+                .hover(|row| row.bg(cx.theme().list_hover))
+                .child(div().flex_1().text_size(px(15.)).child(label))
+                .when(checked, |row| {
+                    row.child(
+                        Icon::new(IconName::Check)
+                            .size_4()
+                            .text_color(cx.theme().primary),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    editor.update(cx, |editor, cx| {
+                        pick(editor, value.clone());
+                        cx.notify();
+                    })
+                })
+                .into_any_element()
+            })
+            .collect();
+        return crate::material::grouped(rows, cx).into_any_element();
+    }
+    let trigger_label = choices
+        .get(selected)
+        .map(|(_, label)| label.clone())
+        .unwrap_or_default();
+    crate::material::overlay_popover(id, cx)
+        // The same trigger as the settings page's dropdown rows.
+        .trigger(
+            Button::new(SharedString::from(format!("{id}-choice")))
+                .ghost()
+                .outline()
+                .compact()
+                .child(
+                    gpui_base::h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .text_size(px(13.))
+                        .child(trigger_label)
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                        ),
+                ),
+        )
+        .content(move |_, _, cx| {
+            let popover = cx.entity();
+            v_flex().p_1().min_w(px(240.)).gap_0p5().children(
+                choices
+                    .clone()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (value, label))| {
+                        let editor = editor.clone();
+                        let popover = popover.clone();
+                        let checked = index == selected;
+                        crate::material::accessible_clickable(
+                            gpui_base::h_flex(),
+                            (SharedString::from(format!("{id}-option")), index),
+                            Role::MenuItem,
+                            SharedString::from(label.clone()),
+                            cx,
+                        )
+                        .aria_selected(checked)
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_2()
+                        .items_center()
+                        .text_size(px(13.))
+                        .rounded(crate::material::radius_button(cx))
+                        .cursor_pointer()
+                        .hover(|item| item.bg(cx.theme().accent))
+                        .child(div().flex_1().child(label))
+                        .when(checked, |item| {
+                            item.child(Icon::new(IconName::Check).xsmall())
+                        })
+                        .on_click(move |_, window, cx| {
+                            editor.update(cx, |editor, cx| {
+                                pick(editor, value.clone());
+                                cx.notify();
+                            });
+                            popover.update(cx, |popover, cx| popover.dismiss(window, cx));
+                        })
+                    }),
+            )
+        })
+        .into_any_element()
 }
 impl gpui::EventEmitter<gpui::DismissEvent> for ProjectRulesEditor {}
