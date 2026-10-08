@@ -31,6 +31,8 @@ pub mod project;
 mod pty;
 #[cfg(feature = "pty")]
 mod pty_info;
+#[cfg(feature = "pty")]
+mod shell_integration;
 mod sync;
 
 pub use hyperlinks::HyperlinkMatch;
@@ -420,6 +422,14 @@ impl Terminal {
     }
 
     /// Read host process exit state without consuming renderer damage.
+    pub fn idle_prompt(&self) -> Option<bool> {
+        self.pty.idle_prompt()
+    }
+
+    pub fn terminate(&self) -> io::Result<()> {
+        self.pty.kill()
+    }
+
     pub fn exited(&self) -> bool {
         self.pty.exited()
     }

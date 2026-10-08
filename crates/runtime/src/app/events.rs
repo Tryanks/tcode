@@ -4,6 +4,15 @@ impl AppState {
     /// Handle one canonical event from the live provider.
     pub(super) fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
         self.advance_decision_revision(session_id);
+        if matches!(
+            &event,
+            AgentEvent::TurnCompleted { .. }
+                | AgentEvent::SessionClosed { .. }
+                | AgentEvent::ProviderStartFailed { .. }
+                | AgentEvent::BackgroundTasksChanged { count: 0 }
+        ) {
+            cx.enqueue(|state, cx| state.request_settlement_sweep(cx));
+        }
         log::debug!(
             "event: {}",
             serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
@@ -61,8 +70,12 @@ impl AppState {
                             .sessions
                             .iter()
                             .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
-                        if is_child && !has_queued {
-                            self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+                        if is_child
+                            && !has_queued
+                            && let Some(callback) =
+                                self.deliver_child_callback(session_id, TurnStatus::Failed, cx)
+                        {
+                            callback.detach();
                         }
                         if !has_queued {
                             self.residents.evict(session_id);
@@ -79,8 +92,10 @@ impl AppState {
                     .sessions
                     .iter()
                     .any(|meta| meta.id == session_id && meta.parent_session_id.is_some())
+                    && let Some(callback) =
+                        self.deliver_child_callback(session_id, TurnStatus::Failed, cx)
                 {
-                    self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+                    callback.detach();
                 }
                 if let Some(active) = self.resident_mut(session_id) {
                     active.mark_dead();
@@ -429,10 +444,10 @@ impl AppState {
                                 .and_then(|turn| turn.provider_turn_id.clone())
                                 .unwrap_or_default();
                             active.queue.clear();
-                            active.shutdown_to_idle();
                             turn_id
                         });
                     if let Some(turn_id) = stopped_turn {
+                        self.detach_provider_to_idle(session_id, cx);
                         // Shutdown drops the provider pump, so its completion cannot
                         // close the persisted turn or the clients' running indicators.
                         self.record_event(session_id, &event, cx);
@@ -462,7 +477,9 @@ impl AppState {
                     }
                 }
             }
-            AgentEvent::ProviderRelay { .. }
+            AgentEvent::MessageAdmitted
+            | AgentEvent::RunRequested
+            | AgentEvent::ProviderRelay { .. }
             | AgentEvent::PlanResolved { .. }
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }
@@ -491,7 +508,9 @@ impl AppState {
 
         if let AgentEvent::TurnCompleted { status, .. } = &event {
             self.cancel_computer_use_feedback(session_id);
-            self.deliver_child_callback(session_id, *status, cx);
+            if let Some(callback) = self.deliver_child_callback(session_id, *status, cx) {
+                callback.detach();
+            }
         }
         if let AgentEvent::ApprovalRequested(request) = &event {
             self.deliver_child_approval_callback(session_id, &request.id, cx);
@@ -520,8 +539,6 @@ impl AppState {
                         "deferring settings restart for {} background task(s)",
                         active.background_task_count
                     );
-                } else if restart {
-                    active.shutdown_to_idle();
                 }
                 true
             } else {
@@ -529,6 +546,7 @@ impl AppState {
             };
             if is_active && restart {
                 if !restart_deferred {
+                    self.detach_provider_to_idle(session_id, cx);
                     self.ensure_started(session_id, cx);
                 }
             } else if is_active && self.dispatch_next_queued(session_id, cx).is_err() {
@@ -559,7 +577,16 @@ impl AppState {
                 content: ItemContent::UserMessage { .. },
                 ..
             })
-            | AgentEvent::SteerRequested { .. } => cx.author.clone(),
+            | AgentEvent::MessageAdmitted => cx.author.clone(),
+            AgentEvent::SteerRequested { request_id, .. } => self
+                .steer_admissions
+                .get(&(session_id.to_owned(), request_id.clone()))
+                .map(|(_, author)| author.clone())
+                .unwrap_or_else(|| cx.author.clone()),
+            AgentEvent::SteerAccepted { request_id, .. } => self
+                .steer_admissions
+                .get(&(session_id.to_owned(), request_id.clone()))
+                .and_then(|(_, author)| author.clone()),
             AgentEvent::ApprovalResolved { request_id, .. }
             | AgentEvent::UserInputResolved { request_id, .. } => self
                 .decision_authors
@@ -575,10 +602,17 @@ impl AppState {
                 content: ItemContent::UserMessage { .. },
                 ..
             })
-            | AgentEvent::SteerRequested { .. } => Some(cx.origin),
+            | AgentEvent::MessageAdmitted => Some(cx.origin),
+            AgentEvent::SteerRequested { request_id, .. } => Some(
+                self.steer_admissions
+                    .get(&(session_id.to_owned(), request_id.clone()))
+                    .map(|(origin, _)| *origin)
+                    .unwrap_or(cx.origin),
+            ),
             AgentEvent::SteerAccepted { request_id, .. } => self
-                .steer_origins
-                .remove(&(session_id.to_owned(), request_id.clone())),
+                .steer_admissions
+                .remove(&(session_id.to_owned(), request_id.clone()))
+                .map(|(origin, _)| origin),
             _ => None,
         };
         let record = SessionEventRecord {

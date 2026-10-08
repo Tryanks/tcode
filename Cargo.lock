@@ -11183,6 +11183,7 @@ dependencies = [
  "portable-pty",
  "rio-vt",
  "tcode-protocol",
+ "tempfile",
 ]
 
 [[package]]

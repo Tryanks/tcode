@@ -38,6 +38,13 @@ impl AppState {
             .expect("thread decision revision overflow");
     }
 
+    pub(super) fn invalidate_child_callback(&mut self, id: &str) {
+        let generation = self.callback_generations.entry(id.to_owned()).or_default();
+        *generation = generation
+            .checked_add(1)
+            .expect("callback generation overflow");
+    }
+
     pub(crate) fn subscribe(
         &mut self,
         subscription: &tcode_protocol::Subscription,
@@ -678,6 +685,10 @@ impl AppState {
     }
 
     pub fn update_settings(&mut self, settings: Settings, cx: &mut HostCx) {
+        let settlement_changed = self.settings.auto_settle_after_days
+            != settings.auto_settle_after_days
+            || self.settings.auto_settle_on_merge != settings.auto_settle_on_merge
+            || self.settings.project_settlement_overrides != settings.project_settlement_overrides;
         self.enqueue_settings(&settings, cx);
         if ProviderKind::NATIVE
             .iter()
@@ -698,6 +709,9 @@ impl AppState {
             self.providers.invalidate_usage(&id);
         }
         self.settings = settings;
+        if settlement_changed {
+            self.request_settlement_sweep(cx);
+        }
         self.forget_disabled_plugin_catalogs(cx);
         self.providers.provider_secret_names =
             provider_secret_names(&self.settings, &self.settings_store);
@@ -752,73 +766,158 @@ impl AppState {
         (Some(marker.reopen_settings), session_id)
     }
 
-    pub(super) fn settle_family_busy(&self, session_id: &str) -> bool {
-        descendant_session_ids(&self.sessions, session_id)
-            .iter()
-            .any(|id| {
-                self.resident(id).is_some_and(|session| {
-                    session.has_work()
-                        || session.timeline.turn_running
-                        || !session.timeline.pending_approvals.is_empty()
-                        || session.timeline.pending_user_input.is_some()
-                })
-            })
+    pub(super) fn settle_thread_busy(&self, id: &str) -> bool {
+        self.resident(id).is_some_and(|session| {
+            session.preparing_worktree
+                || matches!(session.runtime, Runtime::Starting { .. })
+                || session.turn_in_flight
+                || session.delivery_in_flight.is_some()
+                || session.timeline.turn_running
+                || !session.timeline.pending_approvals.is_empty()
+                || session
+                    .timeline
+                    .pending_user_input
+                    .as_ref()
+                    .is_some_and(|input| input.delivery.is_blocking())
+                || session
+                    .queue
+                    .iter()
+                    .any(|message| message.origin == MessageOrigin::Human)
+        }) || self
+            .thread_activity
+            .get(id)
+            .is_some_and(|activity| activity.has_blocking_input())
     }
 
-    /// Settle a whole descendant group without shutting down its resources.
-    pub fn settle_session(&mut self, session_id: &str, cx: &mut HostCx) {
-        if self.settle_family_busy(session_id) {
+    pub fn settle_session(&mut self, id: &str, cx: &mut HostCx) {
+        if !self.settle_thread_busy(id) {
+            self.settle_session_at(id, now_secs(), cx);
+        }
+    }
+
+    pub(super) fn settle_session_at(&mut self, id: &str, timestamp: u64, cx: &mut HostCx) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
+        };
+        if !meta.is_settled() || meta.pinned_at.is_some() {
+            meta.settled_at = Some(timestamp);
+            meta.updated_at = now_secs();
         }
-        let timestamp = now_secs();
-        for id in descendant_session_ids(&self.sessions, session_id) {
-            if let Some(mut meta) = self.find_meta(&id)
-                && meta.settled_at.is_none()
-            {
-                meta.settled_at = Some(timestamp);
-                self.persist_settled_meta(meta, cx);
-            }
+        let mut asynchronous = self
+            .thread_activity
+            .get(id)
+            .map(tcode_core::settlement::ThreadActivity::asynchronous_inputs)
+            .unwrap_or_default();
+        if let Some(input) = self
+            .resident(id)
+            .and_then(|session| session.timeline.pending_user_input.as_ref())
+            && !input.delivery.is_blocking()
+            && !asynchronous.contains(&input.request_id)
+        {
+            asynchronous.push(input.request_id.clone());
         }
-    }
-
-    /// Restore the matching settle cascade, then expose all of its ancestors.
-    pub fn make_session_active(&mut self, session_id: &str, cx: &mut HostCx) {
-        if let Some(timestamp) = self.find_meta(session_id).and_then(|meta| meta.settled_at) {
-            for id in descendant_session_ids(&self.sessions, session_id) {
-                if let Some(mut meta) = self.find_meta(&id)
-                    && meta.settled_at == Some(timestamp)
-                {
-                    meta.settled_at = None;
-                    self.persist_settled_meta(meta, cx);
-                }
-            }
+        for request_id in asynchronous {
+            self.on_event(
+                id,
+                AgentEvent::UserInputResolved {
+                    request_id,
+                    answers: Default::default(),
+                },
+                cx,
+            );
         }
-        self.reactivate_session(session_id, cx);
-    }
-
-    /// Accepted input exposes this thread and its ancestors, leaving siblings settled.
-    pub(super) fn reactivate_session(&mut self, session_id: &str, cx: &mut HostCx) {
-        let mut next = Some(session_id.to_string());
-        let mut visited = HashSet::new();
-        while let Some(id) = next.take() {
-            if !visited.insert(id.clone()) {
-                break;
-            }
-            let Some(mut meta) = self.find_meta(&id) else {
-                break;
-            };
-            next = meta.parent_session_id.clone();
-            if meta.settled_at.take().is_some() {
-                self.persist_settled_meta(meta, cx);
-            }
-        }
-    }
-
-    fn persist_settled_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
-        if let Some(session) = self.resident_mut(&meta.id) {
-            session.meta.settled_at = meta.settled_at;
+        meta.settled_override = Some(tcode_core::project::SettledOverride::Settled);
+        meta.unsettled_at = None;
+        meta.pinned_at = None;
+        meta.pin_order = None;
+        meta.active_order = None;
+        self.detach_provider_to_idle(id, cx);
+        if let Some(session) = self.resident_mut(id) {
+            session
+                .queue
+                .retain(|message| message.origin == MessageOrigin::Human);
+            session.meta = meta.clone();
         }
         self.persist_meta(&meta, cx);
+        self.reschedule_scheduled_wake(cx);
+        self.close_settled_idle_terminals(id, cx);
+    }
+
+    pub fn make_session_active(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
+            return;
+        };
+        if meta.settled_override == Some(tcode_core::project::SettledOverride::Active) {
+            return;
+        }
+        meta.settled_override = Some(tcode_core::project::SettledOverride::Active);
+        meta.settled_at = None;
+        meta.unsettled_at = Some(now_secs());
+        meta.updated_at = now_secs();
+        if let Some(session) = self.resident_mut(id) {
+            session.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
+    }
+
+    pub fn pin_session(&mut self, id: &str, order_key: Option<String>, cx: &mut HostCx) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
+            return;
+        };
+        if meta.is_settled() {
+            meta.unsettled_at = Some(now_secs());
+        }
+        meta.settled_at = None;
+        meta.settled_override = Some(tcode_core::project::SettledOverride::Active);
+        meta.pinned_at = Some(now_secs());
+        meta.pin_order = order_key.or_else(|| {
+            let first = self
+                .sessions
+                .iter()
+                .filter(|other| other.id != id && other.pinned_at.is_some())
+                .filter_map(|other| other.pin_order.as_deref())
+                .min();
+            tcode_core::thread_sort::order_key_between(None, first)
+        });
+        if let Some(session) = self.resident_mut(id) {
+            session.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
+    }
+
+    pub fn set_auto_settle(&mut self, id: &str, enabled: bool, cx: &mut HostCx) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
+            return;
+        };
+        if enabled == meta.auto_settle_disabled_at.is_none() {
+            return;
+        }
+        meta.auto_settle_disabled_at = (!enabled).then(now_secs);
+        meta.updated_at = now_secs();
+        if let Some(session) = self.resident_mut(id) {
+            session.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
+        self.request_settlement_sweep(cx);
+    }
+
+    pub(super) fn reactivate_session(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
+            return;
+        };
+        self.advance_decision_revision(id);
+        self.invalidate_child_callback(id);
+        self.record_event(id, &AgentEvent::MessageAdmitted, cx);
+        if meta.is_settled() {
+            meta.unsettled_at = Some(now_secs());
+        }
+        if meta.settled_override.take().is_some() || meta.settled_at.take().is_some() {
+            meta.settled_at = None;
+            if let Some(session) = self.resident_mut(id) {
+                session.meta = meta.clone();
+            }
+            self.persist_meta(&meta, cx);
+        }
     }
 
     pub(super) fn repair_auto_archived_mirrors(
@@ -879,8 +978,7 @@ impl AppState {
     }
 
     /// Restore an archived thread (Settings → Archived Threads → Unarchive).
-    /// Restoring is activity: without it the auto-archive sweep would take an
-    /// idle thread straight back. A thread that was read stays read.
+    /// A thread that was read before archiving stays read.
     pub fn unarchive_session(&mut self, session_id: &str, cx: &mut HostCx) {
         let Some(archived_at) = self
             .sessions
@@ -917,45 +1015,6 @@ impl AppState {
         }
     }
 
-    /// Sweep one project's visible sessions using the configured idle and
-    /// sibling keep windows. Returns the number of threads archived.
-    pub fn auto_archive_sweep(&mut self, project_id: &str, cx: &mut HostCx) -> usize {
-        if self.settings.auto_archive_disabled {
-            return 0;
-        }
-        let sessions: Vec<_> = self
-            .sessions
-            .iter()
-            .filter(|meta| {
-                meta.project_id.as_deref() == Some(project_id) && meta.archived_at.is_none()
-            })
-            .cloned()
-            .collect();
-        let exemptions = AutoArchiveExemptions {
-            working: sessions
-                .iter()
-                .filter(|meta| self.turn_running_for(&meta.id))
-                .map(|meta| meta.id.clone())
-                .collect(),
-            unread: sessions
-                .iter()
-                .filter(|meta| self.session_unread(meta))
-                .map(|meta| meta.id.clone())
-                .collect(),
-            active: self.residents.live.keys().cloned().collect(),
-        };
-        let config = AutoArchiveConfig {
-            max_idle_secs: u64::from(self.settings.auto_archive_max_idle_days.max(1)) * 86_400,
-            keep_count: self.settings.auto_archive_keep_count.max(1),
-        };
-        let ids = auto_archive_candidates(&sessions, now_secs(), &config, &exemptions);
-        let count = ids.len();
-        if count > 0 {
-            self.archive_session_ids(&ids, now_secs(), cx);
-        }
-        count
-    }
-
     pub(super) fn archive_session_ids(
         &mut self,
         ids: &[String],
@@ -968,6 +1027,7 @@ impl AppState {
             .collect();
 
         for id in &ids {
+            self.invalidate_child_callback(id);
             self.shutdown_active(id, cx);
             // An archived conversation must not leave an off-screen PTY running.
             self.terminal_workspaces
@@ -1156,6 +1216,14 @@ impl AppState {
         }
         self.sessions
             .retain(|meta| !deleted.contains(meta.id.as_str()));
+        self.thread_activity
+            .retain(|id, _| !deleted.contains(id.as_str()));
+        self.decision_revisions
+            .retain(|id, _| !deleted.contains(id.as_str()));
+        self.callback_generations
+            .retain(|id, _| !deleted.contains(id.as_str()));
+        self.steer_admissions
+            .retain(|(id, _), _| !deleted.contains(id.as_str()));
         let mut kept_worktrees = Vec::new();
         let mut worktree_removals = Vec::new();
         let sharing = self.worktree_sharing();

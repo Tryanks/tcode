@@ -1509,6 +1509,9 @@ pub enum SessionCommand {
     RespondUserInput {
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
+        /// Host admission identity for replies delivered as a new message/steer.
+        /// Blocking callback answers do not carry a message admission.
+        message_request_id: Option<String>,
     },
     /// Inject a message into the turn that is ALREADY running, so the model
     /// picks it up at its next opportunity to accept input (typically the next
@@ -1689,6 +1692,10 @@ pub enum AgentEvent {
         /// Human-readable detail from Claude's error text.
         detail: String,
     },
+    /// Host admission of a user-role message; text is recorded only on provider acknowledgement.
+    MessageAdmitted,
+    /// Host dispatch of a queued turn to its provider.
+    RunRequested,
     TurnStarted {
         turn_id: String,
     },

@@ -740,6 +740,8 @@ impl Timeline {
             }
             AgentEvent::TurnAccepted { .. }
             | AgentEvent::BackgroundTasksChanged { .. }
+            | AgentEvent::MessageAdmitted
+            | AgentEvent::RunRequested
             | AgentEvent::ModelFallbackDetected { .. }
             | AgentEvent::TurnBlocked { .. } => {}
             AgentEvent::TurnChangesUpdated {

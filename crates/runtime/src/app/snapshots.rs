@@ -209,7 +209,19 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 
 impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
+        let visible_ids: HashSet<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.archived_at.is_none())
+            .map(|meta| meta.id.as_str())
+            .collect();
         let mut summary = IndexSummary {
+            activity_clocks: self
+                .thread_activity
+                .iter()
+                .filter(|(id, _)| visible_ids.contains(id.as_str()))
+                .map(|(id, clocks)| (id.clone(), clocks.clone()))
+                .collect(),
             title_generating: self.title_generating.clone(),
             archived_revision: self.archived_revision,
             ..IndexSummary::default()
@@ -642,7 +654,17 @@ impl AppState {
             self.open_requests(&meta.id, session)
         });
         SessionActivity {
-            working: resident.is_some_and(ActiveSession::has_work),
+            working: resident.is_some_and(|session| {
+                session.preparing_worktree
+                    || matches!(session.runtime, Runtime::Starting { .. })
+                    || session.turn_in_flight
+                    || session.delivery_in_flight.is_some()
+                    || (meta.native_subagent.is_some() && session.timeline.turn_running)
+                    || session
+                        .queue
+                        .iter()
+                        .any(|message| message.origin == MessageOrigin::Human)
+            }),
             turn_running: resident.is_some_and(|session| session.turn_in_flight),
             waiting: resident.is_some_and(|session| session.background_task_count > 0)
                 || self.children_unfinished(&meta.id),
@@ -761,6 +783,7 @@ impl AppState {
                 .iter()
                 .map(|message| QueuedMessageStatus {
                     delivery_key: message.delivery_key.clone(),
+                    origin: Some(message.origin),
                     id: message.id,
                     editable: Self::queued_message_editable(session, message.id),
                     text: message.text.clone(),

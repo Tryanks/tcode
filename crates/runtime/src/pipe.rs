@@ -160,6 +160,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.start_diff_pass(&mut cx);
             }
             state.sync_terminal_handles();
+            state.start_settlement_sweeps(&mut cx);
             let _ = ready_tx.send(Ok(()));
             let mut state = smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
             if let Err(error) = state.close_store() {
@@ -389,6 +390,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
+            app.note_terminal_input(terminal_id);
             if let Some(terminal) = app.terminal_handle(terminal_id) {
                 terminal.write_input(bytes);
             }
@@ -637,13 +639,20 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             collapsed,
         } => app.set_thread_collapsed(&session_id, collapsed, cx),
         Command::PatchSettings { patch } => app.patch_settings(patch, cx),
-        Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
-        Command::MakeSessionActive { session_id } => app.make_session_active(&session_id, cx),
+        Command::SettleSession { session_id } => {
+            return CommandOutcome::Pending(app.settle_command(session_id, cx));
+        }
+        Command::PinSession {
+            session_id,
+            order_key,
+        } => app.pin_session(&session_id, order_key, cx),
+        Command::SetAutoSettle {
+            session_id,
+            enabled,
+        } => app.set_auto_settle(&session_id, enabled, cx),
+        Command::UnsettleSession { session_id } => app.make_session_active(&session_id, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
-        Command::AutoArchiveSweep { project_id } => {
-            response = CommandResponse::ArchivedCount(app.auto_archive_sweep(&project_id, cx));
-        }
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)

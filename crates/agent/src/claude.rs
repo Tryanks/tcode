@@ -809,6 +809,7 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::RespondUserInput {
+            message_request_id: _,
             request_id,
             answers,
         } => {

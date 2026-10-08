@@ -242,8 +242,7 @@ impl ActiveSession {
         }
     }
 
-    pub(super) fn resume_cursor_for_fresh_provider(&mut self) {
-        self.shutdown_to_idle();
+    pub(super) fn clear_provider_resume(&mut self) {
         self.meta.resume_cursor = None;
         self.meta.pending_fork = false;
         self.pending_relay = None;

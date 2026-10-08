@@ -108,6 +108,19 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         state.on_event(
             "parent",
             AgentEvent::ItemCompleted(ThreadItem {
+                id: "delegated-prompt".into(),
+                parent_item_id: Some("spawn-1".into()),
+                content: ItemContent::UserMessage {
+                    text: "Inspect the delegated task".into(),
+                    context_len: None,
+                    attachments: vec![],
+                },
+            }),
+            cx,
+        );
+        state.on_event(
+            "parent",
+            AgentEvent::ItemCompleted(ThreadItem {
                 id: "child-answer".into(),
                 parent_item_id: Some("spawn-1".into()),
                 content: ItemContent::AssistantMessage {
@@ -180,6 +193,19 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             serde_json::json!("low")
         );
         let mirror_events = state.store.read_events(&mirror.id).unwrap();
+        let delegated = mirror_events
+            .iter()
+            .find(|stored| {
+                matches!(&stored.event,
+                    AgentEvent::ItemCompleted(ThreadItem { id, .. }) if id == "delegated-prompt"
+                )
+            })
+            .unwrap();
+        assert_eq!(delegated.origin, Some(MessageOrigin::Agent));
+        let activity = tcode_core::settlement::ThreadActivity::fold_stored(&mirror_events, true);
+        assert_eq!(activity.last_message_at, delegated.ts);
+        assert_eq!(activity.last_human_message_at, None);
+
         assert!(mirror_events.iter().any(|stored| matches!(
             &stored.event,
             AgentEvent::ItemCompleted(ThreadItem {
@@ -836,7 +862,6 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         language: Some("zh-CN".into()),
         word_wrap_diffs: true,
         sidebar_provider_marks: true,
-        auto_archive_max_idle_days: 99,
         ..Settings::default()
     };
     settings.browser.home_url = Some("https://example.com".into());
@@ -895,7 +920,6 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         assert_eq!(reset.language, None);
         assert!(!reset.word_wrap_diffs);
         assert!(!reset.sidebar_provider_marks);
-        assert_eq!(reset.auto_archive_max_idle_days, 7);
         assert_eq!(reset.browser.home_url, None);
 
         assert_eq!(
@@ -1403,73 +1427,6 @@ fn deleting_a_thread_deletes_every_descendant_in_one_command() {
     }
     assert!(!reopened.read_event_log("other").unwrap().is_empty());
     reopened.close().unwrap();
-}
-
-#[test]
-fn unarchived_thread_survives_the_next_auto_archive_sweep() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-unarchive-sweep-test");
-    let root = test_store.root().clone();
-    let store = (*test_store).clone();
-    let idle_since = now_secs() - 30 * 86_400;
-    for (id, updated_at, archived_at) in [
-        ("recent", now_secs(), None),
-        ("restored", idle_since, Some(idle_since + 1)),
-    ] {
-        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-        meta.id = id.into();
-        meta.project_id = Some("project".into());
-        meta.updated_at = updated_at;
-        meta.archived_at = archived_at;
-        store.upsert_meta(&meta).unwrap();
-    }
-    let state = cx.new_entity(TestClientState::new(store.clone()));
-    state.update(cx, |state, _| {
-        state.settings.auto_archive_keep_count = 1;
-        state.settings.auto_archive_max_idle_days = 1;
-        state
-            .settings
-            .last_visited
-            .insert("restored".into(), idle_since);
-    });
-
-    state.dispatch_command(
-        cx,
-        1,
-        Command::UnarchiveSession {
-            session_id: "restored".into(),
-        },
-    );
-    state.dispatch_command(
-        cx,
-        2,
-        Command::AutoArchiveSweep {
-            project_id: "project".into(),
-        },
-    );
-    cx.run_until_parked();
-
-    assert!(cx.drain_outgoing().iter().any(|message| matches!(
-        message,
-        HostMessage::Ack {
-            id: 2,
-            result: Ok(CommandResponse::ArchivedCount(0))
-        }
-    )));
-    let restored = store
-        .load_index()
-        .unwrap()
-        .into_iter()
-        .find(|meta| meta.id == "restored")
-        .unwrap();
-    assert_eq!(restored.archived_at, None);
-    assert!(restored.updated_at > idle_since);
-    state.read(|state| {
-        assert!(
-            !state.session_unread(&restored),
-            "a thread read before it was archived is still read"
-        );
-    });
 }
 
 #[test]
@@ -3812,7 +3769,7 @@ fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
 }
 
 #[test]
-fn orchestrate_send_reactivates_the_child_and_its_settled_parent() {
+fn orchestrate_send_revives_only_its_archived_child() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-send-unarchive-test");
     let store = (*test_store).clone();
@@ -3846,7 +3803,7 @@ fn orchestrate_send_reactivates_the_child_and_its_settled_parent() {
         );
         assert!(response.try_recv().unwrap().is_ok());
         assert!(state.find_meta("child").unwrap().settled_at.is_none());
-        assert!(state.find_meta("parent").unwrap().settled_at.is_none());
+        assert_eq!(state.find_meta("parent").unwrap().settled_at, Some(1));
         assert!(
             state.find_meta("child").unwrap().archived_at.is_none(),
             "send should revive an archived child"
@@ -6858,9 +6815,12 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
                 "{label}"
             );
             let active_answer = state.turn_running_for(&id);
+            // Background work keeps the provider resident and shows Waiting;
+            // Working describes this thread's own turn or queued human input.
+            let expected_working = expected && label != "background";
             assert_eq!(
                 state.session_status_snapshot(&id).unwrap().activity.working,
-                expected,
+                expected_working,
                 "{label}"
             );
 
@@ -6869,7 +6829,7 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             let parked_answer = state.turn_running_for(&id);
             assert_eq!(
                 state.session_status_snapshot(&id).unwrap().activity.working,
-                expected,
+                expected_working,
                 "{label}"
             );
 
@@ -7669,6 +7629,12 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
     };
     receive_turn(&first_commands, "from desktop");
     receive_turn(&second_commands, "from phone");
+    // Fence admission events separately from the tail fixture. New canonical
+    // lifecycle entries must not change the offset being tested below.
+    for link in [&one, &two] {
+        link.command_blocking(Command::ClearRelaunchMarker).unwrap();
+        while link.events().try_recv().is_ok() {}
+    }
     let ids = (id_one.clone(), id_two.clone());
     smol::block_on(host.update_state_for_test(move |state, cx| {
         for id in [&ids.0, &ids.1] {
@@ -7703,7 +7669,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
             topic: Topic::SessionEvents {
                 session_id: id.clone(),
             },
-            after: Some(1),
+            after: Some(3),
         })
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
@@ -7711,7 +7677,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         let ServerEvent::SessionSnapshot { from, records, .. } = snapshot.event else {
             panic!("expected tail")
         };
-        assert_eq!(from, 1);
+        assert_eq!(from, 3);
         assert_eq!(records.len(), 2);
         assert!(
             matches!(&records[0].event, AgentEvent::Warning { message } if message == "second")
@@ -7726,7 +7692,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         assert!(
-            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records, .. } if records.len() == 3)
+            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records, .. } if records.len() == 5)
         );
     }
     assert!(
@@ -8409,209 +8375,6 @@ fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutd
         state.host.shutdown_all(cx);
         assert!(state.host.mcp.computer_use_registrations.is_empty());
     });
-}
-
-#[test]
-fn settled_commands_persist_without_closing_the_selected_conversation() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-settled-lifecycle");
-    let store = (*test_store).clone();
-    for (id, parent) in [
-        ("parent", None),
-        ("child", Some("parent")),
-        ("sibling", Some("parent")),
-    ] {
-        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
-        meta.id = id.into();
-        meta.parent_session_id = parent.map(str::to_string);
-        store.upsert_meta(&meta).unwrap();
-    }
-    let state = cx.new_entity(TestClientState::new(store.clone()));
-    state.update(cx, |state, cx| state.select_session("parent", cx));
-    cx.run_until_parked();
-    state.dispatch_command(
-        cx,
-        1,
-        Command::SettleSession {
-            session_id: "parent".into(),
-        },
-    );
-    cx.run_until_parked();
-    state.read(|state| {
-        assert_eq!(state.active_session_id(), Some("parent"));
-        assert!(state.resident("parent").is_some());
-        assert!(
-            state
-                .sessions
-                .iter()
-                .all(|meta| meta.settled_at.is_some() && meta.archived_at.is_none())
-        );
-    });
-    let restarted = AppState::new(store.clone()).unwrap();
-    assert!(
-        restarted
-            .sessions
-            .iter()
-            .all(|meta| meta.settled_at.is_some())
-    );
-    state.update(cx, |state, cx| state.select_session("child", cx));
-    cx.run_until_parked();
-    state.read(|state| assert!(state.find_meta("child").unwrap().settled_at.is_some()));
-    state.dispatch_command(
-        cx,
-        2,
-        Command::ArchiveSession {
-            session_id: "parent".into(),
-        },
-    );
-    state.dispatch_command(
-        cx,
-        3,
-        Command::UnarchiveSession {
-            session_id: "parent".into(),
-        },
-    );
-    cx.run_until_parked();
-    state.read(|state| {
-        assert!(
-            state
-                .sessions
-                .iter()
-                .all(|meta| meta.settled_at.is_some() && meta.archived_at.is_none())
-        )
-    });
-    state.dispatch_command(
-        cx,
-        4,
-        Command::MakeSessionActive {
-            session_id: "parent".into(),
-        },
-    );
-    cx.run_until_parked();
-    assert!(
-        store
-            .load_index()
-            .unwrap()
-            .iter()
-            .all(|meta| meta.settled_at.is_none())
-    );
-}
-
-#[test]
-fn settling_rejects_busy_descendants_and_accepted_input_reactivates_ancestors() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-settled-input");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, _receiver) = smol::channel::unbounded();
-    state.update(cx, |state, _| {
-        let mut child = live_session(ProviderKind::Codex, commands);
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        child.meta.settled_at = Some(1);
-        let mut parent = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
-        parent.id = "parent".into();
-        parent.settled_at = Some(1);
-        let mut sibling = parent.clone();
-        sibling.id = "sibling".into();
-        sibling.parent_session_id = Some("parent".into());
-        state.sessions.extend([parent, sibling, child.meta.clone()]);
-        state.install_selected(child);
-    });
-    state.dispatch_command(
-        cx,
-        1,
-        Command::ScheduleTurn {
-            session_id: "child".into(),
-            text: "later".into(),
-            attachment_paths: Vec::new(),
-            fire_at_unix_secs: now_secs() + 3600,
-        },
-    );
-    state.read(|state| {
-        assert!(state.find_meta("child").unwrap().settled_at.is_none());
-        assert!(state.find_meta("parent").unwrap().settled_at.is_none());
-        assert!(state.find_meta("sibling").unwrap().settled_at.is_some());
-    });
-    // Each state would hide reachable child work if the parent were allowed to settle.
-    for busy in ["queued", "turn", "background", "input", "approval"] {
-        state.update(cx, |state, _| {
-            let child = state.resident_mut("child").unwrap();
-            child.queue.clear();
-            child.turn_in_flight = busy == "turn";
-            child.background_task_count = usize::from(busy == "background");
-            child.timeline.pending_user_input =
-                (busy == "input").then(|| tcode_core::session::PendingUserInput {
-                    request_id: "input".into(),
-                    questions: Vec::new(),
-                    delivery: agent::UserInputDelivery::Blocking,
-                });
-            child.timeline.pending_approvals.clear();
-            if busy == "queued" {
-                child.push_queued("queued".into(), Vec::new());
-            }
-            if busy == "approval" {
-                child
-                    .timeline
-                    .pending_approvals
-                    .push(agent::ApprovalRequest {
-                        id: "approval".into(),
-                        turn_id: None,
-                        kind: agent::ApprovalKind::ExecCommand {
-                            command: "pwd".into(),
-                            cwd: None,
-                            reason: None,
-                        },
-                        options: Vec::new(),
-                    });
-            }
-            assert_eq!(
-                state
-                    .validate_command_target(&Command::SettleSession {
-                        session_id: "parent".into()
-                    })
-                    .unwrap_err()
-                    .code,
-                "thread_busy"
-            );
-        });
-        state.dispatch_command(
-            cx,
-            2,
-            Command::SettleSession {
-                session_id: "parent".into(),
-            },
-        );
-        state.read(|state| assert!(state.find_meta("parent").unwrap().settled_at.is_none()));
-    }
-    state.update(cx, |state, _| {
-        let child = state.resident_mut("child").unwrap();
-        child.timeline.pending_approvals.clear();
-        child.timeline.pending_user_input = None;
-        child.turn_in_flight = false;
-        child.background_task_count = 0;
-    });
-    state.dispatch_command(
-        cx,
-        3,
-        Command::SettleSession {
-            session_id: "parent".into(),
-        },
-    );
-    state.dispatch_command(
-        cx,
-        4,
-        Command::SendTurn {
-            session_id: "child".into(),
-            text: "continue".into(),
-            attachment_paths: Vec::new(),
-        },
-    );
-    state.read(|state| {
-        assert!(state.find_meta("parent").unwrap().settled_at.is_none());
-        assert!(state.find_meta("child").unwrap().settled_at.is_none());
-        assert!(state.find_meta("sibling").unwrap().settled_at.is_some());
-    });
-    cx.run_until_parked();
 }
 
 #[test]
@@ -10220,8 +9983,62 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
     let root = TestStore::new("cold-open-mux");
     open_stored_session(&root, "cold");
     let persisted = persist_streamed_turns(&root, "cold", 3).len() as u64;
-    let reads_before_open = root.event_reads();
     let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
+    host.to_host
+        .send_blocking(
+            tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+                id: 100,
+                key: None,
+                principal: Default::default(),
+                payload: tcode_protocol::ClientPayload::Subscribe(Subscription {
+                    topic: Topic::Index,
+                    after: None,
+                }),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    loop {
+        let message =
+            tcode_protocol::decode_host_line(&host.from_host.recv_blocking().unwrap()).unwrap();
+        let summary = match message {
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::IndexSnapshot(snapshot),
+                ..
+            }) => Some(snapshot.summary),
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::IndexSummaryReplaced(summary),
+                ..
+            }) => Some(summary),
+            _ => None,
+        };
+        if summary.is_some_and(|summary| summary.activity_clocks.contains_key("cold")) {
+            break;
+        }
+    }
+    host.to_host
+        .send_blocking(
+            tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
+                id: 101,
+                key: None,
+                principal: Default::default(),
+                payload: tcode_protocol::ClientPayload::Unsubscribe(Subscription {
+                    topic: Topic::Index,
+                    after: None,
+                }),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    loop {
+        if matches!(
+            tcode_protocol::decode_host_line(&host.from_host.recv_blocking().unwrap()).unwrap(),
+            HostMessage::Ack { id: 101, .. }
+        ) {
+            break;
+        }
+    }
+    let reads_before_open = root.event_reads();
     let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
     let clients: Vec<HostLink> = (0..2)
         .map(|_| {
@@ -10483,6 +10300,8 @@ fn admitted_message_origins_survive_queue_acknowledgement_and_callback_steering(
             .collect::<Vec<_>>(),
         [
             MessageOrigin::Human,
+            MessageOrigin::Human,
+            MessageOrigin::Agent,
             MessageOrigin::Agent,
             MessageOrigin::Agent
         ]
@@ -10491,6 +10310,1028 @@ fn admitted_message_origins_survive_queue_acknowledgement_and_callback_steering(
     for record in &records {
         activity.apply(record, false);
     }
-    assert_eq!(activity.last_human_message_at, records[0].ts);
-    assert_eq!(activity.last_message_at, records[2].ts);
+    assert_eq!(
+        activity.last_human_message_at,
+        records
+            .iter()
+            .find(|record| matches!(record.event, AgentEvent::ItemCompleted(_)))
+            .unwrap()
+            .ts
+    );
+    let request = records
+        .iter()
+        .rev()
+        .find(|record| matches!(record.event, AgentEvent::SteerRequested { .. }))
+        .unwrap();
+    assert_eq!(activity.last_message_at, request.ts);
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "thread",
+            AgentEvent::UserInputRequested {
+                request_id: "async-question".into(),
+                questions: vec![],
+                delivery: agent::UserInputDelivery::Async,
+            },
+            cx,
+        );
+    });
+    state.dispatch_command(
+        cx,
+        2,
+        Command::RespondUserInput {
+            session_id: "thread".into(),
+            request_id: "async-question".into(),
+            answers: serde_json::Map::from_iter([("answer".into(), serde_json::json!("A"))]),
+        },
+    );
+    let SessionCommand::RespondUserInput {
+        message_request_id: Some(reply_id),
+        ..
+    } = received.try_recv().unwrap()
+    else {
+        panic!("message-capable reply must carry admission identity")
+    };
+    state.update(cx, |state, cx| {
+        cx.origin = MessageOrigin::Server;
+        state.on_event(
+            "thread",
+            AgentEvent::SteerRequested {
+                request_id: reply_id.clone(),
+                text: "A".into(),
+                attachments: vec![],
+            },
+            cx,
+        );
+        state.on_event(
+            "thread",
+            AgentEvent::SteerAccepted {
+                request_id: reply_id,
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let records = store.read_events("thread").unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .rev()
+            .filter_map(|record| record.origin)
+            .take(3)
+            .collect::<Vec<_>>(),
+        [MessageOrigin::Human; 3]
+    );
+}
+
+fn next_host_event(link: &tcode_client::HostLink) -> EventEnvelope {
+    smol::block_on(smol::future::race(
+        async { link.events().recv().await.unwrap() },
+        async {
+            smol::Timer::after(Duration::from_secs(5)).await;
+            panic!("host did not publish the expected lifecycle change")
+        },
+    ))
+}
+
+#[test]
+fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename() {
+    use crate::pipe::{HostServices, spawn_host};
+    let store = TestStore::new("cold-settlement");
+    let stamp = now_millis() - 10 * 86_400_000;
+    for id in ["inherit", "never"] {
+        let mut project = Project::from_root(store.root().join(id));
+        project.id = id.into();
+        store.upsert_project(&project).unwrap();
+    }
+    for (id, settled) in [
+        ("legacy", Some(7)),
+        ("aged", None),
+        ("untouched", None),
+        ("never", None),
+        ("blocked", None),
+    ] {
+        let meta: SessionMeta = serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "provider": "codex", "cwd": store.root(),
+            "created_at": stamp / 1000, "updated_at": stamp / 1000, "settled_at": settled,
+            "project_id": if id == "never" { "never" } else { "inherit" }
+        }))
+        .unwrap();
+        store.upsert_meta(&meta).unwrap();
+    }
+    for id in ["aged", "never", "blocked"] {
+        store
+            .append_event(
+                id,
+                stamp,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "old-human".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "An old request".into(),
+                        context_len: None,
+                        attachments: vec![],
+                    },
+                }),
+            )
+            .unwrap();
+    }
+    store
+        .append_event(
+            "blocked",
+            stamp + 1,
+            &AgentEvent::UserInputRequested {
+                request_id: "cold-input".into(),
+                questions: vec![],
+                delivery: agent::UserInputDelivery::Blocking,
+            },
+        )
+        .unwrap();
+    // Literal persisted settings distinguish an omitted project value from
+    // explicit null, and exercise removal of the former idle-archive keys.
+    std::fs::write(
+        store.root().join("settings.json"),
+        r#"{
+        "auto_settle_after_days":null,
+        "project_settlement_overrides":{"inherit":{},"never":{"auto_settle_after_days":null}},
+        "auto_archive_disabled":false,"auto_archive_max_idle_days":7,"auto_archive_keep_count":4
+    }"#,
+    )
+    .unwrap();
+    let host = spawn_host((*store).clone(), HostServices::default()).unwrap();
+    let link = host.link();
+    link.subscribe(Subscription {
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    loop {
+        let event = next_host_event(&link).event;
+        let summary = match event {
+            ServerEvent::IndexSnapshot(snapshot) => Some(snapshot.summary),
+            ServerEvent::IndexSummaryReplaced(summary) => Some(summary),
+            _ => None,
+        };
+        if summary.is_some_and(|summary| {
+            summary
+                .activity_clocks
+                .get("aged")
+                .is_some_and(|activity| activity.last_human_message_at == Some(stamp))
+        }) {
+            break;
+        }
+    }
+    link.command_blocking(Command::RenameSession {
+        session_id: "aged".into(),
+        title: "Recently renamed".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        link.command_blocking(Command::PatchSettings {
+            patch: SettingsPatch::AutoSettleAfterDays(Some(0.5))
+        })
+        .unwrap_err()
+        .code,
+        "invalid_settlement_days"
+    );
+    assert_eq!(
+        link.command_blocking(Command::SettleSession {
+            session_id: "blocked".into()
+        })
+        .unwrap_err()
+        .code,
+        "thread_busy"
+    );
+    assert_eq!(
+        link.command_blocking(Command::PatchSettings {
+            patch: SettingsPatch::ProjectSettlement {
+                project_id: "never".into(),
+                value: Some(tcode_core::settings::ProjectSettlementSettings {
+                    auto_settle_after_days: Some(Some(0.5)),
+                    ..Default::default()
+                })
+            },
+        })
+        .unwrap_err()
+        .code,
+        "invalid_settlement_days"
+    );
+    link.command_blocking(Command::PatchSettings {
+        patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
+    })
+    .unwrap();
+    loop {
+        if let ServerEvent::IndexUpsertSession(meta) = next_host_event(&link).event
+            && meta.id == "aged"
+            && meta.is_settled()
+        {
+            assert_eq!(meta.settled_at, Some(stamp / 1000));
+            assert!(meta.updated_at > stamp / 1000);
+            break;
+        }
+    }
+    link.shutdown_blocking().unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
+    let restarted = spawn_host(
+        SessionStore::open_at(store.root().clone()).unwrap(),
+        HostServices::default(),
+    )
+    .unwrap();
+    let link = restarted.link();
+    link.subscribe(Subscription {
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    loop {
+        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&link).event {
+            let find = |id: &str| snapshot.sessions.iter().find(|meta| meta.id == id).unwrap();
+            assert_eq!(
+                find("legacy").settled_override,
+                Some(tcode_core::project::SettledOverride::Settled)
+            );
+            assert_eq!(find("legacy").settled_at, Some(7));
+            assert!(find("aged").is_settled());
+            assert!(
+                !find("never").is_settled(),
+                "explicit project null survives settings save and restart"
+            );
+            assert!(
+                !find("blocked").is_settled(),
+                "cold callback input blocks settlement"
+            );
+            assert!(
+                !find("untouched").is_settled(),
+                "no event activity never ages"
+            );
+            break;
+        }
+    }
+    let inherited: Command = serde_json::from_str(r#"{"type":"patch_settings","content":{"patch":{"type":"project_settlement","content":{"project_id":"never","value":{}}}}}"#).unwrap();
+    link.command_blocking(inherited).unwrap();
+    loop {
+        if let ServerEvent::IndexUpsertSession(meta) = next_host_event(&link).event
+            && meta.id == "never"
+            && meta.is_settled()
+        {
+            assert_eq!(meta.settled_at, Some(stamp / 1000));
+            break;
+        }
+    }
+    link.shutdown_blocking().unwrap();
+    restarted.to_host.close();
+    restarted.stopped.recv_blocking().unwrap();
+}
+
+#[test]
+fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_admission() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("manual-settlement");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, received) = smol::channel::unbounded();
+    let original_commands = commands.clone();
+    state.update(cx, |state, _| {
+        let mut parent = live_session(ProviderKind::Codex, commands);
+        parent.meta.id = "parent".into();
+        parent.meta.pinned_at = Some(1);
+        parent.meta.pin_order = Some("m".into());
+        parent.meta.active_order = Some("n".into());
+        parent.meta.unsettled_at = Some(1);
+        parent.push_or_merge_orchestrate_callback("queued completion".into());
+        let wake = parent.push_queued("automatic wake".into(), vec![]);
+        parent
+            .queue
+            .iter_mut()
+            .find(|message| message.id == wake)
+            .unwrap()
+            .origin = MessageOrigin::Server;
+        let mut child = ActiveSession::new(
+            SessionMeta::new(ProviderKind::Codex, store.root().clone(), None),
+            false,
+            vec![],
+        );
+        child.meta.id = "child".into();
+        child.meta.parent_session_id = Some("parent".into());
+        child.turn_in_flight = true;
+        state
+            .sessions
+            .extend([parent.meta.clone(), child.meta.clone()]);
+        state.residents.parked.insert("child".into(), child);
+        state.install_selected(parent);
+    });
+    through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::ScheduleTurn {
+            session_id: "parent".into(),
+            text: "human later".into(),
+            attachment_paths: vec![],
+            fire_at_unix_secs: now_secs() + 3600,
+        }),
+    );
+    let denied = through_pipe(
+        &state,
+        cx,
+        2,
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "parent".into(),
+        }),
+    );
+    assert!(denied.iter().any(|message| matches!(message, HostMessage::Ack { id: 2, result: Err(error) } if error.code == "thread_busy")));
+    let human = state.read(|state| {
+        state
+            .resident("parent")
+            .unwrap()
+            .queue
+            .iter()
+            .find(|message| message.origin == MessageOrigin::Human)
+            .unwrap()
+            .id
+    });
+    through_pipe(
+        &state,
+        cx,
+        3,
+        tcode_protocol::ClientPayload::Command(Command::DropQueued {
+            session_id: "parent".into(),
+            id: human,
+        }),
+    );
+    for (request, resolved) in [
+        (
+            AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                id: "approval".into(),
+                turn_id: None,
+                kind: agent::ApprovalKind::ToolUse {
+                    name: "shell".into(),
+                    input: serde_json::json!({}),
+                    detail: "Needs consent".into(),
+                },
+                options: vec![],
+            }),
+            AgentEvent::ApprovalResolved {
+                request_id: "approval".into(),
+                decision: agent::ApprovalDecision::Option("reject".into()),
+            },
+        ),
+        (
+            AgentEvent::UserInputRequested {
+                request_id: "blocking".into(),
+                questions: vec![],
+                delivery: agent::UserInputDelivery::Blocking,
+            },
+            AgentEvent::UserInputResolved {
+                request_id: "blocking".into(),
+                answers: Default::default(),
+            },
+        ),
+    ] {
+        state.update(cx, |state, cx| state.on_event("parent", request, cx));
+        let denied = through_pipe(
+            &state,
+            cx,
+            20,
+            tcode_protocol::ClientPayload::Command(Command::SettleSession {
+                session_id: "parent".into(),
+            }),
+        );
+        assert!(denied.iter().any(|message| matches!(message, HostMessage::Ack { id:20, result:Err(error) } if error.code == "thread_busy")));
+        state.update(cx, |state, cx| state.on_event("parent", resolved, cx));
+    }
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "parent",
+            AgentEvent::UserInputRequested {
+                request_id: "asynchronous".into(),
+                questions: vec![],
+                delivery: agent::UserInputDelivery::Async,
+            },
+            cx,
+        )
+    });
+    let accepted = through_pipe(
+        &state,
+        cx,
+        4,
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "parent".into(),
+        }),
+    );
+    assert!(accepted.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 4,
+            result: Ok(_)
+        }
+    )));
+    state.read(|state| {
+        let parent = state.resident("parent").unwrap();
+        assert!(parent.meta.is_settled());
+        assert!(
+            parent.meta.pinned_at.is_none()
+                && parent.meta.pin_order.is_none()
+                && parent.meta.active_order.is_none()
+                && parent.meta.unsettled_at.is_none()
+        );
+        assert!(parent.queue.is_empty());
+        assert_eq!(state.active_session_id(), Some("parent"));
+        assert!(state.resident("child").unwrap().turn_in_flight);
+        assert!(!state.find_meta("child").unwrap().is_settled());
+    });
+    assert!(matches!(
+        received.try_recv().unwrap(),
+        SessionCommand::Shutdown
+    ));
+    through_pipe(
+        &state,
+        cx,
+        21,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "parent".into(),
+            },
+            after: None,
+        }),
+    );
+    state.read(|state| {
+        assert!(
+            state.find_meta("parent").unwrap().is_settled(),
+            "reading leaves settlement intact"
+        )
+    });
+    for command in [
+        Command::ArchiveSession {
+            session_id: "parent".into(),
+        },
+        Command::UnarchiveSession {
+            session_id: "parent".into(),
+        },
+    ] {
+        through_pipe(
+            &state,
+            cx,
+            22,
+            tcode_protocol::ClientPayload::Command(command),
+        );
+        state.read(|state| assert!(state.find_meta("parent").unwrap().is_settled()));
+    }
+    through_pipe(
+        &state,
+        cx,
+        24,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::SessionStatus {
+                session_id: "parent".into(),
+            },
+            after: None,
+        }),
+    );
+    cx.run_until(|state| state.resident("parent").is_some());
+    state.read(|state| {
+        assert!(
+            state.find_meta("parent").unwrap().is_settled(),
+            "reopening status preserves settlement"
+        )
+    });
+    through_pipe(
+        &state,
+        cx,
+        23,
+        tcode_protocol::ClientPayload::Command(Command::UnsettleSession {
+            session_id: "parent".into(),
+        }),
+    );
+    state.read(|state| {
+        assert_eq!(
+            state.find_meta("parent").unwrap().settled_override,
+            Some(tcode_core::project::SettledOverride::Active)
+        )
+    });
+    let fresh = smol::channel::unbounded();
+    state.update(cx, |state, _| {
+        state.resident_mut("parent").unwrap().runtime = Runtime::Live(fresh.0)
+    });
+    through_pipe(
+        &state,
+        cx,
+        5,
+        tcode_protocol::ClientPayload::Command(Command::SendTurn {
+            session_id: "parent".into(),
+            text: "new work".into(),
+            attachment_paths: vec![],
+        }),
+    );
+    assert!(
+        matches!(fresh.1.try_recv().unwrap(), SessionCommand::SendTurn { text, .. } if text == "new work")
+    );
+    state.update(cx, |state, cx| {
+        state.on_event_stream_ended("parent", &original_commands, cx)
+    });
+    state.read(|state| {
+        let meta = state.find_meta("parent").unwrap();
+        assert!(!meta.is_settled());
+        assert_eq!(
+            meta.settled_override, None,
+            "an accepted message clears explicit Active"
+        );
+        assert!(meta.unsettled_at.is_some());
+        assert!(
+            state
+                .resident("parent")
+                .unwrap()
+                .delivery_in_flight
+                .is_some()
+        );
+    });
+    through_pipe(
+        &state,
+        cx,
+        6,
+        tcode_protocol::ClientPayload::Command(Command::ShutdownAllAndFlush),
+    );
+    let restarted = AppState::new((*store).clone()).unwrap();
+    assert!(!restarted.find_meta("parent").unwrap().is_settled());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("settlement-real-pty");
+    for id in ["idle", "busy", "builtin", "input"] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        store.upsert_meta(&meta).unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut request = 0;
+    let mut terminals = HashMap::new();
+    for id in ["idle", "busy", "builtin", "input"] {
+        request += 1;
+        through_pipe(
+            &state,
+            cx,
+            request,
+            tcode_protocol::ClientPayload::Subscribe(Subscription {
+                topic: Topic::SessionStatus {
+                    session_id: id.into(),
+                },
+                after: None,
+            }),
+        );
+        request += 1;
+        through_pipe(
+            &state,
+            cx,
+            request,
+            tcode_protocol::ClientPayload::Command(Command::NewTerminal {
+                session_id: id.into(),
+            }),
+        );
+        cx.run_until(|state| {
+            state
+                .resident(id)
+                .is_some_and(|session| session.terminal_workspace.active_id.is_some())
+        });
+        let terminal = state.read(|state| {
+            state
+                .resident(id)
+                .unwrap()
+                .terminal_workspace
+                .active()
+                .unwrap()
+                .terminal
+                .clone()
+        });
+        cx.run_until(|_| terminal.idle_prompt() == Some(true));
+        let terminal_id = state.read(|state| {
+            state
+                .resident(id)
+                .unwrap()
+                .terminal_workspace
+                .active_id
+                .unwrap()
+        });
+        let (command, marker, idle) = match id {
+            "busy" => (
+                "printf '__BUSY_CHILD__\\n'; sleep 60\r",
+                "__BUSY_CHILD__",
+                false,
+            ),
+            "builtin" => (
+                "printf '__BUSY_BUILTIN__\\n'; while true; do :; done\r",
+                "__BUSY_BUILTIN__",
+                false,
+            ),
+            _ => (
+                "printf '__IDLE_OUTPUT__\\n'; true\r",
+                "__IDLE_OUTPUT__",
+                true,
+            ),
+        };
+        request += 1;
+        through_pipe(
+            &state,
+            cx,
+            request,
+            tcode_protocol::ClientPayload::Command(Command::TerminalInput {
+                terminal_id,
+                bytes: command.as_bytes().to_vec(),
+            }),
+        );
+        cx.run_until(|_| {
+            terminal
+                .peek_snapshot()
+                .text()
+                .lines()
+                .any(|line| line.trim() == marker)
+                && terminal.idle_prompt() == Some(idle)
+        });
+        terminals.insert(id, (terminal_id, terminal));
+    }
+    for id in ["idle", "busy", "builtin"] {
+        request += 1;
+        through_pipe(
+            &state,
+            cx,
+            request,
+            tcode_protocol::ClientPayload::Command(Command::SettleSession {
+                session_id: id.into(),
+            }),
+        );
+    }
+    cx.run_until(|_| terminals["idle"].1.exited());
+    assert!(
+        terminals["idle"]
+            .1
+            .peek_snapshot()
+            .text()
+            .contains("__IDLE_OUTPUT__")
+    );
+    assert!(!terminals["busy"].1.exited());
+    assert!(!terminals["builtin"].1.exited());
+    state.read(|state| {
+        assert!(
+            state.terminal_handle(terminals["idle"].0).is_some(),
+            "closed shell output remains in its tab"
+        )
+    });
+    request += 1;
+    state.dispatch_command(
+        cx,
+        request,
+        Command::SettleSession {
+            session_id: "input".into(),
+        },
+    );
+    while !state.read(|state| state.find_meta("input").unwrap().is_settled()) {
+        cx.run_next();
+    }
+    request += 1;
+    state.dispatch_command(
+        cx,
+        request,
+        Command::TerminalInput {
+            terminal_id: terminals["input"].0,
+            bytes: b"printf '__NEW_INPUT_SURVIVED__\\n'\r".to_vec(),
+        },
+    );
+    cx.run_until(|_| {
+        terminals["input"]
+            .1
+            .peek_snapshot()
+            .text()
+            .lines()
+            .any(|line| line.trim() == "__NEW_INPUT_SURVIVED__")
+    });
+    assert!(!terminals["input"].1.exited());
+    for (_, terminal) in terminals.values() {
+        if !terminal.exited() {
+            terminal.terminate().unwrap();
+        }
+    }
+    cx.run_until(|_| terminals.values().all(|(_, terminal)| terminal.exited()));
+}
+
+#[test]
+fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets() {
+    for case in [
+        "valid",
+        "renamed",
+        "new_work",
+        "archived_child",
+        "archived_parent",
+        "deleted_parent",
+    ] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("completion-admission");
+        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        let (parent_commands, parent_received) = smol::channel::unbounded();
+        let (child_commands, _child_received) = smol::channel::unbounded();
+        let completion = state.update(cx, |state, cx| {
+            let mut ancestor = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+            ancestor.id = "ancestor".into();
+            ancestor.settled_at = Some(1);
+            let mut parent = live_session(ProviderKind::Codex, parent_commands);
+            parent.meta.id = "parent".into();
+            parent.meta.parent_session_id = Some("ancestor".into());
+            parent.meta.settled_at = Some(1);
+            let mut child = live_session(ProviderKind::Codex, child_commands);
+            child.meta.id = "child".into();
+            child.meta.parent_session_id = Some("parent".into());
+            child.meta.archive_on_complete = false;
+            state
+                .sessions
+                .extend([ancestor, parent.meta.clone(), child.meta.clone()]);
+            state.residents.parked.insert("parent".into(), parent);
+            state.install_selected(child);
+            state.record_event(
+                "child",
+                &AgentEvent::TurnStarted {
+                    turn_id: "finished-run".into(),
+                },
+                cx,
+            );
+            state.on_event(
+                "child",
+                persisted_assistant_event("completion evidence"),
+                cx,
+            );
+            state.record_event(
+                "child",
+                &AgentEvent::TurnCompleted {
+                    turn_id: "finished-run".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+            state.deliver_child_callback("child", TurnStatus::Completed, cx)
+        });
+        let command = match case {
+            "renamed" => Some(Command::RenameSession {
+                session_id: "child".into(),
+                title: "Renamed".into(),
+            }),
+            "new_work" => Some(Command::SendTurn {
+                session_id: "child".into(),
+                text: "new human work".into(),
+                attachment_paths: vec![],
+            }),
+            "archived_child" => Some(Command::ArchiveSession {
+                session_id: "child".into(),
+            }),
+            "archived_parent" => Some(Command::ArchiveSession {
+                session_id: "parent".into(),
+            }),
+            "deleted_parent" => Some(Command::DeleteSession {
+                session_id: "parent".into(),
+                remove_worktree: false,
+            }),
+            _ => None,
+        };
+        if let Some(command) = command {
+            state.dispatch_command(cx, 1, command);
+        }
+        let (finished, done) = smol::channel::bounded(1);
+        smol::spawn(async move {
+            if let Some(completion) = completion {
+                completion.await;
+            }
+            finished.send(()).await.unwrap();
+        })
+        .detach();
+        cx.run_until(|_| !done.is_empty());
+        if case == "valid" || case == "renamed" {
+            cx.run_until(|_| !parent_received.is_empty());
+            assert!(
+                matches!(parent_received.try_recv().unwrap(), SessionCommand::SendTurn { text, .. } if text.contains("completion evidence"))
+            );
+            state.read(|state| assert!(!state.find_meta("parent").unwrap().is_settled()));
+        } else {
+            state.read(|state| {
+                if let Some(parent) = state.find_meta("parent") {
+                    assert!(parent.is_settled(), "{case}");
+                }
+            });
+            assert!(
+                !std::iter::from_fn(|| parent_received.try_recv().ok()).any(|command| matches!(
+                    command,
+                    SessionCommand::SendTurn { .. } | SessionCommand::Steer { .. }
+                )),
+                "{case}"
+            );
+        }
+        state.read(|state| assert!(state.find_meta("ancestor").unwrap().is_settled(), "{case}"));
+    }
+}
+#[test]
+fn cancelling_provider_retires_its_requests_and_native_work_without_stopping_independent_children()
+{
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("settlement-cancel-native");
+    let stamp = now_millis() - 10 * 86_400_000;
+    let mut lead = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    lead.id = "lead".into();
+    lead.created_at = stamp / 1000;
+    store.upsert_meta(&lead).unwrap();
+    store
+        .append_event(
+            "lead",
+            stamp,
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: "old-request".into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "Earlier work".into(),
+                    context_len: None,
+                    attachments: vec![],
+                },
+            }),
+        )
+        .unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        state.settings.auto_settle_after_days = None;
+        let (commands, _) = smol::channel::unbounded();
+        let mut worker = live_session(ProviderKind::Codex, commands);
+        worker.meta.id = "worker".into();
+        worker.meta.parent_session_id = Some("lead".into());
+        let mut independent = ActiveSession::new(
+            SessionMeta::new(ProviderKind::Codex, store.root().clone(), None),
+            false,
+            vec![],
+        );
+        independent.meta.id = "independent".into();
+        independent.meta.parent_session_id = Some("worker".into());
+        independent.turn_in_flight = true;
+        state.persist_meta(&worker.meta, cx);
+        state.persist_meta(&independent.meta, cx);
+        state
+            .residents
+            .parked
+            .insert("independent".into(), independent);
+        state.install_selected(worker);
+        for owner in ["worker", "independent"] {
+            state.on_event(
+                owner,
+                AgentEvent::ItemStarted(ThreadItem {
+                    id: format!("spawn-{owner}"),
+                    parent_item_id: None,
+                    content: ItemContent::Subagent {
+                        agent_type: "explorer".into(),
+                        description: "Inspect sample".into(),
+                        status: ItemStatus::InProgress,
+                        summary: None,
+                        model: None,
+                        effort: None,
+                    },
+                }),
+                cx,
+            );
+        }
+        state.on_event(
+            "worker",
+            AgentEvent::UserInputRequested {
+                request_id: "blocking".into(),
+                questions: vec![],
+                delivery: agent::UserInputDelivery::Blocking,
+            },
+            cx,
+        );
+    });
+    let denied = through_pipe(
+        &state,
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "worker".into(),
+        }),
+    );
+    assert!(denied.iter().any(|message| matches!(message, HostMessage::Ack { id:1, result:Err(error) } if error.code == "thread_busy")));
+    state.update(cx, |state, cx| {
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Cancel {
+                parent_id: "lead".into(),
+                thread_id: "worker".into(),
+            },
+            reply,
+            cx,
+        );
+        assert!(response.try_recv().unwrap().is_ok());
+    });
+    let accepted = through_pipe(
+        &state,
+        cx,
+        2,
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "worker".into(),
+        }),
+    );
+    assert!(accepted.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 2,
+            result: Ok(_)
+        }
+    )));
+    state.read(|state| {
+        let mirror = |spawn| {
+            state
+                .sessions
+                .iter()
+                .find(|meta| meta.native_subagent.as_deref() == Some(spawn))
+                .unwrap()
+        };
+        assert_eq!(
+            state
+                .resident(&mirror("spawn-worker").id)
+                .unwrap()
+                .timeline
+                .last_turn_status,
+            Some(TurnStatus::Interrupted)
+        );
+        assert!(
+            state
+                .resident(&mirror("spawn-independent").id)
+                .unwrap()
+                .timeline
+                .turn_running
+        );
+        assert!(state.resident("independent").unwrap().turn_in_flight);
+    });
+    // A provider may ask during startup before there is transcript content.
+    // Changing that provider is a fresh switch, and must retire the question
+    // before shutdown hides provider ownership from the cold activity fold.
+    let (switch_commands, switch_received) = smol::channel::unbounded();
+    state.update(cx, |state, cx| {
+        let mut opening = live_session(ProviderKind::Codex, switch_commands);
+        opening.meta.id = "opening".into();
+        state.persist_meta(&opening.meta, cx);
+        state.install_selected(opening);
+        state.on_event(
+            "opening",
+            AgentEvent::UserInputRequested {
+                request_id: "startup-question".into(),
+                questions: vec![],
+                delivery: agent::UserInputDelivery::Blocking,
+            },
+            cx,
+        );
+    });
+    state.dispatch_command(
+        cx,
+        5,
+        Command::SetActiveModel {
+            session_id: "opening".into(),
+            provider: ProviderKind::ClaudeCode,
+            model: None,
+            profile_id: None,
+        },
+    );
+    assert!(matches!(
+        switch_received.try_recv().unwrap(),
+        SessionCommand::Shutdown
+    ));
+    let switched = through_pipe(
+        &state,
+        cx,
+        6,
+        tcode_protocol::ClientPayload::Command(Command::SettleSession {
+            session_id: "opening".into(),
+        }),
+    );
+    assert!(switched.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 6,
+            result: Ok(_)
+        }
+    )));
+    through_pipe(
+        &state,
+        cx,
+        3,
+        tcode_protocol::ClientPayload::Command(Command::PatchSettings {
+            patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
+        }),
+    );
+    cx.run_until(|state| {
+        state
+            .find_meta("lead")
+            .is_some_and(|meta| meta.is_settled())
+    });
+    through_pipe(
+        &state,
+        cx,
+        4,
+        tcode_protocol::ClientPayload::Command(Command::ShutdownAllAndFlush),
+    );
+    let records = store.read_events("worker").unwrap();
+    assert!(
+        !tcode_core::settlement::ThreadActivity::fold_stored(&records, true).has_pending_input(),
+        "cancellation survives a cold fold"
+    );
 }

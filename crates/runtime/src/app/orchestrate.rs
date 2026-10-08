@@ -237,9 +237,7 @@ impl AppState {
                 self.report_error(RuntimeError::External(message), cx);
                 return;
             }
-            if let Some(active) = self.resident_mut(target_id) {
-                active.shutdown_to_idle();
-            }
+            self.detach_provider_to_idle(target_id, cx);
         }
 
         // Stage the split so the next `push_queued` records it on the user
@@ -648,7 +646,6 @@ impl AppState {
                     if archived {
                         self.unarchive_session(&thread_id, cx);
                     }
-                    self.reactivate_session(&thread_id, cx);
                     // A live turn accepts the message right away — same routing as
                     // parent callbacks. Queueing a mid-turn correction until the
                     // turn ends would deliver it after the work it was meant to
@@ -668,6 +665,9 @@ impl AppState {
                         }
                         // Provider channel gone: fall through so the text survives
                         // in the queue for the wake-up path.
+                    }
+                    if !can_steer {
+                        self.reactivate_session(&thread_id, cx);
                     }
                     if self.residents.live.contains_key(&thread_id) {
                         let child = self.resident_mut(&thread_id).unwrap();
@@ -703,13 +703,13 @@ impl AppState {
             } => {
                 let result = (|| {
                     self.require_child(&parent_id, &thread_id)?;
-                    self.clear_approvals(&thread_id);
+                    self.advance_decision_revision(&thread_id);
+                    self.invalidate_child_callback(&thread_id);
                     if self.residents.live.contains_key(&thread_id) {
                         if let Some(child) = self.resident_mut(&thread_id) {
                             child.queue.clear();
-                            child.timeline.mark_idle();
-                            child.shutdown_to_idle();
                         }
+                        self.detach_provider_to_idle(&thread_id, cx);
                     } else {
                         self.drop_background(&thread_id, cx);
                     }
@@ -1079,20 +1079,17 @@ impl AppState {
         child_id: &str,
         status: TurnStatus,
         cx: &mut HostCx,
-    ) {
-        let Some(child) = self
+    ) -> Option<HostTask<()>> {
+        let child = self
             .sessions
             .iter()
             .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
-            .cloned()
-        else {
-            return;
-        };
+            .cloned()?;
         if self
             .resident(child_id)
             .is_some_and(|child| !child.queue.is_empty())
         {
-            return;
+            return None;
         }
         let child_id = child_id.to_string();
         let parent_id = child.parent_session_id.clone().unwrap();
@@ -1102,68 +1099,88 @@ impl AppState {
         // attention.
         let auto_archive = child.archive_on_complete && matches!(status, TurnStatus::Completed);
         let result_max_chars = child.result_max_chars;
+        let revision = self
+            .callback_generations
+            .get(&child_id)
+            .copied()
+            .unwrap_or(0);
         let fold = self.folded_log(&child_id, cx);
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
+        Some(cx.spawn_background(async move {
             let timeline = fold.await;
-            host_cx.enqueue(move |state, cx| {
-                let timeline = match timeline {
-                    Ok(timeline) => timeline,
-                    Err(error) => {
-                        state.report_error(
+            let _ = host_cx
+                .enqueue_and_wait(move |state, cx| {
+                    let timeline = match timeline {
+                        Ok(timeline) => timeline,
+                        Err(error) => {
+                            state.report_error(
                             RuntimeError::External(format!(
                                 "could not read thread {child_id} to report its completion: {error}"
                             )),
                             cx,
                         );
+                            return;
+                        }
+                    };
+                    let child_still_exists = state.sessions.iter().any(|meta| {
+                        meta.id == child_id
+                            && meta.parent_session_id.as_deref() == Some(parent_id.as_str())
+                    });
+                    if !child_still_exists
+                        || state
+                            .callback_generations
+                            .get(&child_id)
+                            .copied()
+                            .unwrap_or(0)
+                            != revision
+                        || !state
+                            .find_meta(&child_id)
+                            .is_some_and(|meta| meta.archived_at.is_none())
+                        || !state
+                            .find_meta(&parent_id)
+                            .is_some_and(|meta| meta.archived_at.is_none())
+                    {
                         return;
                     }
-                };
-                let child_still_exists = state.sessions.iter().any(|meta| {
-                    meta.id == child_id
-                        && meta.parent_session_id.as_deref() == Some(parent_id.as_str())
-                });
-                if !child_still_exists {
-                    return;
-                }
-                let turn = timeline.turns.len();
-                // A failed start folds into the turn that was already reported,
-                // so it is not deduplicated against that turn's callback; and its
-                // final message is that old turn's, so it is not repeated.
-                let text = if let Some(error) = trailing_start_error(&timeline) {
-                    format!(
-                        "[orchestrate] thread {child_id} (\"{title}\") failed to start: {error}"
-                    )
-                } else {
-                    if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
-                        return;
+                    let turn = timeline.turns.len();
+                    // A failed start folds into the turn that was already reported,
+                    // so it is not deduplicated against that turn's callback; and its
+                    // final message is that old turn's, so it is not repeated.
+                    let text = if let Some(error) = trailing_start_error(&timeline) {
+                        format!(
+                            "[orchestrate] thread {child_id} (\"{title}\") failed to start: {error}"
+                        )
+                    } else {
+                        if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
+                            return;
+                        }
+                        // A report pushed via the child's report_result tool supersedes
+                        // the last-message digest and is delivered in full; consuming it
+                        // here keeps the fallback per turn.
+                        let reported = state.child_reported_results.remove(&child_id);
+                        assemble_callback_text(
+                            &child_id,
+                            &title,
+                            status,
+                            &final_assistant_message(&timeline),
+                            reported.as_deref(),
+                            timeline.usage.as_ref(),
+                            result_max_chars,
+                            auto_archive,
+                        )
+                    };
+                    state.callback_last_turn.insert(child_id.clone(), turn);
+                    state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+                    if auto_archive
+                        && state
+                            .find_meta(&child_id)
+                            .is_some_and(|meta| meta.settled_at.is_none())
+                    {
+                        state.archive_session_ids(&[child_id], now_secs(), cx);
                     }
-                    // A report pushed via the child's report_result tool supersedes
-                    // the last-message digest and is delivered in full; consuming it
-                    // here keeps the fallback per turn.
-                    let reported = state.child_reported_results.remove(&child_id);
-                    assemble_callback_text(
-                        &child_id,
-                        &title,
-                        status,
-                        &final_assistant_message(&timeline),
-                        reported.as_deref(),
-                        timeline.usage.as_ref(),
-                        result_max_chars,
-                        auto_archive,
-                    )
-                };
-                state.callback_last_turn.insert(child_id.clone(), turn);
-                state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
-                if auto_archive
-                    && state
-                        .find_meta(&child_id)
-                        .is_some_and(|meta| meta.settled_at.is_none())
-                {
-                    state.archive_session_ids(&[child_id], now_secs(), cx);
-                }
-            });
-        });
+                })
+                .await;
+        }))
     }
 
     pub(super) fn deliver_child_approval_callback(
@@ -1239,11 +1256,16 @@ impl AppState {
         text: String,
         cx: &mut HostCx,
     ) {
+        if !self
+            .find_meta(parent_id)
+            .is_some_and(|meta| meta.archived_at.is_none())
+        {
+            return;
+        }
         let mut callback_cx = cx.clone();
         callback_cx.origin = MessageOrigin::Agent;
         callback_cx.author = None;
         let cx = &mut callback_cx;
-        self.reactivate_session(parent_id, cx);
         let can_steer = self
             .resident(parent_id)
             .is_some_and(|parent| parent.turn_in_flight && parent.can_steer());
@@ -1260,6 +1282,8 @@ impl AppState {
             return;
         }
 
+        self.reactivate_session(parent_id, cx);
+
         if self.residents.live.contains_key(parent_id) {
             let parent = self.resident_mut(parent_id).unwrap();
             parent.push_or_merge_orchestrate_callback(text);
@@ -1270,9 +1294,11 @@ impl AppState {
             let settings_changed = parent.launch_settings_changed_while_live();
             let restart_deferred = parent.settings_restart_deferred();
             if settings_changed && !restart_deferred {
-                parent.shutdown_to_idle();
+                self.detach_provider_to_idle(parent_id, cx);
             }
-            let should_start = matches!(parent.runtime, Runtime::Idle);
+            let should_start = self
+                .resident(parent_id)
+                .is_some_and(|parent| matches!(parent.runtime, Runtime::Idle));
             if !restart_deferred && self.dispatch_next_queued(parent_id, cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }

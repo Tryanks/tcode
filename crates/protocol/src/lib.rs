@@ -70,9 +70,14 @@ pub use wire::{
 // version 10 (v0.2.2) adds ImageRead, ToolCall.image_reads metadata and
 // ReadItemImage for fetching model-read image bytes outside timeline windows.
 //
+// Unreleased: MessageAdmitted/RunRequested events carry host admission/dispatch activity.
 // Unreleased: replaces SessionActivity.background_only with waiting, which
 // also covers unfinished child threads; adds the CreateNewProject and
 // StartScratchDraft commands.
+// Unreleased: Settled/Active overrides and lifecycle/pin/order timestamps;
+// UnsettleSession replaces MakeSessionActive, SetAutoSettle controls durable
+// disable, global/project settlement settings, and event-derived activity clocks.
+// Idle AutoArchiveSweep/ArchivedCount and idle-auto-archive settings are removed.
 // Unreleased: stored messages carry human/agent/server origin; absent origin
 // uses the historical top-level human / dispatched child agent fallback.
 pub const PROTOCOL_VERSION: u32 = 10;

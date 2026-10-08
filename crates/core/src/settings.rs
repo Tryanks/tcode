@@ -744,10 +744,12 @@ pub enum SettingsPatch {
     AbortOnModelFallback(bool),
     ResumeOnLimitReset(bool),
     FallbackReviewAdvisor(bool),
-    AutoArchiveDisabled(bool),
-    AutoArchiveMaxIdleDays(u32),
-    AutoArchiveKeepCount(usize),
-    AutoArchiveNoticeShown(bool),
+    AutoSettleAfterDays(Option<f64>),
+    AutoSettleOnMerge(bool),
+    ProjectSettlement {
+        project_id: String,
+        value: Option<ProjectSettlementSettings>,
+    },
     OrchestrateDecisionModels(Vec<OrchestrateChildModel>),
     OrchestrateChildModels(Vec<OrchestrateChildModel>),
     OrchestrateChildApproval(ChildApprovalMode),
@@ -881,19 +883,12 @@ pub struct Settings {
     pub resume_on_limit_reset: bool,
     #[serde(default)]
     pub fallback_review_advisor: bool,
-    /// Whether automatic archiving is DISABLED. Stored inverted so the feature
-    /// defaults to on even for legacy settings files that lack the field.
-    #[serde(default)]
-    pub auto_archive_disabled: bool,
-    /// Threads must be idle longer than this many days before auto-archive.
-    #[serde(default = "default_auto_archive_max_idle_days")]
-    pub auto_archive_max_idle_days: u32,
-    /// Newest siblings preserved regardless of age by auto-archive.
-    #[serde(default = "default_auto_archive_keep_count")]
-    pub auto_archive_keep_count: usize,
-    /// Whether the one-time first-auto-archive explanation has been shown.
-    #[serde(default)]
-    pub auto_archive_notice_shown: bool,
+    #[serde(default = "default_auto_settle_after_days")]
+    pub auto_settle_after_days: Option<f64>,
+    #[serde(default = "default_true")]
+    pub auto_settle_on_merge: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub project_settlement_overrides: BTreeMap<String, ProjectSettlementSettings>,
     /// Built-in orchestration identities and child-model routing table.
     #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
     pub orchestrate: OrchestrateSettings,
@@ -968,18 +963,26 @@ pub struct Settings {
     pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Factory value for [`Settings::auto_archive_max_idle_days`]. Public so the
-/// settings page can tell an overridden field from an untouched one.
-pub const DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS: u32 = 7;
-/// Factory value for [`Settings::auto_archive_keep_count`].
-pub const DEFAULT_AUTO_ARCHIVE_KEEP_COUNT: usize = 30;
-
-const fn default_auto_archive_max_idle_days() -> u32 {
-    DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS
+const fn default_auto_settle_after_days() -> Option<f64> {
+    Some(3.0)
 }
 
-const fn default_auto_archive_keep_count() -> usize {
-    DEFAULT_AUTO_ARCHIVE_KEEP_COUNT
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSettlementSettings {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_days_override"
+    )]
+    pub auto_settle_after_days: Option<Option<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_settle_on_merge: Option<bool>,
+}
+
+fn deserialize_days_override<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<f64>>, D::Error> {
+    Option::<f64>::deserialize(deserializer).map(Some)
 }
 
 impl Default for Settings {
@@ -1002,10 +1005,9 @@ impl Default for Settings {
             abort_on_model_fallback: true,
             resume_on_limit_reset: true,
             fallback_review_advisor: false,
-            auto_archive_disabled: false,
-            auto_archive_max_idle_days: default_auto_archive_max_idle_days(),
-            auto_archive_keep_count: default_auto_archive_keep_count(),
-            auto_archive_notice_shown: false,
+            auto_settle_after_days: default_auto_settle_after_days(),
+            auto_settle_on_merge: true,
+            project_settlement_overrides: BTreeMap::new(),
             orchestrate: OrchestrateSettings::default(),
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
@@ -1060,15 +1062,24 @@ impl Settings {
             SettingsPatch::FallbackReviewAdvisor(value) => {
                 self.fallback_review_advisor = value;
             }
-            SettingsPatch::AutoArchiveDisabled(value) => self.auto_archive_disabled = value,
-            SettingsPatch::AutoArchiveMaxIdleDays(value) => {
-                self.auto_archive_max_idle_days = value;
+            SettingsPatch::AutoSettleAfterDays(value) => {
+                if value.is_none_or(|days| days.is_finite() && (1.0..=90.0).contains(&days)) {
+                    self.auto_settle_after_days = value;
+                }
             }
-            SettingsPatch::AutoArchiveKeepCount(value) => {
-                self.auto_archive_keep_count = value;
-            }
-            SettingsPatch::AutoArchiveNoticeShown(value) => {
-                self.auto_archive_notice_shown = value;
+            SettingsPatch::AutoSettleOnMerge(value) => self.auto_settle_on_merge = value,
+            SettingsPatch::ProjectSettlement { project_id, value } => {
+                if let Some(value) = value {
+                    if value
+                        .auto_settle_after_days
+                        .flatten()
+                        .is_none_or(|days| days.is_finite() && (1.0..=90.0).contains(&days))
+                    {
+                        self.project_settlement_overrides.insert(project_id, value);
+                    }
+                } else {
+                    self.project_settlement_overrides.remove(&project_id);
+                }
             }
             SettingsPatch::OrchestrateDecisionModels(value) => {
                 self.orchestrate.decision_models = value;
@@ -1305,6 +1316,20 @@ impl Settings {
     /// Fold the pre-`providers` binary overrides into the map (once, on load)
     /// and drop the port of the retired HTTP listener, which no build reads.
     pub fn migrate_legacy(&mut self) {
+        for key in [
+            "auto_archive_disabled",
+            "auto_archive_max_idle_days",
+            "auto_archive_keep_count",
+            "auto_archive_notice_shown",
+        ] {
+            self.unknown.remove(key);
+        }
+        if self
+            .auto_settle_after_days
+            .is_some_and(|days| !days.is_finite() || !(1.0..=90.0).contains(&days))
+        {
+            self.auto_settle_after_days = default_auto_settle_after_days();
+        }
         self.unknown.remove("remote_port");
         for (provider, legacy) in [
             (ProviderKind::Codex, self.codex_binary.take()),
@@ -1359,10 +1384,6 @@ mod tests {
     #[test]
     fn older_settings_preserve_access_policy_and_accept_partial_feature_blocks() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert!(!legacy.auto_archive_disabled);
-        assert_eq!(legacy.auto_archive_max_idle_days, 7);
-        assert_eq!(legacy.auto_archive_keep_count, 30);
-        assert!(!legacy.auto_archive_notice_shown);
         assert!(!legacy.sidebar_provider_marks);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);

@@ -581,6 +581,7 @@ async fn run_probe(
                 handle
                     .commands
                     .send(SessionCommand::RespondUserInput {
+                        message_request_id: None,
                         request_id: request_id.clone(),
                         answers,
                     })

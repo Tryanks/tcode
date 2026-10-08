@@ -80,6 +80,7 @@ impl AppState {
         if !idle {
             return;
         }
+        self.advance_decision_revision(session_id);
         self.next_start_generation = self
             .next_start_generation
             .checked_add(1)
@@ -161,8 +162,9 @@ impl AppState {
                         let pump = HostCx::spawn_background(cx, async move {
                             while let Ok(event) = events.recv().await {
                                 let event_session = pump_session.clone();
+                                let event_commands = pump_commands.clone();
                                 pump_cx.enqueue(move |state, cx| {
-                                    state.on_event(&event_session, event, cx);
+                                    if state.resident(&event_session).is_some_and(|session| matches!(&session.runtime, Runtime::Live(current) if current.same_channel(&event_commands))) { state.on_event(&event_session, event, cx); }
                                 });
                             }
                             pump_cx.enqueue(move |state, cx| {
@@ -252,6 +254,7 @@ impl AppState {
                                 error: err.to_string(),
                             };
                             state.record_event(&session_id, &error_event, cx);
+                            state.request_settlement_sweep(cx);
                             let is_child = state.sessions.iter().any(|meta| {
                                 meta.id == session_id && meta.parent_session_id.is_some()
                             });
@@ -259,7 +262,7 @@ impl AppState {
                                 if let Some(child) = state.resident_mut(&session_id) {
                                     child.queue.clear();
                                 }
-                                state.deliver_child_callback(&session_id, TurnStatus::Failed, cx);
+                                if let Some(callback) = state.deliver_child_callback(&session_id, TurnStatus::Failed, cx) { callback.detach(); }
                             }
                             state.report_error(
                                 RuntimeError::ProviderStart {
@@ -333,7 +336,46 @@ impl AppState {
         self.upsert_session_in_memory(meta.clone());
     }
 
+    /// Retire work owned by this provider before detaching it. Execution
+    /// children own independent providers; only native mirrors end here.
+    pub(super) fn retire_provider_work(&mut self, id: &str, cx: &mut HostCx) {
+        // A cold history replica owns no provider. Retiring it must neither
+        // alter the transcript nor invalidate its persisted tail index.
+        let has_open_work = self.resident(id).is_some_and(|session| {
+            !session.draft
+                && !matches!(session.runtime, Runtime::Idle)
+                && (session.turn_in_flight
+                    || session.delivery_in_flight.is_some()
+                    || session.background_task_count > 0
+                    || session.timeline.turn_running
+                    || !session.timeline.pending_approvals.is_empty()
+                    || session.timeline.pending_user_input.is_some())
+        }) || self
+            .thread_activity
+            .get(id)
+            .is_some_and(|activity| activity.has_pending_input());
+        if self.find_meta(id).is_some() && has_open_work {
+            self.record_event(id, &AgentEvent::SessionClosed { reason: None }, cx);
+        }
+        self.interrupt_native_subagent_work(id, cx);
+        self.clear_approvals(id);
+        self.steer_admissions
+            .retain(|(session, _), _| session != id);
+        self.decision_authors
+            .retain(|(session, _), _| session != id);
+        self.advance_decision_revision(id);
+        self.request_settlement_sweep(cx);
+    }
+
+    pub(super) fn detach_provider_to_idle(&mut self, id: &str, cx: &mut HostCx) {
+        self.retire_provider_work(id, cx);
+        if let Some(session) = self.resident_mut(id) {
+            session.shutdown_to_idle();
+        }
+    }
+
     pub(crate) fn shutdown_active(&mut self, target_id: &str, cx: &mut HostCx) {
+        self.retire_provider_work(target_id, cx);
         self.revoke_computer_use_registration(target_id);
         if let Some(session_id) = self
             .resident(target_id)
@@ -352,6 +394,8 @@ impl AppState {
             }
         }
         self.release_stale_session_logs(cx);
+        self.advance_decision_revision(target_id);
+        self.request_settlement_sweep(cx);
     }
 
     /// Shut down every provider process before the application exits.
@@ -369,10 +413,8 @@ impl AppState {
         for id in self.residents.live.keys().cloned().collect::<Vec<_>>() {
             self.shutdown_active(&id, cx);
         }
-        for (_, parked) in self.residents.parked.drain() {
-            if let Runtime::Live(commands) = parked.runtime {
-                let _ = commands.try_send(SessionCommand::Shutdown);
-            }
+        for id in self.residents.parked.keys().cloned().collect::<Vec<_>>() {
+            self.drop_background(&id, cx);
         }
         // Drop every conversation-owned PTY, including those parked while an
         // idle thread was off screen.
@@ -510,6 +552,8 @@ impl AppState {
 
     /// Shut down and forget a parked session (archive/delete paths).
     pub(super) fn drop_background(&mut self, session_id: &str, cx: &mut HostCx) {
+        self.retire_provider_work(session_id, cx);
+        self.advance_decision_revision(session_id);
         self.revoke_computer_use_registration(session_id);
         self.clear_approvals(session_id);
         self.pending_native_rewinds.remove(session_id);
@@ -520,6 +564,7 @@ impl AppState {
         }
         self.release_stale_session_logs(cx);
         self.reschedule_scheduled_wake(cx);
+        self.request_settlement_sweep(cx);
     }
 
     pub(super) fn close_orchestrator_children(&mut self, parent_id: &str, cx: &mut HostCx) {

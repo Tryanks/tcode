@@ -717,3 +717,77 @@ impl AppState {
         }
     }
 }
+
+impl AppState {
+    pub(crate) fn note_terminal_input(&mut self, terminal_id: u64) {
+        let id = self
+            .residents
+            .live
+            .values()
+            .chain(self.residents.parked.values())
+            .find(|session| session.terminal_workspace.terminal(terminal_id).is_some())
+            .map(|session| session.meta.id.clone())
+            .or_else(|| {
+                self.terminal_workspaces
+                    .iter()
+                    .find_map(|(destination, workspace)| {
+                        if workspace.terminal(terminal_id).is_some() {
+                            match destination {
+                                ConversationDestination::Thread(id) => Some(id.clone()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    })
+            });
+        if let Some(id) = id {
+            self.advance_decision_revision(&id);
+        }
+    }
+
+    pub(super) fn close_settled_idle_terminals(&mut self, id: &str, cx: &mut HostCx) {
+        let terminals: Vec<_> = self
+            .resident(id)
+            .map(|session| &session.terminal_workspace)
+            .or_else(|| {
+                self.terminal_workspaces
+                    .get(&ConversationDestination::Thread(id.to_owned()))
+            })
+            .into_iter()
+            .flat_map(|workspace| &workspace.terminals)
+            .map(|entry| (entry.id, entry.terminal.clone()))
+            .collect();
+        let revision = self.decision_revisions.get(id).copied().unwrap_or(0);
+        let id = id.to_owned();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let idle = host_cx
+                .unblock(move || {
+                    terminals
+                        .into_iter()
+                        .filter(|(_, terminal)| terminal.idle_prompt() == Some(true))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            host_cx.enqueue(move |state, _cx| {
+                if state.decision_revisions.get(&id).copied().unwrap_or(0) != revision
+                    || !state.find_meta(&id).is_some_and(|meta| meta.is_settled())
+                {
+                    return;
+                }
+                for (terminal_id, terminal) in idle {
+                    if state
+                        .terminal_handle(terminal_id)
+                        .is_some_and(|current| Arc::ptr_eq(&current, &terminal))
+                    {
+                        // Retain the emulator and tab: process exit leaves its output readable.
+                        if let Err(error) = terminal.terminate() {
+                            log::warn!("settled terminal {terminal_id}: {error}");
+                        }
+                    }
+                }
+            });
+        });
+    }
+}

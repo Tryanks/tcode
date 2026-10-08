@@ -857,6 +857,7 @@ impl SessionActor for Actor {
                 Ok(())
             }
             SessionCommand::RespondUserInput {
+                message_request_id,
                 request_id,
                 answers,
             } => {
@@ -886,8 +887,13 @@ impl SessionActor for Actor {
                     .is_some_and(|(id, _)| *id == request_id)
                 {
                     let (_, questions) = self.async_questions.take().unwrap_or_default();
-                    self.steer_async_question_reply(&request_id, &questions, &answers)
-                        .await?;
+                    self.steer_async_question_reply(
+                        &request_id,
+                        &questions,
+                        &answers,
+                        message_request_id.as_deref(),
+                    )
+                    .await?;
                 } else {
                     self.events
                         .emit(AgentEvent::Warning {
@@ -2463,6 +2469,7 @@ impl Actor {
         request_id: &str,
         questions: &[UserInputQuestion],
         answers: &serde_json::Map<String, Value>,
+        message_request_id: Option<&str>,
     ) -> Result<(), String> {
         let Some((wire, display)) = async_question_reply(questions, answers) else {
             return Ok(());
@@ -2475,7 +2482,9 @@ impl Actor {
                 .await;
             return Ok(());
         };
-        let steer_id = format!("codex-question-reply-{request_id}");
+        let steer_id = message_request_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("codex-question-reply-{request_id}"));
         self.events
             .emit(AgentEvent::SteerRequested {
                 request_id: steer_id.clone(),
@@ -4419,6 +4428,7 @@ mod tests {
             answers.insert(questions[0].id.clone(), json!("SQLite"));
             actor
                 .handle_command(SessionCommand::RespondUserInput {
+                    message_request_id: Some("admitted-question".into()),
                     request_id: "call_q".into(),
                     answers,
                 })
@@ -4427,7 +4437,7 @@ mod tests {
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::SteerRequested { ref request_id, ref text, .. }
-                    if request_id == "codex-question-reply-call_q"
+                    if request_id == "admitted-question"
                         && text == "> Which DB?\n\nSQLite"
             ));
             assert!(matches!(
@@ -4460,7 +4470,7 @@ mod tests {
                 .await;
             assert!(matches!(
                 events.recv().await.unwrap(),
-                AgentEvent::SteerAccepted { ref request_id } if request_id == "codex-question-reply-call_q"
+                AgentEvent::SteerAccepted { ref request_id } if request_id == "admitted-question"
             ));
 
             // Questions still open when the turn ends can no longer be answered.
@@ -4491,6 +4501,7 @@ mod tests {
             );
             actor
                 .handle_command(SessionCommand::RespondUserInput {
+                    message_request_id: None,
                     request_id: "call_r".into(),
                     answers,
                 })
@@ -5662,6 +5673,7 @@ mod tests {
             answers.insert("free".into(), json!(["a", "b"]));
             actor
                 .handle_command(SessionCommand::RespondUserInput {
+                    message_request_id: None,
                     request_id: "55".into(),
                     answers,
                 })
@@ -5801,6 +5813,7 @@ mod tests {
             answers.insert("tags".into(), json!(["Red", "Blue"]));
             actor
                 .handle_command(SessionCommand::RespondUserInput {
+                    message_request_id: None,
                     request_id: "81".into(),
                     answers,
                 })
@@ -5901,6 +5914,7 @@ mod tests {
             answers.insert("named".into(), json!("Second"));
             actor
                 .handle_command(SessionCommand::RespondUserInput {
+                    message_request_id: None,
                     request_id: "enum-request".into(),
                     answers,
                 })
@@ -5956,6 +5970,7 @@ mod tests {
             answers.insert("count".into(), json!("not-a-number"));
             actor
                 .handle_command(SessionCommand::RespondUserInput {
+                    message_request_id: None,
                     request_id: "82".into(),
                     answers,
                 })
@@ -6015,6 +6030,7 @@ mod tests {
                 answers.insert("url".into(), json!(answer));
                 actor
                     .handle_command(SessionCommand::RespondUserInput {
+                        message_request_id: None,
                         request_id: id.to_string(),
                         answers,
                     })

@@ -355,6 +355,7 @@ impl SessionActor for OpenCodeActor {
                 Ok(())
             }
             SessionCommand::RespondUserInput {
+                message_request_id: _,
                 request_id,
                 answers,
             } => {

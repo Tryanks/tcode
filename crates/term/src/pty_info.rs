@@ -135,3 +135,66 @@ fn load_process(pid: u32) -> Option<ProcessInfo> {
 fn load_process(_pid: u32) -> Option<ProcessInfo> {
     None
 }
+
+impl PtyInfo {
+    /// Fresh subprocess inspection complements the shell prompt evidence.
+    /// Unknown inspection results are never treated as permission to terminate it.
+    #[cfg(unix)]
+    pub fn idle_prompt(&self, shell_name: &str) -> Option<bool> {
+        let foreground = unsafe { libc::tcgetpgrp(self.file.as_raw_fd()) };
+        if foreground <= 0 || self.fallback_pid == 0 {
+            return None;
+        }
+        if foreground as u32 != self.fallback_pid {
+            return Some(false);
+        }
+        let process = load_process(self.fallback_pid)?;
+        if process.name != shell_name {
+            return Some(false);
+        }
+        has_children(self.fallback_pid).map(|children| !children)
+    }
+
+    #[cfg(not(unix))]
+    pub fn idle_prompt(&self, _shell_name: &str) -> Option<bool> {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn has_children(pid: u32) -> Option<bool> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|children| !children.trim().is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn has_children(pid: u32) -> Option<bool> {
+    // libproc's PROC_PPID_ONLY selector is 6. A one-pid buffer suffices: any child blocks closure.
+    let mut child: libc::pid_t = 0;
+    let bytes = unsafe {
+        *libc::__error() = 0;
+        libc::proc_listpids(
+            6,
+            pid,
+            (&mut child as *mut libc::pid_t).cast(),
+            std::mem::size_of_val(&child) as libc::c_int,
+        )
+    };
+    if bytes < 0
+        || (bytes == 0
+            && std::io::Error::last_os_error()
+                .raw_os_error()
+                .is_some_and(|error| error != 0))
+    {
+        None
+    } else {
+        Some(bytes > 0 && child > 0)
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn has_children(_pid: u32) -> Option<bool> {
+    None
+}

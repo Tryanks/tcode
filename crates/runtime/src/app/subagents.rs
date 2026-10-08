@@ -45,7 +45,9 @@ impl AppState {
             if !self.native_subagent_turns.contains_key(&mirror_id) {
                 self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             }
-            self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
+            let mut delegated = cx.clone();
+            delegated.origin = MessageOrigin::Agent;
+            self.record_event(&mirror_id, &strip_parent_item_id(event), &mut delegated);
             if matches!(item.content, ItemContent::Subagent { .. }) {
                 self.nested_subagent_spawns.insert(
                     (parent_session_id.to_string(), item.id.clone()),
@@ -220,6 +222,7 @@ impl AppState {
                 },
                 cx,
             );
+            self.request_settlement_sweep(cx);
         }
     }
 
@@ -318,12 +321,30 @@ impl AppState {
     ) {
         self.nested_subagent_spawns
             .retain(|(session_id, _), _| session_id != parent_session_id);
-        let descendants = descendant_session_ids(&self.sessions, parent_session_id);
+        // Mirrors belong to this provider. An execution child has its own
+        // provider and remains independent when this one is intentionally detached.
+        let mut native_children: HashMap<&str, Vec<&str>> = HashMap::new();
+        for meta in &self.sessions {
+            if meta.native_subagent.is_some()
+                && let Some(parent) = meta.parent_session_id.as_deref()
+            {
+                native_children.entry(parent).or_default().push(&meta.id);
+            }
+        }
+        let mut descendants = HashSet::new();
+        let mut pending = vec![parent_session_id];
+        while let Some(parent) = pending.pop() {
+            for child in native_children.get(parent).into_iter().flatten() {
+                if descendants.insert(*child) {
+                    pending.push(child);
+                }
+            }
+        }
         let running: Vec<_> = self
             .sessions
             .iter()
             .filter(|meta| {
-                descendants.contains(&meta.id)
+                descendants.contains(meta.id.as_str())
                     && self.native_subagent_turns.get(&meta.id) == Some(&true)
             })
             .filter_map(|meta| Some((meta.id.clone(), meta.native_subagent.clone()?)))

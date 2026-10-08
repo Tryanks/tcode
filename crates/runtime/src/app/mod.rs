@@ -25,8 +25,7 @@ use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
 use tcode_core::project::{
-    AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo, WorktreeSharing,
-    auto_archive_candidates, descendant_session_ids,
+    Project, SessionMeta, WorktreeInfo, WorktreeSharing, descendant_session_ids,
 };
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
@@ -255,6 +254,7 @@ mod plugins;
 mod providers;
 mod send;
 mod sessions;
+mod settlement;
 mod snapshots;
 mod store_write;
 mod subagents;
@@ -337,7 +337,11 @@ pub struct AppState {
     store_failed: bool,
     pub sessions: Vec<SessionMeta>,
     archived_revision: u64,
+    settlement_sweep_running: bool,
+    settlement_sweep_pending: bool,
+    settlement_timer_generation: u64,
     decision_revisions: HashMap<String, u64>,
+    callback_generations: HashMap<String, u64>,
     thread_activity: HashMap<String, tcode_core::settlement::ThreadActivity>,
     space_scopes: HashMap<String, BTreeSet<String>>,
     space_policy_revisions: HashMap<String, u64>,
@@ -346,7 +350,7 @@ pub struct AppState {
     // Archive replies remain ordered after the last subscriber releases a projection.
     space_archive_revisions: HashMap<String, u64>,
     decision_authors: HashMap<(String, String), Author>,
-    steer_origins: HashMap<(String, String), MessageOrigin>,
+    steer_admissions: HashMap<(String, String), (MessageOrigin, Option<Author>)>,
     pub projects: Vec<Project>,
     pub residents: ResidentSessions,
     /// Terminal resources parked by conversation destination. Drawer chrome is
@@ -545,7 +549,11 @@ impl AppState {
             sessions,
             projects,
             archived_revision: 0,
+            settlement_sweep_running: false,
+            settlement_sweep_pending: false,
+            settlement_timer_generation: 0,
             decision_revisions: HashMap::new(),
+            callback_generations: HashMap::new(),
             thread_activity: HashMap::new(),
             space_scopes: HashMap::new(),
             space_policy_revisions: HashMap::new(),
@@ -553,7 +561,7 @@ impl AppState {
             space_archives: HashMap::new(),
             space_archive_revisions: HashMap::new(),
             decision_authors: HashMap::new(),
-            steer_origins: HashMap::new(),
+            steer_admissions: HashMap::new(),
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
             terminal_registry: TerminalRegistry::default(),

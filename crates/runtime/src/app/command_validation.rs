@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::settings::SettingsPatch;
 
 impl AppState {
     pub(super) fn native_rewind_blocked(&self, active: &ActiveSession) -> bool {
@@ -36,6 +37,32 @@ impl AppState {
             message: message.into(),
         };
         self.validate_plugin_command(command)?;
+        if let Command::PatchSettings { patch } = command {
+            let days = match patch {
+                SettingsPatch::AutoSettleAfterDays(days) => *days,
+                SettingsPatch::ProjectSettlement {
+                    value: Some(value), ..
+                } => value.auto_settle_after_days.flatten(),
+                _ => None,
+            };
+            if days.is_some_and(|days| !days.is_finite() || !(1.0..=90.0).contains(&days)) {
+                return Err(error(
+                    "invalid_settlement_days",
+                    "Auto-settle days must be between 1 and 90.",
+                ));
+            }
+            if let SettingsPatch::ProjectSettlement { project_id, .. } = patch
+                && !self
+                    .projects
+                    .iter()
+                    .any(|project| &project.id == project_id)
+            {
+                return Err(error(
+                    "unknown_project",
+                    "This project is no longer available.",
+                ));
+            }
+        }
         match command {
             Command::DeleteProfile { profile_id }
                 if Settings::is_builtin_profile_id(profile_id) =>
@@ -141,17 +168,41 @@ impl AppState {
         let Some(session_id) = command.session_id() else {
             return Ok(());
         };
-        if matches!(command, Command::SettleSession { .. }) && self.settle_family_busy(session_id) {
+        if matches!(
+            command,
+            Command::SettleSession { .. }
+                | Command::UnsettleSession { .. }
+                | Command::PinSession { .. }
+        ) && self
+            .find_meta(session_id)
+            .is_some_and(|meta| meta.archived_at.is_some())
+        {
+            return Err(error(
+                "archived_session",
+                "Unarchive this thread before changing its lifecycle.",
+            ));
+        }
+        if matches!(command, Command::SettleSession { .. }) && self.settle_thread_busy(session_id) {
             return Err(error(
                 "thread_busy",
-                "Wait for this thread and its children to finish before settling.",
+                "Wait for this thread to finish before settling.",
             ));
+        }
+        if let Command::PinSession {
+            order_key: Some(key),
+            ..
+        } = command
+            && tcode_core::thread_sort::order_key_between(Some(key), None).is_none()
+        {
+            return Err(error("invalid_order", "Invalid pin order key."));
         }
         // Index mutations operate on stored sessions, without requiring a live provider.
         if matches!(
             command,
             Command::SettleSession { .. }
-                | Command::MakeSessionActive { .. }
+                | Command::UnsettleSession { .. }
+                | Command::PinSession { .. }
+                | Command::SetAutoSettle { .. }
                 | Command::ArchiveSession { .. }
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }

@@ -7,10 +7,11 @@ edition = "2024"
 # The PTY-backed `Terminal`. Off leaves the bare `GridEmulator`, which the host
 # also drives to render stored command output. No client links this crate.
 default = ["pty"]
-pty = ["rio-vt/pty", "dep:libc", "dep:portable-pty"]
+pty = ["rio-vt/pty", "dep:libc", "dep:portable-pty", "dep:tempfile"]
 
 [dependencies]
 async-channel = "2"
+tempfile = { version = "3", optional = true }
 rio-vt = { version = "0.5.24", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 

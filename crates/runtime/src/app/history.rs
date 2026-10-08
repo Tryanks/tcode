@@ -856,6 +856,17 @@ impl AppState {
         for query in hydration.queries {
             query(Ok(&log));
         }
+        if let Some(meta) = self.find_meta(&session_id)
+            && !self.thread_activity.contains_key(&session_id)
+        {
+            self.thread_activity.insert(
+                session_id.clone(),
+                tcode_core::settlement::ThreadActivity::fold_stored(
+                    &log.records,
+                    meta.parent_session_id.is_some(),
+                ),
+            );
+        }
         // Queued after every append the log holds, so it covers all of them.
         self.enqueue_store_write(
             StoreWrite::SetTurnIndex {
