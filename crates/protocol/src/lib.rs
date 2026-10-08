@@ -73,6 +73,8 @@ pub use wire::{
 // Unreleased: replaces SessionActivity.background_only with waiting, which
 // also covers unfinished child threads; adds the CreateNewProject and
 // StartScratchDraft commands.
+// Unreleased: stored messages carry human/agent/server origin; absent origin
+// uses the historical top-level human / dispatched child agent fallback.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

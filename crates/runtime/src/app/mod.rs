@@ -34,7 +34,7 @@ use tcode_core::relay::{
     render_relay_transcript,
 };
 use tcode_core::session::{
-    Author, EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt,
+    Author, EntryContent, MessageOrigin, ReviewComment, Timeline, append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
@@ -337,6 +337,8 @@ pub struct AppState {
     store_failed: bool,
     pub sessions: Vec<SessionMeta>,
     archived_revision: u64,
+    decision_revisions: HashMap<String, u64>,
+    thread_activity: HashMap<String, tcode_core::settlement::ThreadActivity>,
     space_scopes: HashMap<String, BTreeSet<String>>,
     space_policy_revisions: HashMap<String, u64>,
     space_archives_revision: Option<u64>,
@@ -344,6 +346,7 @@ pub struct AppState {
     // Archive replies remain ordered after the last subscriber releases a projection.
     space_archive_revisions: HashMap<String, u64>,
     decision_authors: HashMap<(String, String), Author>,
+    steer_origins: HashMap<(String, String), MessageOrigin>,
     pub projects: Vec<Project>,
     pub residents: ResidentSessions,
     /// Terminal resources parked by conversation destination. Drawer chrome is
@@ -542,12 +545,15 @@ impl AppState {
             sessions,
             projects,
             archived_revision: 0,
+            decision_revisions: HashMap::new(),
+            thread_activity: HashMap::new(),
             space_scopes: HashMap::new(),
             space_policy_revisions: HashMap::new(),
             space_archives_revision: None,
             space_archives: HashMap::new(),
             space_archive_revisions: HashMap::new(),
             decision_authors: HashMap::new(),
+            steer_origins: HashMap::new(),
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
             terminal_registry: TerminalRegistry::default(),

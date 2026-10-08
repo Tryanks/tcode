@@ -318,6 +318,7 @@ impl AppState {
     }
 
     pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+        self.advance_decision_revision(&meta.id);
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),

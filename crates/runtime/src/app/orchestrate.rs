@@ -405,6 +405,7 @@ impl AppState {
         child.meta = meta;
         child.draft = false;
         child.push_queued(brief, Vec::new());
+        child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
         self.residents.parked.insert(id.clone(), child);
         self.reactivate_session(&id, cx);
         self.ensure_session_started(&id, cx);
@@ -437,6 +438,10 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         use orchestrate_mcp::OrchestrateOp;
+        let mut authored_cx = cx.clone();
+        authored_cx.origin = MessageOrigin::Agent;
+        authored_cx.author = None;
+        let cx = &mut authored_cx;
 
         match op {
             orchestrate_mcp::OrchestrateOp::Status {
@@ -667,6 +672,7 @@ impl AppState {
                     if self.residents.live.contains_key(&thread_id) {
                         let child = self.resident_mut(&thread_id).unwrap();
                         child.push_queued(message, Vec::new());
+                        child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
                         let idle = matches!(child.runtime, Runtime::Idle);
                         if self.dispatch_next_queued(&thread_id, cx).is_err() {
                             return Err("child provider is unavailable".into());
@@ -679,6 +685,7 @@ impl AppState {
                     self.ensure_child_loaded(&thread_id, cx)?;
                     let child = self.resident_mut(&thread_id).unwrap();
                     child.push_queued(message, Vec::new());
+                    child.queue.last_mut().unwrap().origin = MessageOrigin::Agent;
                     let idle = matches!(child.runtime, Runtime::Idle);
                     if !idle && !child.turn_in_flight {
                         self.on_background_turn_completed(&thread_id, cx);
@@ -1232,6 +1239,10 @@ impl AppState {
         text: String,
         cx: &mut HostCx,
     ) {
+        let mut callback_cx = cx.clone();
+        callback_cx.origin = MessageOrigin::Agent;
+        callback_cx.author = None;
+        let cx = &mut callback_cx;
         self.reactivate_session(parent_id, cx);
         let can_steer = self
             .resident(parent_id)

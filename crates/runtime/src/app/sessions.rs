@@ -31,6 +31,13 @@ impl ResidentSessions {
 }
 
 impl AppState {
+    pub(super) fn advance_decision_revision(&mut self, id: &str) {
+        let revision = self.decision_revisions.entry(id.to_owned()).or_default();
+        *revision = revision
+            .checked_add(1)
+            .expect("thread decision revision overflow");
+    }
+
     pub(crate) fn subscribe(
         &mut self,
         subscription: &tcode_protocol::Subscription,

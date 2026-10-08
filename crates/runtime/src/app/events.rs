@@ -3,6 +3,7 @@ use super::*;
 impl AppState {
     /// Handle one canonical event from the live provider.
     pub(super) fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
+        self.advance_decision_revision(session_id);
         log::debug!(
             "event: {}",
             serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
@@ -320,6 +321,7 @@ impl AppState {
                             Vec::new(),
                             not_before,
                         );
+                        resident.queue.last_mut().unwrap().origin = MessageOrigin::Server;
                         true
                     });
                     if scheduled {
@@ -568,12 +570,31 @@ impl AppState {
             }
             _ => None,
         };
+        let origin = match event {
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::UserMessage { .. },
+                ..
+            })
+            | AgentEvent::SteerRequested { .. } => Some(cx.origin),
+            AgentEvent::SteerAccepted { request_id, .. } => self
+                .steer_origins
+                .remove(&(session_id.to_owned(), request_id.clone())),
+            _ => None,
+        };
         let record = SessionEventRecord {
+            origin,
             author: author.clone(),
             ts: Some(ts),
             event: event.clone(),
             elided: None,
         };
+        let has_parent = self
+            .find_meta(session_id)
+            .is_some_and(|meta| meta.parent_session_id.is_some());
+        if let Some(activity) = self.thread_activity.get_mut(session_id) {
+            activity.apply(&record, has_parent);
+        }
+        self.advance_decision_revision(session_id);
         let topic = Topic::SessionEvents {
             session_id: session_id.to_string(),
         };
@@ -604,6 +625,7 @@ impl AppState {
                 id: session_id.to_string(),
                 ts,
                 author,
+                origin,
                 event: Box::new(event.clone()),
                 joined,
             },

@@ -61,6 +61,13 @@ pub struct WorktreeInfo {
     pub branch: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettledOverride {
+    Settled,
+    Active,
+}
+
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -84,9 +91,21 @@ pub struct SessionMeta {
     /// legacy files (defaults to "not archived").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
-    /// Manually settled (unix secs), independently of archive state.
+    /// Lifecycle timestamps are Unix seconds; activity in the event stream is Unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_override: Option<SettledOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsettled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_settle_disabled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_order: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_order: Option<String>,
     /// Dedicated-worktree mode metadata, when the session runs in its own git
     /// worktree instead of the project checkout. Absent = local checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +193,17 @@ impl<'a> WorktreeSharing<'a> {
 }
 
 impl SessionMeta {
+    pub fn is_settled(&self) -> bool {
+        self.settled_override == Some(SettledOverride::Settled)
+            || (self.settled_override.is_none() && self.settled_at.is_some())
+    }
+
+    pub fn migrate_lifecycle(&mut self) {
+        if self.settled_override.is_none() && self.settled_at.is_some() {
+            self.settled_override = Some(SettledOverride::Settled);
+        }
+    }
+
     /// Whether `other` works in the worktree this session owns. A fork keeps
     /// the source's cwd without the `worktree` ownership marker, so the cwd
     /// decides as well as the branch.
@@ -222,6 +252,12 @@ impl SessionMeta {
             model,
             archived_at: None,
             settled_at: None,
+            settled_override: None,
+            unsettled_at: None,
+            auto_settle_disabled_at: None,
+            pinned_at: None,
+            pin_order: None,
+            active_order: None,
             worktree: None,
             resume_cursor: None,
             pending_fork: false,

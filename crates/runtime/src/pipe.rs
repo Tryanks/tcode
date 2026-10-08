@@ -238,6 +238,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         principal,
     } = message;
     cx.principal = principal.unwrap_or(Principal::Full);
+    cx.origin = tcode_core::session::MessageOrigin::Human;
     cx.author = match &cx.principal {
         Principal::Full => None,
         Principal::Space {
@@ -267,6 +268,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         cx.send_message(reply);
         cx.principal = Principal::Full;
         cx.author = None;
+        cx.origin = tcode_core::session::MessageOrigin::Server;
         return;
     }
     match payload {
@@ -286,6 +288,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
                     cx.send_message(HostMessage::Ack { id, result });
                     cx.principal = Principal::Full;
                     cx.author = None;
+                    cx.origin = tcode_core::session::MessageOrigin::Server;
                     return;
                 }
             }
@@ -345,6 +348,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
     }
     cx.principal = Principal::Full;
     cx.author = None;
+    cx.origin = tcode_core::session::MessageOrigin::Server;
 }
 
 fn complete_command(
@@ -1753,6 +1757,7 @@ mod tests {
                 "{:?}",
                 Timeline::fold_events(legacy_events().into_iter().map(|(ts, event)| {
                     StoredEvent {
+                        origin: None,
                         author: None,
                         ts,
                         event,

@@ -7873,6 +7873,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
     state.update(cx, |state, _| {
         let records: Vec<SessionEventRecord> = (0..2000)
             .map(|index| SessionEventRecord {
+                origin: None,
                 author: None,
                 ts: Some(index),
                 event: AgentEvent::Warning {
@@ -7968,6 +7969,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         for turn in 0..5u64 {
             turn_starts.push(records.len());
             records.push(SessionEventRecord {
+                origin: None,
                 author: None,
                 ts: Some(turn * 1000),
                 event: AgentEvent::ItemCompleted(ThreadItem {
@@ -7982,6 +7984,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 elided: None,
             });
             records.push(SessionEventRecord {
+                origin: None,
                 author: None,
                 ts: Some(turn * 1000 + 1),
                 event: AgentEvent::TurnStarted {
@@ -7991,6 +7994,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
             });
             for delta in 0..300u64 {
                 records.push(SessionEventRecord {
+                    origin: None,
                     author: None,
                     ts: Some(turn * 1000 + 2 + delta),
                     event: AgentEvent::Delta {
@@ -8002,6 +8006,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
                 });
             }
             records.push(SessionEventRecord {
+                origin: None,
                 author: None,
                 ts: Some(turn * 1000 + 400),
                 event: AgentEvent::TurnCompleted {
@@ -8256,6 +8261,7 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
     state.update(cx, |state, _| {
         let records: Vec<SessionEventRecord> = (0..10)
             .map(|index| SessionEventRecord {
+                origin: None,
                 author: None,
                 ts: Some(index),
                 event: AgentEvent::Warning {
@@ -8927,6 +8933,7 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
 
 fn tool_call(id: &str, output: String) -> SessionEventRecord {
     SessionEventRecord {
+        origin: None,
         author: None,
         ts: Some(1),
         event: AgentEvent::ItemCompleted(ThreadItem {
@@ -8970,6 +8977,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
     let records = vec![
         tool_call("tool", tool_output.clone()),
         SessionEventRecord {
+            origin: None,
             author: None,
             ts: Some(2),
             event: AgentEvent::ItemCompleted(ThreadItem {
@@ -9105,6 +9113,7 @@ fn superseded_turn_changes_cross_without_diffs() {
         .unwrap()
     };
     let update = |diff: &str| SessionEventRecord {
+        origin: None,
         author: None,
         ts: Some(1),
         event: AgentEvent::TurnChangesUpdated {
@@ -9116,6 +9125,7 @@ fn superseded_turn_changes_cross_without_diffs() {
     };
     let records = vec![
         SessionEventRecord {
+            origin: None,
             author: None,
             ts: Some(0),
             event: AgentEvent::TurnStarted {
@@ -9198,6 +9208,7 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
             for (ts, diff) in [(3, "-a\n+c\n"), (4, "-a\n+d\n")] {
                 state.record_event_for_replica_test("thread", ts, &snapshot(diff), cx);
                 conversation.push(SessionEventRecord {
+                    origin: None,
                     author: None,
                     ts: Some(ts),
                     event: snapshot(diff),
@@ -9310,6 +9321,7 @@ fn history_windows_are_byte_budgeted() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let records: Vec<SessionEventRecord> = (0..200)
         .map(|index| SessionEventRecord {
+            origin: None,
             author: None,
             ts: Some(index),
             event: AgentEvent::Warning {
@@ -10422,4 +10434,63 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
     let (window, early, whole) = open(&state, cx);
     assert!(!early, "an append nobody folded forgot the index");
     assert_eq!(window, whole);
+}
+
+#[test]
+fn admitted_message_origins_survive_queue_acknowledgement_and_callback_steering() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("message-origin");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (commands, received) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::Codex, commands);
+    session.meta.id = "thread".into();
+    state.update(cx, |state, _| state.install_selected(session));
+    state.dispatch_command(
+        cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "human work".into(),
+            attachment_paths: vec![],
+        },
+    );
+    let SessionCommand::SendTurn { delivery_id, .. } = received.try_recv().unwrap() else {
+        panic!("send")
+    };
+    state.update(cx, |state, cx| {
+        state.on_event("thread", AgentEvent::TurnAccepted { delivery_id }, cx);
+        state.on_event(
+            "thread",
+            AgentEvent::TurnStarted {
+                turn_id: "run".into(),
+            },
+            cx,
+        );
+        state.deliver_orchestrate_callback_to_parent("thread", "agent completion".into(), cx);
+    });
+    let SessionCommand::Steer { request_id, .. } = received.try_recv().unwrap() else {
+        panic!("steer")
+    };
+    state.update(cx, |state, cx| {
+        state.on_event("thread", AgentEvent::SteerAccepted { request_id }, cx)
+    });
+    cx.run_until_parked();
+    let records = store.read_events("thread").unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter_map(|record| record.origin)
+            .collect::<Vec<_>>(),
+        [
+            MessageOrigin::Human,
+            MessageOrigin::Agent,
+            MessageOrigin::Agent
+        ]
+    );
+    let mut activity = tcode_core::settlement::ThreadActivity::default();
+    for record in &records {
+        activity.apply(record, false);
+    }
+    assert_eq!(activity.last_human_message_at, records[0].ts);
+    assert_eq!(activity.last_message_at, records[2].ts);
 }

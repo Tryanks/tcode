@@ -4907,6 +4907,7 @@ pub(crate) mod tests {
                     from: 10,
                     end: 20,
                     records: vec![StoredEvent {
+                        origin: None,
                         author: None,
                         ts: Some(1),
                         event: tool.clone(),
@@ -5358,6 +5359,7 @@ pub(crate) mod tests {
 
     fn recorded(ts: u64, event: AgentEvent) -> SessionEventRecord {
         SessionEventRecord {
+            origin: None,
             author: None,
             ts: Some(ts),
             ..event.into()

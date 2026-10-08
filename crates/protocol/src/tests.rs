@@ -159,6 +159,7 @@ fn event_envelopes_keep_stored_record_shape_and_optional_request_id() {
             session_id: "session-1".into(),
         },
         event: ServerEvent::SessionEvent(SessionEventRecord {
+            origin: None,
             author: None,
             ts: Some(123),
             event: AgentEvent::TurnStarted {
@@ -1025,6 +1026,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         turn_id: "t".into(),
     };
     let record = SessionEventRecord {
+        origin: None,
         author: None,
         ts: Some(1),
         event: turn_started.clone(),
