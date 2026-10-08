@@ -158,13 +158,18 @@ impl AppState {
                     .any(|message| message.not_before.is_some())
             }),
         };
-        let days = meta
+        let project = meta
             .project_id
             .as_deref()
-            .and_then(|id| self.settings.project_settlement_overrides.get(id))
+            .and_then(|id| self.settings.project_settlement_overrides.get(id));
+        let days = project
             .and_then(|settings| settings.auto_settle_after_days)
             .unwrap_or(self.settings.auto_settle_after_days);
-        automatic_settlement_at(meta, activity, blockers, now, days).map(|at| (meta.id.clone(), at))
+        let on_merge = project
+            .and_then(|settings| settings.auto_settle_on_merge)
+            .unwrap_or(self.settings.auto_settle_on_merge);
+        automatic_settlement_at(meta, activity, blockers, now, days, on_merge)
+            .map(|at| (meta.id.clone(), at))
     }
 
     /// Threads whose completion waits on a child: an unsettled dispatched
