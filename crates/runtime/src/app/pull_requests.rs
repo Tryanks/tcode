@@ -284,6 +284,9 @@ impl AppState {
         let Some(mut meta) = self.find_meta(id) else {
             return;
         };
+        if meta.native_subagent.is_some() {
+            return;
+        }
         if pull_request::unlink_pull_request(&mut meta.pull_requests, key) {
             self.save_pull_request_meta(meta, cx);
         }
@@ -596,14 +599,12 @@ impl AppState {
                 continue;
             };
             let stack = stack.clone().unwrap_or_else(|| link.stack.clone());
-            let changed = link
+            let observation_changed = link
                 .snapshot
                 .as_ref()
                 .is_none_or(|s| !s.same_observation(&summary.snapshot))
                 || link.stack != stack;
-            if !changed {
-                continue;
-            }
+            let mut changed = observation_changed;
             if meta.settled_at.is_none()
                 && let PullRequestStackState::Native(topology) = &stack
             {
@@ -620,6 +621,7 @@ impl AppState {
                         now_secs(),
                         false,
                     ) {
+                        changed = true;
                         if let Some(link) = meta
                             .pull_requests
                             .iter_mut()
@@ -634,10 +636,14 @@ impl AppState {
                     }
                 }
             }
-            if let Some(link) = meta
-                .pull_requests
-                .iter_mut()
-                .find(|link| link.key == key && link.visible())
+            if !changed {
+                continue;
+            }
+            if observation_changed
+                && let Some(link) = meta
+                    .pull_requests
+                    .iter_mut()
+                    .find(|link| link.key == key && link.visible())
             {
                 link.sync_error = None;
                 link.snapshot = Some(summary.snapshot.clone());

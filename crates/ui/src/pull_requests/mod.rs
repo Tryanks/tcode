@@ -28,7 +28,7 @@ use tcode_protocol::Command;
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace=tcode_pull_requests,no_json)]
 pub struct LinkUrl(pub String);
-gpui::actions!(tcode_pull_requests, [OpenLinkDialog]);
+gpui::actions!(tcode_pull_requests, [OpenLinkDialog, OpenSourceControl]);
 
 fn appearance(state: PullRequestBadgeState, cx: &App) -> (IconName, Hsla, &'static str) {
     match state {
@@ -449,7 +449,7 @@ impl PullRequestsPanel {
             .menu(
                 crate::tr!(if action.linking {
                     "pull_requests.relink"
-                } else if position.is_some() {
+                } else if link.is_some_and(|link| link.source == PullRequestSource::Stack) {
                     "pull_requests.dismiss"
                 } else {
                     "pull_requests.unlink"
@@ -605,6 +605,7 @@ impl PullRequestsPanel {
                                 } else {
                                     cx.theme().muted_foreground
                                 })
+                                .when(snapshot.is_none(), |title| title.font_family("monospace"))
                                 .child(title),
                         )
                         .when(
@@ -636,7 +637,61 @@ impl PullRequestsPanel {
                                     .build(window, cx)
                             }
                         })
-                        .child(detail),
+                        .child(if let Some(snapshot) = snapshot {
+                            let layer = position.map(|(index, count)| {
+                                crate::tr!(
+                                    "pull_requests.layer_position",
+                                    index = index.to_string(),
+                                    count = count.to_string()
+                                )
+                                .into_owned()
+                            });
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .min_w_0()
+                                .when(compact, |line| {
+                                    line.children(layer.clone())
+                                        .when(layer.is_some(), |line| line.child("·"))
+                                })
+                                .child(div().min_w_0().truncate().child(match &snapshot.author {
+                                    Some(author) => format!("{source} · {}", author.login),
+                                    None => source.clone(),
+                                }))
+                                .child("·")
+                                // gpui-base has no middle truncation; the full pair is in the parent tooltip.
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .max_w(gpui::relative(0.4))
+                                        .truncate()
+                                        .font_family("monospace")
+                                        .child(format!(
+                                            "{} → {}",
+                                            snapshot.head_branch, snapshot.base_branch
+                                        )),
+                                )
+                                .when(!compact, |line| {
+                                    line.when(layer.is_some(), |line| line.child("·"))
+                                        .children(layer)
+                                })
+                                .child("·")
+                                .child(
+                                    div()
+                                        .font_family("monospace")
+                                        .text_color(cx.theme().success)
+                                        .child(format!("+{}", snapshot.additions)),
+                                )
+                                .child(
+                                    div()
+                                        .font_family("monospace")
+                                        .text_color(cx.theme().danger)
+                                        .child(format!("−{}", snapshot.deletions)),
+                                )
+                                .into_any_element()
+                        } else {
+                            div().child(detail).into_any_element()
+                        }),
                 ),
         )
         .child(
@@ -710,6 +765,47 @@ impl Render for PullRequestsPanel {
             .min_w_0()
             .gap_1()
             .p_2();
+        let mut notice_hosts = std::collections::HashSet::new();
+        for link in links
+            .iter()
+            .filter(|link| link.visible() && link.snapshot.is_none())
+        {
+            if matches!(
+                link.sync_error,
+                Some(PullRequestSyncError::NoCredential | PullRequestSyncError::RateLimited { .. })
+            ) && notice_hosts.insert(link.key.host.clone())
+            {
+                rows = rows.child(
+                    h_flex()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .rounded_md()
+                        .bg(cx.theme().muted)
+                        .text_size(px(12.))
+                        .child(div().flex_1().child(sync_error(link)))
+                        .when(
+                            matches!(link.sync_error, Some(PullRequestSyncError::NoCredential)),
+                            |notice| {
+                                notice.child(
+                                    Button::new(SharedString::from(format!(
+                                        "pr-settings-{}",
+                                        link.key.host
+                                    )))
+                                    .ghost()
+                                    .xsmall()
+                                    .label(crate::tr!("pull_requests.open_settings"))
+                                    .on_click(
+                                        |_, window, cx| {
+                                            window.dispatch_action(Box::new(OpenSourceControl), cx)
+                                        },
+                                    ),
+                                )
+                            },
+                        ),
+                );
+            }
+        }
         let groups = pull_request::groups(links);
         for group in groups {
             if let Some(stack) = group.stack {
@@ -980,7 +1076,7 @@ impl Render for LinkDialog {
                             .outline()
                             .small()
                             .disabled(self.pending)
-                            .label(crate::tr!("common.cancel"))
+                            .label(crate::tr!("sidebar.cancel"))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(

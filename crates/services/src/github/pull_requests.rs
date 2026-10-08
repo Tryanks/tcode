@@ -163,7 +163,7 @@ impl PullRequests {
         let selection = format!(
             "number title url state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt headRefName baseRefName author {{ login avatarUrl }} latestReviews(first: 20) {{ nodes {{ state author {{ login }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }}{stacks}"
         );
-        let document = graphql::aliases("query", "PullRequestSummaries", "s", &items.ok_or(GitHubError::InvalidPath)?, &Variables::new(), |v| format!("repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {selection} }} }}", v["owner"], v["name"], v["number"]), |fields| fields).ok_or(GitHubError::InvalidPath)?;
+        let document = graphql::aliases("query", "PullRequestSummaries", "s", &items.ok_or(GitHubError::Request)?, &Variables::new(), |v| format!("repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {selection} }} }}", v["owner"], v["name"], v["number"]), |fields| fields).ok_or(GitHubError::Request)?;
         let response: Value = self.api.graphql(host, &document, options)?.json()?;
         Ok(keys
             .iter()
@@ -215,7 +215,7 @@ impl PullRequests {
         if key.host != "github.com" {
             return Ok(PullRequestStackState::Unknown);
         }
-        let repository = Repository::from_key(key).ok_or(GitHubError::InvalidPath)?;
+        let repository = Repository::from_key(key).ok_or(GitHubError::Request)?;
         let path = format!(
             "/repos/{}/{}/stacks?pull_request={}",
             repository.owner, repository.name, key.number
@@ -257,7 +257,6 @@ impl PullRequests {
             authentication: Authentication::Pinned(credential),
             interactive,
             operation: "PullRequestsByHead",
-            body_limit: 16_000_000,
             ..Default::default()
         };
         self.heads.read(

@@ -139,7 +139,7 @@ pub struct ActiveSession {
     pub timeline: Timeline,
     /// Git branch of the session cwd, if it is a git repo (display-only).
     pub git_branch: Option<String>,
-    pub(super) pull_request_tools: bool,
+    pub(super) pull_request_tools: Option<bool>,
     /// Local branches for the checkout-row picker, loaded lazily when the
     /// popover opens (empty until then / when not a git repo).
     pub branches: Vec<String>,
@@ -216,7 +216,7 @@ impl ActiveSession {
             meta,
             timeline: Timeline::default(),
             git_branch: None,
-            pull_request_tools: false,
+            pull_request_tools: Some(false),
             branches: Vec::new(),
             draft,
             draft_device_id: None,
@@ -533,6 +533,7 @@ impl ActiveSession {
         if self.turn_in_flight
             || self.delivery_in_flight.is_some()
             || self.settings_restart_deferred()
+            || self.pull_request_tools.is_none()
         {
             return Ok(false);
         }
@@ -555,12 +556,23 @@ impl ActiveSession {
             send.text = send.text[injected.len()..].to_owned();
         }
         let text = send.wire_text(&self.provider_commands);
-        let prefix = if self.pull_request_tools {
+        let prefix = if self.pull_request_tools == Some(true) {
             super::pull_requests::LINKING_INSTRUCTIONS
         } else {
             ""
         };
-        let text = format!("{prefix}{text}");
+        // Native slash commands must stay at byte zero; injected context becomes
+        // their arguments while remaining visible in the recorded context prefix.
+        let text = if !prefix.is_empty() && text.starts_with('/') {
+            let boundary = text.find(char::is_whitespace).unwrap_or(text.len());
+            format!(
+                "{}\n{prefix}{}",
+                &text[..boundary],
+                text[boundary..].trim_start()
+            )
+        } else {
+            format!("{prefix}{text}")
+        };
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,

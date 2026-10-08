@@ -102,7 +102,15 @@ impl AppState {
         };
         let pull_request_registration = self.pull_request_registration_for(&meta);
         if let Some(active) = self.resident_mut(session_id) {
-            active.pull_request_tools = pull_request_registration.is_some();
+            active.pull_request_tools = if pull_request_registration.is_some()
+                && matches!(
+                    meta.provider,
+                    ProviderKind::Acp | ProviderKind::Cursor | ProviderKind::Grok
+                ) {
+                None
+            } else {
+                Some(pull_request_registration.is_some())
+            };
         }
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
@@ -167,7 +175,12 @@ impl AppState {
                         let pump = HostCx::spawn_background(cx, async move {
                             while let Ok(event) = events.recv().await {
                                 let event_session = pump_session.clone();
+                                let event_commands = pump_commands.clone();
                                 pump_cx.enqueue(move |state, cx| {
+                                    if matches!(event, AgentEvent::McpServersRegistered { .. })
+                                        && !state.resident(&event_session).is_some_and(|resident| matches!(&resident.runtime, Runtime::Live(commands) if commands.same_channel(&event_commands))) {
+                                        return;
+                                    }
                                     state.on_event(&event_session, event, cx);
                                 });
                             }

@@ -192,6 +192,18 @@ fn native_stack_sync_preserves_dismissals_and_explicit_restore_has_no_watch() {
         1,
         "settled threads receive the snapshot without installing siblings"
     );
+    state.update(&mut cx, |state, cx| {
+        let mut meta = state.find_meta("settled").unwrap();
+        meta.settled_at = None;
+        state.save_pull_request_meta(meta, cx);
+        state.refresh_thread_pull_requests("settled", cx);
+    });
+    cx.run_until(|state| !state.pull_requests.syncing && state.pull_requests.requested.is_empty());
+    assert_eq!(
+        state.read(|state| state.find_meta("settled").unwrap().pull_requests.len()),
+        2,
+        "unchanged known topology expands when the thread becomes unsettled"
+    );
     let key = PullRequestKey::new("github.com", "sample/project", 2);
     state.update(&mut cx, |state, cx| {
         let mut meta = state.find_meta("active").unwrap();
@@ -490,6 +502,49 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
         state.pull_request_registration_for(&child).unwrap()
     });
     host.start().unwrap();
+    let (commands, delivered) = smol::channel::unbounded();
+    state.update(&mut cx, |state, cx| {
+        let mut active = ActiveSession::new(state.find_meta("child").unwrap(), false, Vec::new());
+        active.runtime = Runtime::Live(commands);
+        active.meta = state.find_meta("child").unwrap();
+        active.pull_request_tools = None;
+        active.push_queued("continue".into(), Vec::new());
+        assert_eq!(active.dispatch_next_pending(), Ok(false));
+        state.install_selected(active);
+        state.on_event(
+            "child",
+            AgentEvent::McpServersRegistered {
+                names: vec!["tcode_pull_requests".into()],
+            },
+            cx,
+        );
+    });
+    assert!(
+        matches!(delivered.try_recv(), Ok(SessionCommand::SendTurn { text, .. }) if text.starts_with(LINKING_INSTRUCTIONS))
+    );
+    state.update(&mut cx, |state, cx| {
+        let mut rejected = linked_meta("rejected", false);
+        rejected.pull_requests.clear();
+        state.pull_request_registration_for(&rejected).unwrap();
+        let (sender, _receiver) = smol::channel::unbounded();
+        let mut active = ActiveSession::new(rejected.clone(), false, Vec::new());
+        active.runtime = Runtime::Live(sender);
+        active.meta = rejected.clone();
+        active.pull_request_tools = None;
+        state.sessions.push(rejected);
+        state.residents.live.insert("rejected".into(), active);
+        state.on_event(
+            "rejected",
+            AgentEvent::McpServersRegistered { names: vec![] },
+            cx,
+        );
+        assert!(
+            !state
+                .mcp
+                .pull_request_registrations
+                .contains_key("rejected")
+        );
+    });
     let result = Arc::new(Mutex::new(None));
     let completed = result.clone();
     let job = std::thread::spawn(move || {
@@ -515,7 +570,7 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
         let linked = call(
             2,
             "link_pull_request",
-            json!({"url":"https://github.com/sample/project/pull/1"}),
+            json!({"url":"https://github.com/sample/project/pull/1?view=1#issuecomment-7"}),
         );
         let forbidden = call(
             3,

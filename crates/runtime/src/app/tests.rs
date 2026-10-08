@@ -5444,7 +5444,7 @@ fn skill_mentions_use_the_providers_native_invocation() {
                 } else {
                     vec![command(ProviderCommandKind::Skill)]
                 };
-                active.pull_request_tools = tools;
+                active.pull_request_tools = Some(tools);
                 active.push_queued(input.into(), Vec::new());
                 assert_eq!(active.dispatch_next_pending(), Ok(true));
                 state.sessions.push(active.meta.clone());
@@ -5456,7 +5456,12 @@ fn skill_mentions_use_the_providers_native_invocation() {
             else {
                 panic!("expected provider delivery")
             };
-            if tools {
+            if tools && expected.starts_with('/') {
+                let boundary = expected.find(char::is_whitespace).unwrap_or(expected.len());
+                assert!(text.starts_with(&format!("{}\n", &expected[..boundary])));
+                assert!(text.contains(pull_requests::LINKING_INSTRUCTIONS));
+                assert!(text.ends_with(expected[boundary..].trim_start()));
+            } else if tools {
                 assert_eq!(
                     text.strip_prefix(pull_requests::LINKING_INSTRUCTIONS),
                     Some(expected)

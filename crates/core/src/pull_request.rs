@@ -242,10 +242,11 @@ pub fn badge(links: &[ThreadPullRequestLink]) -> Option<(PullRequestBadgeState, 
     let state = if visible.iter().all(|link| link.snapshot.is_none()) {
         PullRequestBadgeState::Unknown
     } else if !open.is_empty() {
-        if open
-            .iter()
-            .all(|link| link.snapshot.as_ref().is_some_and(|s| s.is_draft))
-        {
+        if visible.iter().all(|link| {
+            link.snapshot
+                .as_ref()
+                .is_some_and(|s| s.state == PullRequestState::Open && s.is_draft)
+        }) {
             PullRequestBadgeState::Draft
         } else {
             PullRequestBadgeState::Open
@@ -423,6 +424,7 @@ pub fn current_pull_request(links: &[ThreadPullRequestLink]) -> Option<&ThreadPu
 
 /// A menu visibility hint only; the host forge adapter validates and canonicalizes the target.
 pub fn is_pull_request_url(value: &str) -> bool {
+    let value = value.split(['?', '#']).next().unwrap_or_default();
     let Some(rest) = value
         .strip_prefix("https://")
         .or_else(|| value.strip_prefix("http://"))
@@ -474,6 +476,13 @@ mod tests {
             (vec![link(1, None, false)], Some((Badge::Unknown, 1, false))),
             (
                 vec![
+                    link(1, Some(State::Merged), false),
+                    link(2, Some(State::Open), true),
+                ],
+                Some((Badge::Open, 2, false)),
+            ),
+            (
+                vec![
                     link(1, Some(State::Open), true),
                     link(2, Some(State::Open), true),
                 ],
@@ -521,6 +530,9 @@ mod tests {
         assert_eq!(badge(&links), Some((Badge::Open, 2, false)));
         assert!(is_pull_request_url(
             "https://github.com/sample/project/pull/123/files"
+        ));
+        assert!(is_pull_request_url(
+            "https://github.com/sample/project/pull/123?view=1#issuecomment-7"
         ));
         for ordinary in [
             "https://github.com/sample/project/issues/123",

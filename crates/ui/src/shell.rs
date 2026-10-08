@@ -1250,6 +1250,19 @@ impl AppShell {
         }
     }
 
+    fn on_open_source_control(
+        &mut self,
+        _: &crate::pull_requests::OpenSourceControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
+        self.window_state.update(cx, |state, cx| {
+            state.pending_settings_section = Some("source_control".into());
+            state.open_settings(cx);
+        });
+    }
+
     fn on_toggle_palette(
         &mut self,
         _: &TogglePalette,
@@ -1919,6 +1932,7 @@ impl AppShell {
             .text_size(px(16.))
             .line_height(px(22.))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_open_source_control))
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
@@ -2079,6 +2093,7 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
+                .on_action(cx.listener(Self::on_open_source_control))
                 .child(
                     div()
                         .id("workspace")
@@ -2107,6 +2122,7 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
+                .on_action(cx.listener(Self::on_open_source_control))
                 .child(
                     h_flex()
                         .id("workspace")
@@ -2355,6 +2371,7 @@ impl AppShell {
             })
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_open_source_control))
             .child(
                 div()
                     .id("workspace")

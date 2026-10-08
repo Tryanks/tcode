@@ -1,11 +1,7 @@
 use std::{
     collections::BTreeMap,
     io::Write,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, SystemTime},
 };

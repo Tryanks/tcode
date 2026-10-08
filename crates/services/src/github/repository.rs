@@ -54,7 +54,7 @@ pub fn selector(value: &str, default_host: &str) -> Option<Repository> {
 }
 
 pub fn pull_request_url(value: &str) -> Option<(PullRequestKey, String)> {
-    let value = value.trim();
+    let value = value.trim().split(['?', '#']).next()?;
     let rest = value
         .strip_prefix("https://")
         .or_else(|| value.strip_prefix("http://"))?;
