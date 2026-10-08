@@ -445,46 +445,56 @@ impl PullRequestsPanel {
             detail.push(branches.clone());
             detail.extend(layer.clone());
             detail.push(format!("{} {}", stat.0, stat.1));
-            // The author gives way first, so the source and the branches stay readable.
-            h_flex()
-                .gap_1()
-                .items_center()
-                .min_w_0()
-                .overflow_hidden()
-                .child(div().flex_none().child(source.clone()))
-                .when_some(author, |line, author| {
-                    line.child(dot())
-                        .child(div().min_w_0().truncate().child(author))
-                })
-                .child(dot())
-                // gpui-base has no middle truncation; the row tooltip holds the full pair.
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .max_w(gpui::relative(0.5))
-                        .truncate()
-                        .font_family("monospace")
-                        .child(branches),
-                )
-                .when_some(layer.clone(), |line, layer| {
-                    line.child(dot()).child(div().flex_none().child(layer))
-                })
-                .child(dot())
-                .child(
-                    div()
-                        .flex_none()
-                        .font_family("monospace")
-                        .text_color(cx.theme().success)
-                        .child(stat.0),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_family("monospace")
-                        .text_color(cx.theme().danger)
-                        .child(stat.1),
-                )
-                .into_any_element()
+            detail.retain(|part| !part.is_empty());
+            if compact {
+                // The phone sheet has no room for parts that give way, so the line truncates whole.
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(detail.join(" · "))
+                    .into_any_element()
+            } else {
+                // The author gives way first, so the source and the branches stay readable.
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(div().flex_none().child(source.clone()))
+                    .when_some(author, |line, author| {
+                        line.child(dot())
+                            .child(div().min_w_0().truncate().child(author))
+                    })
+                    .child(dot())
+                    // gpui-base has no middle truncation; the row tooltip holds the full pair.
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w(gpui::relative(0.5))
+                            .truncate()
+                            .font_family("monospace")
+                            .child(branches),
+                    )
+                    .when_some(layer.clone(), |line, layer| {
+                        line.child(dot()).child(div().flex_none().child(layer))
+                    })
+                    .child(dot())
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family("monospace")
+                            .text_color(cx.theme().success)
+                            .child(stat.0),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family("monospace")
+                            .text_color(cx.theme().danger)
+                            .child(stat.1),
+                    )
+                    .into_any_element()
+            }
         } else {
             if let Some(link) = link.filter(|_| visible) {
                 detail.insert(0, sync_error(link));
