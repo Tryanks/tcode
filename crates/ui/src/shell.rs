@@ -591,12 +591,16 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         // Already there: go to that host's workspace instead of tearing its
-        // link down and building the same one again.
-        if self
-            .attachment
-            .as_ref()
-            .is_some_and(|current| same_target(&current.link.target, &target))
-        {
+        // link down and building the same one again. A link the machine
+        // refused is not reused: it stopped reconnecting, and re-pairing
+        // lands here with the same machine.
+        if self.attachment.as_ref().is_some_and(|current| {
+            same_target(&current.link.target, &target)
+                && !matches!(
+                    current.link.store.read(cx).connection_state(),
+                    tcode_client::ConnectionState::Offline { reason } if reason.is_terminal()
+                )
+        }) {
             self.go(Destination::Threads, cx);
             return;
         }
@@ -2459,7 +2463,8 @@ mod tests {
 
     struct ReturningClient {
         saved: tcode_client::pairing::PairedHost,
-        transport: RefCell<Option<Transport>>,
+        /// One per attachment the test expects, in order.
+        transports: RefCell<Vec<Transport>>,
         preferences: RefCell<tcode_client::host::ClientPreferences>,
         machine_exists: bool,
         saves: Cell<usize>,
@@ -2521,8 +2526,10 @@ mod tests {
         }
 
         fn connect(&self, host: &tcode_client::pairing::PairedHost) -> Transport {
-            assert_eq!(host, &self.saved);
-            self.transport.borrow_mut().take().expect("one connection")
+            assert_eq!(host.host_id, self.saved.host_id);
+            let mut transports = self.transports.borrow_mut();
+            assert!(!transports.is_empty(), "an unexpected connection");
+            transports.remove(0)
         }
     }
 
@@ -2569,12 +2576,12 @@ mod tests {
                 space_id: None,
                 space_name: None,
             },
-            transport: RefCell::new(Some(Transport {
+            transports: RefCell::new(vec![Transport {
                 to_host: to_host.into(),
                 from_host,
                 state,
                 current_host: None,
-            })),
+            }]),
             preferences: RefCell::new(tcode_client::host::ClientPreferences {
                 navigation: Some(serde_json::json!({
                     "history": history,
@@ -2622,6 +2629,78 @@ mod tests {
         )
     }
 
+    /// Re-pairing with a machine ends on `switch_to` with that machine's id.
+    /// The link it refused has stopped reconnecting, so it is rebuilt rather
+    /// than kept saying the pairing was rejected; a pairing into one of its
+    /// spaces is likewise a new link, not the full one it replaces.
+    #[gpui::test]
+    fn repairing_rebuilds_a_link_the_machine_rejected(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, client, cx) = mount_restored(cx, &["threads"], true);
+        let fresh_transport = || {
+            let (to_host, _outgoing) = async_channel::unbounded();
+            let (_incoming, from_host) = async_channel::unbounded();
+            let (_states, state) = async_channel::unbounded();
+            Transport {
+                to_host: to_host.into(),
+                from_host,
+                state,
+                current_host: None,
+            }
+        };
+        let rejected = tcode_client::ConnectionState::Offline {
+            reason: tcode_client::ConnectionFailure::AuthenticationRejected,
+        };
+        host.states.send_blocking(rejected.clone()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            store_of(&shell, cx).read_with(cx, |store, _| store.connection_state()),
+            rejected
+        );
+        let saved = client.saved.clone();
+        client.transports.borrow_mut().push(fresh_transport());
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.switch_to(AttachmentTarget::Remote(saved.clone()), window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            client.transports.borrow().is_empty(),
+            "the refused link is replaced"
+        );
+        assert_ne!(
+            store_of(&shell, cx).read_with(cx, |store, _| store.connection_state()),
+            rejected
+        );
+
+        // The working link to the same machine is kept...
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.switch_to(AttachmentTarget::Remote(saved.clone()), window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        // ...and joining one of its spaces is a different link.
+        client.transports.borrow_mut().push(fresh_transport());
+        let member = tcode_client::pairing::PairedHost {
+            space_id: Some("space-1".into()),
+            space_name: Some("Shared".into()),
+            ..saved
+        };
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.switch_to(AttachmentTarget::Remote(member), window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            client.transports.borrow().is_empty(),
+            "a space membership replaces the full link"
+        );
+    }
+
     #[gpui::test]
     fn pending_outbox_overrides_desktop_launch_without_a_snapshot(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -2663,12 +2742,12 @@ mod tests {
                 space_id: None,
                 space_name: None,
             },
-            transport: RefCell::new(Some(Transport {
+            transports: RefCell::new(vec![Transport {
                 to_host: to_host.into(),
                 from_host,
                 state,
                 current_host: None,
-            })),
+            }]),
             preferences: RefCell::new(Default::default()),
             machine_exists: true,
             saves: Cell::new(0),
