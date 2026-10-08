@@ -504,7 +504,7 @@ impl PreviewPanel {
         match op {
             PreviewRequest::Open { url } => {
                 self.store.update(cx, |store, cx| {
-                    store.open_preview_panel_for(&session_id, cx);
+                    store.open_tab_for(&session_id, tcode_core::ui::RightTab::Preview, cx);
                 });
                 if let Some(url) = url.as_deref() {
                     self.navigate(&key, url, window, cx);
@@ -539,7 +539,7 @@ impl PreviewPanel {
             }
             PreviewRequest::Navigate { url } => {
                 self.store.update(cx, |store, cx| {
-                    store.open_preview_panel_for(&session_id, cx);
+                    store.open_tab_for(&session_id, tcode_core::ui::RightTab::Preview, cx);
                 });
                 self.navigate(&key, &url, window, cx);
                 if let Some(error) = self
@@ -572,7 +572,7 @@ impl PreviewPanel {
             }
             PreviewRequest::Resize { width, height } => {
                 self.store.update(cx, |store, cx| {
-                    store.open_preview_panel_for(&session_id, cx);
+                    store.open_tab_for(&session_id, tcode_core::ui::RightTab::Preview, cx);
                 });
                 let payload = match (width, height) {
                     (Some(width), Some(height)) => {

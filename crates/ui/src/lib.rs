@@ -99,3 +99,5 @@ pub fn set_client_data_dir(dir: std::path::PathBuf) {
 pub(crate) fn client_data_dir() -> Option<&'static std::path::Path> {
     CLIENT_DATA_DIR.get().map(std::path::PathBuf::as_path)
 }
+
+mod pull_requests;

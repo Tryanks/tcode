@@ -198,11 +198,13 @@ fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
     match mcp_host::Host::bind() {
         Ok(mut mcp_host) => {
             host_services.preview = Some(preview_mcp::start(&mut mcp_host));
+            host_services.pull_requests = Some(pull_request_mcp::start(&mut mcp_host));
             host_services.orchestrate = Some(orchestrate_mcp::start(&mut mcp_host));
             host_services.computer_use = Some(computer_use_mcp::start(&mut mcp_host));
             if let Err(error) = mcp_host.start() {
                 log::warn!("MCP host failed to start: {error}");
                 host_services.preview = None;
+                host_services.pull_requests = None;
                 host_services.orchestrate = None;
                 host_services.computer_use = None;
             }

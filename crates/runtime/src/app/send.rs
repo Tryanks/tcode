@@ -176,11 +176,12 @@ impl AppState {
                     self.ensure_session_started(&session_id, cx);
                 }
             } else if is_live {
+                let instructions = self.pull_request_instructions(&session_id);
                 if self
                     .residents
                     .parked
                     .get_mut(&session_id)
-                    .is_some_and(|parked| parked.dispatch_next_pending().is_err())
+                    .is_some_and(|parked| parked.dispatch_next_pending(instructions).is_err())
                 {
                     log::warn!(
                         "parked session {session_id}: scheduled dispatch failed (process gone)"
@@ -388,9 +389,10 @@ impl AppState {
         if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
+        let instructions = self.pull_request_instructions(target_id);
         self.resident_mut(target_id)
             .ok_or(())?
-            .dispatch_next_pending()
+            .dispatch_next_pending(instructions)
     }
 
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
@@ -463,12 +465,13 @@ impl AppState {
             self.mark_resident_idle(session_id, cx);
             return;
         }
+        let instructions = self.pull_request_instructions(session_id);
         match self
             .residents
             .parked
             .get_mut(session_id)
             .unwrap()
-            .dispatch_next_pending()
+            .dispatch_next_pending(instructions)
         {
             Ok(true) => {}
             Ok(false) => {}

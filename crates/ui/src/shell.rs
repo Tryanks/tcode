@@ -1264,6 +1264,19 @@ impl AppShell {
         }
     }
 
+    fn on_open_source_control(
+        &mut self,
+        _: &crate::pull_requests::OpenSourceControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
+        self.window_state.update(cx, |state, cx| {
+            state.pending_settings_section = Some("source_control".into());
+            state.open_settings(cx);
+        });
+    }
+
     fn on_thread_undo(
         &mut self,
         _: &crate::sidebar::ThreadUndo,
@@ -1946,6 +1959,7 @@ impl AppShell {
             .text_size(px(16.))
             .line_height(px(22.))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_open_source_control))
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             // Every compact page, settings included, is one entry of the same
@@ -2108,6 +2122,7 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
+                .on_action(cx.listener(Self::on_open_source_control))
                 .key_context("TcodeShell")
                 .on_action(cx.listener(Self::on_thread_undo))
                 .child(
@@ -2138,6 +2153,7 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
+                .on_action(cx.listener(Self::on_open_source_control))
                 .key_context("TcodeShell")
                 .on_action(cx.listener(Self::on_thread_undo))
                 .child(
@@ -2388,6 +2404,7 @@ impl AppShell {
             })
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_open_source_control))
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .child(

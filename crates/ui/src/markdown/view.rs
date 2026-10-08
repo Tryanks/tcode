@@ -1,6 +1,7 @@
 //! Markdown view element adapted from gpui-component's Apache-2.0
 //! `text/text_view.rs` implementation.
 
+use gpui::prelude::FluentBuilder as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -204,7 +205,7 @@ impl Element for MarkdownView {
                                 .separator()
                                 .menu(
                                     crate::tr!("markdown.link_open").into_owned(),
-                                    Box::new(OpenUrl(url)),
+                                    Box::new(OpenUrl(url.clone())),
                                 )
                                 .menu(
                                     crate::tr!("markdown.link_copy_address").into_owned(),
@@ -213,6 +214,16 @@ impl Element for MarkdownView {
                                 .menu(
                                     crate::tr!("markdown.link_copy_text").into_owned(),
                                     Box::new(CopyText(pending.text.to_string())),
+                                )
+                                .when(
+                                    extension.is_some()
+                                        && tcode_core::pull_request::is_pull_request_url(&url),
+                                    |menu| {
+                                        menu.menu(
+                                            crate::tr!("pull_requests.link_to_thread").into_owned(),
+                                            Box::new(crate::pull_requests::LinkUrl(url)),
+                                        )
+                                    },
                                 ),
                             LinkTarget::Local(path) => menu
                                 .separator()

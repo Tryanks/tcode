@@ -1,12 +1,7 @@
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    io::Write,
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, SystemTime},
 };
@@ -20,129 +15,10 @@ use tcode_services::{
     settings::SettingsStore,
 };
 
-// The agent's documented TLS/DNS interfaces route real HTTPS requests into a loopback
-// HTTP fixture without a certificate dependency or an endpoint override in production.
-struct LoopbackTls;
-impl ureq::TlsConnector for LoopbackTls {
-    fn connect(
-        &self,
-        _: &str,
-        io: Box<dyn ureq::ReadWrite>,
-    ) -> Result<Box<dyn ureq::ReadWrite>, ureq::Error> {
-        Ok(io)
-    }
-}
-struct Exchange {
-    request: String,
-    body: Vec<u8>,
-    stream: TcpStream,
-}
-impl Exchange {
-    fn reply(mut self, status: u16, headers: &str, body: &[u8]) {
-        write!(
-            self.stream,
-            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
-            body.len()
-        )
-        .unwrap();
-        let _ = self.stream.write_all(body);
-    }
-}
-struct Fixture {
-    address: std::net::SocketAddr,
-    incoming: mpsc::Receiver<Exchange>,
-    stop: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-impl Fixture {
-    fn new() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let (tx, incoming) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = stop.clone();
-        let thread = thread::spawn(move || {
-            'connections: for stream in listener.incoming() {
-                if stopping.load(Ordering::SeqCst) {
-                    break;
-                }
-                let mut stream = stream.unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    let mut byte = [0];
-                    if stream.read_exact(&mut byte).is_err() {
-                        continue 'connections;
-                    }
-                    request.push(byte[0]);
-                }
-                let request = String::from_utf8(request).unwrap();
-                let length = request
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|value| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).unwrap();
-                if tx
-                    .send(Exchange {
-                        request,
-                        body,
-                        stream,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        Self {
-            address,
-            incoming,
-            stop,
-            thread: Some(thread),
-        }
-    }
-    fn builder(&self) -> ureq::AgentBuilder {
-        let address = self.address;
-        ureq::AgentBuilder::new()
-            .resolver(move |_: &str| Ok(vec![address]))
-            .tls_connector(Arc::new(LoopbackTls))
-    }
-    fn next(&self) -> Exchange {
-        self.incoming
-            .recv_timeout(Duration::from_secs(5))
-            .expect("client sent request to fixture")
-    }
-    fn call<T: Send>(
-        &self,
-        run: impl FnOnce() -> T + Send,
-        status: u16,
-        headers: &str,
-        body: &[u8],
-    ) -> (T, String, Vec<u8>) {
-        thread::scope(|scope| {
-            let job = scope.spawn(run);
-            let exchange = self.next();
-            let request = exchange.request.clone();
-            let sent = exchange.body.clone();
-            exchange.reply(status, headers, body);
-            (job.join().unwrap(), request, sent)
-        })
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect(self.address);
-        self.thread.take().unwrap().join().unwrap();
-    }
-}
+#[path = "support/github.rs"]
+mod fixture;
+use fixture::Fixture;
+
 struct Store {
     store: SettingsStore,
     root: std::path::PathBuf,
@@ -1181,4 +1057,202 @@ fn dropped_waiters_keep_all_eight_socket_permits_until_their_jobs_finish() {
         b"{}",
     );
     answer.unwrap();
+}
+#[test]
+fn linked_pr_summaries_coalesce_and_retry_only_missing_graphql_aliases() {
+    use tcode_core::pull_request::PullRequestKey;
+    use tcode_services::github::pull_requests::PullRequests;
+    let store = Store::new();
+    let fixture = Fixture::new();
+    let service = PullRequests::new(GitHubApi::new(
+        store.credentials(&[("GH_TOKEN", "fixture")]),
+        fixture.builder(),
+    ));
+    let sent = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let responding = sent.clone();
+    let _server=fixture.serve(move |exchange| {
+        let body:serde_json::Value=serde_json::from_slice(&exchange.body).unwrap();
+        let mut requests=responding.lock().unwrap();
+        let first=requests.is_empty();
+        requests.push(body.clone());
+        let mut data=serde_json::Map::new();
+        for (variable,number) in body["variables"].as_object().unwrap() {
+            let Some(alias)=variable.strip_suffix("_number") else {continue};
+            let owner=body["variables"][format!("{alias}_owner")].as_str().unwrap();
+            let name=body["variables"][format!("{alias}_name")].as_str().unwrap();
+            data.insert(alias.into(),if first && number==2 {serde_json::Value::Null}else{serde_json::json!({"pullRequest":{"number":number,"url":format!("https://github.com/{owner}/{name}/pull/{number}"),"title":"A real summary","state":"OPEN","headRefName":"feature","baseRefName":"main","updatedAt":"2026-10-08T00:00:00Z","reviewDecision":"REVIEW_REQUIRED","latestReviews":{"nodes":[{"state":"APPROVED","author":{"login":"reviewer"}}]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]},"stack":null}})});
+        }
+        exchange.reply(200,"",&serde_json::to_vec(&serde_json::json!({"data":data})).unwrap());
+    });
+    let barrier = std::sync::Barrier::new(2);
+    let rows = thread::scope(|scope| {
+        let jobs: Vec<_> = (1..=2)
+            .map(|number| {
+                let barrier = &barrier;
+                let service = &service;
+                scope.spawn(move || {
+                    barrier.wait();
+                    service
+                        .summary(&PullRequestKey::new(
+                            "github.com",
+                            if number == 1 {
+                                "sample/one"
+                            } else {
+                                "sample/two"
+                            },
+                            number,
+                        ))
+                        .unwrap()
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|job| job.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(rows.iter().all(|row| row.snapshot.checks_state
+        == Some(tcode_core::pull_request::ChecksState::Passing)
+        && row.snapshot.review_decision
+            == Some(tcode_core::pull_request::ReviewDecision::Approved)
+        && row.stack_number == Some(None)));
+    let requests = sent.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "only the missing summary needs a single GraphQL fallback"
+    );
+}
+
+#[test]
+fn head_queries_filter_fork_owner_and_keep_branch_names_in_variables() {
+    use tcode_services::github::{
+        pull_requests::PullRequests,
+        repository::{BranchHead, Repository},
+    };
+    let store = Store::new();
+    let fixture = Fixture::new();
+    let service = PullRequests::new(GitHubApi::new(
+        store.credentials(&[("GH_TOKEN", "fixture")]),
+        fixture.builder(),
+    ));
+    let repository = Repository {
+        host: "github.com".into(),
+        owner: "sample".into(),
+        name: "project".into(),
+    };
+    let head = "feat/quotes\"and-braces}";
+    let request = Arc::new(std::sync::Mutex::new(None));
+    let received = request.clone();
+    let _server=fixture.serve(move |exchange| {
+        let body:serde_json::Value=serde_json::from_slice(&exchange.body).unwrap();
+        let rows=[serde_json::json!({"number":4,"url":"https://github.com/sample/project/pull/4","state":"OPEN","headRepositoryOwner":{"login":"other"}}),serde_json::json!({"number":5,"url":"https://github.com/sample/project/pull/5","state":"OPEN","headRepositoryOwner":{"login":"fOrKoWnEr"}})];
+        *received.lock().unwrap()=Some(body);
+        exchange.reply(200,"",&serde_json::to_vec(&serde_json::json!({"data":{"repository":{"h0":{"nodes":rows}}}})).unwrap());
+    });
+    let found = service.branch(
+        &BranchHead {
+            cwd: std::path::PathBuf::new(),
+            branch: "local".into(),
+            repository,
+            head_owner: "ForkOwner".into(),
+            head_branch: head.into(),
+            local_identity: "fork".into(),
+            default_branch: false,
+        },
+        false,
+    );
+    assert_eq!(found.unwrap().map(|row| row.key.number), Some(5));
+    let body = request.lock().unwrap().take().unwrap();
+    assert_eq!(body["variables"]["h0"], head);
+    assert!(!body["query"].as_str().unwrap().contains(head));
+    assert!(matches!(
+        service
+            .stack(&tcode_core::pull_request::PullRequestKey::new(
+                "github.example.com",
+                "sample/project",
+                5
+            ))
+            .unwrap(),
+        tcode_core::pull_request::PullRequestStackState::Unknown
+    ));
+}
+
+#[test]
+fn real_git_fork_heads_follow_gh_default_without_mistaking_the_base_for_a_published_branch() {
+    use tcode_services::github::repository;
+    let store = Store::new();
+    let cwd = store.root.join("checkout");
+    std::fs::create_dir(&cwd).unwrap();
+    let git = |args: &[&str]| {
+        let output = tcode_services::process::command("git")
+            .current_dir(&cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-b", "main"]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+    ]);
+    git(&[
+        "remote",
+        "add",
+        "upstream",
+        "https://github.com/sample/project.git",
+    ]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@github-work:ForkOwner/project.git",
+    ]);
+    git(&[
+        "remote",
+        "add",
+        "gitlab",
+        "https://gitlab.example.com/sample/project.git",
+    ]);
+    git(&["config", "remote.upstream.gh-resolved", "base"]);
+    git(&["update-ref", "refs/remotes/upstream/main", "HEAD"]);
+    git(&["switch", "-c", "topic"]);
+    git(&["config", "branch.topic.remote", "upstream"]);
+    git(&["config", "branch.topic.merge", "refs/heads/main"]);
+    let subdirectory = cwd.join("nested");
+    std::fs::create_dir(&subdirectory).unwrap();
+    assert_eq!(repository::resolve(&subdirectory).unwrap().owner, "sample");
+    git(&["config", "--unset", "remote.upstream.gh-resolved"]);
+    git(&["config", "remote.origin.gh-resolved", "base"]);
+    assert_eq!(
+        repository::resolve(&subdirectory).unwrap().owner,
+        "sample",
+        "mixed hosts and SSH aliases reject the strict gh mark and use the host-ranked remote"
+    );
+    assert!(
+        repository::branch_head(&subdirectory).is_none(),
+        "tracking the default branch is not evidence the feature was pushed"
+    );
+    git(&["update-ref", "refs/remotes/origin/topic", "HEAD"]);
+    let head = repository::branch_head(&subdirectory).unwrap();
+    assert_eq!(head.repository.owner, "sample");
+    assert_eq!(head.head_owner, "forkowner");
+    assert_eq!(head.head_branch, "topic");
+    git(&["branch", "-m", "renamed"]);
+    git(&["config", "branch.renamed.remote", "origin"]);
+    git(&["config", "branch.renamed.merge", "refs/heads/topic"]);
+    let renamed = repository::branch_head(&subdirectory).unwrap();
+    assert_eq!(renamed.branch, "renamed");
+    assert_eq!(renamed.head_branch, "topic");
+    assert_ne!(head.local_identity, renamed.local_identity);
 }

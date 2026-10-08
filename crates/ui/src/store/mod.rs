@@ -1891,6 +1891,9 @@ impl WorkspaceStore {
         cx.notify();
     }
 
+    pub fn toggle_pull_requests_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_tab_panel(RightTab::PullRequests, cx);
+    }
     pub fn toggle_plan_panel(&mut self, cx: &mut Context<Self>) {
         self.toggle_tab_panel(RightTab::Plan, cx);
     }
@@ -1928,8 +1931,8 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn open_preview_panel_for(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if !self.scope.is_full() {
+    pub fn open_tab_for(&mut self, session_id: &str, tab: RightTab, cx: &mut Context<Self>) {
+        if tab == RightTab::Preview && !self.scope.is_full() {
             return;
         }
         let destination = if self
@@ -1947,8 +1950,28 @@ impl WorkspaceStore {
             ConversationUiState::new(self.settings_replica.word_wrap_diffs, false, 240.)
         });
         ui.right_panel_open = true;
-        ui.right_tab = RightTab::Preview;
+        ui.right_tab = tab;
         cx.notify();
+    }
+
+    /// The repository a bare pull request number refers to in this thread, when known.
+    pub fn github_repository(&self, session_id: &str) -> Option<String> {
+        (self.selected_session_id.as_deref() == Some(session_id))
+            .then_some(self.git_status_replica.status.as_ref())
+            .flatten()
+            .and_then(|status| status.github_repository.clone())
+    }
+
+    /// The thread's links as its index entry carries them.
+    pub fn pull_requests(
+        &self,
+        session_id: &str,
+    ) -> &[tcode_core::pull_request::ThreadPullRequestLink] {
+        self.index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .map_or(&[], |meta| meta.pull_requests.as_slice())
     }
 
     fn conversation_ui_by_key(&self, key: &str) -> Option<&ConversationUiState> {
