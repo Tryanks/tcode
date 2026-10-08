@@ -1420,7 +1420,6 @@ source_control:
   enabled: "启用"
   host_placeholder: "github.example.com"
   add_host: "添加主机"
-  refresh: "刷新凭据"
   token_placeholder: "粘贴令牌"
   token_set: "已设置保存的令牌"
   token_unset: "未保存令牌"

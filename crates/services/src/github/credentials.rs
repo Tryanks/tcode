@@ -41,12 +41,6 @@ impl std::fmt::Debug for Credential {
     }
 }
 impl Credential {
-    pub fn fingerprint(&self) -> &str {
-        &self.fingerprint
-    }
-    pub fn source(&self) -> GitHubCredentialSource {
-        self.source
-    }
     fn new(host: String, token: String, source: GitHubCredentialSource) -> Self {
         let fingerprint = format!("{host}:{}", super::digest(&token));
         Self {
@@ -82,11 +76,10 @@ impl Credentials {
         store: SettingsStore,
         environment: impl IntoIterator<Item = (String, String)>,
     ) -> Arc<Self> {
-        let hosts = store.load().github.hosts;
         Arc::new(Self {
             store,
             environment: environment.into_iter().collect(),
-            hosts: RwLock::new(hosts),
+            hosts: RwLock::default(),
             cache: Mutex::new(HashMap::new()),
         })
     }
