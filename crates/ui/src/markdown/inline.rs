@@ -45,6 +45,7 @@ impl InlineState {
 /// All selectable text, including code-block lines, is painted through this element.
 pub(super) struct Inline {
     id: ElementId,
+    math_glyph: Option<(gpui::GlyphId, Pixels)>,
     view: Entity<MarkdownState>,
     text: SharedString,
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
@@ -73,6 +74,7 @@ impl Inline {
         let text_layout = styled_text.layout().clone();
         Self {
             id: id.clone(),
+            math_glyph: None,
             view,
             text: text.clone(),
             links: Rc::new(links),
@@ -82,6 +84,11 @@ impl Inline {
             text_layout,
             state,
         }
+    }
+
+    pub(super) fn math_glyph(mut self, glyph: gpui::GlyphId, baseline: Pixels) -> Self {
+        self.math_glyph = Some((glyph, baseline));
+        self
     }
 
     fn link_for_position(
@@ -286,8 +293,20 @@ impl Element for Inline {
     ) {
         let current_view = window.current_view();
         let text_layout = self.text_layout.clone();
-        self.interactive_text
-            .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
+        if let Some((glyph, baseline)) = self.math_glyph {
+            let style = window.text_style();
+            let font_id = window.text_system().resolve_font(&style.font());
+            let _ = window.paint_glyph(
+                bounds.origin + point(px(0.), baseline),
+                font_id,
+                glyph,
+                style.font_size.to_pixels(window.rem_size()),
+                style.color,
+            );
+        } else {
+            self.interactive_text
+                .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
+        }
 
         let adapter = {
             let view = self.view.read(cx);

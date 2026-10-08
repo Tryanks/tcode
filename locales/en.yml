@@ -106,6 +106,9 @@ chat:
   rewind_conversation_done: "Claude Code restored the conversation. The original prompt is ready to edit."
   rewind_files_done: "Claude Code restored the tracked files."
 markdown:
+  math_rendered: "Rendered"
+  math_source: "Source"
+  math_error: "Unable to render this formula. Source is shown below."
   open_image: "Open image"
   link_open: "Open link"
   link_copy_address: "Copy link address"
