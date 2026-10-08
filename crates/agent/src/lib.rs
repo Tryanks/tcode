@@ -1653,11 +1653,6 @@ pub enum AgentEvent {
         item_id: String,
         resolution: PlanResolution,
     },
-    /// HTTP MCP registrations accepted by the negotiated provider session.
-    /// Runtime consumes this control-plane acknowledgement before dispatch.
-    McpServersRegistered {
-        names: Vec<String>,
-    },
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed at session start and on every change. Reuses
     /// [`OptionDescriptor`] so the composer's existing picker renders them

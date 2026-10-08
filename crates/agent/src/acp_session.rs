@@ -949,19 +949,6 @@ async fn handshake<D: Dialect>(
         events,
     };
     let established = dialect.establish(&setup).await?;
-    if !opts.mcp_servers.is_empty() {
-        let registrations = opts.mcp_servers.iter().collect::<Vec<_>>();
-        let names = mcp_servers(&registrations, &init.agent_capabilities)
-            .into_iter()
-            .filter_map(|server| match server {
-                acp::McpServer::Http(server) => Some(server.name),
-                _ => None,
-            })
-            .collect();
-        let _ = events
-            .send(AgentEvent::McpServersRegistered { names })
-            .await;
-    }
     let can_close = init.agent_capabilities.session_capabilities.close.is_some();
     Ok((established, can_close))
 }

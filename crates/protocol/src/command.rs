@@ -100,9 +100,6 @@ pub enum Command {
         session_id: String,
         key: tcode_core::pull_request::PullRequestKey,
     },
-    RefreshPullRequests {
-        session_id: String,
-    },
     SetProfileSecret {
         profile_id: String,
         name: String,
@@ -459,7 +456,6 @@ impl Command {
         match self {
             Self::LinkPullRequest { session_id, .. }
             | Self::UnlinkPullRequest { session_id, .. }
-            | Self::RefreshPullRequests { session_id }
             | Self::OrchestrateTurn { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }
@@ -525,7 +521,6 @@ impl Command {
                 | Self::PreviewReply { .. }
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
-                | Self::RefreshPullRequests { .. }
                 | Self::RefreshGitHubCredentials
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage

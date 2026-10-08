@@ -13,21 +13,6 @@ impl AppState {
             return;
         }
 
-        if let AgentEvent::McpServersRegistered { names } = &event {
-            let accepted = names.iter().any(|name| name == "tcode_pull_requests")
-                && self.mcp.pull_request_registrations.contains_key(session_id);
-            if let Some(resident) = self.resident_mut(session_id) {
-                resident.pull_request_tools = Some(accepted);
-            }
-            if !accepted {
-                self.revoke_pull_request_registration(session_id);
-            }
-            if self.dispatch_next_queued(session_id, cx).is_err() {
-                self.report_error(RuntimeError::ProcessGone, cx);
-            }
-            return;
-        }
-
         match &event {
             AgentEvent::RewindFailed { error, .. } => {
                 self.pending_native_rewinds.remove(session_id);
@@ -476,8 +461,7 @@ impl AppState {
                     }
                 }
             }
-            AgentEvent::McpServersRegistered { .. }
-            | AgentEvent::ProviderRelay { .. }
+            AgentEvent::ProviderRelay { .. }
             | AgentEvent::PlanResolved { .. }
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }

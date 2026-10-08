@@ -139,7 +139,6 @@ pub struct ActiveSession {
     pub timeline: Timeline,
     /// Git branch of the session cwd, if it is a git repo (display-only).
     pub git_branch: Option<String>,
-    pub(super) pull_request_tools: Option<bool>,
     /// Local branches for the checkout-row picker, loaded lazily when the
     /// popover opens (empty until then / when not a git repo).
     pub branches: Vec<String>,
@@ -216,7 +215,6 @@ impl ActiveSession {
             meta,
             timeline: Timeline::default(),
             git_branch: None,
-            pull_request_tools: Some(false),
             branches: Vec::new(),
             draft,
             draft_device_id: None,
@@ -529,11 +527,13 @@ impl ActiveSession {
     /// queued message is by definition one that waits for the running turn to
     /// finish. (Steering — the other way to send mid-turn — never goes through
     /// here; see [`AppState::steer`].)
-    pub(super) fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
+    pub(super) fn dispatch_next_pending(
+        &mut self,
+        pull_request_instructions: bool,
+    ) -> Result<bool, ()> {
         if self.turn_in_flight
             || self.delivery_in_flight.is_some()
             || self.settings_restart_deferred()
-            || self.pull_request_tools.is_none()
         {
             return Ok(false);
         }
@@ -549,30 +549,20 @@ impl ActiveSession {
         else {
             return Ok(false);
         };
-        let injected = super::pull_requests::LINKING_INSTRUCTIONS;
-        let already_prefixed = send.context_len.is_some_and(|len| len >= injected.len())
-            && send.text.starts_with(injected);
-        if already_prefixed {
-            send.text = send.text[injected.len()..].to_owned();
+        // A retried delivery already carries the block it was first dispatched with.
+        let instructions = tcode_core::pull_request::LINKING_INSTRUCTIONS;
+        if let Some(len) = send.context_len.filter(|len| *len >= instructions.len())
+            && let Some(own) = send.text.strip_prefix(instructions)
+        {
+            send.text = own.to_owned();
+            send.context_len = Some(len - instructions.len()).filter(|len| *len > 0);
         }
-        let text = send.wire_text(&self.provider_commands);
-        let prefix = if self.pull_request_tools == Some(true) {
-            super::pull_requests::LINKING_INSTRUCTIONS
-        } else {
-            ""
-        };
-        // Native slash commands must stay at byte zero; injected context becomes
-        // their arguments while remaining visible in the recorded context prefix.
-        let text = if !prefix.is_empty() && text.starts_with('/') {
-            let boundary = text.find(char::is_whitespace).unwrap_or(text.len());
-            format!(
-                "{}\n{prefix}{}",
-                &text[..boundary],
-                text[boundary..].trim_start()
-            )
-        } else {
-            format!("{prefix}{text}")
-        };
+        let mut text = send.wire_text(&self.provider_commands);
+        // A native `/command` must stay at byte zero, and the block must not become its arguments.
+        let instructed = pull_request_instructions && !text.starts_with('/');
+        if instructed {
+            text.insert_str(0, instructions);
+        }
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,
@@ -581,12 +571,14 @@ impl ActiveSession {
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
-        if !prefix.is_empty()
-            && !already_prefixed
-            && let Some(queued) = self.queue.iter_mut().find(|queued| queued.id == send.id)
-        {
-            queued.text = format!("{prefix}{}", queued.text);
-            queued.context_len = Some(prefix.len() + queued.context_len.unwrap_or(0));
+        if let Some(queued) = self.queue.iter_mut().find(|queued| queued.id == send.id) {
+            if instructed {
+                queued.text = format!("{instructions}{}", send.text);
+                queued.context_len = Some(instructions.len() + send.context_len.unwrap_or(0));
+            } else {
+                queued.text = send.text;
+                queued.context_len = send.context_len;
+            }
         }
         self.idle_since = None;
         self.delivery_in_flight = Some(send.id);

@@ -485,12 +485,15 @@ pub fn read_status(cwd: &Path) -> GitStatus {
                 .to_string()
         })
         .filter(|value| !value.is_empty());
-    parse_status(
+    let mut status = parse_status(
         &porcelain,
         &numstat,
         default_branch.as_deref(),
         has_origin_remote,
-    )
+    );
+    status.github_repository = crate::github::repository::resolve(cwd)
+        .map(|repository| format!("{}/{}", repository.owner, repository.name));
+    status
 }
 
 fn read_numstat(cwd: &Path) -> Vec<(String, u32, u32)> {

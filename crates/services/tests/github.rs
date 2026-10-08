@@ -1093,18 +1093,15 @@ fn linked_pr_summaries_coalesce_and_retry_only_missing_graphql_aliases() {
                 scope.spawn(move || {
                     barrier.wait();
                     service
-                        .summary(
-                            &PullRequestKey::new(
-                                "github.com",
-                                if number == 1 {
-                                    "sample/one"
-                                } else {
-                                    "sample/two"
-                                },
-                                number,
-                            ),
-                            false,
-                        )
+                        .summary(&PullRequestKey::new(
+                            "github.com",
+                            if number == 1 {
+                                "sample/one"
+                            } else {
+                                "sample/two"
+                            },
+                            number,
+                        ))
                         .unwrap()
                 })
             })
@@ -1113,30 +1110,24 @@ fn linked_pr_summaries_coalesce_and_retry_only_missing_graphql_aliases() {
             .map(|job| job.join().unwrap())
             .collect::<Vec<_>>()
     });
-    assert!(rows.iter().all(
-        |row| row.snapshot.checks_state.as_deref() == Some("passing")
-            && row.snapshot.review_decision.as_deref() == Some("approved")
-            && row.stack_number == Some(None)
-    ));
+    assert!(rows.iter().all(|row| row.snapshot.checks_state
+        == Some(tcode_core::pull_request::ChecksState::Passing)
+        && row.snapshot.review_decision
+            == Some(tcode_core::pull_request::ReviewDecision::Approved)
+        && row.stack_number == Some(None)));
     let requests = sent.lock().unwrap();
     assert_eq!(
         requests.len(),
         2,
         "only the missing summary needs a single GraphQL fallback"
     );
-    assert!(
-        requests[0]["query"]
-            .as_str()
-            .unwrap()
-            .contains("stackEntry")
-    );
 }
 
 #[test]
 fn head_queries_filter_fork_owner_and_keep_branch_names_in_variables() {
     use tcode_services::github::{
-        pull_requests::{HeadRequest, PullRequests},
-        repository::Repository,
+        pull_requests::PullRequests,
+        repository::{BranchHead, Repository},
     };
     let store = Store::new();
     let fixture = Fixture::new();
@@ -1154,42 +1145,33 @@ fn head_queries_filter_fork_owner_and_keep_branch_names_in_variables() {
     let received = request.clone();
     let _server=fixture.serve(move |exchange| {
         let body:serde_json::Value=serde_json::from_slice(&exchange.body).unwrap();
-        let query=body["query"].as_str().unwrap();
-        let limit=query.split_once("first:").unwrap().1.trim_start().chars().take_while(|c|c.is_ascii_digit()).collect::<String>().parse::<usize>().unwrap();
-        let rows=[serde_json::json!({"number":4,"url":"https://github.com/sample/project/pull/4","state":"OPEN","headRepositoryOwner":{"login":"other"}}),serde_json::json!({"number":5,"url":"https://github.com/sample/project/pull/5","state":"OPEN","headRepositoryOwner":{"login":"fOrKoWnEr"}})].into_iter().take(limit).collect::<Vec<_>>();
+        let rows=[serde_json::json!({"number":4,"url":"https://github.com/sample/project/pull/4","state":"OPEN","headRepositoryOwner":{"login":"other"}}),serde_json::json!({"number":5,"url":"https://github.com/sample/project/pull/5","state":"OPEN","headRepositoryOwner":{"login":"fOrKoWnEr"}})];
         *received.lock().unwrap()=Some(body);
         exchange.reply(200,"",&serde_json::to_vec(&serde_json::json!({"data":{"repository":{"h0":{"nodes":rows}}}})).unwrap());
     });
-    let rows = service.by_head(
-        &repository,
-        HeadRequest {
-            head: head.into(),
-            owner: Some("ForkOwner".into()),
-            open_only: true,
-            limit: 1,
+    let found = service.branch(
+        &BranchHead {
+            cwd: std::path::PathBuf::new(),
+            branch: "local".into(),
+            repository,
+            head_owner: "ForkOwner".into(),
+            head_branch: head.into(),
+            local_identity: "fork".into(),
+            default_branch: false,
         },
-        true,
+        false,
     );
-    assert_eq!(
-        rows.unwrap()
-            .iter()
-            .map(|row| row.key.number)
-            .collect::<Vec<_>>(),
-        vec![5]
-    );
+    assert_eq!(found.unwrap().map(|row| row.key.number), Some(5));
     let body = request.lock().unwrap().take().unwrap();
     assert_eq!(body["variables"]["h0"], head);
     assert!(!body["query"].as_str().unwrap().contains(head));
     assert!(matches!(
         service
-            .stack(
-                &tcode_core::pull_request::PullRequestKey::new(
-                    "github.example.com",
-                    "sample/project",
-                    5
-                ),
-                false
-            )
+            .stack(&tcode_core::pull_request::PullRequestKey::new(
+                "github.example.com",
+                "sample/project",
+                5
+            ))
             .unwrap(),
         tcode_core::pull_request::PullRequestStackState::Unknown
     ));

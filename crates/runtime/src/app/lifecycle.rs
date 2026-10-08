@@ -100,18 +100,11 @@ impl AppState {
         } else {
             None
         };
-        let pull_request_registration = self.pull_request_registration_for(&meta);
-        if let Some(active) = self.resident_mut(session_id) {
-            active.pull_request_tools = if pull_request_registration.is_some()
-                && matches!(
-                    meta.provider,
-                    ProviderKind::Acp | ProviderKind::Cursor | ProviderKind::Grok
-                ) {
-                None
-            } else {
-                Some(pull_request_registration.is_some())
-            };
-        }
+        let pull_request_registration = if meta.provider.caps().mcp_servers {
+            self.pull_request_registration_for(&meta)
+        } else {
+            None
+        };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
@@ -138,7 +131,7 @@ impl AppState {
             let launch_env = host_cx
                 .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
                 .await;
-            let opts = session_options(
+            let mut opts = session_options(
                 &meta,
                 &settings,
                 launch_env,
@@ -147,7 +140,6 @@ impl AppState {
                 orchestrate_report_registration,
                 computer_use_registration,
             );
-            let mut opts = opts;
             opts.mcp_servers.extend(pull_request_registration);
             let result = provider_launcher.launch(meta.provider, opts).await;
             host_cx.enqueue(move |state, cx| {
@@ -175,12 +167,7 @@ impl AppState {
                         let pump = HostCx::spawn_background(cx, async move {
                             while let Ok(event) = events.recv().await {
                                 let event_session = pump_session.clone();
-                                let event_commands = pump_commands.clone();
                                 pump_cx.enqueue(move |state, cx| {
-                                    if matches!(event, AgentEvent::McpServersRegistered { .. })
-                                        && !state.resident(&event_session).is_some_and(|resident| matches!(&resident.runtime, Runtime::Live(commands) if commands.same_channel(&event_commands))) {
-                                        return;
-                                    }
                                     state.on_event(&event_session, event, cx);
                                 });
                             }
@@ -358,8 +345,7 @@ impl AppState {
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
         if discover {
-            self.discover_pull_requests(Some(meta.id.clone()), true, cx)
-                .detach();
+            self.discover_pull_requests_for(&meta.id, true, cx);
         }
     }
 
@@ -569,9 +555,11 @@ impl AppState {
         for child_id in child_ids {
             self.drop_background(&child_id, cx);
             self.revoke_preview_registration(&child_id);
+            self.revoke_pull_request_registration(&child_id);
             self.revoke_orchestrate_child_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
+        self.revoke_pull_request_registration(parent_id);
         self.revoke_computer_use_registration(parent_id);
         if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)
             && let Some(tokens) = &self.mcp.orchestrate_tokens
@@ -581,7 +569,6 @@ impl AppState {
     }
 
     pub(super) fn revoke_preview_registration(&mut self, session_id: &str) {
-        self.revoke_pull_request_registration(session_id);
         if let Some(registration) = self.mcp.preview_registrations.remove(session_id)
             && let Some(tokens) = &self.mcp.preview_tokens
         {

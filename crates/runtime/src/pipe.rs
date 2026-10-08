@@ -439,9 +439,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::UnlinkPullRequest { session_id, key } => {
             app.unlink_pull_request(&session_id, &key, cx);
         }
-        Command::RefreshPullRequests { session_id } => {
-            app.refresh_thread_pull_requests(&session_id, cx)
-        }
         Command::RefreshGitHubCredentials => app.refresh_github_credentials(cx),
         Command::SetGitHubToken { host, token } => {
             return CommandOutcome::Pending(app.set_github_token(host, token, cx));

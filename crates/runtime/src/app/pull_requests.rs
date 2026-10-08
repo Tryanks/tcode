@@ -7,10 +7,8 @@ use tcode_protocol::{CommandResponse, ProtocolError};
 use tcode_services::github::{
     GitHubApi, GitHubError,
     pull_requests::{PullRequests, Summary},
-    repository::{self, BranchHead, Repository},
+    repository::{self, Repository},
 };
-
-pub(super) const LINKING_INSTRUCTIONS: &str = "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests .\n</pull_request_linking>\n\n";
 
 pub(super) struct PullRequestRuntime {
     service: Arc<PullRequests>,
@@ -19,10 +17,11 @@ pub(super) struct PullRequestRuntime {
     generation: u64,
     paused: HashMap<(Option<String>, String), SystemTime>,
     syncing: bool,
+    sync_scheduled: bool,
     discovering: bool,
-    discover_again: HashSet<String>,
+    /// Threads triggered during a discovery pass, each with the refresh its triggers asked for.
+    discover_again: HashMap<String, bool>,
     merge_commands: HashSet<String>,
-    discovered: HashMap<String, (BranchHead, PullRequestKey)>,
     workers: Vec<HostTask<()>>,
 }
 impl PullRequestRuntime {
@@ -34,10 +33,10 @@ impl PullRequestRuntime {
             generation: 0,
             paused: HashMap::new(),
             syncing: false,
+            sync_scheduled: false,
             discovering: false,
-            discover_again: HashSet::new(),
+            discover_again: HashMap::new(),
             merge_commands: HashSet::new(),
-            discovered: HashMap::new(),
             workers: Vec::new(),
         }
     }
@@ -101,9 +100,6 @@ impl AppState {
         &mut self,
         meta: &SessionMeta,
     ) -> Option<agent::McpRegistration> {
-        if !meta.provider.caps().mcp_servers {
-            return None;
-        }
         if let Some(registration) = self.mcp.pull_request_registrations.get(&meta.id) {
             return Some(registration.clone());
         }
@@ -118,6 +114,10 @@ impl AppState {
             .pull_request_registrations
             .insert(meta.id.clone(), registration.clone());
         Some(registration)
+    }
+    /// Turns carry the linking block while the tools are registered, the same gate as launch.
+    pub(super) fn pull_request_instructions(&self, session_id: &str) -> bool {
+        self.mcp.pull_request_registrations.contains_key(session_id)
     }
     pub(super) fn revoke_pull_request_registration(&mut self, session_id: &str) {
         if let Some(registration) = self.mcp.pull_request_registrations.remove(session_id)
@@ -143,18 +143,52 @@ impl AppState {
             return;
         }
         if matches!(request.operation, Operation::List) {
-            let groups = pull_request::groups(&meta.pull_requests);
             let mut positions = HashMap::new();
-            let chains:Vec<_>=groups.iter().map(|group| {
-                let kind=match group.kind {pull_request::PullRequestGroupKind::Native=>"native",pull_request::PullRequestGroupKind::Derived=>"derived",pull_request::PullRequestGroupKind::Single=>"single"};
-                if group.links.len()>1 {for (position,link) in group.links.iter().enumerate() {positions.insert(link.key.clone(),serde_json::json!({"kind":kind,"position":position+1,"size":group.links.len()}));}}
-                serde_json::json!({"kind":kind,"numbers":group.links.iter().map(|link|link.key.number).collect::<Vec<_>>()})
-            }).collect();
-            let rows: Vec<_> = meta.pull_requests.iter().filter(|link|link.visible()).map(|link|serde_json::json!({
-                "host":link.key.host,"repository":link.key.repository,"number":link.key.number,"url":link.url,"source":link.source,"watching":link.watch.is_some(),
-                "state":link.snapshot.as_ref().map(|snapshot|snapshot.state),"title":link.snapshot.as_ref().map(|snapshot|&snapshot.title),
-                "headBranch":link.snapshot.as_ref().map(|snapshot|&snapshot.head_branch),"baseBranch":link.snapshot.as_ref().map(|snapshot|&snapshot.base_branch),"isDraft":link.snapshot.as_ref().map(|snapshot|snapshot.is_draft),"stack":positions.get(&link.key)
-            })).collect();
+            let chains: Vec<_> = pull_request::groups(&meta.pull_requests)
+                .iter()
+                .map(|group| {
+                    let kind = match group.kind {
+                        pull_request::PullRequestGroupKind::Native => "native",
+                        pull_request::PullRequestGroupKind::Derived => "derived",
+                        pull_request::PullRequestGroupKind::Single => "single",
+                    };
+                    if group.links.len() > 1 {
+                        for (position, link) in group.links.iter().enumerate() {
+                            positions.insert(
+                                link.key.clone(),
+                                serde_json::json!({
+                                    "kind": kind,
+                                    "position": position + 1,
+                                    "size": group.links.len(),
+                                }),
+                            );
+                        }
+                    }
+                    let numbers: Vec<_> = group.links.iter().map(|link| link.key.number).collect();
+                    serde_json::json!({ "kind": kind, "numbers": numbers })
+                })
+                .collect();
+            let rows: Vec<_> = meta
+                .pull_requests
+                .iter()
+                .filter(|link| link.visible())
+                .map(|link| {
+                    let snapshot = link.snapshot.as_ref();
+                    serde_json::json!({
+                        "host": link.key.host,
+                        "repository": link.key.repository,
+                        "number": link.key.number,
+                        "url": link.url,
+                        "source": link.source,
+                        "state": snapshot.map(|snapshot| snapshot.state),
+                        "title": snapshot.map(|snapshot| &snapshot.title),
+                        "headBranch": snapshot.map(|snapshot| &snapshot.head_branch),
+                        "baseBranch": snapshot.map(|snapshot| &snapshot.base_branch),
+                        "isDraft": snapshot.map(|snapshot| snapshot.is_draft),
+                        "stack": positions.get(&link.key),
+                    })
+                })
+                .collect();
             let _ = request
                 .reply
                 .try_send(Ok(serde_json::json!({"pullRequests":rows,"chains":chains})));
@@ -168,19 +202,52 @@ impl AppState {
         let cwd = self.pull_request_project_cwd(&meta);
         let host = cx.clone();
         cx.spawn_detached(async move {
-            let target = host.unblock(move || {
-                if let Some(url) = target.url { return repository::pull_request_url(&url).ok_or_else(|| "Invalid pull request URL.".to_owned()) }
-                let number = target.number.filter(|n| *n > 0).ok_or_else(|| "Pass url or repository plus number.".to_owned())?;
-                let name = target.repository.ok_or_else(|| "Pass url or repository plus number.".to_owned())?;
-                let host = target.host.or_else(|| repository::resolve(&cwd).map(|r| r.host)).ok_or_else(|| "Pass host or a full PR URL.".to_owned())?;
-                let repository = repository::selector(&name, &host).ok_or_else(|| "Invalid GitHub repository.".to_owned())?;
-                Ok((repository.key(number),repository.url(number)))
-            }).await;
-            host.enqueue(move |state,cx| {
-                let result = target.and_then(|(key,url)| {
-                    let linked = state.find_meta(&request.session_id).ok_or_else(|| "Thread disappeared.".to_owned())?.pull_requests.iter().any(|link| link.visible() && link.key == key);
-                    if linking { state.apply_pull_request_link(&request.session_id,key.clone(),url.clone(),PullRequestSource::Agent,true,cx)?; } else { state.unlink_pull_request(&request.session_id,&key,cx); }
-                    Ok(serde_json::json!({"host":key.host,"repository":key.repository,"number":key.number,"url":url,"alreadyLinked": linking && linked,"wasLinked": !linking && linked}))
+            let target = host
+                .unblock(move || {
+                    if let Some(url) = target.url {
+                        return repository::pull_request_url(&url)
+                            .ok_or_else(|| "Invalid pull request URL.".to_owned());
+                    }
+                    let missing = || "Pass url or repository plus number.".to_owned();
+                    let number = target.number.filter(|n| *n > 0).ok_or_else(missing)?;
+                    let name = target.repository.ok_or_else(missing)?;
+                    let host = target
+                        .host
+                        .or_else(|| repository::resolve(&cwd).map(|r| r.host))
+                        .ok_or_else(|| "Pass host or a full PR URL.".to_owned())?;
+                    let repository = repository::selector(&name, &host)
+                        .ok_or_else(|| "Invalid GitHub repository.".to_owned())?;
+                    Ok((repository.key(number), repository.url(number)))
+                })
+                .await;
+            host.enqueue(move |state, cx| {
+                let result = target.and_then(|(key, url)| {
+                    let linked = state
+                        .find_meta(&request.session_id)
+                        .ok_or_else(|| "Thread disappeared.".to_owned())?
+                        .pull_requests
+                        .iter()
+                        .any(|link| link.visible() && link.key == key);
+                    if linking {
+                        state.apply_pull_request_link(
+                            &request.session_id,
+                            key.clone(),
+                            url.clone(),
+                            PullRequestSource::Agent,
+                            true,
+                            cx,
+                        )?;
+                    } else {
+                        state.unlink_pull_request(&request.session_id, &key, cx);
+                    }
+                    Ok(serde_json::json!({
+                        "host": key.host,
+                        "repository": key.repository,
+                        "number": key.number,
+                        "url": url,
+                        "alreadyLinked": linking && linked,
+                        "wasLinked": !linking && linked,
+                    }))
                 });
                 let _ = request.reply.try_send(result);
             });
@@ -276,9 +343,16 @@ impl AppState {
             self.save_pull_request_meta(meta, cx);
         }
     }
-    pub fn refresh_thread_pull_requests(&mut self, id: &str, cx: &mut HostCx) {
+    /// Requests a read of the thread's open links, as after an agent merged or closed one.
+    fn refresh_open_pull_requests(&mut self, id: &str, cx: &mut HostCx) {
         if let Some(meta) = self.find_meta(id) {
-            for link in meta.pull_requests.into_iter().filter(|link| link.visible()) {
+            for link in meta.pull_requests.into_iter().filter(|link| {
+                link.visible()
+                    && link
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.state == PullRequestState::Open)
+            }) {
                 self.request_pull_request_sync(link.key, cx);
             }
         }
@@ -288,13 +362,15 @@ impl AppState {
         self.pull_requests
             .requested
             .insert(key, self.pull_requests.generation);
-        if self.pull_requests.syncing {
+        if self.pull_requests.syncing || self.pull_requests.sync_scheduled {
             return;
         }
+        self.pull_requests.sync_scheduled = true;
         let host = cx.clone();
         cx.spawn_detached(async move {
             smol::Timer::after(Duration::from_millis(10)).await;
             host.enqueue(move |state, cx| {
+                state.pull_requests.sync_scheduled = false;
                 state.sweep_pull_requests(true, cx).detach();
             });
         });
@@ -310,7 +386,7 @@ impl AppState {
                     let task = host
                         .enqueue_and_wait(move |state, cx| {
                             if discovery {
-                                state.discover_pull_requests(None, false, cx)
+                                state.discover_pull_requests(None, cx)
                             } else {
                                 state.sweep_pull_requests(false, cx)
                             }
@@ -369,39 +445,44 @@ impl AppState {
         self.pull_requests
             .requested
             .retain(|key, _| groups.contains_key(key));
+        let paused_until = |project: &Option<String>, host: &str| {
+            self.pull_requests
+                .paused
+                .get(&(project.clone(), host.to_owned()))
+                .is_some_and(|until| *until > SystemTime::now())
+        };
         let due: Vec<_> = groups
             .into_values()
             .filter(|group| {
                 if requested_only && group.request.is_none() {
                     return false;
                 }
-                if group.projects.iter().all(|project| {
-                    self.pull_requests
-                        .paused
-                        .get(&(project.clone(), group.key.host.clone()))
-                        .is_some_and(|until| *until > SystemTime::now())
-                }) {
+                if group
+                    .projects
+                    .iter()
+                    .all(|project| paused_until(project, &group.key.host))
+                {
                     return false;
                 }
+                let state = |wanted| {
+                    group.observations.iter().any(|(snapshot, _)| {
+                        snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.state == wanted)
+                    })
+                };
                 group.request.is_some()
                     || group
                         .observations
                         .iter()
                         .any(|(snapshot, _)| snapshot.is_none())
-                    || group.observations.iter().any(|(snapshot, _)| {
-                        snapshot
-                            .as_ref()
-                            .is_some_and(|s| s.state == PullRequestState::Open)
-                    })
-                    || (group.observations.iter().any(|(snapshot, _)| {
-                        snapshot
-                            .as_ref()
-                            .is_some_and(|s| s.state == PullRequestState::Closed)
-                    }) && self
-                        .pull_requests
-                        .last_synced
-                        .get(&group.key)
-                        .is_none_or(|last| now.saturating_sub(*last) >= 900))
+                    || state(PullRequestState::Open)
+                    || (state(PullRequestState::Closed)
+                        && self
+                            .pull_requests
+                            .last_synced
+                            .get(&group.key)
+                            .is_none_or(|last| now.saturating_sub(*last) >= 900))
             })
             .collect();
         let service = self.pull_requests.service.clone();
@@ -409,78 +490,50 @@ impl AppState {
         cx.spawn_background(async move {
             let mut failures = HashMap::<String, usize>::new();
             for chunk in due.chunks(25) {
-                let mut tasks = Vec::new();
-                for group in chunk {
-                    let key = group.key.clone();
-                    let observations = group.observations.clone();
-                    let forced = group.request.is_some();
-                    let service = service.clone();
-                    let paused = host
-                        .enqueue_and_wait({
-                            let projects = group.projects.clone();
-                            let host_name = key.host.clone();
-                            move |state, _| {
-                                projects.iter().all(|project| {
-                                    state
-                                        .pull_requests
-                                        .paused
-                                        .get(&(project.clone(), host_name.clone()))
-                                        .is_some_and(|until| *until > SystemTime::now())
-                                })
-                            }
-                        })
-                        .await
-                        .unwrap_or(true);
-                    if paused {
-                        continue;
-                    }
-                    let result = host.unblock(move || {
-                        let summary = service.summary(&key, false)?;
-                        let changed = observations.iter().any(|(snapshot, stack)| {
-                            snapshot
-                                .as_ref()
-                                .is_none_or(|s| !s.same_observation(&summary.snapshot))
-                                || match summary.stack_number {
-                                    Some(number) => {
-                                        number
-                                            != match stack {
-                                                PullRequestStackState::Native(stack) => {
-                                                    Some(stack.number)
-                                                }
-                                                _ => None,
-                                            }
-                                    }
-                                    None => false,
-                                }
+                let tasks: Vec<_> = chunk
+                    .iter()
+                    .map(|group| {
+                        let key = group.key.clone();
+                        let observations = group.observations.clone();
+                        let forced = group.request.is_some();
+                        let service = service.clone();
+                        let read = host.unblock(move || {
+                            let summary = service.summary(&key)?;
+                            let changed = observations.iter().any(|(snapshot, stack)| {
+                                let known = match stack {
+                                    PullRequestStackState::Native(stack) => Some(stack.number),
+                                    _ => None,
+                                };
+                                snapshot
+                                    .as_ref()
+                                    .is_none_or(|s| !s.same_observation(&summary.snapshot))
+                                    || summary.stack_number.is_some_and(|number| number != known)
+                            });
+                            let stack = if summary.stack_number == Some(None) {
+                                Some(PullRequestStackState::None)
+                            } else if forced || changed {
+                                Some(service.stack(&key)?)
+                            } else {
+                                None
+                            };
+                            Ok::<_, GitHubError>((summary, stack))
                         });
-                        let stack = if key.host != "github.com" {
-                            Some(PullRequestStackState::Unknown)
-                        } else if summary.stack_number == Some(None) {
-                            Some(PullRequestStackState::None)
-                        } else if forced || changed {
-                            Some(service.stack(&key, false)?)
-                        } else {
-                            None
-                        };
-                        Ok::<_, GitHubError>((summary, stack))
-                    });
-                    tasks.push((
-                        group.key.clone(),
-                        group.projects.clone(),
-                        group.threads.clone(),
-                        group.request,
-                        result,
-                    ));
-                }
-                for (key, project, threads, generation, task) in tasks {
-                    let result = task.await;
+                        (group, read)
+                    })
+                    .collect();
+                for (group, read) in tasks {
+                    let result = read.await;
                     if let Err(error) = &result {
                         *failures.entry(error.to_string()).or_default() += 1;
                     }
+                    let key = group.key.clone();
+                    let projects = group.projects.clone();
+                    let threads = group.threads.clone();
+                    let generation = group.request;
                     let _ = host
                         .enqueue_and_wait(move |state, cx| {
                             state.finish_pull_request_sync(
-                                key, project, threads, generation, result, cx,
+                                key, projects, threads, generation, result, cx,
                             )
                         })
                         .await;
@@ -637,15 +690,16 @@ impl AppState {
             self.save_pull_request_meta(meta, cx);
         }
     }
+    /// `None` sweeps every eligible thread without refresh; otherwise each listed thread
+    /// is discovered with the refresh its trigger asked for.
     pub(super) fn discover_pull_requests(
         &mut self,
-        thread: Option<String>,
-        refresh: bool,
+        threads: Option<HashMap<String, bool>>,
         cx: &mut HostCx,
     ) -> HostTask<()> {
         if self.pull_requests.discovering {
-            if let Some(thread) = thread {
-                self.pull_requests.discover_again.insert(thread);
+            for (thread, refresh) in threads.into_iter().flatten() {
+                *self.pull_requests.discover_again.entry(thread).or_default() |= refresh;
             }
             return cx.spawn_background(async {});
         }
@@ -653,22 +707,27 @@ impl AppState {
         let metas: Vec<_> = self
             .sessions
             .iter()
-            .filter(|meta| thread.as_ref().is_none_or(|id| &meta.id == id))
-            .filter_map(|meta| self.find_meta(&meta.id))
-            .filter(|meta| meta.archived_at.is_none() && meta.settled_at.is_none())
-            .map(|meta| {
+            .filter_map(|meta| match &threads {
+                None => Some((meta, false)),
+                Some(threads) => threads.get(&meta.id).map(|refresh| (meta, *refresh)),
+            })
+            .filter_map(|(meta, refresh)| Some((self.find_meta(&meta.id)?, refresh)))
+            .filter(|(meta, _)| meta.archived_at.is_none() && meta.settled_at.is_none())
+            .map(|(meta, refresh)| {
                 let root = self.pull_request_project_cwd(&meta);
-                (meta, root)
+                (meta, root, refresh)
             })
             .collect();
-        let mut grouped = HashMap::<(PathBuf, PathBuf), Vec<SessionMeta>>::new();
-        for (meta, root) in metas {
+        let mut grouped = HashMap::<(PathBuf, PathBuf), (Vec<SessionMeta>, bool)>::new();
+        for (meta, root, refresh) in metas {
             let cwd = if meta.worktree.is_some() {
                 meta.cwd.clone()
             } else {
                 root.clone()
             };
-            grouped.entry((cwd, root)).or_default().push(meta);
+            let group = grouped.entry((cwd, root)).or_default();
+            group.0.push(meta);
+            group.1 |= refresh;
         }
         let groups: Vec<_> = grouped.into_iter().collect();
         let service = self.pull_requests.service.clone();
@@ -676,9 +735,10 @@ impl AppState {
         cx.spawn_background(async move {
             for chunk in groups.chunks(32) {
                 let mut tasks = Vec::new();
-                for ((cwd, root), metas) in chunk {
+                for ((cwd, root), (metas, refresh)) in chunk {
                     let cwd = cwd.clone();
                     let root = root.clone();
+                    let refresh = *refresh;
                     let service = service.clone();
                     tasks.push((
                         metas.clone(),
@@ -738,15 +798,6 @@ impl AppState {
                                 {
                                     return;
                                 }
-                                if state.pull_requests.discovered.get(&meta.id).is_some_and(
-                                    |(previous, key)| previous == &head && key == &result.key,
-                                ) {
-                                    return;
-                                }
-                                state
-                                    .pull_requests
-                                    .discovered
-                                    .insert(meta.id.clone(), (head, result.key.clone()));
                                 let _ = state.apply_pull_request_link(
                                     &meta.id,
                                     result.key,
@@ -765,11 +816,15 @@ impl AppState {
                     state.pull_requests.discovering = false;
                     let pending = std::mem::take(&mut state.pull_requests.discover_again);
                     if !pending.is_empty() {
-                        state.discover_pull_requests(None, true, cx).detach();
+                        state.discover_pull_requests(Some(pending), cx).detach();
                     }
                 })
                 .await;
         })
+    }
+    pub(super) fn discover_pull_requests_for(&mut self, id: &str, refresh: bool, cx: &mut HostCx) {
+        self.discover_pull_requests(Some(HashMap::from([(id.to_owned(), refresh)])), cx)
+            .detach();
     }
     pub(super) fn observe_pull_request_event(
         &mut self,
@@ -779,25 +834,50 @@ impl AppState {
     ) {
         if let AgentEvent::ItemStarted(item) | AgentEvent::ItemCompleted(item) = event
             && let ItemContent::CommandExecution { command, .. } = &item.content
+            && merges_or_closes(command)
         {
-            let words: Vec<_> = command.split_whitespace().collect();
-            if words.windows(3).any(|words| {
-                words[0] == "gh" && words[1] == "pr" && matches!(words[2], "merge" | "close")
-            }) {
-                self.pull_requests.merge_commands.insert(id.to_owned());
-            }
+            self.pull_requests.merge_commands.insert(id.to_owned());
         }
         if matches!(
             event,
             AgentEvent::TurnCompleted { .. } | AgentEvent::TurnCheckpoint { .. }
         ) {
             if self.pull_requests.merge_commands.remove(id) {
-                self.refresh_thread_pull_requests(id, cx);
+                self.refresh_open_pull_requests(id, cx);
             }
-            self.discover_pull_requests(Some(id.to_owned()), true, cx)
-                .detach();
+            self.discover_pull_requests_for(id, true, cx);
         }
     }
+}
+
+/// Upstream's `\b(?:gh\s+pr|glab\s+mr)\s+(?:merge|close)\b` over the raw command text.
+fn merges_or_closes(command: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let spaced = |text: &'static str| {
+        move |rest: &str| -> Option<usize> {
+            let trimmed = rest.trim_start();
+            (trimmed.len() < rest.len() && trimmed.starts_with(text))
+                .then(|| rest.len() - trimmed.len() + text.len())
+        }
+    };
+    command.char_indices().any(|(start, _)| {
+        if command[..start].ends_with(word) {
+            return false;
+        }
+        let rest = &command[start..];
+        let Some(rest) = [("gh", "pr"), ("glab", "mr")]
+            .into_iter()
+            .find_map(|(tool, noun)| {
+                let after = rest.strip_prefix(tool)?;
+                Some(&after[spaced(noun)(after)?..])
+            })
+        else {
+            return false;
+        };
+        ["merge", "close"]
+            .into_iter()
+            .any(|verb| spaced(verb)(rest).is_some_and(|end| !rest[end..].starts_with(word)))
+    })
 }
 
 #[cfg(test)]

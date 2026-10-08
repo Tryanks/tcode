@@ -11,8 +11,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tcode_core::pull_request::{
-    PullRequestAuthor, PullRequestKey, PullRequestSnapshot, PullRequestStack,
-    PullRequestStackLayer, PullRequestStackState, PullRequestState,
+    ChecksState, Mergeability, PullRequestAuthor, PullRequestKey, PullRequestSnapshot,
+    PullRequestStack, PullRequestStackLayer, PullRequestStackState, PullRequestState,
+    ReviewDecision,
 };
 
 #[derive(Debug, Clone)]
@@ -78,11 +79,10 @@ impl<K: Clone, V> Batcher<K, V> {
 }
 
 #[derive(Debug, Clone)]
-pub struct HeadRequest {
-    pub head: String,
-    pub owner: Option<String>,
-    pub open_only: bool,
-    pub limit: usize,
+struct HeadRequest {
+    head: String,
+    owner: String,
+    open_only: bool,
 }
 #[derive(Debug, Clone)]
 pub struct HeadPullRequest {
@@ -99,7 +99,7 @@ struct CachedBranch {
 pub struct PullRequests {
     api: Arc<GitHubApi>,
     summaries: Batcher<PullRequestKey, Summary>,
-    heads: Batcher<HeadRequest, Vec<HeadPullRequest>>,
+    heads: Batcher<HeadRequest, Option<HeadPullRequest>>,
     branches: Mutex<HashMap<BranchHead, CachedBranch>>,
 }
 impl PullRequests {
@@ -111,12 +111,11 @@ impl PullRequests {
             branches: Mutex::new(HashMap::new()),
         })
     }
-    pub fn summary(&self, key: &PullRequestKey, interactive: bool) -> Result<Summary, GitHubError> {
+    pub fn summary(&self, key: &PullRequestKey) -> Result<Summary, GitHubError> {
         let credential = self.api.credentials().get(&key.host)?;
-        let group = format!("{}\0{}\0{interactive}", key.host, credential.fingerprint);
+        let group = format!("{}\0{}", key.host, credential.fingerprint);
         let options = RequestOptions {
             authentication: Authentication::Pinned(credential),
-            interactive,
             operation: "PullRequestSummaries",
             ..Default::default()
         };
@@ -163,7 +162,21 @@ impl PullRequests {
         let selection = format!(
             "number title url state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt headRefName baseRefName author {{ login avatarUrl }} latestReviews(first: 20) {{ nodes {{ state author {{ login }} }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }}{stacks}"
         );
-        let document = graphql::aliases("query", "PullRequestSummaries", "s", &items.ok_or(GitHubError::Request)?, &Variables::new(), |v| format!("repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {selection} }} }}", v["owner"], v["name"], v["number"]), |fields| fields).ok_or(GitHubError::Request)?;
+        let document = graphql::aliases(
+            "query",
+            "PullRequestSummaries",
+            "s",
+            &items.ok_or(GitHubError::Request)?,
+            &Variables::new(),
+            |v| {
+                format!(
+                    "repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {selection} }} }}",
+                    v["owner"], v["name"], v["number"]
+                )
+            },
+            |fields| fields,
+        )
+        .ok_or(GitHubError::Request)?;
         let response: Value = self.api.graphql(host, &document, options)?.json()?;
         Ok(keys
             .iter()
@@ -207,11 +220,7 @@ impl PullRequests {
             .map(|result| result.unwrap())
             .collect()
     }
-    pub fn stack(
-        &self,
-        key: &PullRequestKey,
-        interactive: bool,
-    ) -> Result<PullRequestStackState, GitHubError> {
+    pub fn stack(&self, key: &PullRequestKey) -> Result<PullRequestStackState, GitHubError> {
         if key.host != "github.com" {
             return Ok(PullRequestStackState::Unknown);
         }
@@ -224,7 +233,6 @@ impl PullRequests {
             &key.host,
             RestRequest::get(&path),
             &RequestOptions {
-                interactive,
                 operation: "PullRequestStack",
                 ..Default::default()
             },
@@ -242,43 +250,36 @@ impl PullRequests {
             .map(PullRequestStackState::Native)
             .ok_or(GitHubError::InvalidResponse)
     }
-    pub fn by_head(
+    fn by_head(
         &self,
         repository: &Repository,
         request: HeadRequest,
-        interactive: bool,
-    ) -> Result<Vec<HeadPullRequest>, GitHubError> {
+    ) -> Result<Option<HeadPullRequest>, GitHubError> {
         let credential = self.api.credentials().get(&repository.host)?;
         let group = format!(
-            "{}\0{}\0{}\0{}\0{interactive}",
+            "{}\0{}\0{}\0{}",
             repository.host, repository.owner, repository.name, credential.fingerprint
         );
         let options = RequestOptions {
             authentication: Authentication::Pinned(credential),
-            interactive,
             operation: "PullRequestsByHead",
             ..Default::default()
         };
-        self.heads.read(
-            group,
-            request,
-            if interactive { 50 } else { 25 },
-            Duration::from_millis(if interactive { 50 } else { 500 }),
-            |requests| {
+        self.heads
+            .read(group, request, 25, Duration::from_millis(500), |requests| {
                 let result = self.read_heads(repository, requests, &options);
                 match result {
                     Ok(rows) => rows.into_iter().map(Ok).collect(),
                     Err(error) => requests.iter().map(|_| Err(error.clone())).collect(),
                 }
-            },
-        )
+            })
     }
     fn read_heads(
         &self,
         repository: &Repository,
         requests: &[HeadRequest],
         options: &RequestOptions,
-    ) -> Result<Vec<Vec<HeadPullRequest>>, GitHubError> {
+    ) -> Result<Vec<Option<HeadPullRequest>>, GitHubError> {
         let mut declarations = vec!["$owner: String!".to_owned(), "$name: String!".to_owned()];
         let mut variables = std::collections::BTreeMap::from([
             ("owner".into(), json!(repository.owner)),
@@ -299,12 +300,8 @@ impl PullRequests {
                     json!(["OPEN", "CLOSED", "MERGED"])
                 },
             );
-            let limit = if request.owner.is_some() {
-                100
-            } else {
-                request.limit.clamp(1, 100)
-            };
-            fields.push(format!("h{index}: pullRequests(headRefName: $h{index}, states: $s{index}, first: {limit}, orderBy: {{ field: CREATED_AT, direction: DESC }}) {{ nodes {{ number title url baseRefName headRefName headRefOid state isDraft mergedAt closedAt updatedAt isCrossRepository headRepository {{ name nameWithOwner }} headRepositoryOwner {{ login }} }} }}"));
+            // GitHub cannot filter by head owner, so scan 100 same-named heads for the owner's.
+            fields.push(format!("h{index}: pullRequests(headRefName: $h{index}, states: $s{index}, first: 100, orderBy: {{ field: CREATED_AT, direction: DESC }}) {{ nodes {{ number title url baseRefName headRefName headRefOid state isDraft mergedAt closedAt updatedAt isCrossRepository headRepository {{ name nameWithOwner }} headRepositoryOwner {{ login }} }} }}"));
         }
         let document = graphql::Document {
             query: format!(
@@ -330,13 +327,11 @@ impl PullRequests {
                     .into_iter()
                     .flatten()
                     .filter(|row| {
-                        request.owner.as_ref().is_none_or(|owner| {
-                            row["headRepositoryOwner"]["login"]
-                                .as_str()
-                                .is_some_and(|login| owner.eq_ignore_ascii_case(login))
-                        })
+                        row["headRepositoryOwner"]["login"]
+                            .as_str()
+                            .is_some_and(|login| request.owner.eq_ignore_ascii_case(login))
                     })
-                    .filter_map(|row| {
+                    .find_map(|row| {
                         let (key, url) = pull_request_url(row["url"].as_str()?)?;
                         Some(HeadPullRequest {
                             key,
@@ -344,8 +339,6 @@ impl PullRequests {
                             state: state(row)?,
                         })
                     })
-                    .take(request.limit.clamp(1, 100))
-                    .collect()
             })
             .collect())
     }
@@ -372,23 +365,16 @@ impl PullRequests {
         };
         let request = |open_only| HeadRequest {
             head: head.head_branch.clone(),
-            owner: Some(head.head_owner.clone()),
+            owner: head.head_owner.clone(),
             open_only,
-            limit: 1,
         };
         let result = self
-            .by_head(&head.repository, request(true), false)
-            .and_then(|rows| {
-                if let Some(row) = rows.into_iter().next() {
-                    Ok(Some(row))
-                } else {
-                    self.by_head(&head.repository, request(false), false)
-                        .map(|rows| {
-                            rows.into_iter().next().filter(|row| {
-                                !head.default_branch || row.state == PullRequestState::Open
-                            })
-                        })
-                }
+            .by_head(&head.repository, request(true))
+            .and_then(|row| match row {
+                Some(row) => Ok(Some(row)),
+                None => self.by_head(&head.repository, request(false)).map(|row| {
+                    row.filter(|row| !head.default_branch || row.state == PullRequestState::Open)
+                }),
             });
         let failures = if result.is_err() {
             failures.saturating_add(1)
@@ -448,12 +434,11 @@ fn decode_summary(raw: &Value, key: &PullRequestKey) -> Option<Summary> {
         .and_then(|rows| rows.last())
         .and_then(|row| row["commit"]["statusCheckRollup"]["state"].as_str())
         .and_then(|state| match state {
-            "SUCCESS" => Some("passing"),
-            "FAILURE" | "ERROR" => Some("failing"),
-            "PENDING" | "EXPECTED" => Some("pending"),
+            "SUCCESS" => Some(ChecksState::Passing),
+            "FAILURE" | "ERROR" => Some(ChecksState::Failing),
+            "PENDING" | "EXPECTED" => Some(ChecksState::Pending),
             _ => None,
-        })
-        .map(str::to_owned);
+        });
     Some(Summary {
         snapshot: PullRequestSnapshot {
             state: state(raw)?,
@@ -477,7 +462,11 @@ fn decode_summary(raw: &Value, key: &PullRequestKey) -> Option<Summary> {
             changed_files: raw["changedFiles"].as_u64().unwrap_or(0),
             review_decision: review_decision(raw),
             checks_state: checks,
-            mergeability: string(raw, "mergeable").map(|s| s.to_ascii_lowercase()),
+            mergeability: match raw["mergeable"].as_str() {
+                Some("MERGEABLE") => Mergeability::Clean,
+                Some("CONFLICTING") => Mergeability::Conflicting,
+                _ => Mergeability::Unknown,
+            },
         },
         stack_number: raw.get("stack").map(|stack| stack["number"].as_u64()),
     })
@@ -515,22 +504,25 @@ fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullRequestStack
     })
 }
 
-fn review_decision(raw: &Value) -> Option<String> {
+fn review_decision(raw: &Value) -> Option<ReviewDecision> {
     let decision = match raw["reviewDecision"].as_str() {
-        Some("APPROVED") => Some("approved"),
-        Some("CHANGES_REQUESTED") => Some("changes-requested"),
-        Some("REVIEW_REQUIRED") => Some("review-required"),
+        Some("APPROVED") => Some(ReviewDecision::Approved),
+        Some("CHANGES_REQUESTED") => Some(ReviewDecision::ChangesRequested),
+        Some("REVIEW_REQUIRED") => Some(ReviewDecision::Required),
         _ => None,
     };
-    if matches!(decision, Some("approved" | "changes-requested")) {
-        return decision.map(str::to_owned);
+    if matches!(
+        decision,
+        Some(ReviewDecision::Approved | ReviewDecision::ChangesRequested)
+    ) {
+        return decision;
     }
     let reviews = raw["latestReviews"]["nodes"].as_array();
     if reviews.is_some_and(|rows| rows.iter().any(|row| row["state"] == "CHANGES_REQUESTED")) {
-        Some("changes-requested".into())
+        Some(ReviewDecision::ChangesRequested)
     } else if reviews.is_some_and(|rows| rows.iter().any(|row| row["state"] == "APPROVED")) {
-        Some("approved".into())
+        Some(ReviewDecision::Approved)
     } else {
-        decision.map(str::to_owned)
+        decision
     }
 }

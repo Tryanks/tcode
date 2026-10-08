@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// Prepended to each turn while the pull request tools are registered; the transcript shows it.
+pub const LINKING_INSTRUCTIONS: &str = "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests .\n</pull_request_linking>\n\n";
+
+/// The rest of a turn's injected context when it leads with [`LINKING_INSTRUCTIONS`].
+pub fn strip_linking_instructions(context: &str) -> Option<&str> {
+    context.strip_prefix(LINKING_INSTRUCTIONS)
+}
+
 /// `repository` is a canonical locator supplied by the forge adapter, opaque to core.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PullRequestKey {
@@ -39,13 +47,39 @@ pub enum PullRequestSource {
     Created,
     Agent,
     Stack,
-    StackDismissed,
+    /// A key-only tombstone left by every unlink, so sync and discovery never relink it.
+    Dismissed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestAuthor {
     pub login: String,
     pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksState {
+    Passing,
+    Failing,
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    Required,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mergeability {
+    Clean,
+    Conflicting,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,9 +97,10 @@ pub struct PullRequestSnapshot {
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
-    pub review_decision: Option<String>,
-    pub checks_state: Option<String>,
-    pub mergeability: Option<String>,
+    pub review_decision: Option<ReviewDecision>,
+    pub checks_state: Option<ChecksState>,
+    #[serde(default)]
+    pub mergeability: Mergeability,
 }
 
 impl PullRequestSnapshot {
@@ -126,8 +161,6 @@ pub struct ThreadPullRequestLink {
     #[serde(default, skip_serializing_if = "is_unknown")]
     pub stack: PullRequestStackState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub watch: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_error: Option<PullRequestSyncError>,
 }
 
@@ -137,18 +170,7 @@ fn is_unknown(stack: &PullRequestStackState) -> bool {
 
 impl ThreadPullRequestLink {
     pub fn visible(&self) -> bool {
-        self.source != PullRequestSource::StackDismissed
-    }
-
-    pub fn position(&self) -> Option<(usize, usize)> {
-        let PullRequestStackState::Native(stack) = &self.stack else {
-            return None;
-        };
-        stack
-            .layers
-            .iter()
-            .position(|layer| layer.number == self.key.number)
-            .map(|index| (index + 1, stack.layers.len()))
+        self.source != PullRequestSource::Dismissed
     }
 }
 
@@ -171,7 +193,6 @@ pub fn link_pull_request(
             linked_at: Some(now),
             snapshot: None,
             stack: PullRequestStackState::Unknown,
-            watch: None,
             sync_error: None,
         };
     } else {
@@ -182,38 +203,29 @@ pub fn link_pull_request(
             linked_at: Some(now),
             snapshot: None,
             stack: PullRequestStackState::Unknown,
-            watch: None,
             sync_error: None,
         });
     }
     true
 }
 
-pub fn unlink_pull_request(links: &mut Vec<ThreadPullRequestLink>, key: &PullRequestKey) -> bool {
-    let Some(index) = links
-        .iter()
-        .position(|link| &link.key == key && link.visible())
+/// Leaves a key-only tombstone, which only an explicit link restores.
+pub fn unlink_pull_request(links: &mut [ThreadPullRequestLink], key: &PullRequestKey) -> bool {
+    let Some(link) = links
+        .iter_mut()
+        .find(|link| &link.key == key && link.visible())
     else {
         return false;
     };
-    let stacked = links[index].source == PullRequestSource::Stack || links.iter().any(|link| {
-        link.key.host == key.host && link.key.repository == key.repository &&
-            matches!(&link.stack, PullRequestStackState::Native(stack) if stack.layers.iter().any(|layer| layer.number == key.number))
-    });
-    if stacked {
-        links[index] = ThreadPullRequestLink {
-            key: key.clone(),
-            source: PullRequestSource::StackDismissed,
-            url: String::new(),
-            linked_at: None,
-            snapshot: None,
-            stack: PullRequestStackState::Unknown,
-            watch: None,
-            sync_error: None,
-        };
-    } else {
-        links.remove(index);
-    }
+    *link = ThreadPullRequestLink {
+        key: key.clone(),
+        source: PullRequestSource::Dismissed,
+        url: String::new(),
+        linked_at: None,
+        snapshot: None,
+        stack: PullRequestStackState::Unknown,
+        sync_error: None,
+    };
     true
 }
 
@@ -407,21 +419,6 @@ pub fn groups(links: &[ThreadPullRequestLink]) -> Vec<PullRequestGroup<'_>> {
     groups
 }
 
-pub fn current_pull_request(links: &[ThreadPullRequestLink]) -> Option<&ThreadPullRequestLink> {
-    let groups = groups(links);
-    let open = |link: &&ThreadPullRequestLink| {
-        link.snapshot
-            .as_ref()
-            .is_none_or(|s| s.state == PullRequestState::Open)
-    };
-    groups
-        .iter()
-        .flat_map(|group| group.links.iter().rev())
-        .find(|link| open(link))
-        .copied()
-        .or_else(|| groups.first().and_then(|group| group.links.last().copied()))
-}
-
 /// A menu visibility hint only; the host forge adapter validates and canonicalizes the target.
 pub fn is_pull_request_url(value: &str) -> bool {
     let value = value.split(['?', '#']).next().unwrap_or_default();
@@ -432,7 +429,13 @@ pub fn is_pull_request_url(value: &str) -> bool {
         return false;
     };
     let parts: Vec<_> = rest.split('/').collect();
-    matches!(parts.as_slice(), [host,owner,repository,"pull",number,..] if !host.is_empty() && !owner.is_empty() && !repository.is_empty() && number.parse::<u64>().is_ok_and(|number| number > 0))
+    let [host, owner, repository, "pull", number, ..] = parts.as_slice() else {
+        return false;
+    };
+    !host.is_empty()
+        && !owner.is_empty()
+        && !repository.is_empty()
+        && number.parse::<u64>().is_ok_and(|number| number > 0)
 }
 
 #[cfg(test)]
@@ -460,10 +463,9 @@ mod tests {
                 changed_files: 0,
                 review_decision: None,
                 checks_state: None,
-                mergeability: None,
+                mergeability: Mergeability::Unknown,
             }),
             stack: PullRequestStackState::Unknown,
-            watch: None,
             sync_error: None,
         }
     }
@@ -526,7 +528,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
-        links[1].source = PullRequestSource::StackDismissed;
+        links[1].source = PullRequestSource::Dismissed;
         assert_eq!(badge(&links), Some((Badge::Open, 2, false)));
         assert!(is_pull_request_url(
             "https://github.com/sample/project/pull/123/files"

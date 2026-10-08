@@ -721,8 +721,7 @@ impl Timeline {
                 self.turn_running = true;
                 self.last_turn_status = None;
             }
-            AgentEvent::McpServersRegistered { .. }
-            | AgentEvent::TurnAccepted { .. }
+            AgentEvent::TurnAccepted { .. }
             | AgentEvent::BackgroundTasksChanged { .. }
             | AgentEvent::ModelFallbackDetected { .. }
             | AgentEvent::TurnBlocked { .. } => {}

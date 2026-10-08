@@ -18,7 +18,22 @@ struct HostReply {
     requests: Vec<Value>,
 }
 fn pr(number: u64, state: &str, stack: bool) -> Value {
-    json!({"number":number,"url":format!("https://github.com/sample/project/pull/{number}"),"title":format!("Change {number}"),"state":state,"isDraft":false,"headRefName":format!("layer-{number}"),"baseRefName":"main","updatedAt":"2026-10-08T00:00:00Z","additions":3,"deletions":1,"changedFiles":1,"reviewDecision":"APPROVED","mergeable":"MERGEABLE","stack":if stack {json!({"number":7})}else{Value::Null}})
+    json!({
+        "number": number,
+        "url": format!("https://github.com/sample/project/pull/{number}"),
+        "title": format!("Change {number}"),
+        "state": state,
+        "isDraft": false,
+        "headRefName": format!("layer-{number}"),
+        "baseRefName": "main",
+        "updatedAt": "2026-10-08T00:00:00Z",
+        "additions": 3,
+        "deletions": 1,
+        "changedFiles": 1,
+        "reviewDecision": "APPROVED",
+        "mergeable": "MERGEABLE",
+        "stack": if stack { json!({"number": 7}) } else { Value::Null },
+    })
 }
 fn client(store: &SessionStore, fixture: &fixture::Fixture) -> Arc<GitHubApi> {
     GitHubApi::new(
@@ -55,6 +70,32 @@ fn sweep(state: &TestEntity, cx: &mut TestAppContext) {
     cx.run_until(|state| !state.pull_requests.syncing);
 }
 
+fn linked(id: &str, number: u64, settled: bool) -> SessionMeta {
+    let mut meta = linked_meta(id, settled);
+    meta.pull_requests[0].key.number = number;
+    meta.pull_requests[0].url = format!("https://github.com/sample/project/pull/{number}");
+    meta
+}
+fn command(command: &str) -> AgentEvent {
+    AgentEvent::ItemCompleted(ThreadItem {
+        id: "command".into(),
+        parent_item_id: None,
+        content: ItemContent::CommandExecution {
+            command: command.into(),
+            output: String::new(),
+            exit_code: Some(0),
+            status: ItemStatus::Completed,
+        },
+    })
+}
+fn turn_completed() -> AgentEvent {
+    AgentEvent::TurnCompleted {
+        turn_id: "turn".into(),
+        status: TurnStatus::Completed,
+        usage: None,
+    }
+}
+
 #[test]
 fn shared_sync_changes_only_observations_and_honors_terminal_cadence() {
     let store = TestStore::new("tcode-pr-sync");
@@ -81,28 +122,52 @@ fn shared_sync_changes_only_observations_and_honors_terminal_cadence() {
         }
         exchange.reply(200, "", &serde_json::to_vec(&json!({"data":data})).unwrap());
     });
+    let read_numbers = || -> Vec<u64> {
+        response
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .flat_map(|sent| {
+                sent["variables"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(name, _)| name.ends_with("_number"))
+                    .map(|(_, number)| number.as_u64().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(&mut cx, |state, _| {
         state.pull_requests = PullRequestRuntime::new(api);
-        for meta in [linked_meta("active", false), linked_meta("settled", true)] {
+        for meta in [
+            linked("active", 1, false),
+            linked("settled", 1, true),
+            linked("settled-alone", 2, true),
+        ] {
             store.upsert_meta(&meta).unwrap();
             state.sessions.push(meta);
         }
     });
     sweep(&state, &mut cx);
     assert_eq!(
-        response.lock().unwrap().requests.len(),
-        1,
+        read_numbers(),
+        vec![1],
         "a PR shared by two threads needs one read"
     );
     let first = store.load_index().unwrap();
-    assert!(first.iter().all(|meta| {
-        meta.pull_requests[0]
-            .snapshot
-            .as_ref()
-            .is_some_and(|s| s.state == PullRequestState::Open)
-    }));
+    for id in ["active", "settled"] {
+        assert!(first.iter().any(|meta| {
+            meta.id == id
+                && meta.pull_requests[0]
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.state == PullRequestState::Open)
+        }));
+    }
     sweep(&state, &mut cx);
     assert_eq!(
         store.load_index().unwrap(),
@@ -110,67 +175,98 @@ fn shared_sync_changes_only_observations_and_honors_terminal_cadence() {
         "unchanged state must preserve activity, unread state and synced_at"
     );
     response.lock().unwrap().state = "CLOSED";
-    sweep(&state, &mut cx);
-    let closed_reads = response.lock().unwrap().requests.len();
-    sweep(&state, &mut cx);
-    assert_eq!(response.lock().unwrap().requests.len(), closed_reads);
-    state.update(&mut cx, |state, _| {
-        state.pull_requests.last_synced.insert(
-            PullRequestKey::new("github.com", "sample/project", 1),
-            now_secs() - 900,
-        );
-    });
-    sweep(&state, &mut cx);
-    assert_eq!(response.lock().unwrap().requests.len(), closed_reads + 1);
-    response.lock().unwrap().state = "MERGED";
     state.update(&mut cx, |state, cx| {
-        state.refresh_thread_pull_requests("active", cx)
+        state.on_event("active", command("cd project&&gh pr close 1"), cx);
+        state.on_event("active", turn_completed(), cx);
     });
     cx.run_until(|state| {
         !state.pull_requests.syncing
             && state.find_meta("active").unwrap().pull_requests[0]
                 .snapshot
                 .as_ref()
-                .unwrap()
-                .state
-                == PullRequestState::Merged
+                .is_some_and(|s| s.state == PullRequestState::Closed)
     });
-    let merged_reads = response.lock().unwrap().requests.len();
+    let closed_reads = read_numbers().len();
     sweep(&state, &mut cx);
-    assert_eq!(response.lock().unwrap().requests.len(), merged_reads);
-    state.update(&mut cx, |state, cx| {
-        state.unlink_pull_request(
-            "active",
-            &PullRequestKey::new("github.com", "sample/project", 1),
-            cx,
-        )
-    });
+    assert_eq!(read_numbers().len(), closed_reads);
+    let fifteen_minutes_pass = |state: &TestEntity, cx: &mut TestAppContext| {
+        state.update(cx, |state, _| {
+            state.pull_requests.last_synced.insert(
+                PullRequestKey::new("github.com", "sample/project", 1),
+                now_secs() - 900,
+            );
+        })
+    };
+    fifteen_minutes_pass(&state, &mut cx);
+    response.lock().unwrap().state = "MERGED";
     sweep(&state, &mut cx);
-    assert!(state.read(|state| state.find_meta("active").unwrap().pull_requests.is_empty()));
-    assert_eq!(
-        response.lock().unwrap().requests.len(),
-        merged_reads,
-        "settled-only links are not independently due"
+    assert_eq!(read_numbers().len(), closed_reads + 1);
+    assert!(state.read(|state| {
+        state.find_meta("active").unwrap().pull_requests[0]
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.state == PullRequestState::Merged)
+    }));
+    fifteen_minutes_pass(&state, &mut cx);
+    sweep(&state, &mut cx);
+    assert_eq!(read_numbers().len(), closed_reads + 1, "merged stops reads");
+    assert!(
+        !read_numbers().contains(&2),
+        "a settled thread's open or unsynced link nobody shares is not independently due"
     );
+    assert!(state.read(|state| {
+        state.find_meta("settled-alone").unwrap().pull_requests[0]
+            .snapshot
+            .is_none()
+    }));
 }
 
 #[test]
-fn native_stack_sync_preserves_dismissals_and_explicit_restore_has_no_watch() {
+fn merge_or_close_detection_matches_words_in_the_raw_command() {
+    for command in [
+        "gh pr merge 12 --squash",
+        "cd repo && gh pr close 3",
+        "(gh  pr\tmerge)",
+        "glab mr merge 4",
+    ] {
+        assert!(merges_or_closes(command), "{command}");
+    }
+    for command in [
+        "gh pr view 12",
+        "ugh pr merge",
+        "gh pr merged",
+        "gh prmerge",
+        "echo gh pr",
+    ] {
+        assert!(!merges_or_closes(command), "{command}");
+    }
+}
+
+#[test]
+fn native_stack_sync_preserves_dismissals_and_explicit_restore() {
     let store = TestStore::new("tcode-pr-stack");
     let fixture = fixture::Fixture::new();
     let api = client(&store, &fixture);
     let _server = fixture.serve(|exchange| {
         if exchange.request.starts_with("GET ") {
-            exchange.reply(200,"",br#"[{"id":"stack-7","number":7,"url":"https://github.com/sample/project/stack/7","base":{"ref":"main"},"pull_requests":[{"number":1,"head":{"ref":"layer-1"},"state":"merged"},{"number":2,"head":{"ref":"layer-2"},"state":"open"}]}]"#);
+            exchange.reply(
+                200,
+                "",
+                br#"[{"id":"stack-7","number":7,"url":"https://github.com/sample/project/stack/7","base":{"ref":"main"},"pull_requests":[{"number":1,"head":{"ref":"layer-1"},"state":"merged"},{"number":2,"head":{"ref":"layer-2"},"state":"open"}]}]"#,
+            );
         } else {
             let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
             let mut data = serde_json::Map::new();
-            for (name,number) in sent["variables"].as_object().unwrap() {
+            for (name, number) in sent["variables"].as_object().unwrap() {
                 if let Some(alias) = name.strip_suffix("_number") {
-                    data.insert(alias.into(),json!({"pullRequest":pr(number.as_u64().unwrap(), if number == 1 {"MERGED"}else{"OPEN"},true)}));
+                    let state = if number == 1 { "MERGED" } else { "OPEN" };
+                    data.insert(
+                        alias.into(),
+                        json!({"pullRequest": pr(number.as_u64().unwrap(), state, true)}),
+                    );
                 }
             }
-            exchange.reply(200,"", &serde_json::to_vec(&json!({"data":data})).unwrap());
+            exchange.reply(200, "", &serde_json::to_vec(&json!({"data":data})).unwrap());
         }
     });
     let mut cx = TestAppContext::default();
@@ -179,56 +275,58 @@ fn native_stack_sync_preserves_dismissals_and_explicit_restore_has_no_watch() {
         state.pull_requests = PullRequestRuntime::new(api);
         state
             .sessions
-            .extend([linked_meta("active", false), linked_meta("settled", true)]);
+            .extend([linked_meta("active", false), linked("settled", 2, true)]);
     });
+    let settle_requests = |cx: &mut TestAppContext| {
+        cx.run_until(|state| {
+            !state.pull_requests.syncing
+                && !state.pull_requests.sync_scheduled
+                && state.pull_requests.requested.is_empty()
+        })
+    };
     sweep(&state, &mut cx);
-    cx.run_until(|state| !state.pull_requests.syncing);
+    settle_requests(&mut cx);
     assert_eq!(
         state.read(|state| state.find_meta("active").unwrap().pull_requests.len()),
         2
     );
-    assert_eq!(
-        state.read(|state| state.find_meta("settled").unwrap().pull_requests.len()),
-        1,
+    let settled = state.read(|state| state.find_meta("settled").unwrap().pull_requests);
+    assert!(
+        settled.len() == 1 && settled[0].snapshot.is_some(),
         "settled threads receive the snapshot without installing siblings"
     );
     state.update(&mut cx, |state, cx| {
         let mut meta = state.find_meta("settled").unwrap();
         meta.settled_at = None;
         state.save_pull_request_meta(meta, cx);
-        state.refresh_thread_pull_requests("settled", cx);
     });
-    cx.run_until(|state| !state.pull_requests.syncing && state.pull_requests.requested.is_empty());
+    sweep(&state, &mut cx);
+    settle_requests(&mut cx);
     assert_eq!(
         state.read(|state| state.find_meta("settled").unwrap().pull_requests.len()),
         2,
-        "unchanged known topology expands when the thread becomes unsettled"
+        "known topology expands on the next read once the thread is unsettled"
     );
     let key = PullRequestKey::new("github.com", "sample/project", 2);
+    let layer = |state: &TestEntity| {
+        state.read(|state| {
+            state
+                .find_meta("active")
+                .unwrap()
+                .pull_requests
+                .into_iter()
+                .find(|link| link.key == key)
+                .unwrap()
+        })
+    };
     state.update(&mut cx, |state, cx| {
-        let mut meta = state.find_meta("active").unwrap();
-        meta.pull_requests
-            .iter_mut()
-            .find(|link| link.key == key)
-            .unwrap()
-            .watch = Some(json!({"id":"old-watch"}));
-        state.save_pull_request_meta(meta, cx);
         state.unlink_pull_request("active", &key, cx);
-        state.refresh_thread_pull_requests("active", cx);
     });
-    cx.run_until(|state| !state.pull_requests.syncing && state.pull_requests.requested.is_empty());
-    let dismissed = state.read(|state| {
-        state
-            .find_meta("active")
-            .unwrap()
-            .pull_requests
-            .into_iter()
-            .find(|link| link.key == key)
-            .unwrap()
-    });
+    sweep(&state, &mut cx);
+    settle_requests(&mut cx);
     assert_eq!(
-        serde_json::to_value(&dismissed).unwrap(),
-        json!({"key":{"host":"github.com","repository":"sample/project","number":2},"source":"stack_dismissed"})
+        serde_json::to_value(layer(&state)).unwrap(),
+        json!({"key":{"host":"github.com","repository":"sample/project","number":2},"source":"dismissed"})
     );
     state.update(&mut cx, |state, cx| {
         state
@@ -242,17 +340,10 @@ fn native_stack_sync_preserves_dismissals_and_explicit_restore_has_no_watch() {
             )
             .unwrap()
     });
-    cx.run_until(|state| !state.pull_requests.syncing && state.pull_requests.requested.is_empty());
-    let restored = state.read(|state| {
-        state
-            .find_meta("active")
-            .unwrap()
-            .pull_requests
-            .into_iter()
-            .find(|link| link.key == key)
-            .unwrap()
-    });
-    assert!(restored.visible() && restored.watch.is_none() && restored.snapshot.is_some());
+    settle_requests(&mut cx);
+    let restored = layer(&state);
+    assert!(restored.visible() && restored.snapshot.is_some());
+    assert_eq!(restored.source, PullRequestSource::Manual);
     assert!(matches!(
         restored.stack,
         PullRequestStackState::Native(PullRequestStack { number: 7, .. })
@@ -264,13 +355,14 @@ fn rate_limit_keeps_requests_due_until_host_pause_expires() {
     let store = TestStore::new("tcode-pr-paused");
     let fixture = fixture::Fixture::new();
     let api = client(&store, &fixture);
+    let unpaused_api = client(&store, &fixture);
     let calls = Arc::new(Mutex::new(0));
     let serving = calls.clone();
     let _server = fixture.serve(move |exchange| {
         let mut calls = serving.lock().unwrap();
         *calls += 1;
         if *calls == 1 {
-            exchange.reply(429, "retry-after: 1\r\n", b"{}");
+            exchange.reply(429, "retry-after: 3600\r\n", b"{}");
         } else {
             exchange.reply(
                 200,
@@ -282,43 +374,51 @@ fn rate_limit_keeps_requests_due_until_host_pause_expires() {
     });
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let key = PullRequestKey::new("github.com", "sample/project", 1);
     state.update(&mut cx, |state, cx| {
         state.pull_requests = PullRequestRuntime::new(api);
-        state.sessions.push(linked_meta("active", false));
-        state.refresh_thread_pull_requests("active", cx);
+        let mut meta = linked_meta("active", false);
+        meta.pull_requests.clear();
+        state.sessions.push(meta);
+        state
+            .apply_pull_request_link(
+                "active",
+                key.clone(),
+                "https://github.com/sample/project/pull/1".into(),
+                PullRequestSource::Manual,
+                true,
+                cx,
+            )
+            .unwrap();
     });
     cx.run_until(|state| !state.pull_requests.syncing && !state.pull_requests.paused.is_empty());
     assert!(state.read(|state| matches!(
         state.find_meta("active").unwrap().pull_requests[0].sync_error,
-        Some(PullRequestSyncError::RateLimited { .. })
+        Some(PullRequestSyncError::RateLimited { retry_at }) if retry_at >= now_secs() + 3_500
     )));
     sweep(&state, &mut cx);
-    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(*calls.lock().unwrap(), 1, "a paused group makes no request");
     assert!(state.read(|state| {
         state.find_meta("active").unwrap().pull_requests[0]
             .snapshot
             .is_none()
-            && !state.pull_requests.requested.is_empty()
+            && state.pull_requests.requested.contains_key(&key)
     }));
-    state.update(&mut cx, |state, cx| {
-        let until = *state.pull_requests.paused.values().next().unwrap();
-        let host = cx.clone();
-        cx.spawn_detached(async move {
-            smol::Timer::after(until.duration_since(SystemTime::now()).unwrap_or_default()).await;
-            host.enqueue(|state, cx| state.sweep_pull_requests(true, cx).detach());
-        });
+    // The hour passes: both the runtime's group pause and the transport's host pause
+    // (private to a client, so a client whose pause has elapsed) are behind the clock.
+    state.update(&mut cx, |state, _| {
+        for until in state.pull_requests.paused.values_mut() {
+            *until = SystemTime::now() - Duration::from_secs(1);
+        }
+        state.pull_requests.service = PullRequests::new(unpaused_api);
     });
-    cx.run_until(|state| {
-        state.find_meta("active").unwrap().pull_requests[0]
-            .snapshot
-            .is_some()
-    });
+    sweep(&state, &mut cx);
     assert_eq!(*calls.lock().unwrap(), 2);
     assert!(state.read(|state| {
-        state.pull_requests.requested.is_empty()
-            && state.find_meta("active").unwrap().pull_requests[0]
-                .sync_error
-                .is_none()
+        let link = &state.find_meta("active").unwrap().pull_requests[0];
+        link.snapshot.is_some()
+            && link.sync_error.is_none()
+            && state.pull_requests.requested.is_empty()
     }));
 }
 
@@ -336,14 +436,9 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
-#[test]
-fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_branch_change() {
-    let store = TestStore::new("tcode-pr-discovery");
-    let root = store.root().join("checkout");
-    std::fs::create_dir(&root).unwrap();
-    git(&root, &["init", "-b", "main"]);
+fn commit(cwd: &Path) {
     git(
-        &root,
+        cwd,
         &[
             "-c",
             "user.name=Fixture",
@@ -352,9 +447,15 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
             "commit",
             "--allow-empty",
             "-m",
-            "initial",
+            "change",
         ],
     );
+}
+fn checkout(store: &TestStore) -> PathBuf {
+    let root = store.root().join("checkout");
+    std::fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-b", "main"]);
+    commit(&root);
     git(
         &root,
         &[
@@ -365,6 +466,13 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
         ],
     );
     git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    root
+}
+
+#[test]
+fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_branch_change() {
+    let store = TestStore::new("tcode-pr-discovery");
+    let root = checkout(&store);
     let worktree = store.root().join("worktree");
     git(
         &root,
@@ -381,10 +489,14 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
     let (arrived, requested) = std::sync::mpsc::channel();
     let (release, resume) = std::sync::mpsc::channel();
     let _server = fixture.serve(move |exchange| {
-        let sent:Value=serde_json::from_slice(&exchange.body).unwrap();
+        let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
         arrived.send(sent).unwrap();
         resume.recv_timeout(Duration::from_secs(5)).unwrap();
-        exchange.reply(200,"",br#"{"data":{"repository":{"h0":{"nodes":[{"number":1,"url":"https://github.com/sample/project/pull/1","state":"OPEN","headRepositoryOwner":{"login":"SAMPLE"}}]}}}}"#);
+        exchange.reply(
+            200,
+            "",
+            br#"{"data":{"repository":{"h0":{"nodes":[{"number":1,"url":"https://github.com/sample/project/pull/1","state":"OPEN","headRepositoryOwner":{"login":"SAMPLE"}}]}}}}"#,
+        );
     });
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -404,7 +516,7 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
         state.sessions.push(meta);
     });
     state.update(&mut cx, |state, cx| {
-        state.discover_pull_requests(None, false, cx).detach()
+        state.discover_pull_requests(None, cx).detach()
     });
     cx.run_until(|state| !state.pull_requests.discovering);
     assert!(
@@ -413,7 +525,7 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
     );
     git(&root, &["update-ref", "refs/remotes/origin/topic", "HEAD"]);
     state.update(&mut cx, |state, cx| {
-        state.discover_pull_requests(None, true, cx).detach()
+        state.discover_pull_requests_for("active", true, cx)
     });
     let sent = requested.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(
@@ -429,6 +541,77 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
     assert!(
         state.read(|state| state.find_meta("active").unwrap().pull_requests.is_empty()),
         "a reply for the previous branch must not be linked"
+    );
+}
+
+#[test]
+fn an_unlinked_discovered_pull_request_stays_unlinked_across_new_refs_and_restarts() {
+    let store = TestStore::new("tcode-pr-durable-unlink");
+    let root = checkout(&store);
+    git(&root, &["switch", "-c", "topic"]);
+    git(&root, &["update-ref", "refs/remotes/origin/topic", "HEAD"]);
+    let fixture = fixture::Fixture::new();
+    let api = client(&store, &fixture);
+    let restarted_api = client(&store, &fixture);
+    let reads = Arc::new(Mutex::new(0));
+    let counting = reads.clone();
+    let _server = fixture.serve(move |exchange| {
+        let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
+        if sent["query"].as_str().unwrap().contains("PullRequestsByHead") {
+            *counting.lock().unwrap() += 1;
+        }
+        exchange.reply(
+            200,
+            "",
+            br#"{"data":{"repository":{"h0":{"nodes":[{"number":1,"url":"https://github.com/sample/project/pull/1","state":"OPEN","headRepositoryOwner":{"login":"sample"}}]}}}}"#,
+        );
+    });
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        let mut meta = linked_meta("active", false);
+        meta.pull_requests.clear();
+        meta.cwd = root.clone();
+        let project = Project::from_root(root.clone());
+        meta.project_id = Some(project.id.clone());
+        state.projects.push(project);
+        state.sessions.push(meta);
+    });
+    let key = PullRequestKey::new("github.com", "sample/project", 1);
+    let links =
+        |state: &TestEntity| state.read(|state| state.find_meta("active").unwrap().pull_requests);
+    let discover = |state: &TestEntity, cx: &mut TestAppContext, threads| {
+        let before = *reads.lock().unwrap();
+        state.update(cx, |state, cx| {
+            state.discover_pull_requests(threads, cx).detach()
+        });
+        cx.run_until(|state| !state.pull_requests.discovering);
+        assert_eq!(
+            *reads.lock().unwrap(),
+            before + 1,
+            "discovery read the head"
+        );
+    };
+    let refresh = || Some(HashMap::from([("active".to_owned(), true)]));
+    discover(&state, &mut cx, refresh());
+    assert_eq!(links(&state)[0].source, PullRequestSource::Created);
+    state.update(&mut cx, |state, cx| {
+        state.unlink_pull_request("active", &key, cx)
+    });
+    commit(&root);
+    git(&root, &["update-ref", "refs/remotes/origin/topic", "HEAD"]);
+    discover(&state, &mut cx, refresh());
+    let dismissed = links(&state);
+    assert!(dismissed.len() == 1 && dismissed[0].source == PullRequestSource::Dismissed);
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(restarted_api)
+    });
+    discover(&state, &mut cx, None);
+    assert_eq!(
+        links(&state),
+        dismissed,
+        "a fresh runtime does not relink it"
     );
 }
 
@@ -502,49 +685,6 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
         state.pull_request_registration_for(&child).unwrap()
     });
     host.start().unwrap();
-    let (commands, delivered) = smol::channel::unbounded();
-    state.update(&mut cx, |state, cx| {
-        let mut active = ActiveSession::new(state.find_meta("child").unwrap(), false, Vec::new());
-        active.runtime = Runtime::Live(commands);
-        active.meta = state.find_meta("child").unwrap();
-        active.pull_request_tools = None;
-        active.push_queued("continue".into(), Vec::new());
-        assert_eq!(active.dispatch_next_pending(), Ok(false));
-        state.install_selected(active);
-        state.on_event(
-            "child",
-            AgentEvent::McpServersRegistered {
-                names: vec!["tcode_pull_requests".into()],
-            },
-            cx,
-        );
-    });
-    assert!(
-        matches!(delivered.try_recv(), Ok(SessionCommand::SendTurn { text, .. }) if text.starts_with(LINKING_INSTRUCTIONS))
-    );
-    state.update(&mut cx, |state, cx| {
-        let mut rejected = linked_meta("rejected", false);
-        rejected.pull_requests.clear();
-        state.pull_request_registration_for(&rejected).unwrap();
-        let (sender, _receiver) = smol::channel::unbounded();
-        let mut active = ActiveSession::new(rejected.clone(), false, Vec::new());
-        active.runtime = Runtime::Live(sender);
-        active.meta = rejected.clone();
-        active.pull_request_tools = None;
-        state.sessions.push(rejected);
-        state.residents.live.insert("rejected".into(), active);
-        state.on_event(
-            "rejected",
-            AgentEvent::McpServersRegistered { names: vec![] },
-            cx,
-        );
-        assert!(
-            !state
-                .mcp
-                .pull_request_registrations
-                .contains_key("rejected")
-        );
-    });
     let result = Arc::new(Mutex::new(None));
     let completed = result.clone();
     let job = std::thread::spawn(move || {
@@ -565,7 +705,18 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
         );
         let call = |id, name, args| {
-            rpc(&registration.url,&registration.bearer_token,session.as_deref(),json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}})).0
+            rpc(
+                &registration.url,
+                &registration.bearer_token,
+                session.as_deref(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": args},
+                }),
+            )
+            .0
         };
         let linked = call(
             2,
@@ -602,9 +753,97 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
         "unlink response: {unlinked}"
     );
     assert!(state.read(|state| {
-        state
-            .sessions
-            .iter()
-            .all(|meta| meta.pull_requests.is_empty())
+        state.find_meta("parent").unwrap().pull_requests.is_empty()
+            && state
+                .find_meta("child")
+                .unwrap()
+                .pull_requests
+                .iter()
+                .all(|link| !link.visible())
     }));
+}
+
+#[test]
+fn registered_tools_prefix_each_turn_except_a_native_command() {
+    let store = TestStore::new("tcode-pr-instructions");
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut host = mcp_host::Host::bind().unwrap();
+    let server = pull_request_mcp::start(&mut host);
+    state.update(&mut cx, |state, cx| {
+        state.pump_pull_request_requests(Some(server), cx)
+    });
+    let review = |kind| ProviderCommand {
+        name: "review".into(),
+        description: None,
+        kind,
+    };
+    for (id, typed, instructed) in [
+        ("plain", "fix the build", true),
+        ("slash", "/compact keep the plan", false),
+        ("skill", "$review the diff", false),
+    ] {
+        let (commands, delivered) = smol::channel::unbounded();
+        state.update(&mut cx, |state, cx| {
+            let mut meta = SessionMeta::new(
+                ProviderKind::ClaudeCode,
+                PathBuf::from("/tmp/synthetic-checkout"),
+                None,
+            );
+            meta.id = id.into();
+            let registration = state.pull_request_registration_for(&meta);
+            assert!(registration.is_some());
+            let mut active = ActiveSession::new(meta.clone(), false, Vec::new());
+            active.runtime = Runtime::Live(commands);
+            active.provider_commands = vec![
+                review(ProviderCommandKind::Command),
+                review(ProviderCommandKind::Skill),
+            ];
+            active.push_queued(typed.into(), Vec::new());
+            state.sessions.push(meta);
+            state.install_selected(active);
+            assert_eq!(state.dispatch_next_queued(id, cx), Ok(true));
+        });
+        let Ok(SessionCommand::SendTurn {
+            text, delivery_id, ..
+        }) = delivered.try_recv()
+        else {
+            panic!("expected a provider delivery")
+        };
+        let typed_wire = typed.replacen('$', "/", 1);
+        if instructed {
+            assert_eq!(
+                text,
+                format!("{}{typed}", pull_request::LINKING_INSTRUCTIONS)
+            );
+        } else {
+            assert_eq!(text, typed_wire, "a native command stays at byte zero");
+        }
+        state.update(&mut cx, |state, cx| {
+            state.on_event(id, AgentEvent::TurnAccepted { delivery_id }, cx)
+        });
+        cx.run_until_parked();
+        let (recorded, context_len) = store
+            .read_events(id)
+            .unwrap()
+            .into_iter()
+            .find_map(|event| match event.event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content:
+                        ItemContent::UserMessage {
+                            text, context_len, ..
+                        },
+                    ..
+                }) => Some((text, context_len)),
+                _ => None,
+            })
+            .unwrap();
+        let disclosed = context_len.map(|len| &recorded[..len]);
+        assert_eq!(&recorded[context_len.unwrap_or(0)..], typed);
+        assert_eq!(
+            disclosed.and_then(pull_request::strip_linking_instructions),
+            instructed.then_some(""),
+            "the disclosure holds exactly the pull request instructions"
+        );
+    }
 }

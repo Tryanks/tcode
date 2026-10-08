@@ -99,13 +99,13 @@ impl PullRequestTools {
         self.invoke(Operation::Link(target)).await
     }
     #[tool(
-        description = "Unlink a PR from this thread. A dismissed native stack layer stays dismissed until explicitly linked again. Pass a URL or repository plus number."
+        description = "Unlink a PR from this thread. It stays unlinked, even when discovered again or found in a stack, until explicitly linked again. Pass a URL or repository plus number."
     )]
     async fn unlink_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
         self.invoke(Operation::Unlink(target)).await
     }
     #[tool(
-        description = "List this thread's visible linked PRs, their source, watching intent, last known state and stack position. This reads stored state without asking GitHub. Before finishing PR work, list and link anything missing."
+        description = "List this thread's visible linked PRs, their source, last known state and stack position. This reads stored state without asking GitHub. Before finishing PR work, list and link anything missing."
     )]
     async fn list_thread_pull_requests(&self) -> CallToolResult {
         self.invoke(Operation::List).await
@@ -114,6 +114,12 @@ impl PullRequestTools {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PullRequestTools {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(Implementation::from_build_env()).with_instructions("Link every PR and every stack layer you create or work on immediately. List and link missing PRs before finishing. Do not link background mentions. Report linking failures.")
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
+                "Link every PR and every stack layer you create or work on immediately. \
+                 List and link missing PRs before finishing. Do not link background mentions. \
+                 Report linking failures.",
+            )
     }
 }

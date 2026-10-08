@@ -4679,14 +4679,14 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     active.push_queued("first".into(), Vec::new());
     active.push_queued("second".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let first_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
         }) if text == "first" => delivery_id,
         other => panic!("expected first SendTurn, got {other:?}"),
     };
-    assert_eq!(active.dispatch_next_pending(), Ok(false));
+    assert_eq!(active.dispatch_next_pending(false), Ok(false));
     assert!(receiver.try_recv().is_err());
     assert_eq!(active.queue.len(), 2, "unaccepted head stays queued");
     assert_eq!(
@@ -4697,7 +4697,7 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     assert_eq!(active.queue[0].text, "second");
 
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let second_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
@@ -4719,7 +4719,7 @@ fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
     );
     let ordinary_id = active.push_queued("now".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn {
@@ -5091,7 +5091,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
             assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
         } else {
             active.push_queued("next turn".into(), Vec::new());
-            assert_eq!(active.dispatch_next_pending(), Ok(true));
+            assert_eq!(active.dispatch_next_pending(false), Ok(true));
             let SessionCommand::SendTurn {
                 options: Some(options),
                 ..
@@ -5411,90 +5411,30 @@ fn send_routing_matrix() {
 /// sent as typed.
 #[test]
 fn skill_mentions_use_the_providers_native_invocation() {
-    let command = |kind| ProviderCommand {
-        name: "review".into(),
+    let command = |name: &str, kind| ProviderCommand {
+        name: name.into(),
         description: None,
         kind,
     };
-    for (provider, input, expected) in [
-        (
-            ProviderKind::ClaudeCode,
-            "$review the diff",
-            "/review the diff",
-        ),
-        (ProviderKind::ClaudeCode, "$review", "/review"),
-        (ProviderKind::Codex, "$review the diff", "$review the diff"),
-        (ProviderKind::ClaudeCode, "$HOME is set", "$HOME is set"),
-        (ProviderKind::ClaudeCode, "please $review", "please $review"),
-        (ProviderKind::ClaudeCode, "$", "$"),
-    ] {
-        for tools in [false, true] {
-            let store = TestStore::new("tcode-native-skill-delivery");
-            let mut cx = TestAppContext::default();
-            let state = cx.new_entity(TestClientState::new((*store).clone()));
-            let (sender, receiver) = smol::channel::unbounded();
-            state.update(&mut cx, |state, _| {
-                let mut active = live_session(provider, sender);
-                active.meta.id = "skill".into();
-                active.provider_commands = if provider == ProviderKind::ClaudeCode {
-                    vec![
-                        command(ProviderCommandKind::Command),
-                        command(ProviderCommandKind::Skill),
-                    ]
-                } else {
-                    vec![command(ProviderCommandKind::Skill)]
-                };
-                active.pull_request_tools = Some(tools);
-                active.push_queued(input.into(), Vec::new());
-                assert_eq!(active.dispatch_next_pending(), Ok(true));
-                state.sessions.push(active.meta.clone());
-                state.install_selected(active);
-            });
-            let SessionCommand::SendTurn {
-                text, delivery_id, ..
-            } = receiver.try_recv().unwrap()
-            else {
-                panic!("expected provider delivery")
-            };
-            if tools && expected.starts_with('/') {
-                let boundary = expected.find(char::is_whitespace).unwrap_or(expected.len());
-                assert!(text.starts_with(&format!("{}\n", &expected[..boundary])));
-                assert!(text.contains(pull_requests::LINKING_INSTRUCTIONS));
-                assert!(text.ends_with(expected[boundary..].trim_start()));
-            } else if tools {
-                assert_eq!(
-                    text.strip_prefix(pull_requests::LINKING_INSTRUCTIONS),
-                    Some(expected)
-                );
-            } else {
-                assert_eq!(text, expected);
-            }
-            state.update(&mut cx, |state, cx| {
-                state.on_event("skill", AgentEvent::TurnAccepted { delivery_id }, cx)
-            });
-            cx.run_until_parked();
-            let recorded = store.read_events("skill").unwrap();
-            let message = recorded
-                .iter()
-                .find_map(|event| match &event.event {
-                    AgentEvent::ItemCompleted(item) => match &item.content {
-                        ItemContent::UserMessage {
-                            text, context_len, ..
-                        } => Some((text, context_len)),
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .unwrap();
-            if tools {
-                let boundary = message.1.unwrap();
-                assert!(message.0[..boundary].contains("link_pull_request"));
-                assert_eq!(&message.0[boundary..], input);
-            } else {
-                assert_eq!(message.0, input);
-                assert_eq!(*message.1, None);
-            }
-        }
+    let claude = [
+        command("review", ProviderCommandKind::Command),
+        command("review", ProviderCommandKind::Skill),
+    ];
+    let codex = [command("review", ProviderCommandKind::Skill)];
+    assert_eq!(
+        native_skill_invocation("$review the diff".into(), &claude),
+        "/review the diff"
+    );
+    assert_eq!(
+        native_skill_invocation("$review".into(), &claude),
+        "/review"
+    );
+    assert_eq!(
+        native_skill_invocation("$review the diff".into(), &codex),
+        "$review the diff"
+    );
+    for text in ["$HOME is set", "please $review", "$"] {
+        assert_eq!(native_skill_invocation(text.into(), &claude), text);
     }
 }
 
@@ -5511,7 +5451,7 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     };
     active.push_queued(String::new(), vec![attachment.clone()]);
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let delivery_id = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id,
@@ -5540,7 +5480,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     active.queue[0].relay_transcript = Some("# prior work".into());
     active.push_queued("follow up".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let first = receiver.try_recv().unwrap();
     let SessionCommand::SendTurn {
         delivery_id, text, ..
@@ -5554,7 +5494,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
 
     active.accept_turn_delivery(delivery_id).unwrap();
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
