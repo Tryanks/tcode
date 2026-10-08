@@ -717,3 +717,60 @@ impl AppState {
         }
     }
 }
+
+impl AppState {
+    /// Close the thread's terminals that fresh process inspection proves are
+    /// at an idle shell, keeping their output. A terminal used since the
+    /// settle, one that cannot be inspected, and a thread re-engaged
+    /// meanwhile all keep their shells.
+    pub(super) fn close_settled_idle_terminals(&mut self, id: &str, cx: &mut HostCx) {
+        let terminals: Vec<_> = self
+            .resident(id)
+            .map(|session| &session.terminal_workspace)
+            .or_else(|| {
+                self.terminal_workspaces
+                    .get(&ConversationDestination::Thread(id.to_owned()))
+            })
+            .into_iter()
+            .flat_map(|workspace| &workspace.terminals)
+            .map(|entry| {
+                let terminal = entry.terminal.clone();
+                (entry.id, terminal.activity_mark(), terminal)
+            })
+            .collect();
+        if terminals.is_empty() {
+            return;
+        }
+        let revision = self.decision_revision(id);
+        let id = id.to_owned();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let idle = host_cx
+                .unblock(move || {
+                    terminals
+                        .into_iter()
+                        .filter(|(_, _, terminal)| terminal.idle_shell() == Some(true))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            host_cx.enqueue(move |state, _cx| {
+                if state.decision_revision(&id) != revision
+                    || !state.find_meta(&id).is_some_and(|meta| meta.is_settled())
+                {
+                    return;
+                }
+                for (terminal_id, mark, terminal) in idle {
+                    if terminal.activity_mark() == mark
+                        && state
+                            .terminal_handle(terminal_id)
+                            .is_some_and(|current| Arc::ptr_eq(&current, &terminal))
+                    {
+                        // The tab and its emulator stay: an exited shell's
+                        // output remains readable.
+                        terminal.kill();
+                    }
+                }
+            });
+        });
+    }
+}

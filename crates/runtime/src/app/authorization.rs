@@ -251,7 +251,8 @@ impl AppState {
                 | Command::ArchiveSession { session_id }
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleSession { session_id }
-                | Command::MakeSessionActive { session_id }
+                | Command::UnsettleSession { session_id }
+                | Command::SetAutoSettle { session_id, .. }
                 | Command::RewindTurn { session_id, .. }
                 | Command::AddReviewComment { session_id, .. }
                 | Command::RemoveReviewComment { session_id, .. }
@@ -287,7 +288,6 @@ impl AppState {
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
                 | Command::SetThreadCollapsed { .. }
-                | Command::AutoArchiveSweep { .. }
                 | Command::PreviewReply { .. }
                 | Command::ReloadProvider
                 | Command::SetGitHubToken { .. }

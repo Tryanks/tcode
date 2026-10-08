@@ -8,6 +8,7 @@ use gpui::{
     Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
     Window, deferred, div, prelude::FluentBuilder, px,
 };
+use gpui_base::StyledExt as _;
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use serde::Deserialize;
 
@@ -63,6 +64,7 @@ pub fn init(cx: &mut App) {
 
 enum MenuItem {
     Separator,
+    Label(SharedString),
     Item {
         label: Option<SharedString>,
         render: Option<ItemRenderer>,
@@ -148,6 +150,10 @@ impl PopupMenu {
             disabled: false,
             checked: false,
         });
+        self
+    }
+    pub fn label(mut self, text: impl Into<SharedString>) -> Self {
+        self.items.push(MenuItem::Label(text.into()));
         self
     }
     pub fn separator(mut self) -> Self {
@@ -321,6 +327,17 @@ impl Render for PopupMenu {
             match item {
                 MenuItem::Separator => {
                     items = items.child(div().h(px(1.)).mx_1().my_1().bg(cx.theme().border))
+                }
+                MenuItem::Label(label) => {
+                    items = items.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(11.))
+                            .font_medium()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label.clone()),
+                    );
                 }
                 MenuItem::Item {
                     label,

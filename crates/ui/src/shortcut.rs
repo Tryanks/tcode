@@ -12,6 +12,13 @@ pub(crate) enum NavigateThread {
 
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::navigate_thread);
+    // With nothing focused the shell's own Undo listener is off the dispatch path.
+    cx.on_action(crate::shell::undo_thread_action);
+    cx.bind_keys([KeyBinding::new(
+        "secondary-z",
+        crate::sidebar::ThreadUndo,
+        None,
+    )]);
     for number in 1..=9 {
         let key = format!("secondary-{number}");
         cx.bind_keys([
@@ -28,6 +35,7 @@ pub(crate) fn init(cx: &mut App) {
     // window root's focus traversal and selection copy must not claim them.
     let terminal = Some(crate::terminal_drawer::CONTEXT);
     cx.bind_keys([
+        KeyBinding::new("secondary-z", NoAction, terminal),
         KeyBinding::new("tab", NoAction, terminal),
         KeyBinding::new("shift-tab", NoAction, terminal),
         #[cfg(target_os = "macos")]

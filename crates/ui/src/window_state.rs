@@ -26,6 +26,7 @@ pub enum Destination {
     /// One settings section's detail. Which section it is belongs to the page;
     /// *that a detail is open* is navigation and belongs here.
     SettingsSection,
+    SettingsThreadRules,
 }
 
 /// The shell's client-local checkpoint, independent of the host's settings.
@@ -70,7 +71,10 @@ impl NavigationSnapshot {
         snapshot.history.retain(|destination| {
             !matches!(
                 destination,
-                Destination::Settings | Destination::SettingsSection | Destination::Pair
+                Destination::Settings
+                    | Destination::SettingsSection
+                    | Destination::SettingsThreadRules
+                    | Destination::Pair
             )
         });
         if snapshot.history.first() != Some(&Destination::Hosts) {
@@ -109,7 +113,7 @@ impl Destination {
     pub fn route(self) -> Route {
         match self {
             Self::Hosts | Self::Pair => Route::Hosts,
-            Self::Settings | Self::SettingsSection => Route::Settings,
+            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => Route::Settings,
             Self::Threads | Self::Thread | Self::Panel => Route::Chat,
         }
     }
@@ -125,7 +129,7 @@ impl Destination {
             Self::Threads => "mobile.threads",
             Self::Thread => "mobile.thread",
             Self::Panel => "chat.panels",
-            Self::Settings | Self::SettingsSection => "settings.title",
+            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => "settings.title",
         })
         .into_owned()
         .into()

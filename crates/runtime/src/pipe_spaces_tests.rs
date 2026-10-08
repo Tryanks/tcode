@@ -64,7 +64,10 @@ impl SpaceHost {
             );
         }
         store.apply(&mutations).unwrap();
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            auto_settle_after_days: None,
+            ..Settings::default()
+        };
         settings.profiles.insert(
             "shared-profile".into(),
             ProviderProfile {

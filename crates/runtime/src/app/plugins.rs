@@ -847,7 +847,7 @@ mod tests {
 
     fn host_with(fake: &FakeClaude, store: &TestStore) -> TestClientState {
         let mut state = unmanaged_host(fake, store);
-        state.settings.apply(claude_switch(true));
+        state.settings.apply(claude_switch(true)).unwrap();
         state
     }
 

@@ -791,10 +791,12 @@ pub enum SettingsPatch {
     AbortOnModelFallback(bool),
     ResumeOnLimitReset(bool),
     FallbackReviewAdvisor(bool),
-    AutoArchiveDisabled(bool),
-    AutoArchiveMaxIdleDays(u32),
-    AutoArchiveKeepCount(usize),
-    AutoArchiveNoticeShown(bool),
+    AutoSettleAfterDays(Option<f64>),
+    AutoSettleOnMerge(bool),
+    ProjectSettlement {
+        project_id: String,
+        value: Option<ProjectSettlementSettings>,
+    },
     OrchestrateDecisionModels(Vec<OrchestrateChildModel>),
     OrchestrateChildModels(Vec<OrchestrateChildModel>),
     OrchestrateChildApproval(ChildApprovalMode),
@@ -930,19 +932,12 @@ pub struct Settings {
     pub resume_on_limit_reset: bool,
     #[serde(default)]
     pub fallback_review_advisor: bool,
-    /// Whether automatic archiving is DISABLED. Stored inverted so the feature
-    /// defaults to on even for legacy settings files that lack the field.
-    #[serde(default)]
-    pub auto_archive_disabled: bool,
-    /// Threads must be idle longer than this many days before auto-archive.
-    #[serde(default = "default_auto_archive_max_idle_days")]
-    pub auto_archive_max_idle_days: u32,
-    /// Newest siblings preserved regardless of age by auto-archive.
-    #[serde(default = "default_auto_archive_keep_count")]
-    pub auto_archive_keep_count: usize,
-    /// Whether the one-time first-auto-archive explanation has been shown.
-    #[serde(default)]
-    pub auto_archive_notice_shown: bool,
+    #[serde(default = "default_auto_settle_after_days")]
+    pub auto_settle_after_days: Option<f64>,
+    #[serde(default = "default_true")]
+    pub auto_settle_on_merge: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub project_settlement_overrides: BTreeMap<String, ProjectSettlementSettings>,
     /// Built-in orchestration identities and child-model routing table.
     #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
     pub orchestrate: OrchestrateSettings,
@@ -1017,18 +1012,36 @@ pub struct Settings {
     pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Factory value for [`Settings::auto_archive_max_idle_days`]. Public so the
-/// settings page can tell an overridden field from an untouched one.
-pub const DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS: u32 = 7;
-/// Factory value for [`Settings::auto_archive_keep_count`].
-pub const DEFAULT_AUTO_ARCHIVE_KEEP_COUNT: usize = 30;
-
-const fn default_auto_archive_max_idle_days() -> u32 {
-    DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS
+const fn default_auto_settle_after_days() -> Option<f64> {
+    Some(3.0)
 }
 
-const fn default_auto_archive_keep_count() -> usize {
-    DEFAULT_AUTO_ARCHIVE_KEEP_COUNT
+/// Auto-settle after 1 to 90 days, or never.
+fn auto_settle_days(days: Option<f64>) -> Result<Option<f64>, &'static str> {
+    match days {
+        Some(days) if !(1.0..=90.0).contains(&days) => {
+            Err("Auto-settle days must be between 1 and 90.")
+        }
+        days => Ok(days),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSettlementSettings {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_days_override"
+    )]
+    pub auto_settle_after_days: Option<Option<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_settle_on_merge: Option<bool>,
+}
+
+fn deserialize_days_override<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<f64>>, D::Error> {
+    Option::<f64>::deserialize(deserializer).map(Some)
 }
 
 impl Default for Settings {
@@ -1052,10 +1065,9 @@ impl Default for Settings {
             abort_on_model_fallback: true,
             resume_on_limit_reset: true,
             fallback_review_advisor: false,
-            auto_archive_disabled: false,
-            auto_archive_max_idle_days: default_auto_archive_max_idle_days(),
-            auto_archive_keep_count: default_auto_archive_keep_count(),
-            auto_archive_notice_shown: false,
+            auto_settle_after_days: default_auto_settle_after_days(),
+            auto_settle_on_merge: true,
+            project_settlement_overrides: BTreeMap::new(),
             orchestrate: OrchestrateSettings::default(),
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
@@ -1079,8 +1091,9 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Apply one field-scoped mutation without replacing sibling fields.
-    pub fn apply(&mut self, patch: SettingsPatch) {
+    /// Apply one field-scoped mutation without replacing sibling fields. A
+    /// value outside its field's range is refused and changes nothing.
+    pub fn apply(&mut self, patch: SettingsPatch) -> Result<(), &'static str> {
         match patch {
             SettingsPatch::GitHubHost {
                 host,
@@ -1127,15 +1140,19 @@ impl Settings {
             SettingsPatch::FallbackReviewAdvisor(value) => {
                 self.fallback_review_advisor = value;
             }
-            SettingsPatch::AutoArchiveDisabled(value) => self.auto_archive_disabled = value,
-            SettingsPatch::AutoArchiveMaxIdleDays(value) => {
-                self.auto_archive_max_idle_days = value;
+            SettingsPatch::AutoSettleAfterDays(value) => {
+                self.auto_settle_after_days = auto_settle_days(value)?;
             }
-            SettingsPatch::AutoArchiveKeepCount(value) => {
-                self.auto_archive_keep_count = value;
-            }
-            SettingsPatch::AutoArchiveNoticeShown(value) => {
-                self.auto_archive_notice_shown = value;
+            SettingsPatch::AutoSettleOnMerge(value) => self.auto_settle_on_merge = value,
+            SettingsPatch::ProjectSettlement { project_id, value } => {
+                if let Some(mut value) = value {
+                    if let Some(days) = value.auto_settle_after_days {
+                        value.auto_settle_after_days = Some(auto_settle_days(days)?);
+                    }
+                    self.project_settlement_overrides.insert(project_id, value);
+                } else {
+                    self.project_settlement_overrides.remove(&project_id);
+                }
             }
             SettingsPatch::OrchestrateDecisionModels(value) => {
                 self.orchestrate.decision_models = value;
@@ -1192,6 +1209,7 @@ impl Settings {
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
         }
+        Ok(())
     }
 }
 
@@ -1426,10 +1444,8 @@ mod tests {
     #[test]
     fn older_settings_preserve_access_policy_and_accept_partial_feature_blocks() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert!(!legacy.auto_archive_disabled);
-        assert_eq!(legacy.auto_archive_max_idle_days, 7);
-        assert_eq!(legacy.auto_archive_keep_count, 30);
-        assert!(!legacy.auto_archive_notice_shown);
+        assert_eq!(legacy.auto_settle_after_days, Some(3.0));
+        assert!(legacy.auto_settle_on_merge);
         assert!(!legacy.sidebar_provider_marks);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);
@@ -1764,10 +1780,14 @@ mod tests {
             description: String::new(),
             bundled: None,
         });
-        settings.apply(SettingsPatch::OrchestrateChildModels(children));
+        settings
+            .apply(SettingsPatch::OrchestrateChildModels(children))
+            .unwrap();
         let mut decisions = settings.orchestrate.decision_models.clone();
         decisions[0].description = "Mine.".into();
-        settings.apply(SettingsPatch::OrchestrateDecisionModels(decisions));
+        settings
+            .apply(SettingsPatch::OrchestrateDecisionModels(decisions))
+            .unwrap();
         let saved = serde_json::to_value(&settings.orchestrate).unwrap();
         assert_eq!(
             saved["decision_models"],
@@ -2121,7 +2141,9 @@ mod tests {
         duplicate.description = "must not overwrite".into();
         let mut children = settings.orchestrate.child_models.clone();
         children.push(duplicate);
-        settings.apply(SettingsPatch::OrchestrateChildModels(children));
+        settings
+            .apply(SettingsPatch::OrchestrateChildModels(children))
+            .unwrap();
         assert_eq!(settings.orchestrate.child_models.len(), 2);
         assert_eq!(settings.orchestrate.child_models[0], executor);
 
@@ -2130,7 +2152,9 @@ mod tests {
         duplicate.description = "must not overwrite".into();
         let mut decisions = settings.orchestrate.decision_models.clone();
         decisions.push(duplicate);
-        settings.apply(SettingsPatch::OrchestrateDecisionModels(decisions));
+        settings
+            .apply(SettingsPatch::OrchestrateDecisionModels(decisions))
+            .unwrap();
         assert_eq!(settings.orchestrate.decision_models.len(), 2);
         assert_eq!(settings.orchestrate.decision_models[0], peer);
         assert_eq!(settings.orchestrate.child_models[0], executor);
@@ -2286,7 +2310,9 @@ mod tests {
         assert_eq!(off.traverse, TraverseSetting::Off);
 
         let mut patched = Settings::default();
-        patched.apply(SettingsPatch::Traverse(TraverseSetting::Off));
+        patched
+            .apply(SettingsPatch::Traverse(TraverseSetting::Off))
+            .unwrap();
         assert_eq!(
             serde_json::to_value(&patched).unwrap().get("traverse"),
             Some(&serde_json::json!({"mode": "off"}))

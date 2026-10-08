@@ -72,6 +72,9 @@ struct Shared {
     exited: bool,
     command_line: String,
     command_label: Option<String>,
+    /// Grows with every input write and every output read, so a command
+    /// started while the shell is inspected still changes it.
+    activity: u64,
 }
 
 /// Host-side handle for a child process running in a pseudoterminal.
@@ -139,6 +142,7 @@ impl PtyHandle {
             exited: false,
             command_line: String::new(),
             command_label: None,
+            activity: 0,
         }));
         let refresh_running = Arc::new(AtomicBool::new(false));
         let (notifications, events) = async_channel::unbounded();
@@ -218,6 +222,16 @@ impl PtyHandle {
             .unwrap_or_else(|| self.shell_name.clone())
     }
 
+    pub fn activity_mark(&self) -> u64 {
+        self.shared.lock_recover().activity
+    }
+
+    /// Fresh inspection: the shell itself is in the foreground with no child
+    /// process. `None` when the platform cannot tell.
+    pub fn idle_shell(&self) -> Option<bool> {
+        self.pty_info.idle_shell(&self.shell_name)
+    }
+
     pub fn exited(&self) -> bool {
         self.shared.lock_recover().exited
     }
@@ -225,6 +239,9 @@ impl PtyHandle {
     pub(crate) fn write_input_inner(&self, bytes: Vec<u8>) -> io::Result<bool> {
         let label_changed = {
             let mut shared = self.shared.lock_recover();
+            if !bytes.is_empty() {
+                shared.activity += 1;
+            }
             let previous_label = shared.command_label.clone();
             track_command_input(&mut shared, &bytes);
             shared.command_label != previous_label
@@ -446,6 +463,7 @@ impl RawPtyEventLoop {
                 Ok(0) => break,
                 Ok(read) => {
                     read_any = true;
+                    self.shared.lock_recover().activity += 1;
                     let _ = self
                         .notifications
                         .try_send(PtyEvent::Output(buffer[..read].to_vec()));

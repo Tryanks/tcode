@@ -159,6 +159,7 @@ fn event_envelopes_keep_stored_record_shape_and_optional_request_id() {
             session_id: "session-1".into(),
         },
         event: ServerEvent::SessionEvent(SessionEventRecord {
+            origin: None,
             author: None,
             ts: Some(123),
             event: AgentEvent::TurnStarted {
@@ -945,6 +946,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                     waiting: false,
                     waiting_for_approval: false,
                     waiting_for_input: false,
+                    failed: false,
                     unread: true,
                     fork: ForkAvailability::Available,
                 },
@@ -959,7 +961,8 @@ fn version_six_index_visits_output_and_elision_literal_json() {
     assert_eq!(
         serde_json::to_value(&index).unwrap(),
         json!({"activity": {"cold": {"working":false,"turn_running":false,"waiting":false,
-            "waiting_for_approval":false,"waiting_for_input":false,"unread":true,"fork":"available"}},
+            "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":true,
+            "fork":"available"}},
             "title_generating": [], "archived_counts": {"p": 2},
             "worktree_shared": [], "archived_revision": 7, "sessions": [], "projects": []})
     );
@@ -992,7 +995,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         "review_comment_drafts":[], "terminals":[], "active_terminal_id":null, "terminal_splits":[],
         "terminal_contexts":[], "terminal_open":false, "terminal_height":240.0, "delivery_in_flight":3,
         "activity":{"working":true,"turn_running":false,"waiting":false,"waiting_for_approval":false,
-            "waiting_for_input":false,"unread":false,"fork":"available"},
+            "waiting_for_input":false,"failed":false,"unread":false,"fork":"available"},
         "stopping":false,"native_rewind_blocked":true,"checkout_blocked":false,"conversation_read_only":false,
         "terminal_limit_reached":false,"terminal_split_available":false,"usage":null,"context_window":200000,
         "running_turn":null,"pending_approvals":[],"pending_user_input":null,"supports_steering":true,
@@ -1025,6 +1028,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         turn_id: "t".into(),
     };
     let record = SessionEventRecord {
+        origin: None,
         author: None,
         ts: Some(1),
         event: turn_started.clone(),

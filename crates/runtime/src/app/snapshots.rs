@@ -642,12 +642,26 @@ impl AppState {
             self.open_requests(&meta.id, session)
         });
         SessionActivity {
-            working: resident.is_some_and(ActiveSession::has_work),
+            working: resident.is_some_and(|session| {
+                session.preparing_worktree
+                    || matches!(session.runtime, Runtime::Starting { .. })
+                    || session.turn_in_flight
+                    || session.delivery_in_flight.is_some()
+                    || (meta.native_subagent.is_some() && session.timeline.turn_running)
+                    || session
+                        .queue
+                        .iter()
+                        .any(|message| message.origin == MessageOrigin::Human)
+            }),
             turn_running: resident.is_some_and(|session| session.turn_in_flight),
             waiting: resident.is_some_and(|session| session.background_task_count > 0)
                 || self.children_unfinished(&meta.id),
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
+            failed: self
+                .thread_activity
+                .get(&meta.id)
+                .is_some_and(|activity| activity.failed),
             unread: self.session_unread(meta),
             fork: Self::session_fork_availability(meta, resident),
         }

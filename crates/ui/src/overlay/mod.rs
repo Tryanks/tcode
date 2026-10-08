@@ -230,6 +230,7 @@ pub trait OverlayExt {
     fn push_notification(&mut self, note: impl Into<Notification>, cx: &mut App);
     fn remove_notification<T: Sized + 'static>(&mut self, cx: &mut App);
     fn remove_notification1<T: Sized + 'static>(&mut self, key: impl Into<ElementId>, cx: &mut App);
+    fn has_notification<T: Sized + 'static>(&mut self, cx: &mut App) -> bool;
     fn clear_notifications(&mut self, cx: &mut App);
 }
 
@@ -302,6 +303,14 @@ impl OverlayExt for Window {
                 list.close((std::any::TypeId::of::<T>(), key), window, cx)
             });
         });
+    }
+
+    fn has_notification<T: Sized + 'static>(&mut self, cx: &mut App) -> bool {
+        Overlays::update(self, cx, |host, _, cx| {
+            host.notifications
+                .read(cx)
+                .contains_type(std::any::TypeId::of::<T>())
+        })
     }
 
     fn clear_notifications(&mut self, cx: &mut App) {

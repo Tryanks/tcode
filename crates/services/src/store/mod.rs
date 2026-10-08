@@ -65,6 +65,8 @@ const RELAUNCH_WAIT: Duration = Duration::from_secs(15);
 #[derive(Serialize, Deserialize)]
 struct EventEnvelope {
     #[serde(default)]
+    origin: Option<tcode_core::session::MessageOrigin>,
+    #[serde(default)]
     author: Option<Author>,
     ts: u64,
     event: AgentEvent,
@@ -75,6 +77,8 @@ struct EventEnvelope {
 #[derive(Serialize)]
 struct EventEnvelopeRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<tcode_core::session::MessageOrigin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<&'a Author>,
     ts: u64,
     event: &'a AgentEvent,
@@ -83,7 +87,12 @@ struct EventEnvelopeRef<'a> {
 }
 
 impl<'a> EventEnvelopeRef<'a> {
-    fn new(ts: u64, event: &'a AgentEvent, author: Option<&'a Author>) -> Self {
+    fn new(
+        ts: u64,
+        event: &'a AgentEvent,
+        author: Option<&'a Author>,
+        origin: Option<tcode_core::session::MessageOrigin>,
+    ) -> Self {
         let file_change = match event {
             AgentEvent::ItemStarted(item)
             | AgentEvent::ItemUpdated(item)
@@ -96,6 +105,7 @@ impl<'a> EventEnvelopeRef<'a> {
             _ => false,
         };
         Self {
+            origin,
             author,
             ts,
             event,
@@ -270,7 +280,7 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
-        Self::append_authored_event(session_id, ts, event, None)
+        Self::append_authored_event(session_id, ts, event, None, None)
     }
 
     pub fn append_authored_event(
@@ -278,9 +288,10 @@ impl Mutation {
         ts: u64,
         event: &AgentEvent,
         author: Option<&Author>,
+        origin: Option<tcode_core::session::MessageOrigin>,
     ) -> io::Result<Self> {
-        let mut line =
-            serde_json::to_vec(&EventEnvelopeRef::new(ts, event, author)).map_err(invalid_data)?;
+        let mut line = serde_json::to_vec(&EventEnvelopeRef::new(ts, event, author, origin))
+            .map_err(invalid_data)?;
         line.push(b'\n');
         Ok(Self(Op::AppendEvent {
             session_id: session_id.to_owned(),
@@ -1252,9 +1263,13 @@ fn read_index(db: &Db, connection: &turso::Connection) -> io::Result<IndexFile> 
         )?;
         Ok(values)
     }
+    let mut sessions: Vec<SessionMeta> = rows(db, connection, "sessions")?;
+    for meta in &mut sessions {
+        meta.migrate_lifecycle();
+    }
     Ok(IndexFile {
         projects: rows(db, connection, "projects")?,
-        sessions: rows(db, connection, "sessions")?,
+        sessions,
     })
 }
 
@@ -1471,6 +1486,7 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
     let (stored, version) = match serde_json::from_str::<EventEnvelope>(line) {
         Ok(envelope) => (
             StoredEvent {
+                origin: envelope.origin,
                 author: envelope.author,
                 ts: Some(envelope.ts),
                 event: envelope.event,
@@ -1480,6 +1496,7 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
         ),
         Err(_) => (
             StoredEvent {
+                origin: None,
                 author: None,
                 ts: None,
                 event: serde_json::from_str::<AgentEvent>(line)?,

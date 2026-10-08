@@ -3,6 +3,16 @@ use super::*;
 impl AppState {
     /// Handle one canonical event from the live provider.
     pub(super) fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
+        if matches!(
+            &event,
+            AgentEvent::TurnCompleted { .. }
+                | AgentEvent::SessionClosed { .. }
+                | AgentEvent::ProviderStartFailed { .. }
+                | AgentEvent::BackgroundTasksChanged { count: 0 }
+        ) {
+            let id = session_id.to_owned();
+            cx.enqueue(move |state, cx| state.evaluate_thread_settlement(&id, cx));
+        }
         log::debug!(
             "event: {}",
             serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
@@ -320,6 +330,7 @@ impl AppState {
                             Vec::new(),
                             not_before,
                         );
+                        resident.queue.last_mut().unwrap().origin = MessageOrigin::Server;
                         true
                     });
                     if scheduled {
@@ -568,12 +579,40 @@ impl AppState {
             }
             _ => None,
         };
+        // Messages the provider reports on its own carry no admission origin;
+        // the activity fold falls back to the thread's historical origin.
+        let origin = match event {
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::UserMessage { .. },
+                ..
+            })
+            | AgentEvent::SteerRequested { .. } => cx.origin,
+            _ => None,
+        };
         let record = SessionEventRecord {
+            origin,
             author: author.clone(),
             ts: Some(ts),
             event: event.clone(),
             elided: None,
         };
+        if let Some(activity) = self.thread_activity.get_mut(session_id) {
+            let message = matches!(
+                event,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::UserMessage { .. },
+                    ..
+                }) | AgentEvent::SteerRequested { .. }
+            );
+            let has_parent = message
+                && origin.is_none()
+                && self
+                    .sessions
+                    .iter()
+                    .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
+            activity.apply(&record, has_parent);
+        }
+        self.advance_decision_revision(session_id);
         let topic = Topic::SessionEvents {
             session_id: session_id.to_string(),
         };
@@ -604,6 +643,7 @@ impl AppState {
                 id: session_id.to_string(),
                 ts,
                 author,
+                origin,
                 event: Box::new(event.clone()),
                 joined,
             },

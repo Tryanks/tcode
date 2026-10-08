@@ -47,6 +47,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.origin = cx.origin.unwrap_or(message.origin);
         }
         let should_start = matches!(active.runtime, Runtime::Idle)
             && !(active.draft
@@ -124,9 +125,11 @@ impl AppState {
                 continue;
             };
             let author = std::mem::replace(&mut cx.author, message.author);
+            let origin = cx.origin.replace(message.origin);
             let key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
             self.send_turn_assembled(&session_id, message.text, message.attachments, cx);
             cx.author = author;
+            cx.origin = origin;
             cx.delivery_key = key;
         }
 
@@ -238,6 +241,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.origin = cx.origin.unwrap_or(message.origin);
         }
 
         let model_changed = active.model_changed_while_live();
@@ -358,6 +362,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
+            message.origin = cx.origin.unwrap_or(message.origin);
         }
         if let Some(message) = active.queue.last_mut() {
             message.relay_transcript = Some(transcript);
@@ -402,6 +407,7 @@ impl AppState {
             return;
         };
         let author = std::mem::replace(&mut cx.author, message.author.clone());
+        let origin = cx.origin.replace(message.origin);
         self.record_user_message(
             session_id,
             &message.text,
@@ -411,6 +417,7 @@ impl AppState {
             cx,
         );
         cx.author = author;
+        cx.origin = origin;
         if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
         }
@@ -613,9 +620,11 @@ impl AppState {
         };
         let command_key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
         let author = std::mem::replace(&mut cx.author, message.author);
+        let origin = cx.origin.replace(message.origin);
         self.steer_assembled(target_id, message.text, message.attachments, cx);
         cx.delivery_key = command_key;
         cx.author = author;
+        cx.origin = origin;
         self.reschedule_scheduled_wake(cx);
     }
 

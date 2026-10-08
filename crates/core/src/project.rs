@@ -61,6 +61,13 @@ pub struct WorktreeInfo {
     pub branch: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettledOverride {
+    Settled,
+    Active,
+}
+
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -84,9 +91,15 @@ pub struct SessionMeta {
     /// legacy files (defaults to "not archived").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
-    /// Manually settled (unix secs), independently of archive state.
+    /// Lifecycle timestamps are Unix seconds; activity in the event stream is Unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_override: Option<SettledOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsettled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_settle_disabled_at: Option<u64>,
     /// Dedicated-worktree mode metadata, when the session runs in its own git
     /// worktree instead of the project checkout. Absent = local checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +187,17 @@ impl<'a> WorktreeSharing<'a> {
 }
 
 impl SessionMeta {
+    pub fn is_settled(&self) -> bool {
+        self.settled_override == Some(SettledOverride::Settled)
+            || (self.settled_override.is_none() && self.settled_at.is_some())
+    }
+
+    pub fn migrate_lifecycle(&mut self) {
+        if self.settled_override.is_none() && self.settled_at.is_some() {
+            self.settled_override = Some(SettledOverride::Settled);
+        }
+    }
+
     /// Whether `other` works in the worktree this session owns. A fork keeps
     /// the source's cwd without the `worktree` ownership marker, so the cwd
     /// decides as well as the branch.
@@ -222,6 +246,9 @@ impl SessionMeta {
             model,
             archived_at: None,
             settled_at: None,
+            settled_override: None,
+            unsettled_at: None,
+            auto_settle_disabled_at: None,
             worktree: None,
             resume_cursor: None,
             pending_fork: false,
@@ -237,19 +264,6 @@ impl SessionMeta {
             updated_at: now,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AutoArchiveConfig {
-    pub max_idle_secs: u64,
-    pub keep_count: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AutoArchiveExemptions {
-    pub working: HashSet<String>,
-    pub unread: HashSet<String>,
-    pub active: HashSet<String>,
 }
 
 /// `root_id` and every thread under it, each parent before its children:
@@ -284,148 +298,6 @@ pub fn descendant_session_ids<'a>(
     output
 }
 
-/// Return the cascade-closed ids eligible for auto-archive in one project.
-/// `sessions` may contain only non-archived entries; archived entries are also
-/// defensively ignored here so they cannot consume ranking slots.
-pub fn auto_archive_candidates(
-    sessions: &[SessionMeta],
-    now: u64,
-    config: &AutoArchiveConfig,
-    exempt: &AutoArchiveExemptions,
-) -> Vec<String> {
-    let sessions: Vec<&SessionMeta> = sessions
-        .iter()
-        .filter(|session| session.archived_at.is_none())
-        .collect();
-    let ids: HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
-    let mut children: HashMap<&str, Vec<&SessionMeta>> = HashMap::new();
-    let mut roots = Vec::new();
-    for session in &sessions {
-        if let Some(parent) = session.parent_session_id.as_deref()
-            && ids.contains(parent)
-        {
-            children.entry(parent).or_default().push(session);
-        } else {
-            roots.push(*session);
-        }
-    }
-    roots.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-    for siblings in children.values_mut() {
-        siblings.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-    }
-
-    fn has_exempt_descendant(
-        session_id: &str,
-        children: &HashMap<&str, Vec<&SessionMeta>>,
-        exempt: &AutoArchiveExemptions,
-        visiting: &mut HashSet<String>,
-    ) -> bool {
-        if !visiting.insert(session_id.to_string()) {
-            return false;
-        }
-        let found = children.get(session_id).is_some_and(|descendants| {
-            descendants.iter().any(|child| {
-                child.settled_at.is_some()
-                    || exempt.working.contains(&child.id)
-                    || exempt.unread.contains(&child.id)
-                    || exempt.active.contains(&child.id)
-                    || has_exempt_descendant(&child.id, children, exempt, visiting)
-            })
-        });
-        visiting.remove(session_id);
-        found
-    }
-
-    fn append_subtree(
-        session_id: &str,
-        children: &HashMap<&str, Vec<&SessionMeta>>,
-        archived: &mut HashSet<String>,
-        output: &mut Vec<String>,
-    ) {
-        if !archived.insert(session_id.to_string()) {
-            return;
-        }
-        output.push(session_id.to_string());
-        if let Some(descendants) = children.get(session_id) {
-            for child in descendants {
-                append_subtree(&child.id, children, archived, output);
-            }
-        }
-    }
-
-    struct WalkState {
-        archived: HashSet<String>,
-        output: Vec<String>,
-        visited: HashSet<String>,
-    }
-
-    fn visit_siblings(
-        siblings: &[&SessionMeta],
-        parent_id: Option<&str>,
-        children: &HashMap<&str, Vec<&SessionMeta>>,
-        now: u64,
-        config: &AutoArchiveConfig,
-        exempt: &AutoArchiveExemptions,
-        state: &mut WalkState,
-    ) {
-        for (rank, session) in siblings.iter().enumerate() {
-            if !state.visited.insert(session.id.clone()) || state.archived.contains(&session.id) {
-                continue;
-            }
-            let directly_exempt = session.settled_at.is_some()
-                || exempt.working.contains(&session.id)
-                || exempt.unread.contains(&session.id)
-                || exempt.active.contains(&session.id)
-                || parent_id.is_some_and(|parent| exempt.working.contains(parent));
-            let exempt_descendant =
-                has_exempt_descendant(&session.id, children, exempt, &mut HashSet::new());
-            let eligible = rank >= config.keep_count.max(1)
-                && now.saturating_sub(session.updated_at) > config.max_idle_secs
-                && !directly_exempt
-                && !exempt_descendant;
-            if eligible {
-                append_subtree(
-                    &session.id,
-                    children,
-                    &mut state.archived,
-                    &mut state.output,
-                );
-            } else if let Some(descendants) = children.get(session.id.as_str()) {
-                visit_siblings(
-                    descendants,
-                    Some(&session.id),
-                    children,
-                    now,
-                    config,
-                    exempt,
-                    state,
-                );
-            }
-        }
-    }
-
-    let mut state = WalkState {
-        archived: HashSet::new(),
-        output: Vec::new(),
-        visited: HashSet::new(),
-    };
-    visit_siblings(&roots, None, &children, now, config, exempt, &mut state);
-
-    // Malformed cycles have no root. Keep the function total and apply the same
-    // sibling rule to any remaining entries, mirroring the sidebar's defensive
-    // visibility behavior.
-    let mut remainder: Vec<_> = sessions
-        .iter()
-        .copied()
-        .filter(|session| {
-            !state.visited.contains(&session.id) && !state.archived.contains(&session.id)
-        })
-        .collect();
-    remainder.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-    visit_siblings(&remainder, None, &children, now, config, exempt, &mut state);
-    state.output
-}
-
 /// A project and its sessions, ready for the sidebar (newest activity first).
 #[derive(Debug, Clone)]
 pub struct ProjectGroup {
@@ -433,8 +305,8 @@ pub struct ProjectGroup {
     pub sessions: Vec<SessionMeta>,
 }
 
-/// Group `sessions` under their `projects`, ordering sessions newest-activity
-/// first within each group and groups per `sort`.
+/// Group `sessions` under their `projects` and order projects using `sort`.
+/// Callers choose the row order for their lifecycle or archive surface.
 pub fn group_sessions(
     projects: &[Project],
     sessions: &[SessionMeta],
@@ -443,12 +315,11 @@ pub fn group_sessions(
     let mut groups: Vec<ProjectGroup> = projects
         .iter()
         .map(|project| {
-            let mut sessions: Vec<SessionMeta> = sessions
+            let sessions: Vec<SessionMeta> = sessions
                 .iter()
                 .filter(|s| s.project_id.as_deref() == Some(project.id.as_str()))
                 .cloned()
                 .collect();
-            sessions = order_sessions_with_children(sessions);
             ProjectGroup {
                 project: project.clone(),
                 sessions,
@@ -479,59 +350,6 @@ pub fn group_sessions(
         }
     }
     groups
-}
-
-/// Stable parent-first ordering for a session pool. Orphans are roots; each
-/// parent's newest children follow it immediately.
-pub fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMeta> {
-    let ids: std::collections::HashSet<&str> =
-        sessions.iter().map(|session| session.id.as_str()).collect();
-    let mut roots: Vec<&SessionMeta> = sessions
-        .iter()
-        .filter(|session| {
-            session
-                .parent_session_id
-                .as_deref()
-                .is_none_or(|parent| !ids.contains(parent))
-        })
-        .collect();
-    roots.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-
-    fn append(
-        parent: &SessionMeta,
-        sessions: &[SessionMeta],
-        output: &mut Vec<SessionMeta>,
-        visited: &mut std::collections::HashSet<String>,
-    ) {
-        if !visited.insert(parent.id.clone()) {
-            return;
-        }
-        output.push(parent.clone());
-        let mut children: Vec<&SessionMeta> = sessions
-            .iter()
-            .filter(|session| session.parent_session_id.as_deref() == Some(parent.id.as_str()))
-            .collect();
-        children.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-        for child in children {
-            append(child, sessions, output, visited);
-        }
-    }
-
-    let mut output = Vec::with_capacity(sessions.len());
-    let mut visited = std::collections::HashSet::new();
-    for root in roots {
-        append(root, &sessions, &mut output, &mut visited);
-    }
-    // Defensive cycle handling: malformed cyclic metadata stays visible.
-    let mut remainder: Vec<&SessionMeta> = sessions
-        .iter()
-        .filter(|session| !visited.contains(&session.id))
-        .collect();
-    remainder.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-    for session in remainder {
-        append(session, &sessions, &mut output, &mut visited);
-    }
-    output
 }
 
 /// Every project and session in the store. Also the shape of the legacy
@@ -597,13 +415,6 @@ mod tests {
         meta
     }
 
-    fn archive_session(id: &str, updated_at: u64, parent: Option<&str>) -> SessionMeta {
-        let mut meta = session_in("p", updated_at);
-        meta.id = id.to_string();
-        meta.parent_session_id = parent.map(str::to_string);
-        meta
-    }
-
     #[test]
     fn provider_color_key_prefers_user_profile_then_acp_agent_then_builtin() {
         let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
@@ -647,28 +458,8 @@ mod tests {
         );
     }
 
-    fn candidates(
-        sessions: &[SessionMeta],
-        now: u64,
-        max_idle_secs: u64,
-        keep_count: usize,
-        exempt: &AutoArchiveExemptions,
-    ) -> HashSet<String> {
-        auto_archive_candidates(
-            sessions,
-            now,
-            &AutoArchiveConfig {
-                max_idle_secs,
-                keep_count,
-            },
-            exempt,
-        )
-        .into_iter()
-        .collect()
-    }
-
     #[test]
-    fn group_sessions_orders_by_activity() {
+    fn group_sessions_orders_projects_by_activity_or_name() {
         let projects = vec![
             Project {
                 id: "p-old".into(),
@@ -707,9 +498,6 @@ mod tests {
         assert_eq!(groups[0].project.id, "p-new");
         assert_eq!(groups[1].project.id, "p-old");
         assert_eq!(groups[2].project.id, "p-empty");
-        // Within a group, newest session first.
-        assert_eq!(groups[0].sessions[0].updated_at, 100);
-        assert_eq!(groups[0].sessions[1].updated_at, 50);
         assert!(groups[2].sessions.is_empty());
 
         // Name A-Z ordering ignores activity: Empty, New, Old (case-insensitive).
@@ -717,48 +505,6 @@ mod tests {
         assert_eq!(by_name[0].project.name, "Empty");
         assert_eq!(by_name[1].project.name, "New");
         assert_eq!(by_name[2].project.name, "Old");
-    }
-
-    #[test]
-    fn group_sessions_places_children_after_their_parent() {
-        let projects = vec![Project {
-            id: "p".into(),
-            name: "Project".into(),
-            root: PathBuf::from("/p"),
-            icon_path: None,
-            permission_defaults: BTreeMap::new(),
-            created_at: 1,
-        }];
-        let make = |id: &str, updated_at: u64, parent: Option<&str>| {
-            let mut meta = session_in("p", updated_at);
-            meta.id = id.into();
-            meta.parent_session_id = parent.map(str::to_string);
-            meta
-        };
-        let sessions = vec![
-            make("child-old", 10, Some("parent-new")),
-            make("parent-old", 90, None),
-            make("orphan", 95, Some("deleted-parent")),
-            make("child-new", 500, Some("parent-new")),
-            make("parent-new", 100, None),
-        ];
-
-        let groups = group_sessions(&projects, &sessions, ProjectSort::RecentActivity);
-        let ids: Vec<_> = groups[0]
-            .sessions
-            .iter()
-            .map(|session| session.id.as_str())
-            .collect();
-        assert_eq!(
-            ids,
-            [
-                "parent-new",
-                "child-new",
-                "child-old",
-                "orphan",
-                "parent-old"
-            ]
-        );
     }
 
     #[test]
@@ -806,138 +552,5 @@ mod tests {
         assert!(json.get("forked_from").is_none());
         assert!(json.get("checkpoints").is_none());
         assert_eq!(serde_json::from_value::<SessionMeta>(json).unwrap(), meta);
-    }
-
-    #[test]
-    fn auto_archive_respects_idle_rank_exemptions_and_descendant_cascades() {
-        let make = |id: &str, updated, parent: Option<&str>| archive_session(id, updated, parent);
-        let mut settled = make("settled", 1, Some("parent"));
-        settled.settled_at = Some(2);
-        let mut archived = make("already-archived", 900, None);
-        archived.archived_at = Some(950);
-        let cases = [
-            (
-                "settled descendant",
-                vec![
-                    make("newest", 1000, None),
-                    make("parent", 2, None),
-                    settled,
-                    make("old", 1, None),
-                ],
-                1,
-                AutoArchiveExemptions::default(),
-                vec!["old"],
-            ),
-            (
-                "idle boundary and future clock",
-                vec![
-                    make("future", 1100, None),
-                    make("at-boundary", 900, None),
-                    make("old", 899, None),
-                ],
-                1,
-                AutoArchiveExemptions::default(),
-                vec!["old"],
-            ),
-            (
-                "keep at least one",
-                vec![make("only", 1, None)],
-                0,
-                AutoArchiveExemptions::default(),
-                vec![],
-            ),
-            (
-                "archived does not consume rank",
-                vec![archived, make("keep", 2, None), make("old", 1, None)],
-                1,
-                AutoArchiveExemptions::default(),
-                vec!["old"],
-            ),
-            (
-                "exemptions consume rank",
-                vec![
-                    make("working", 40, None),
-                    make("active", 30, None),
-                    make("unread", 20, None),
-                    make("old", 10, None),
-                ],
-                3,
-                AutoArchiveExemptions {
-                    working: HashSet::from(["working".into()]),
-                    active: HashSet::from(["active".into()]),
-                    unread: HashSet::from(["unread".into()]),
-                },
-                vec!["old"],
-            ),
-            (
-                "working descendant",
-                vec![
-                    make("new-root", 900, None),
-                    make("root", 100, None),
-                    make("child", 90, Some("root")),
-                    make("worker", 80, Some("child")),
-                ],
-                1,
-                AutoArchiveExemptions {
-                    working: HashSet::from(["worker".into()]),
-                    ..Default::default()
-                },
-                vec![],
-            ),
-            (
-                "working parent",
-                vec![
-                    make("parent", 900, None),
-                    make("new-child", 80, Some("parent")),
-                    make("old-child", 70, Some("parent")),
-                ],
-                1,
-                AutoArchiveExemptions {
-                    working: HashSet::from(["parent".into()]),
-                    ..Default::default()
-                },
-                vec![],
-            ),
-            (
-                "children rank among siblings",
-                vec![
-                    make("parent", 1, None),
-                    make("new-child", 90, Some("parent")),
-                    make("old-child", 80, Some("parent")),
-                ],
-                1,
-                AutoArchiveExemptions::default(),
-                vec!["old-child"],
-            ),
-            (
-                "parent cascades even to recent descendants",
-                vec![
-                    make("new-root", 900, None),
-                    make("root", 100, None),
-                    make("child", 999, Some("root")),
-                    make("grandchild", 999, Some("child")),
-                ],
-                1,
-                AutoArchiveExemptions::default(),
-                vec!["root", "child", "grandchild"],
-            ),
-            (
-                "orphan ranks as root",
-                vec![
-                    make("new-root", 900, None),
-                    make("orphan", 10, Some("missing")),
-                ],
-                1,
-                AutoArchiveExemptions::default(),
-                vec!["orphan"],
-            ),
-        ];
-        for (label, sessions, keep, exempt, expected) in cases {
-            assert_eq!(
-                candidates(&sessions, 1000, 100, keep, &exempt),
-                expected.into_iter().map(str::to_string).collect(),
-                "{label}"
-            );
-        }
     }
 }
