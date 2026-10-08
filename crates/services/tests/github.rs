@@ -10,7 +10,7 @@ use std::{
     thread,
     time::{Duration, SystemTime},
 };
-use tcode_core::settings::{GitHubCredentialSource, GitHubHostSettings};
+use tcode_core::settings::GitHubHostSettings;
 use tcode_services::{
     github::{
         CredentialError, Credentials, GitHubApi, GitHubError, RequestOptions, RestRequest,
@@ -908,6 +908,7 @@ if [ -n "$6" ]; then printf '%s' "account-$6"; else /bin/cat "$FIXTURE_ROOT/toke
 #[test]
 fn gh_process_boundary_honors_binding_pins_cache_invalidation_and_failure_ttls() {
     use std::os::unix::fs::PermissionsExt as _;
+    use tcode_core::settings::GitHubCredentialSource;
     let fixture = Fixture::new();
     let store = Store::new();
     let mut env = gh_fixture(&store);
