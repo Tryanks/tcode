@@ -7,10 +7,7 @@ use super::{
     repository::Repository,
 };
 use serde_json::{Value, json};
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    time::{Duration, Instant},
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tcode_core::{
     pull_request::{Mergeability, PullRequestKey, PullRequestState},
     pull_request_watch::{CheckStatus, PullRequestCheck, PullRequestRemark, PullRequestWatchRead},
@@ -18,9 +15,6 @@ use tcode_core::{
 
 /// Past this many requests a list is reported incomplete rather than read on.
 const MAX_PAGES: usize = 10;
-/// A cached review-thread tail is paged again after this long, so an edited reply past a
-/// thread's first page is seen even while the thread's comment count stays the same.
-pub const TAIL_REREAD: Duration = Duration::from_secs(30 * 60);
 const FINGERPRINT_BATCH: usize = 25;
 
 /// Two parts, so a watch reads only what moved: `status` needs the detail read, `remarks` the
@@ -36,7 +30,6 @@ pub struct Fingerprint {
 pub struct Tail {
     count: u64,
     comments: Vec<PullRequestRemark>,
-    read_at: Instant,
 }
 pub type Tails = HashMap<String, Tail>;
 
@@ -532,9 +525,7 @@ pub fn activity(
             continue;
         };
         live.insert(id.to_owned());
-        let cached = tails
-            .get(id)
-            .filter(|tail| tail.count == count && tail.read_at.elapsed() < TAIL_REREAD);
+        let cached = tails.get(id).filter(|tail| tail.count == count);
         let tail = match cached {
             Some(tail) => tail.comments.clone(),
             None => match read_tail(api, key, &options, id, cursor, path) {
@@ -544,7 +535,6 @@ pub fn activity(
                         Tail {
                             count,
                             comments: comments.clone(),
-                            read_at: Instant::now(),
                         },
                     );
                     comments

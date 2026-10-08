@@ -493,6 +493,15 @@ fn reads_follow_the_fingerprint_and_its_half_hour_backstop() {
     let (delivery, text) = harness.delivered();
     assert!(text.contains("- Checks failed on 1111111:\n  - lint https://ci.test/lint"));
     harness.accept(delivery);
+    harness.host().checks.push(check("deploy", "PENDING"));
+    harness.pass();
+    harness.requests();
+    harness.pass();
+    assert_eq!(
+        harness.requests(),
+        [FINGERPRINTS, DETAIL],
+        "a check still running is read again though the fingerprint is quiet"
+    );
     harness.state.update(&mut harness.cx, |state, _| {
         for read in state.pull_request_watches.last_reads.values_mut() {
             read.at -= FINGERPRINT_REREAD;
@@ -599,15 +608,33 @@ fn stop_discards_a_read_in_flight_and_refuses_a_late_agent_start() {
     let mut harness = Harness::new("tcode-watch-stop");
     harness.host().checks = vec![check("build", "FAILURE")];
     harness.watch_thread("thread", START);
-    let (commands, provider) = smol::channel::unbounded();
-    harness.state.update(&mut harness.cx, |state, _| {
-        let meta = state.find_meta("thread").unwrap();
-        let session = ActiveSession {
-            runtime: Runtime::Live(commands),
-            ..ActiveSession::new(meta, false, Vec::new())
-        };
-        state.install_selected(session);
+    harness.state.update(&mut harness.cx, |state, cx| {
+        state.select_session("thread", cx);
+        state.mcp.pull_request_registrations.insert(
+            "thread".into(),
+            agent::McpRegistration {
+                name: "tcode_pull_requests".into(),
+                url: "http://127.0.0.1/pull-requests".into(),
+                bearer_token: "token".into(),
+            },
+        );
     });
+    harness.state.dispatch_command(
+        &mut harness.cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "Open a pull request and watch it.".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    let (delivery_id, _) = harness.delivered();
+    harness
+        .events
+        .try_send(AgentEvent::TurnAccepted { delivery_id })
+        .unwrap();
+    harness.cx.run_until_parked();
+
     let (release, gate) = mpsc::channel();
     harness.host().gate = Some(gate);
     harness.state.update(&mut harness.cx, |state, cx| {
@@ -617,9 +644,25 @@ fn stop_discards_a_read_in_flight_and_refuses_a_late_agent_start() {
     harness
         .cx
         .run_until(|_| host.lock().unwrap().requests.contains(&DETAIL.to_owned()));
+    let (reply, answer) = async_channel::bounded(1);
+    harness.state.update(&mut harness.cx, |state, cx| {
+        state.handle_pull_request_request(
+            pull_request_mcp::BrokerRequest {
+                session_id: "thread".into(),
+                operation: pull_request_mcp::Operation::Watch(pull_request_mcp::Target {
+                    url: Some("https://github.com/sample/project/pull/1".into()),
+                    repository: None,
+                    number: None,
+                    host: None,
+                }),
+                reply,
+            },
+            cx,
+        );
+    });
     harness.state.dispatch_command(
         &mut harness.cx,
-        1,
+        2,
         Command::Interrupt {
             session_id: "thread".into(),
         },
@@ -628,53 +671,24 @@ fn stop_discards_a_read_in_flight_and_refuses_a_late_agent_start() {
     release.send(()).unwrap();
     harness
         .cx
-        .run_until(|state| !state.pull_request_watches.passing);
+        .run_until(|state| !state.pull_request_watches.passing && !answer.is_empty());
+    let refused = answer.try_recv().unwrap().unwrap_err();
+    assert!(refused.contains("stopped"), "{refused}");
     assert_eq!(
         harness.watch("thread"),
         None,
-        "a late read never resurrects it"
+        "neither a late read nor a late agent start resurrects it"
     );
+    let sent: Vec<_> = std::iter::from_fn(|| harness.commands.try_recv().ok()).collect();
     assert!(
-        std::iter::from_fn(|| provider.try_recv().ok())
-            .all(|command| !matches!(command, SessionCommand::SendTurn { .. })),
-        "nothing was delivered"
+        matches!(sent[..], [SessionCommand::Interrupt]),
+        "Stop reaches the provider and nothing is delivered: {sent:?}"
     );
     assert!(harness.notices().is_empty());
 
-    let (reply, answer) = async_channel::bounded(1);
-    let request = |operation, reply| pull_request_mcp::BrokerRequest {
-        session_id: "thread".into(),
-        operation,
-        reply,
-    };
-    let target = || pull_request_mcp::Target {
-        url: Some("https://github.com/sample/project/pull/1".into()),
-        repository: None,
-        number: None,
-        host: None,
-    };
-    harness.state.update(&mut harness.cx, |state, cx| {
-        state.mcp.pull_request_registrations.insert(
-            "thread".into(),
-            agent::McpRegistration {
-                name: "tcode_pull_requests".into(),
-                url: "http://127.0.0.1/pull-requests".into(),
-                bearer_token: "token".into(),
-            },
-        );
-        state.interrupt("thread", cx).unwrap();
-        state.handle_pull_request_request(
-            request(pull_request_mcp::Operation::Watch(target()), reply),
-            cx,
-        );
-    });
-    harness.cx.run_until(|_| !answer.is_empty());
-    let refused = answer.try_recv().unwrap().unwrap_err();
-    assert!(refused.contains("stopped"), "{refused}");
-    assert_eq!(harness.watch("thread"), None);
     harness.state.dispatch_command(
         &mut harness.cx,
-        2,
+        3,
         Command::WatchPullRequest {
             session_id: "thread".into(),
             key: key(),
@@ -764,9 +778,6 @@ fn the_half_hour_reread_pages_cached_review_thread_tails_again() {
     harness.state.update(&mut harness.cx, |state, _| {
         for read in state.pull_request_watches.last_reads.values_mut() {
             read.at -= FINGERPRINT_REREAD;
-        }
-        for (since, _) in state.pull_request_watches.tails.values_mut() {
-            *since -= TAIL_REREAD;
         }
     });
     harness.requests();
