@@ -34,6 +34,7 @@ impl WorkspaceStore {
                 | Command::CreateNewProject { .. }
                 | Command::StartScratchDraft
                 | Command::SetProjectIcon { .. }
+                | Command::SetProjectRoot { .. }
                 | Command::StartExternalImport { .. }
                 | Command::OpenLatestSession
                 | Command::ShutdownAllAndFlush
@@ -640,6 +641,22 @@ impl WorkspaceStore {
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
         self.command(Command::CreateNewProject { name }, cx)
+    }
+    pub fn set_project_root(
+        &self,
+        project_id: String,
+        root: PathBuf,
+        move_files: bool,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(
+            Command::SetProjectRoot {
+                project_id,
+                root,
+                move_files,
+            },
+            cx,
+        )
     }
     pub fn toggle_project_collapsed(&mut self, project_id: String, cx: &mut Context<Self>) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });

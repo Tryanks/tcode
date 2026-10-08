@@ -84,6 +84,11 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::ProviderStart { error } => {
                     crate::tr!("errors.provider_start", error = error).into_owned()
                 }
+                RuntimeError::WorkingDirectoryMissing { cwd, .. } => crate::tr!(
+                    "errors.working_directory_missing",
+                    cwd = cwd.to_string_lossy()
+                )
+                .into_owned(),
                 RuntimeError::ProviderClosed {
                     reason: Some(reason),
                 } => crate::tr!("errors.provider_closed_reason", reason = reason).into_owned(),
