@@ -1372,6 +1372,15 @@ impl Timeline {
 /// the UI reparses that shape to render a disclosure row instead of a bubble.
 pub const ORCHESTRATE_CALLBACK_PREFIX: &str = "[orchestrate] thread ";
 
+/// Opens a callback body carrying the report the child chose with
+/// `report_result`.
+pub const ORCHESTRATE_REPORT_LABEL: &str = "Result (reported via report_result):\n";
+/// Follows a brief report, before the final assistant message delivered with it.
+pub const ORCHESTRATE_BRIEF_REPORT_LABEL: &str =
+    "\n\nThe report is brief; the final assistant message follows:\n";
+/// Opens the line before the tail of a final message too long to deliver whole.
+pub const ORCHESTRATE_OUTPUT_TAIL_LABEL: &str = "Final output tail (";
+
 /// The parts of an orchestrate child-thread callback user message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrchestrateCallback {
@@ -1383,6 +1392,22 @@ pub struct OrchestrateCallback {
     pub state: String,
     /// Everything after the first line — the digest body (empty when absent).
     pub body: String,
+}
+
+impl OrchestrateCallback {
+    /// The child's own words without the labels the callback frames them
+    /// with: its report, or else its final message.
+    pub fn report(&self) -> &str {
+        if let Some(report) = self.body.strip_prefix(ORCHESTRATE_REPORT_LABEL) {
+            return report
+                .split_once(ORCHESTRATE_BRIEF_REPORT_LABEL)
+                .map_or(report, |(report, _)| report);
+        }
+        if self.body.starts_with(ORCHESTRATE_OUTPUT_TAIL_LABEL) {
+            return self.body.split_once('\n').map_or("", |(_, tail)| tail);
+        }
+        &self.body
+    }
 }
 
 /// Parse a user-message text that a child-thread callback injected, mirroring

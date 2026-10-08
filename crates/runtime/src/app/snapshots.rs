@@ -1,4 +1,6 @@
 use super::*;
+use tcode_core::settlement::{AgentDelivery, AgentExecution};
+use tcode_protocol::AgentStatus;
 
 /// Last emitted values for every replace-style replica domain.
 ///
@@ -621,16 +623,65 @@ impl AppState {
         )
     }
 
-    /// Whether any descendant thread still runs or is itself waiting.
-    fn children_unfinished(&self, parent_id: &str) -> bool {
+    /// Whether a child of this thread holds it: one still runs, or a
+    /// dispatched one awaits its lead's settle.
+    pub(super) fn children_hold(&self, parent_id: &str) -> bool {
         self.sessions
             .iter()
-            .filter(|meta| meta.parent_session_id.as_deref() == Some(parent_id))
-            .any(|child| {
-                self.resident(&child.id)
-                    .is_some_and(ActiveSession::is_unfinished)
-                    || self.children_unfinished(&child.id)
+            .filter(|meta| {
+                meta.parent_session_id.as_deref() == Some(parent_id) && meta.archived_at.is_none()
             })
+            .any(|child| match self.agent_status(child) {
+                Some(status) => status.delivery.holds_parent(),
+                None => {
+                    self.resident(&child.id).is_some_and(|session| {
+                        session.is_unfinished() || session.timeline.turn_running
+                    }) || self.children_hold(&child.id)
+                }
+            })
+    }
+
+    /// A dispatched orchestrate child's execution and delivery; `None` for
+    /// every other thread.
+    pub(super) fn agent_status(&self, meta: &SessionMeta) -> Option<AgentStatus> {
+        if !meta.is_dispatched() {
+            return None;
+        }
+        let resident = self.resident(&meta.id);
+        let activity = self.thread_activity.get(&meta.id);
+        let asking = resident.is_some_and(|session| {
+            let (approvals, input) = self.open_requests(&meta.id, session);
+            !approvals.is_empty() || input.is_some()
+        });
+        let execution = if asking {
+            AgentExecution::Waiting
+        } else if resident.is_some_and(|session| {
+            session.turn_in_flight
+                || session.delivery_in_flight.is_some()
+                || !session.queue.is_empty()
+                || session.preparing_worktree
+                || matches!(session.runtime, Runtime::Starting { .. })
+        }) {
+            AgentExecution::Working
+        } else if resident.is_some_and(|session| session.background_task_count > 0)
+            || self.children_hold(&meta.id)
+        {
+            AgentExecution::Waiting
+        } else if meta.cancelled_at.is_some() {
+            AgentExecution::Cancelled
+        } else if activity.is_some_and(|activity| activity.failed) {
+            AgentExecution::Failed
+        } else if activity.is_some_and(|activity| activity.interrupted) {
+            AgentExecution::Interrupted
+        } else {
+            AgentExecution::Finished
+        };
+        Some(AgentStatus {
+            execution,
+            delivery: AgentDelivery::of(meta, execution),
+            run_started_at: activity.and_then(|activity| activity.last_run_started_at),
+            run_completed_at: activity.and_then(|activity| activity.last_run_completed_at),
+        })
     }
 
     pub(super) fn session_activity(
@@ -655,7 +706,7 @@ impl AppState {
             }),
             turn_running: resident.is_some_and(|session| session.turn_in_flight),
             waiting: resident.is_some_and(|session| session.background_task_count > 0)
-                || self.children_unfinished(&meta.id),
+                || self.children_hold(&meta.id),
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
             failed: self
@@ -664,6 +715,7 @@ impl AppState {
                 .is_some_and(|activity| activity.failed),
             unread: self.session_unread(meta),
             fork: Self::session_fork_availability(meta, resident),
+            agent: self.agent_status(meta),
         }
     }
 

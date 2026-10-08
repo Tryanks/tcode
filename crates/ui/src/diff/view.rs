@@ -33,6 +33,7 @@ use super::model::{
     build_file, diff_content_widths, expand, reconstruct_from_text, visible_split, visible_unified,
 };
 use super::parse::RowKind;
+use crate::agents_panel::{Agents, AgentsPanel};
 use crate::plan_panel::PlanPanel;
 use crate::store::WorkspaceStore;
 use crate::widgets::menu::DropdownMenu as _;
@@ -254,6 +255,7 @@ pub struct DiffPanel {
     /// The Plan/Tasks tab content (the other tab in this right panel).
     plan: Entity<PlanPanel>,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
+    agents: Entity<AgentsPanel>,
     ignore_ws: bool,
     show_invisibles: bool,
     scopes: HashMap<String, DiffScope>,
@@ -282,6 +284,7 @@ impl DiffPanel {
             )
         });
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
+        let agents = cx.new(|cx| AgentsPanel::new(workspace_store.clone(), cx));
         let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
             let comments = store.read(cx).review_comments();
             if this.observed_review_comments != comments {
@@ -295,6 +298,7 @@ impl DiffPanel {
             window_state,
             plan,
             pull_requests,
+            agents,
             ignore_ws: false,
             show_invisibles: false,
             scopes: HashMap::new(),
@@ -698,6 +702,14 @@ impl DiffPanel {
         let store_diff = self.workspace_store.clone();
         let store_plan = self.workspace_store.clone();
         let store_pr = self.workspace_store.clone();
+        let store_agents = self.workspace_store.clone();
+        let agents = {
+            let store = self.workspace_store.read(cx);
+            store.active_session_id().and_then(|id| {
+                let agents = Agents::of(store, &id);
+                (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
+            })
+        };
         let muted = cx.theme().muted_foreground;
         let tab_active = cx.theme().tab_active;
 
@@ -777,6 +789,43 @@ impl DiffPanel {
                     });
                 }),
             )
+            .when_some(agents, |strip, outstanding| {
+                let is_active = active == RightTab::Agents;
+                let tab = if outstanding == 0 {
+                    tab(
+                        "agents-tab",
+                        IconName::Bot,
+                        crate::tr!("agents.title").into_owned().into(),
+                        is_active,
+                        cx,
+                    )
+                } else {
+                    // The localized pattern places the count; only the count is muted.
+                    let pattern = crate::tr!("agents.tab_count", count = "\u{0}").into_owned();
+                    let (before, after) = pattern.split_once('\u{0}').unwrap_or((&pattern, ""));
+                    let content = h_flex()
+                        .gap_1()
+                        .children((!before.trim().is_empty()).then(|| before.trim().to_owned()))
+                        .child(div().text_color(muted).child(outstanding.to_string()))
+                        .children((!after.trim().is_empty()).then(|| after.trim().to_owned()))
+                        .into_any_element();
+                    labelled(
+                        "agents-tab",
+                        IconName::Bot,
+                        crate::tr!("agents.tab_count", count = outstanding.to_string())
+                            .into_owned()
+                            .into(),
+                        content,
+                        is_active,
+                        cx,
+                    )
+                };
+                strip.child(tab.on_click(move |_, _, cx| {
+                    store_agents.update(cx, |store, cx| {
+                        store.set_right_tab(RightTab::Agents, cx);
+                    });
+                }))
+            })
             .child({
                 let count = self
                     .workspace_store
@@ -2205,6 +2254,7 @@ impl Render for DiffPanel {
                 root.child(div().flex_1().min_h_0().child(self.pull_requests.clone()))
             }
             RightTab::Plan => root.child(div().flex_1().min_h_0().child(self.plan.clone())),
+            RightTab::Agents => root.child(div().flex_1().min_h_0().child(self.agents.clone())),
         };
         root
     }

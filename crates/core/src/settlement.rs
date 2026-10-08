@@ -2,6 +2,8 @@
 
 use agent::{AgentEvent, ItemContent, ThreadItem, TurnStatus};
 
+use serde::{Deserialize, Serialize};
+
 use crate::project::SessionMeta;
 use crate::pull_request::PullRequestState;
 use crate::session::{MessageOrigin, StoredEvent};
@@ -18,6 +20,8 @@ pub struct ThreadActivity {
     pub last_run_completed_at: Option<u64>,
     /// The latest run ended in an error and nothing has run since.
     pub failed: bool,
+    /// The latest run was interrupted and nothing has run since.
+    pub interrupted: bool,
 }
 
 impl ThreadActivity {
@@ -67,14 +71,17 @@ impl ThreadActivity {
             AgentEvent::TurnStarted { .. } => {
                 self.last_run_started_at = self.last_run_started_at.max(Some(ts));
                 self.failed = false;
+                self.interrupted = false;
             }
             AgentEvent::TurnCompleted { status, .. } => {
                 self.last_run_completed_at = self.last_run_completed_at.max(Some(ts));
                 self.failed = *status == TurnStatus::Failed;
+                self.interrupted = *status == TurnStatus::Interrupted;
             }
             AgentEvent::ProviderStartFailed { .. } => {
                 self.last_run_completed_at = self.last_run_completed_at.max(Some(ts));
                 self.failed = true;
+                self.interrupted = false;
             }
             _ => {}
         }
@@ -101,6 +108,56 @@ impl ThreadActivity {
             && [self.last_run_started_at, self.last_run_completed_at]
                 .into_iter()
                 .all(|run| run.is_none_or(|run| run < message_at))
+    }
+}
+
+/// What a dispatched orchestrate child is doing, as its lead's Agents view shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecution {
+    Working,
+    /// Waiting on a request, or on work of its own, inside the child.
+    Waiting,
+    Finished,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl AgentExecution {
+    pub fn running(self) -> bool {
+        matches!(self, Self::Working | Self::Waiting)
+    }
+}
+
+/// Whether a dispatched child's result has reached its lead. Settling the
+/// child is the lead's acknowledgement: a finished child is not delivered
+/// until then, and a cancelled or archived one never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDelivery {
+    Running,
+    AwaitingSettle,
+    Settled,
+    NotDelivered,
+}
+
+impl AgentDelivery {
+    pub fn of(meta: &SessionMeta, execution: AgentExecution) -> Self {
+        if meta.is_settled() {
+            Self::Settled
+        } else if meta.cancelled_at.is_some() || meta.archived_at.is_some() {
+            Self::NotDelivered
+        } else if execution.running() {
+            Self::Running
+        } else {
+            Self::AwaitingSettle
+        }
+    }
+
+    /// Outstanding child work keeps its lead waiting and out of settlement.
+    pub fn holds_parent(self) -> bool {
+        matches!(self, Self::Running | Self::AwaitingSettle)
     }
 }
 

@@ -445,11 +445,6 @@ pub struct OrchestrateSettings {
     /// is itself a repository root. Dispatch-level `worktree` overrides this.
     #[serde(default)]
     pub child_worktrees: bool,
-    /// Archive completed children automatically once their terminal result has
-    /// been delivered to the parent. Per-dispatch `archive_on_complete`
-    /// overrides this; failed children always stay visible for retries.
-    #[serde(default = "default_true")]
-    pub archive_on_complete: bool,
 }
 
 impl Default for OrchestrateSettings {
@@ -474,32 +469,18 @@ impl Default for OrchestrateSettings {
             child_models: rows(Role::Execution),
             child_approval: ChildApprovalMode::default(),
             child_worktrees: false,
-            archive_on_complete: true,
         }
     }
 }
 
 /// Ignore retired lead identities and consume old fixed efforts only for migration.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(default)]
 struct OrchestrateSettingsData {
     decision_models: Option<Vec<LegacyOrchestrateModel>>,
     child_models: Vec<LegacyOrchestrateModel>,
     child_approval: ChildApprovalMode,
     child_worktrees: bool,
-    archive_on_complete: bool,
-}
-
-impl Default for OrchestrateSettingsData {
-    fn default() -> Self {
-        Self {
-            decision_models: None,
-            child_models: Vec::new(),
-            child_approval: ChildApprovalMode::default(),
-            child_worktrees: false,
-            archive_on_complete: true,
-        }
-    }
 }
 
 impl From<OrchestrateSettingsData> for OrchestrateSettings {
@@ -514,7 +495,6 @@ impl From<OrchestrateSettingsData> for OrchestrateSettings {
             child_models,
             child_approval: data.child_approval,
             child_worktrees: data.child_worktrees,
-            archive_on_complete: data.archive_on_complete,
         };
         settings.normalize_models(true);
         settings
@@ -801,7 +781,6 @@ pub enum SettingsPatch {
     OrchestrateChildModels(Vec<OrchestrateChildModel>),
     OrchestrateChildApproval(ChildApprovalMode),
     OrchestrateChildWorktrees(bool),
-    OrchestrateArchiveOnComplete(bool),
     ComputerUseEnabled(bool),
     ComputerUseImageMode(ImageMode),
     ComputerUseAllowInput(bool),
@@ -959,11 +938,6 @@ pub struct Settings {
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
-    /// Ids of parent threads whose child rows are folded in the thread list.
-    /// Host-owned so every client shows the same list; reseeded at host
-    /// start so threads that already had children begin folded.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub collapsed_threads: Vec<String>,
     /// Model ids the user has starred in the model picker (favorites float to
     /// the top and are shown first under the star filter).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1075,7 +1049,6 @@ impl Default for Settings {
             title_generation: TitleGenerationSettings::default(),
             fallback_review: FallbackReviewSettings::default(),
             collapsed_projects: Vec::new(),
-            collapsed_threads: Vec::new(),
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
             sidebar_layout: SidebarLayout::default(),
@@ -1167,9 +1140,6 @@ impl Settings {
             }
             SettingsPatch::OrchestrateChildWorktrees(value) => {
                 self.orchestrate.child_worktrees = value;
-            }
-            SettingsPatch::OrchestrateArchiveOnComplete(value) => {
-                self.orchestrate.archive_on_complete = value;
             }
             SettingsPatch::ComputerUseEnabled(value) => self.computer_use.enabled = value,
             SettingsPatch::ComputerUseImageMode(value) => self.computer_use.image_mode = value,

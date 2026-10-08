@@ -5,6 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use super::*;
+use tcode_core::settlement::{AgentDelivery, AgentExecution};
 
 #[test]
 fn provider_update_command_and_toasts_have_literal_wire_contracts() {
@@ -938,19 +939,41 @@ fn version_six_index_visits_output_and_elision_literal_json() {
     let index = IndexSnapshot {
         summary: IndexSummary {
             archived_counts: [("p".to_string(), 2)].into(),
-            activity: [(
-                "cold".into(),
-                SessionActivity {
-                    working: false,
-                    turn_running: false,
-                    waiting: false,
-                    waiting_for_approval: false,
-                    waiting_for_input: false,
-                    failed: false,
-                    unread: true,
-                    fork: ForkAvailability::Available,
-                },
-            )]
+            activity: [
+                (
+                    "cold".into(),
+                    SessionActivity {
+                        working: false,
+                        turn_running: false,
+                        waiting: false,
+                        waiting_for_approval: false,
+                        waiting_for_input: false,
+                        failed: false,
+                        unread: true,
+                        fork: ForkAvailability::Available,
+                        agent: None,
+                    },
+                ),
+                (
+                    "child".into(),
+                    SessionActivity {
+                        working: false,
+                        turn_running: false,
+                        waiting: false,
+                        waiting_for_approval: false,
+                        waiting_for_input: false,
+                        failed: false,
+                        unread: false,
+                        fork: ForkAvailability::Available,
+                        agent: Some(AgentStatus {
+                            execution: AgentExecution::Finished,
+                            delivery: AgentDelivery::AwaitingSettle,
+                            run_started_at: Some(1_000),
+                            run_completed_at: Some(81_000),
+                        }),
+                    },
+                ),
+            ]
             .into(),
             archived_revision: 7,
             ..IndexSummary::default()
@@ -962,7 +985,11 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         serde_json::to_value(&index).unwrap(),
         json!({"activity": {"cold": {"working":false,"turn_running":false,"waiting":false,
             "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":true,
-            "fork":"available"}},
+            "fork":"available"},
+            "child": {"working":false,"turn_running":false,"waiting":false,
+            "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":false,
+            "fork":"available","agent":{"execution":"finished","delivery":"awaiting_settle",
+            "run_started_at":1000,"run_completed_at":81000}}},
             "title_generating": [], "archived_counts": {"p": 2},
             "worktree_shared": [], "archived_revision": 7, "sessions": [], "projects": []})
     );

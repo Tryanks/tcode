@@ -8,6 +8,12 @@ pub enum ThreadSection {
     Settled,
 }
 
+/// Whether a thread is listed among the threads: archived threads, dispatched
+/// orchestrate children and provider-native subagents are not; forks are.
+pub fn in_roster(meta: &SessionMeta) -> bool {
+    meta.archived_at.is_none() && !meta.is_subagent()
+}
+
 pub fn thread_section(meta: &SessionMeta) -> ThreadSection {
     if meta.is_settled() {
         ThreadSection::Settled

@@ -74,12 +74,11 @@ impl AppState {
                         Err(error) => log::warn!("settlement activity read for {id}: {error}"),
                     }
                 }
-                let holders = state.completion_holders();
                 let now = now_millis();
                 let due: Vec<_> = state
                     .sessions
                     .iter()
-                    .filter_map(|meta| state.settlement_due(meta, &holders, now))
+                    .filter_map(|meta| state.settlement_due(meta, now))
                     .collect();
                 for (id, at) in due {
                     state.settle_session_at(&id, at / 1000, cx);
@@ -112,23 +111,17 @@ impl AppState {
 
     /// Settle one thread now if it is due; for changes that concern only it.
     pub(super) fn evaluate_thread_settlement(&mut self, id: &str, cx: &mut HostCx) {
-        let holders = self.completion_holders();
         let due = self
             .sessions
             .iter()
             .find(|meta| meta.id == id)
-            .and_then(|meta| self.settlement_due(meta, &holders, now_millis()));
+            .and_then(|meta| self.settlement_due(meta, now_millis()));
         if let Some((id, at)) = due {
             self.settle_session_at(&id, at / 1000, cx);
         }
     }
 
-    fn settlement_due(
-        &self,
-        meta: &SessionMeta,
-        holders: &HashSet<&str>,
-        now: u64,
-    ) -> Option<(String, u64)> {
+    fn settlement_due(&self, meta: &SessionMeta, now: u64) -> Option<(String, u64)> {
         let activity = self.thread_activity.get(&meta.id)?;
         let resident = self.resident(&meta.id);
         let blockers = SettlementBlockers {
@@ -143,8 +136,9 @@ impl AppState {
                     || session.delivery_in_flight.is_some()
                     || session.timeline.turn_running
             }),
-            completion_holding_work: holders.contains(meta.id.as_str())
-                || resident.is_some_and(|session| session.background_task_count > 0),
+            completion_holding_work: resident
+                .is_some_and(|session| session.background_task_count > 0)
+                || self.children_hold(&meta.id),
             pending_human_message: resident.is_some_and(|session| {
                 session
                     .queue
@@ -170,46 +164,6 @@ impl AppState {
             .unwrap_or(self.settings.auto_settle_on_merge);
         automatic_settlement_at(meta, activity, blockers, now, days, on_merge)
             .map(|at| (meta.id.clone(), at))
-    }
-
-    /// Threads whose completion waits on a child: an unsettled dispatched
-    /// child, or a running provider-native subagent, which also holds every
-    /// native mirror above it.
-    fn completion_holders(&self) -> HashSet<&str> {
-        let by_id: HashMap<_, _> = self
-            .sessions
-            .iter()
-            .map(|meta| (meta.id.as_str(), meta))
-            .collect();
-        let mut holders = HashSet::new();
-        for child in self
-            .sessions
-            .iter()
-            .filter(|child| child.archived_at.is_none())
-        {
-            let native = child.native_subagent.is_some();
-            let holds = if native {
-                self.resident(&child.id)
-                    .is_some_and(|session| session.timeline.turn_running)
-            } else {
-                !child.is_settled()
-            };
-            if !holds {
-                continue;
-            }
-            let mut parent = child.parent_session_id.as_deref();
-            while let Some(id) = parent {
-                if !holders.insert(id) {
-                    break;
-                }
-                let owner = by_id.get(id);
-                if !native || owner.is_none_or(|meta| meta.native_subagent.is_none()) {
-                    break;
-                }
-                parent = owner.and_then(|meta| meta.parent_session_id.as_deref());
-            }
-        }
-        holders
     }
 }
 

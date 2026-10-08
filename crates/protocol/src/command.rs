@@ -301,15 +301,15 @@ pub enum Command {
     ToggleProjectCollapsed {
         project_id: String,
     },
-    /// Fold or unfold a parent thread's child rows in every client's list.
-    SetThreadCollapsed {
-        session_id: String,
-        collapsed: bool,
-    },
     PatchSettings {
         patch: SettingsPatch,
     },
     SettleSession {
+        session_id: String,
+    },
+    /// Orchestrate `cancel` for a dispatched child: stop it without
+    /// delivering its result.
+    CancelAgent {
         session_id: String,
     },
     SetAutoSettle {
@@ -483,6 +483,7 @@ impl Command {
             | Self::AddReviewComment { session_id, .. }
             | Self::RemoveReviewComment { session_id, .. }
             | Self::SettleSession { session_id, .. }
+            | Self::CancelAgent { session_id }
             | Self::UnsettleSession { session_id, .. }
             | Self::SetAutoSettle { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
