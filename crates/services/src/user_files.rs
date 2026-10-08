@@ -10,3 +10,71 @@ pub fn attachment_dir(data_root: &Path, session_id: &str) -> PathBuf {
 pub fn attachments_root(data_root: &Path) -> PathBuf {
     data_root.join("attachments")
 }
+
+#[derive(Clone, Debug)]
+pub struct UserDirectories {
+    pub home: Option<PathBuf>,
+    pub documents: Option<PathBuf>,
+}
+
+impl Default for UserDirectories {
+    fn default() -> Self {
+        Self {
+            home: dirs::home_dir(),
+            documents: dirs::document_dir(),
+        }
+    }
+}
+
+impl UserDirectories {
+    pub fn new_project_root(&self, name: &str) -> std::io::Result<PathBuf> {
+        let name = name.trim();
+        if name.is_empty()
+            || name.contains(['/', '\\'])
+            || !matches!(
+                Path::new(name).components().collect::<Vec<_>>().as_slice(),
+                [std::path::Component::Normal(_)]
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Project name must be a non-empty single directory name without / or \\.",
+            ));
+        }
+        let home = self.home.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Host home directory is unavailable.",
+            )
+        })?;
+        let root = home.join("TcodeProjects").join(name);
+        create_directory(&root)?;
+        Ok(root)
+    }
+
+    pub fn scratch_directory(&self) -> std::io::Result<(PathBuf, PathBuf)> {
+        let documents = self
+            .documents
+            .clone()
+            .or_else(|| self.home.as_ref().map(|home| home.join("Documents")))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Host documents directory is unavailable.",
+                )
+            })?;
+        let root = documents.join("Tcode");
+        let daily = root.join(chrono::Local::now().date_naive().to_string());
+        create_directory(&daily)?;
+        Ok((root, daily))
+    }
+}
+
+fn create_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("Could not create {}: {error}", path.display()),
+        )
+    })
+}

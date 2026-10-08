@@ -18,6 +18,7 @@ use crate::host::{HostCx, HostFn};
 /// client traffic.
 #[derive(Default)]
 pub struct HostServices {
+    pub user_directories: tcode_services::user_files::UserDirectories,
     /// Run provider catalog, version, and status probes during host startup.
     pub background_startup_probes: bool,
     /// Generate AI-authored titles for new threads and explicit regeneration.
@@ -123,7 +124,11 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
-            let mut state = match AppState::with_ai_titles(store, services.ai_title_generation) {
+            let mut state = match AppState::with_ai_titles(
+                store,
+                services.ai_title_generation,
+                services.user_directories,
+            ) {
                 Ok(state) => state,
                 Err(error) => {
                     let _ = ready_tx.send(Err(error));
@@ -289,15 +294,13 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
             cx.delivery_key = None;
             match outcome {
                 CommandOutcome::Immediate(result) => {
-                    if let Some((device, key)) = scoped_key {
-                        let mut completed = cx.completed.lock().unwrap();
-                        let cache = completed.entry(device).or_default();
-                        cache.push_back((key, result.clone()));
-                        while cache.len() > 512 {
-                            cache.pop_front();
-                        }
-                    }
-                    cx.send_message(HostMessage::Ack { id, result })
+                    complete_command(cx, id, scoped_key, result);
+                }
+                CommandOutcome::Pending(task) => {
+                    let response_cx = cx.clone();
+                    cx.spawn_detached(async move {
+                        complete_command(&response_cx, id, scoped_key, task.await);
+                    });
                 }
                 CommandOutcome::StoreBarrier(barrier) => {
                     let response_cx = cx.clone();
@@ -344,9 +347,27 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
     cx.author = None;
 }
 
+fn complete_command(
+    cx: &HostCx,
+    id: u64,
+    scoped_key: Option<(String, String)>,
+    result: Result<CommandResponse, ProtocolError>,
+) {
+    if let Some((device, key)) = scoped_key {
+        let mut completed = cx.completed.lock().unwrap();
+        let cache = completed.entry(device).or_default();
+        cache.push_back((key, result.clone()));
+        while cache.len() > 512 {
+            cache.pop_front();
+        }
+    }
+    cx.send_message(HostMessage::Ack { id, result });
+}
+
 enum CommandOutcome {
     Immediate(Result<CommandResponse, ProtocolError>),
     StoreBarrier(smol::channel::Receiver<Result<(), String>>),
+    Pending(crate::host::HostTask<Result<CommandResponse, ProtocolError>>),
 }
 
 fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
@@ -585,6 +606,18 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             Ok(project_id) => response = CommandResponse::ProjectId(Some(project_id)),
             Err(error) => return CommandOutcome::Immediate(Err(error)),
         },
+        Command::CreateNewProject { name } => {
+            let task = app.create_new_project(name, cx);
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                task.await.map(|id| CommandResponse::ProjectId(Some(id)))
+            }));
+        }
+        Command::StartScratchDraft => {
+            let task = app.start_scratch_draft(cx);
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                task.await.map(|id| CommandResponse::SessionId(Some(id)))
+            }));
+        }
         Command::StartExternalImport {
             project_id,
             threads,
@@ -1840,3 +1873,7 @@ mod terminal_replication_tests;
 #[cfg(test)]
 #[path = "pipe_spaces_tests.rs"]
 mod spaces_tests;
+
+#[cfg(test)]
+#[path = "pipe_project_creation_tests.rs"]
+mod project_creation_tests;

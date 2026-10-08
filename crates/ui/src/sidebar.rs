@@ -523,6 +523,9 @@ struct FilterProject(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
 struct StartDraftForProject(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct QuickChat;
 
 /// In-progress inline rename of a thread row.
 struct RenameState {
@@ -1084,6 +1087,13 @@ impl SessionsSidebar {
         self.window_state
             .update(cx, |state, cx| state.leave_route_for_chat(cx));
         cx.notify();
+    }
+
+    fn on_quick_chat(&mut self, _: &QuickChat, _window: &mut Window, cx: &mut Context<Self>) {
+        self.store
+            .update(cx, |store, cx| store.start_scratch_draft(cx));
+        self.window_state
+            .update(cx, |state, cx| state.open_thread(cx));
     }
 
     fn on_start_draft_for_project(
@@ -1890,6 +1900,17 @@ impl SessionsSidebar {
                     .child(self.render_layout_toggle(SidebarLayout::Grouped, cx))
                     .when(self.store.read(cx).scope().is_full(), |row| {
                         row.child(
+                            Button::new("quick-chat-grouped")
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .icon(IconName::Plus)
+                                .tooltip(crate::tr!("sidebar.quick_chat"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.on_quick_chat(&QuickChat, window, cx)
+                                })),
+                        )
+                        .child(
                             Button::new("add-project")
                                 .ghost()
                                 .xsmall()
@@ -1964,6 +1985,7 @@ impl SessionsSidebar {
                 .into_any_element()
         } else {
             let draft_projects = projects.clone();
+            let full_scope = self.store.read(cx).scope().is_full();
             Button::new("new-flat-thread")
                 .ghost()
                 .xsmall()
@@ -1971,7 +1993,9 @@ impl SessionsSidebar {
                 .icon(IconName::Plus)
                 .tooltip(crate::tr!("sidebar.create_thread"))
                 .dropdown_menu(move |menu, _window, _cx| {
-                    let mut menu = menu;
+                    let mut menu = menu.when(full_scope, |menu| {
+                        menu.menu(crate::tr!("sidebar.quick_chat"), Box::new(QuickChat))
+                    });
                     for project in &draft_projects {
                         menu = menu.menu(
                             project.name.clone(),
@@ -4230,6 +4254,7 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_project_reveal))
             .on_action(cx.listener(Self::on_filter_project))
             .on_action(cx.listener(Self::on_start_draft_for_project))
+            .on_action(cx.listener(Self::on_quick_chat))
             .on_action(cx.listener(Self::on_toggle_share))
             .on_action(cx.listener(Self::on_new_space_and_share))
             .child(self.render_app_row(window, cx))

@@ -1,4 +1,4 @@
-//! Add Project: pick a directory on the *host* and, optionally, import the
+//! Add Project: create or pick a directory on the *host* and, optionally, import the
 //! external-agent threads it already has.
 //!
 //! Everything here is host state reached over the pipe — the recents scan, the
@@ -15,7 +15,7 @@ use crate::scroll::ScrollableElement as _;
 use crate::sizing::fit_viewport;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::widgets::input::{Input, InputState};
+use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::progress::Progress;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
@@ -31,10 +31,9 @@ use tcode_protocol::{CommandResponse, ExternalImportState, ExternalThread, Recen
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
 const RECENT_VIEWPORT_MAX_HEIGHT: f32 = 390.;
-/// Everything around the recents viewport inside the dialog: title, the path
-/// row, the recents heading and the footer. Subtracted so the list scrolls
-/// instead of pushing the Open button off a short window.
-const RECENT_VIEWPORT_CHROME: f32 = 280.;
+/// Reserve room for the project inputs and footer so recents scroll instead
+/// of pushing the Open button off a short window.
+const RECENT_VIEWPORT_CHROME: f32 = 380.;
 
 enum RecentState {
     Loading,
@@ -52,6 +51,9 @@ pub(super) struct AddProjectDialog {
     /// The last failure to show under the path row. Host-authored where the
     /// host produced it, so the user reads the host's own reason.
     error: Option<String>,
+    name_input: Entity<InputState>,
+    pending_created_project: Option<String>,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 
 pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) {
@@ -81,7 +83,28 @@ impl AddProjectDialog {
             None => crate::tr!("sidebar.path_placeholder").into_owned(),
         };
         let path_input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let name_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(crate::tr!("sidebar.project_name")));
+        let subscriptions = vec![
+            cx.subscribe(&name_input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(
+                &store,
+                window,
+                |dialog, _, change: &crate::store::StoreChange, window, cx| {
+                    if change.topic == TopicKind::Index {
+                        dialog.open_created_project(window, cx);
+                    }
+                },
+            ),
+        ];
         Self {
+            name_input,
+            pending_created_project: None,
+            _subscriptions: subscriptions,
             store,
             path_input,
             recent: RecentState::Loading,
@@ -175,6 +198,43 @@ impl AddProjectDialog {
             });
         })
         .detach();
+    }
+
+    fn create_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
+        let name = self.name_input.read(cx).value().to_string();
+        let create = self
+            .store
+            .update(cx, |store, cx| store.create_new_project(name, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let response = create.await;
+            let _ = this.update_in(cx, |dialog, window, cx| match response {
+                Ok(CommandResponse::ProjectId(Some(id))) => {
+                    dialog.pending_created_project = Some(id);
+                    dialog.open_created_project(window, cx);
+                }
+                Ok(_) => dialog.fail(
+                    crate::tr!("sidebar.create_project_no_response").into_owned(),
+                    cx,
+                ),
+                Err(error) => dialog.fail(error.message, cx),
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_created_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.pending_created_project.as_ref() else {
+            return;
+        };
+        let Some(root) = self.store.read(cx).project_root(id) else {
+            return;
+        };
+        let id = self.pending_created_project.take().unwrap();
+        self.store
+            .update(cx, |store, cx| store.start_draft(id, root, cx));
+        window.close_dialog(cx);
     }
 
     fn fail(&mut self, reason: String, cx: &mut Context<Self>) {
@@ -362,8 +422,50 @@ impl Render for AddProjectDialog {
             .as_ref()
             .map(|host| crate::tr!("sidebar.host_path_hint", host = host).into_owned());
         let can_browse = self.can_browse(cx);
+        let destination = format!(
+            "~/TcodeProjects/{}",
+            self.name_input.read(cx).value().trim()
+        );
+        let destination_hint = match &host {
+            Some(host) => crate::tr!(
+                "sidebar.new_project_destination_host",
+                host = host,
+                path = destination
+            )
+            .into_owned(),
+            None => crate::tr!("sidebar.new_project_destination", path = destination).into_owned(),
+        };
         v_flex()
             .gap_4()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_semibold()
+                            .child(crate::tr!("sidebar.create_new_project")),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(Input::new(&self.name_input).flex_1())
+                            .child(
+                                Button::new("create-new-project")
+                                    .label(crate::tr!("sidebar.create"))
+                                    .on_click(cx.listener(|dialog, _, window, cx| {
+                                        dialog.create_new_project(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(destination_hint),
+                    ),
+            )
             .child(
                 v_flex()
                     .gap_1()

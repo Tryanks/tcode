@@ -262,6 +262,9 @@ pub enum Command {
     CreateProject {
         root: PathBuf,
     },
+    CreateNewProject {
+        name: String,
+    },
     /// Start an import run. Progress, completion and the finalized index are
     /// host-owned: subscribe to [`crate::Topic::ExternalImport`] before sending
     /// this, and read the outcome from that replicated status. Returns
@@ -332,6 +335,7 @@ pub enum Command {
         project_id: String,
         cwd: PathBuf,
     },
+    StartScratchDraft,
     SetDraftWorkspace {
         session_id: String,
         mode: WorkspaceMode,

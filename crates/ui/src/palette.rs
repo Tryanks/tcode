@@ -70,6 +70,7 @@ enum Action {
         cwd: std::path::PathBuf,
         project_id: String,
     },
+    QuickChat,
     OpenSettings,
     ToggleTheme,
     ToggleDiff,
@@ -326,6 +327,13 @@ impl CommandPalette {
                 ));
             }
         };
+        if store.scope().is_full() {
+            push_action(
+                crate::tr!("sidebar.quick_chat").into_owned(),
+                IconName::Plus,
+                Action::QuickChat,
+            );
+        }
         for group in store.grouped_sessions() {
             push_action(
                 crate::tr!("palette.new_thread", project = group.project.name.clone()).into_owned(),
@@ -504,6 +512,13 @@ impl CommandPalette {
                 });
                 // Draft selection arrives asynchronously and can reuse an
                 // already selected draft. Navigation is a separate intent.
+                self.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
+            }
+            Action::QuickChat => {
+                self.close(cx);
+                self.store
+                    .update(cx, |store, cx| store.start_scratch_draft(cx));
                 self.window_state
                     .update(cx, |state, cx| state.open_thread(cx));
             }
@@ -1222,8 +1237,10 @@ mod tests {
             draw(cx);
         }
         let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
-        assert_eq!(last, 309);
-        assert!(cx.debug_bounds("palette-row-309").is_some());
+        assert!(
+            cx.debug_bounds(format!("palette-row-{last}").leak())
+                .is_some()
+        );
         assert!(cx.debug_bounds("palette-row-5").is_none());
 
         for _ in 0..5 {

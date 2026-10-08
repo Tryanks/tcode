@@ -325,6 +325,7 @@ impl Default for TcodeUpdateState {
 
 pub struct AppState {
     store: SessionStore,
+    user_directories: user_files::UserDirectories,
     settings_store: SettingsStore,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
@@ -473,7 +474,7 @@ pub(crate) fn startup_collapsed_threads(sessions: &[SessionMeta]) -> Vec<String>
 
 impl AppState {
     pub fn new(store: SessionStore) -> std::io::Result<Self> {
-        Self::with_ai_titles(store, false)
+        Self::with_ai_titles(store, false, user_files::UserDirectories::default())
     }
 
     /// Take ownership of the data dir and load its threads. Fails while
@@ -481,6 +482,7 @@ impl AppState {
     pub(crate) fn with_ai_titles(
         store: SessionStore,
         ai_title_generation_enabled: bool,
+        user_directories: user_files::UserDirectories,
     ) -> std::io::Result<Self> {
         store.open()?;
         let file = store.read_file()?;
@@ -529,6 +531,7 @@ impl AppState {
         let session_search = Arc::new(std::sync::Mutex::new(SessionSearch::new(store.clone())));
         Ok(Self {
             store,
+            user_directories,
             settings_store,
             store_writes,
             store_write_receiver: Some(store_write_receiver),

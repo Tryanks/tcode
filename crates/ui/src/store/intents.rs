@@ -31,6 +31,8 @@ impl WorkspaceStore {
             Command::DeleteSession { .. }
                 | Command::DeleteProject { .. }
                 | Command::CreateProject { .. }
+                | Command::CreateNewProject { .. }
+                | Command::StartScratchDraft
                 | Command::SetProjectIcon { .. }
                 | Command::StartExternalImport { .. }
                 | Command::OpenLatestSession
@@ -635,6 +637,13 @@ impl WorkspaceStore {
     ) -> Task<Result<CommandResponse, ProtocolError>> {
         self.command(Command::CreateProject { root }, cx)
     }
+    pub fn create_new_project(
+        &self,
+        name: String,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(Command::CreateNewProject { name }, cx)
+    }
     pub fn toggle_project_collapsed(&mut self, project_id: String, cx: &mut Context<Self>) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });
         self.local_settings_changed(cx);
@@ -658,7 +667,11 @@ impl WorkspaceStore {
         self.remember_project(Some(project_id.clone()));
         self.create_and_select(Command::StartDraft { project_id, cwd }, cx);
     }
+    pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
+        self.create_and_select(Command::StartScratchDraft, cx);
+    }
     fn create_and_select(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.draft_fallback_pending = true;
         let request = self.command(command, cx);
         let selected = self.selected_session_id.clone();
         cx.spawn(async move |this, cx| {
