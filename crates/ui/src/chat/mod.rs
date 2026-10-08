@@ -369,6 +369,7 @@ enum FullOutput {
 
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
+    pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
@@ -672,9 +673,17 @@ impl ChatView {
                 }),
             ];
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
+        let pull_requests = cx.new(|cx| {
+            crate::pull_requests::PullRequestsPanel::new(
+                workspace_store.clone(),
+                window_state.clone(),
+                cx,
+            )
+        });
         let terminal_was_open = workspace_store.read(cx).panel_state().terminal_open;
 
         let mut this = Self {
+            pull_requests,
             workspace_store,
             window_state,
             composer,
@@ -1805,7 +1814,7 @@ impl ChatView {
             .child(self.compose_disclosure(
                 turn,
                 format!("orchestrate-context-{entry_id}"),
-                crate::tr!("chat.orchestrate_skill").into_owned().into(),
+                injected_context_label(context).into(),
                 context,
                 cx,
             ))
@@ -2221,6 +2230,108 @@ impl ChatView {
         self.copied.mark(key, |this| &mut this.copied, cx);
     }
 
+    fn on_link_url(
+        &mut self,
+        action: &crate::pull_requests::LinkUrl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.workspace_store.read(cx).active_session_id() else {
+            return;
+        };
+        let task = self.workspace_store.update(cx, |store, cx| {
+            store.command(
+                tcode_protocol::Command::LinkPullRequest {
+                    session_id,
+                    reference: action.0.clone(),
+                },
+                cx,
+            )
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let result = task.await;
+            _ = cx.update(|window, cx| {
+                window.push_notification(
+                    match result {
+                        Ok(tcode_protocol::CommandResponse::PullRequestLinked {
+                            key,
+                            already_linked,
+                        }) => crate::overlay::Notification::info(
+                            crate::tr!(
+                                if already_linked {
+                                    "pull_requests.already_linked"
+                                } else {
+                                    "pull_requests.linked_toast"
+                                },
+                                number = key.number.to_string()
+                            )
+                            .into_owned(),
+                        ),
+                        Ok(_) => return,
+                        Err(error) => crate::overlay::Notification::error(
+                            crate::tr!("pull_requests.link_failed", reason = error.message)
+                                .into_owned(),
+                        ),
+                    },
+                    cx,
+                )
+            });
+        })
+        .detach();
+    }
+
+    fn active_pull_requests(
+        &self,
+        cx: &App,
+    ) -> Option<Vec<tcode_core::pull_request::ThreadPullRequestLink>> {
+        let store = self.workspace_store.read(cx);
+        Some(store.pull_requests(&store.active_session_id()?).to_vec())
+    }
+
+    /// The phone's entry to the linked pull requests: a chip in the row above the
+    /// composer that opens them in a bottom sheet.
+    fn render_pull_request_pill(&self, cx: &App) -> Option<AnyElement> {
+        let links = self.active_pull_requests(cx)?;
+        let badge = crate::pull_requests::badge(&links, 14., cx)?;
+        let label = crate::pull_requests::badge_label(&links, cx)?;
+        let panel = self.pull_requests.clone();
+        Some(
+            h_flex()
+                .h(px(36.))
+                .px(px(crate::material::COMPACT_PAGE_INSET))
+                .gap_2()
+                .items_center()
+                .child(
+                    crate::widgets::Popover::new("phone-pull-requests")
+                        .bottom_sheet(crate::tr!("pull_requests.title").into_owned())
+                        .trigger(
+                            Button::new("phone-pr-pill")
+                                .ghost()
+                                .compact()
+                                .h(px(28.))
+                                .min_h(px(44.))
+                                .px_2p5()
+                                .aria_label(label)
+                                .rounded(crate::material::radius_chip(cx))
+                                .bg(cx.theme().muted)
+                                .child(badge),
+                        )
+                        .content(move |_, _, _| panel.clone()),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn on_link_dialog(
+        &mut self,
+        _: &crate::pull_requests::OpenLinkDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.workspace_store.read(cx).active_session_id() {
+            crate::pull_requests::open_link_dialog(self.workspace_store.clone(), id, window, cx);
+        }
+    }
     fn render_header(
         &self,
         title: Option<String>,
@@ -2345,6 +2456,10 @@ impl ChatView {
                         Box::new(crate::widgets::menu::CopyText(title)),
                     )
                 });
+                let menu = menu.separator().menu(
+                    crate::tr!("pull_requests.link_menu").into_owned(),
+                    Box::new(crate::pull_requests::OpenLinkDialog),
+                );
                 match &cwd {
                     Some(cwd) => menu.separator().path_items(&cwd.to_string_lossy(), None),
                     None => menu,
@@ -2353,7 +2468,44 @@ impl ChatView {
         };
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
-            .child(window_caption::drag_region(title_el).context_menu(title_menu))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w(px(168.))
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        window_caption::drag_region(title_el.flex_grow(0.))
+                            .context_menu(title_menu),
+                    )
+                    .when_some(
+                        self.active_pull_requests(cx).and_then(|links| {
+                            Some((
+                                crate::pull_requests::badge(&links, 14., cx)?,
+                                crate::pull_requests::badge_label(&links, cx)?,
+                            ))
+                        }),
+                        |header, (badge, label)| {
+                            header.child(
+                                Button::new("header-pr-badge")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .selected(
+                                        right_panel_open && right_tab == RightTab::PullRequests,
+                                    )
+                                    .tooltip(crate::tr!("pull_requests.toggle"))
+                                    .aria_label(label)
+                                    .child(badge)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.toggle_pull_requests_panel(cx)
+                                        })
+                                    })),
+                            )
+                        },
+                    ),
+            )
             .when(show_actions, |this| {
                 this.children(self.render_git_button(cx))
                     .children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
@@ -3422,6 +3574,8 @@ impl Render for ChatView {
         let main = v_flex()
             .size_full()
             .min_h_0()
+            .on_action(cx.listener(Self::on_link_url))
+            .on_action(cx.listener(Self::on_link_dialog))
             .on_action(cx.listener(Self::on_rewind_turn))
             .on_action(cx.listener(Self::on_open_file_diff))
             .child(
@@ -3484,6 +3638,9 @@ impl Render for ChatView {
                     .debug_selector(|| "chat-composer".into())
                     .w_full()
                     .flex_none()
+                    .when(self.window_state.read(cx).compact, |container| {
+                        container.children(self.render_pull_request_pill(cx))
+                    })
                     .child(composer),
             );
 
@@ -3516,6 +3673,22 @@ impl Render for ChatView {
         };
         root.when(!self.window_state.read(cx).compact, |el| el.child(header))
             .child(body)
+    }
+}
+
+/// A recorded turn's injected context is named by what it holds.
+fn injected_context_label(context: &str) -> String {
+    let orchestrate = || crate::tr!("chat.orchestrate_skill").into_owned();
+    match tcode_core::pull_request::strip_linking_instructions(context) {
+        None => orchestrate(),
+        Some(rest) => {
+            let instructions = crate::tr!("pull_requests.instructions_disclosure").into_owned();
+            if rest.trim().is_empty() {
+                instructions
+            } else {
+                format!("{instructions} · {}", orchestrate())
+            }
+        }
     }
 }
 

@@ -242,7 +242,9 @@ impl AppState {
                         self.authorize_path(path, project_ids, PathAccess::AttachmentDescendant, cx)
                     })
                 }
-                Command::Interrupt { session_id }
+                Command::LinkPullRequest { session_id, .. }
+                | Command::UnlinkPullRequest { session_id, .. }
+                | Command::Interrupt { session_id }
                 | Command::SetActiveModel { session_id, .. }
                 | Command::SetActiveOption { session_id, .. }
                 | Command::SetActiveAcpAgent { session_id, .. }

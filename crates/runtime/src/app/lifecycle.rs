@@ -100,6 +100,11 @@ impl AppState {
         } else {
             None
         };
+        let pull_request_registration = if meta.provider.caps().mcp_servers {
+            self.pull_request_registration_for(&meta)
+        } else {
+            None
+        };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
@@ -126,7 +131,7 @@ impl AppState {
             let launch_env = host_cx
                 .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
                 .await;
-            let opts = session_options(
+            let mut opts = session_options(
                 &meta,
                 &settings,
                 launch_env,
@@ -135,6 +140,7 @@ impl AppState {
                 orchestrate_report_registration,
                 computer_use_registration,
             );
+            opts.mcp_servers.extend(pull_request_registration);
             let result = provider_launcher.launch(meta.provider, opts).await;
             host_cx.enqueue(move |state, cx| {
                 let matches_active = state.residents.live.get(&session_id).is_some_and(|active| {
@@ -327,6 +333,14 @@ impl AppState {
     }
 
     pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+        let discover = self
+            .sessions
+            .iter()
+            .find(|old| old.id == meta.id)
+            .is_none_or(|old| {
+                (old.archived_at.is_some() && meta.archived_at.is_none())
+                    || (old.is_settled() && !meta.is_settled())
+            });
         self.advance_decision_revision(&meta.id);
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
@@ -340,6 +354,9 @@ impl AppState {
         // and re-parsing every session's meta would stall the mailbox.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
+        if discover {
+            self.discover_pull_requests_for(&meta.id, true, cx);
+        }
     }
 
     /// Close what this thread's provider leaves open before it goes away: the
@@ -396,6 +413,7 @@ impl AppState {
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
         self.stop_diff_pass();
+        self.stop_pull_request_workers();
         for id in self
             .mcp
             .computer_use_registrations
@@ -577,9 +595,11 @@ impl AppState {
         for child_id in child_ids {
             self.drop_background(&child_id, cx);
             self.revoke_preview_registration(&child_id);
+            self.revoke_pull_request_registration(&child_id);
             self.revoke_orchestrate_child_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
+        self.revoke_pull_request_registration(parent_id);
         self.revoke_computer_use_registration(parent_id);
         if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)
             && let Some(tokens) = &self.mcp.orchestrate_tokens

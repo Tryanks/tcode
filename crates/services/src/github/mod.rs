@@ -3,7 +3,9 @@
 pub mod api;
 pub mod credentials;
 pub mod graphql;
+pub mod pull_requests;
 mod quota;
+pub mod repository;
 
 pub use api::{GitHubApi, GitHubError, RequestOptions, Response, RestRequest};
 pub use credentials::{Credential, CredentialError, Credentials, Identity};

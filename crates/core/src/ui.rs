@@ -28,6 +28,7 @@ pub enum RightTab {
     Diff,
     Plan,
     Preview,
+    PullRequests,
 }
 
 /// Stable identity for client-owned state attached to a conversation surface.

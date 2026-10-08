@@ -253,6 +253,7 @@ mod options;
 mod orchestrate;
 mod plugins;
 mod providers;
+mod pull_requests;
 mod send;
 mod sessions;
 mod settlement;
@@ -330,6 +331,7 @@ pub struct AppState {
     settings_store: SettingsStore,
     github: Arc<tcode_services::github::GitHubApi>,
     github_generation: u64,
+    pull_requests: pull_requests::PullRequestRuntime,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
     store_write_failures: smol::channel::Sender<StoreWriteFailure>,
@@ -546,8 +548,9 @@ impl AppState {
             store,
             user_directories,
             settings_store,
-            github,
+            github: github.clone(),
             github_generation: 0,
+            pull_requests: pull_requests::PullRequestRuntime::new(github.clone()),
             store_writes,
             store_write_receiver: Some(store_write_receiver),
             store_write_failures,

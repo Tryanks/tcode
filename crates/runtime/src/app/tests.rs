@@ -2281,10 +2281,18 @@ fn collaboration_starts_a_peer_discussion_with_native_permission() {
     let test_store = TestStore::new("tcode-peer-collaboration-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
     state.update(cx, |state, cx| {
-        let parent = SessionMeta::new(
+        let mut parent = SessionMeta::new(
             ProviderKind::ClaudeCode,
             PathBuf::from("/workspace"),
             Some("claude-fable-5-1".into()),
+        );
+        tcode_core::pull_request::link_pull_request(
+            &mut parent.pull_requests,
+            tcode_core::pull_request::PullRequestKey::new("github.com", "sample/project", 1),
+            "https://github.com/sample/project/pull/1".into(),
+            tcode_core::pull_request::PullRequestSource::Agent,
+            1,
+            true,
         );
         let parent_id = parent.id.clone();
         state.sessions.push(parent);
@@ -2314,6 +2322,7 @@ fn collaboration_starts_a_peer_discussion_with_native_permission() {
         let id = result["thread_id"].as_str().unwrap();
         assert_eq!(result["permission"], "auto_review");
         let child = state.resident(id).unwrap();
+        assert!(child.meta.pull_requests.is_empty());
         assert_eq!(child.meta.model.as_deref(), Some("gpt-6-astra"));
         assert_eq!(
             child.meta.parent_session_id.as_deref(),
@@ -4601,14 +4610,14 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     active.push_queued("first".into(), Vec::new());
     active.push_queued("second".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let first_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
         }) if text == "first" => delivery_id,
         other => panic!("expected first SendTurn, got {other:?}"),
     };
-    assert_eq!(active.dispatch_next_pending(), Ok(false));
+    assert_eq!(active.dispatch_next_pending(false), Ok(false));
     assert!(receiver.try_recv().is_err());
     assert_eq!(active.queue.len(), 2, "unaccepted head stays queued");
     assert_eq!(
@@ -4619,7 +4628,7 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     assert_eq!(active.queue[0].text, "second");
 
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let second_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
@@ -4641,7 +4650,7 @@ fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
     );
     let ordinary_id = active.push_queued("now".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn {
@@ -5013,7 +5022,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
             assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
         } else {
             active.push_queued("next turn".into(), Vec::new());
-            assert_eq!(active.dispatch_next_pending(), Ok(true));
+            assert_eq!(active.dispatch_next_pending(false), Ok(true));
             let SessionCommand::SendTurn {
                 options: Some(options),
                 ..
@@ -5373,7 +5382,7 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     };
     active.push_queued(String::new(), vec![attachment.clone()]);
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let delivery_id = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id,
@@ -5402,7 +5411,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     active.queue[0].relay_transcript = Some("# prior work".into());
     active.push_queued("follow up".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     let first = receiver.try_recv().unwrap();
     let SessionCommand::SendTurn {
         delivery_id, text, ..
@@ -5416,7 +5425,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
 
     active.accept_turn_delivery(delivery_id).unwrap();
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(), Ok(true));
+    assert_eq!(active.dispatch_next_pending(false), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
@@ -5932,6 +5941,14 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         base: "main".into(),
         branch: "tcode/source".into(),
     });
+    tcode_core::pull_request::link_pull_request(
+        &mut source.pull_requests,
+        tcode_core::pull_request::PullRequestKey::new("github.com", "sample/project", 1),
+        "https://github.com/sample/project/pull/1".into(),
+        tcode_core::pull_request::PullRequestSource::Manual,
+        1,
+        true,
+    );
     store.upsert_meta(&source).unwrap();
     store
         .append_event(
@@ -5987,6 +6004,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         let fork = &active.meta;
         assert_ne!(fork.id, source.id);
         assert!(fork.pending_fork);
+        assert!(fork.pull_requests.is_empty());
         assert_eq!(
             fork.resume_cursor.as_ref().unwrap().0["thread_id"],
             "native-source"

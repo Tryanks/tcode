@@ -1021,6 +1021,7 @@ impl AppState {
                 .remove(&ConversationDestination::Thread(id.to_string()));
             self.drop_background(id, cx);
             self.revoke_preview_registration(id);
+            self.revoke_pull_request_registration(id);
             self.revoke_orchestrate_child_registration(id);
         }
         for id in &ids {
@@ -1707,7 +1708,9 @@ impl AppState {
                 },
                 cx,
             );
+            let id = meta.id.clone();
             self.upsert_session_in_memory(meta);
+            self.discover_pull_requests_for(&id, false, cx);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)

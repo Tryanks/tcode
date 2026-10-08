@@ -74,6 +74,8 @@ pub use wire::{
 // also covers unfinished child threads; adds the CreateNewProject and
 // StartScratchDraft commands; adds per-host GitHub settings, credential source
 // discovery, SetGitHubToken and RefreshGitHubCredentials.
+// Unreleased: linked PRs in SessionMeta; LinkPullRequest and UnlinkPullRequest commands,
+// and the PullRequestLinked command result.
 // Unreleased: Settled/Active overrides and lifecycle timestamps on thread
 // metadata; UnsettleSession replaces MakeSessionActive, SetAutoSettle controls
 // the durable per-thread disable; global and per-project settlement settings;

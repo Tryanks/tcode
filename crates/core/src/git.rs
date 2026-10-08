@@ -70,6 +70,9 @@ pub struct GitStatus {
     pub behind: u32,
     /// Changed files (for the commit dialog list).
     pub changed_files: Vec<GitFileEntry>,
+    /// The GitHub repository a bare pull request number refers to, resolved as gh does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repository: Option<String>,
 }
 
 impl GitStatus {
@@ -513,6 +516,7 @@ pub fn parse_status(
         ahead,
         behind,
         changed_files,
+        github_repository: None,
     }
 }
 
@@ -892,6 +896,7 @@ mod tests {
                         deletions: 3
                     },
                 ],
+                github_repository: None,
             }
         );
         for (head, oid, default, commits, detached, is_default) in [

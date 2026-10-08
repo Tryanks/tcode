@@ -27,10 +27,9 @@ pub struct QueuedMessage {
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
     pub(super) options: TurnOptions,
-    /// Byte length of an injected context prefix folded into `text` (set only for
-    /// an `/orchestrate` send). Threaded into the recorded user-message event so
-    /// the timeline can split the prefix from the user's own words; `None` for
-    /// every ordinary send.
+    /// Byte length of visible context folded into `text`, including orchestration
+    /// context and per-turn pull-request instructions. The recorded event uses
+    /// it to split the injected prefix from the user's own words.
     pub(super) context_len: Option<usize>,
     /// Context-window selection changed while the provider was live.
     pub(super) context_window_changed: Option<u64>,
@@ -531,7 +530,10 @@ impl ActiveSession {
     /// queued message is by definition one that waits for the running turn to
     /// finish. (Steering — the other way to send mid-turn — never goes through
     /// here; see [`AppState::steer`].)
-    pub(super) fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
+    pub(super) fn dispatch_next_pending(
+        &mut self,
+        pull_request_instructions: bool,
+    ) -> Result<bool, ()> {
         if self.turn_in_flight
             || self.delivery_in_flight.is_some()
             || self.settings_restart_deferred()
@@ -542,7 +544,7 @@ impl ActiveSession {
             return Ok(false);
         };
         let now = SystemTime::now();
-        let Some(send) = self
+        let Some(mut send) = self
             .queue
             .iter()
             .find(|message| message.not_before.is_none_or(|time| time <= now))
@@ -550,14 +552,37 @@ impl ActiveSession {
         else {
             return Ok(false);
         };
+        // A retried delivery already carries the block it was first dispatched with.
+        let instructions = tcode_core::pull_request::LINKING_INSTRUCTIONS;
+        if let Some(len) = send.context_len.filter(|len| *len >= instructions.len())
+            && let Some(own) = send.text.strip_prefix(instructions)
+        {
+            send.text = own.to_owned();
+            send.context_len = Some(len - instructions.len()).filter(|len| *len > 0);
+        }
+        let mut text = send.wire_text(&self.provider_commands);
+        // A native `/command` must stay at byte zero, and the block must not become its arguments.
+        let instructed = pull_request_instructions && !text.starts_with('/');
+        if instructed {
+            text.insert_str(0, instructions);
+        }
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,
-                text: send.wire_text(&self.provider_commands),
+                text,
                 options: Some(send.options),
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
+        if let Some(queued) = self.queue.iter_mut().find(|queued| queued.id == send.id) {
+            if instructed {
+                queued.text = format!("{instructions}{}", send.text);
+                queued.context_len = Some(instructions.len() + send.context_len.unwrap_or(0));
+            } else {
+                queued.text = send.text;
+                queued.context_len = send.context_len;
+            }
+        }
         self.idle_since = None;
         self.delivery_in_flight = Some(send.id);
         Ok(true)

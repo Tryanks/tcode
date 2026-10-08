@@ -71,6 +71,8 @@ pub enum SettledOverride {
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
+    #[serde(default)]
+    pub pull_requests: Vec<crate::pull_request::ThreadPullRequestLink>,
     pub id: String,
     pub title: String,
     pub provider: ProviderKind,
@@ -239,6 +241,7 @@ impl SessionMeta {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             title: format!("New {} session", provider.display_name()),
+            pull_requests: Vec::new(),
             provider,
             profile_id: None,
             cwd,
