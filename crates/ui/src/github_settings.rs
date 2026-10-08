@@ -276,15 +276,5 @@ impl Render for GitHubSettingsPanel {
                             })),
                     ),
             )
-            .child(
-                Button::new("github-refresh")
-                    .ghost()
-                    .compact()
-                    .label(crate::tr!("source_control.refresh").into_owned())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.store
-                            .update(cx, |store, _| store.refresh_github_credentials());
-                    })),
-            )
     }
 }

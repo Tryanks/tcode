@@ -43,10 +43,7 @@ const MIGRATION_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
-    // ureq debug traces include full URLs; GitHub logs only sanitized paths.
-    env_logger::Builder::from_default_env()
-        .parse_filters("ureq=off")
-        .init();
+    env_logger::init();
     if let Err(error) = run(std::env::args().skip(1).collect()) {
         eprintln!("tcode-headless: {error}");
         std::process::exit(1);

@@ -7,16 +7,12 @@ use serde::Deserialize;
 
 pub mod provider_updates;
 
-pub fn fetch_latest_tcode_release_json(
-    api: &std::sync::Arc<GitHubApi>,
-) -> Result<Vec<u8>, FetchError> {
+pub fn fetch_latest_tcode_release_json(api: &GitHubApi) -> Result<Vec<u8>, FetchError> {
     api.rest(
         "github.com",
         RestRequest::get("/repos/Tryanks/tcode/releases/latest"),
         &RequestOptions {
-            authentication: Authentication::Anonymous {
-                namespace: "version-check".into(),
-            },
+            authentication: Authentication::Anonymous,
             operation: "LatestRelease",
             timeout: Duration::from_secs(10),
             body_limit: 1024 * 1024,

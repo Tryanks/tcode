@@ -27,31 +27,23 @@ pub enum GitHubError {
     Deadline,
     BodyTooLarge,
     InvalidResponse,
-    InvalidPath,
 }
 impl std::fmt::Display for GitHubError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Server messages may echo request values; keep the display safe for generic logging.
-        match self {
-            Self::Response { status, .. } => write!(f, "GitHub response failed ({status})"),
-            Self::Credential(error) => error.fmt(f),
-            _ => write!(
-                f,
-                "GitHub request failed ({})",
-                match self {
-                    Self::Paused { .. } => "paused",
-                    Self::RateLimited { .. } => "rate limited",
-                    Self::Unauthorized => "unauthorized",
-                    Self::NotFound => "not found",
-                    Self::Request => "network",
-                    Self::Deadline => "deadline",
-                    Self::BodyTooLarge => "body too large",
-                    Self::InvalidResponse => "invalid response",
-                    Self::InvalidPath => "invalid path",
-                    _ => unreachable!(),
-                }
-            ),
-        }
+        let reason = match self {
+            Self::Credential(error) => return error.fmt(f),
+            Self::Response { status, .. } => return write!(f, "GitHub response failed ({status})"),
+            Self::Paused { .. } => "paused",
+            Self::RateLimited { .. } => "rate limited",
+            Self::Unauthorized => "unauthorized",
+            Self::NotFound => "not found",
+            Self::Request => "network",
+            Self::Deadline => "deadline",
+            Self::BodyTooLarge => "body too large",
+            Self::InvalidResponse => "invalid response",
+        };
+        write!(f, "GitHub request failed ({reason})")
     }
 }
 impl std::error::Error for GitHubError {}
@@ -66,9 +58,8 @@ pub enum Authentication {
     #[default]
     Automatic,
     Pinned(Credential),
-    Anonymous {
-        namespace: String,
-    },
+    /// A separate ledger scope, so unauthenticated quota never mixes with a credential's.
+    Anonymous,
 }
 
 #[derive(Debug, Clone)]
@@ -130,18 +121,18 @@ struct Gate {
     active: Mutex<usize>,
     ready: Condvar,
 }
-struct Permit(Arc<Gate>);
+struct Permit<'a>(&'a Gate);
 impl Gate {
-    fn acquire(self: &Arc<Self>) -> Permit {
+    fn acquire(&self) -> Permit<'_> {
         let mut active = self.active.lock().unwrap();
         while *active >= 8 {
             active = self.ready.wait(active).unwrap();
         }
         *active += 1;
-        Permit(self.clone())
+        Permit(self)
     }
 }
-impl Drop for Permit {
+impl Drop for Permit<'_> {
     fn drop(&mut self) {
         *self.0.active.lock().unwrap() -= 1;
         self.0.ready.notify_one();
@@ -156,10 +147,9 @@ struct CachedIdentity {
 pub struct GitHubApi {
     credentials: Arc<Credentials>,
     agent: ureq::Agent,
-    gate: Arc<Gate>,
+    gate: Gate,
     ledger: Mutex<Ledger>,
     identities: Mutex<HashMap<String, CachedIdentity>>,
-    identity_gates: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
 }
 
 impl GitHubApi {
@@ -167,16 +157,15 @@ impl GitHubApi {
         Self::new(credentials, ureq::AgentBuilder::new())
     }
 
-    /// The builder allows host-specific TLS trust and proxy/DNS configuration. Pooling is
-    /// disabled because ureq retries stale pooled sockets; GitHub writes must never retry here.
+    /// Tests route the builder's resolver and TLS to a loopback fixture. Pooling is disabled
+    /// because ureq retries stale pooled sockets; GitHub writes must never retry here.
     pub fn new(credentials: Arc<Credentials>, builder: ureq::AgentBuilder) -> Arc<Self> {
         Arc::new(Self {
             credentials,
             agent: builder.redirects(0).max_idle_connections(0).build(),
-            gate: Arc::new(Gate::default()),
+            gate: Gate::default(),
             ledger: Mutex::new(Ledger::default()),
             identities: Mutex::new(HashMap::new()),
-            identity_gates: Mutex::new(HashMap::new()),
         })
     }
 
@@ -185,7 +174,7 @@ impl GitHubApi {
     }
 
     pub fn rest(
-        self: &Arc<Self>,
+        &self,
         host: &str,
         request: RestRequest<'_>,
         options: &RequestOptions,
@@ -194,7 +183,7 @@ impl GitHubApi {
     }
 
     pub fn graphql(
-        self: &Arc<Self>,
+        &self,
         host: &str,
         document: &Document,
         options: &RequestOptions,
@@ -214,10 +203,7 @@ impl GitHubApi {
     }
 
     /// Capture and verify once before a multi-request operation to prevent account changes mid-page.
-    pub fn verified_credential(
-        self: &Arc<Self>,
-        host: &str,
-    ) -> Result<(Credential, Identity), GitHubError> {
+    pub fn verified_credential(&self, host: &str) -> Result<(Credential, Identity), GitHubError> {
         let credential = self.credentials.get(host)?;
         {
             let mut cache = self.identities.lock().unwrap();
@@ -225,23 +211,6 @@ impl GitHubApi {
             if let Some(cached) = cache.get(&credential.fingerprint) {
                 return Ok((credential, cached.identity.clone()));
             }
-        }
-        let gate = {
-            let mut gates = self.identity_gates.lock().unwrap();
-            gates.retain(|_, gate| gate.strong_count() > 0);
-            let weak = gates.entry(credential.fingerprint.clone()).or_default();
-            match weak.upgrade() {
-                Some(gate) => gate,
-                None => {
-                    let gate = Arc::new(Mutex::new(()));
-                    *weak = Arc::downgrade(&gate);
-                    gate
-                }
-            }
-        };
-        let _verification = gate.lock().unwrap();
-        if let Some(cached) = self.identities.lock().unwrap().get(&credential.fingerprint) {
-            return Ok((credential, cached.identity.clone()));
         }
         let response = self.rest(
             host,
@@ -254,16 +223,7 @@ impl GitHubApi {
             },
         )?;
         let identity: Identity = response.json()?;
-        let mut cache = self.identities.lock().unwrap();
-        if cache.len() >= 128
-            && let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, value)| value.expires)
-                .map(|(key, _)| key.clone())
-        {
-            cache.remove(&oldest);
-        }
-        cache.insert(
+        self.identities.lock().unwrap().insert(
             credential.fingerprint.clone(),
             CachedIdentity {
                 identity: identity.clone(),
@@ -274,19 +234,13 @@ impl GitHubApi {
     }
 
     fn execute(
-        self: &Arc<Self>,
+        &self,
         raw_host: &str,
         input: RestRequest<'_>,
         graphql: Option<&str>,
         options: &RequestOptions,
     ) -> Result<Response, GitHubError> {
         let host = normalize_host(raw_host)?;
-        if !input.path.starts_with('/')
-            || input.path.starts_with("//")
-            || input.path.contains(['\r', '\n', '#', '\\'])
-        {
-            return Err(GitHubError::InvalidPath);
-        }
         let credential = match &options.authentication {
             Authentication::Automatic => Some(self.credentials.get(&host)?),
             Authentication::Pinned(credential) => {
@@ -296,70 +250,22 @@ impl GitHubApi {
                 self.credentials.check_enabled(&host)?;
                 Some(credential.clone())
             }
-            Authentication::Anonymous { .. } => None,
+            Authentication::Anonymous => None,
         };
-        let scope = match (&credential, &options.authentication) {
-            (Some(credential), _) => credential.fingerprint.clone(),
-            (_, Authentication::Anonymous { namespace }) => format!("anonymous:{namespace}"),
-            _ => unreachable!(),
-        };
-        let permit = self.gate.acquire();
+        let scope = credential
+            .as_ref()
+            .map_or("anonymous", |credential| &credential.fingerprint);
+        // Callers run this inside HostCx::unblock, so a dropped waiter leaves the job, and
+        // its permit, alive until the socket closes. ureq 2 does not apply its deadline to
+        // DNS resolution; a stalled lookup is bounded by the system resolver instead.
+        let _permit = self.gate.acquire();
         let lease = self.ledger.lock().unwrap().admit(
             &host,
-            &scope,
+            scope,
             if graphql.is_some() { "graphql" } else { "core" },
             options.interactive,
         )?;
-        let timeout = options.timeout.min(Duration::from_secs(30));
-        let api = self.clone();
-        let method = input.method.to_owned();
-        let path = input.path.to_owned();
-        let body = input.body.cloned();
-        let validator = input.if_none_match.map(str::to_owned);
-        let graphql = graphql.map(str::to_owned);
-        let options = options.clone();
-        let (send, receive) = std::sync::mpsc::sync_channel(1);
-        // ureq 2 cannot apply its deadline to DNS or every TLS handshake phase. The
-        // result deadline includes them; this I/O job retains the permit until it exits,
-        // even after timeout or when the HostCx::unblock waiter has been dropped.
-        std::thread::Builder::new()
-            .name("github-io".into())
-            .spawn(move || {
-                let _permit = permit;
-                let answer = api.execute_io(
-                    &host,
-                    RestRequest {
-                        method: &method,
-                        path: &path,
-                        body: body.as_ref(),
-                        if_none_match: validator.as_deref(),
-                    },
-                    graphql.as_deref(),
-                    &options,
-                    credential,
-                    &scope,
-                    lease,
-                );
-                let _ = send.send(answer);
-            })
-            .map_err(|_| GitHubError::Request)?;
-        receive.recv_timeout(timeout).map_err(|error| match error {
-            std::sync::mpsc::RecvTimeoutError::Timeout => GitHubError::Deadline,
-            _ => GitHubError::Request,
-        })?
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn execute_io(
-        &self,
-        host: &str,
-        input: RestRequest<'_>,
-        graphql: Option<&str>,
-        options: &RequestOptions,
-        credential: Option<Credential>,
-        scope: &str,
-        lease: u64,
-    ) -> Result<Response, GitHubError> {
+        let host = host.as_str();
         let public = host == "github.com";
         let residency = host.ends_with(".ghe.com");
         let root = if public {

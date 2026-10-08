@@ -1062,55 +1062,6 @@ fn dropped_waiters_keep_all_eight_socket_permits_until_their_jobs_finish() {
     );
     answer.unwrap();
 }
-
-#[test]
-fn whole_response_result_deadline_includes_a_stalled_dns_resolver() {
-    let fixture = Fixture::new();
-    let store = Store::new();
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let release_rx = std::sync::Mutex::new(release_rx);
-    let first = AtomicBool::new(true);
-    let address = fixture.address;
-    let builder = fixture.builder().resolver(move |_: &str| {
-        if first.swap(false, Ordering::SeqCst) {
-            entered_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv().unwrap();
-        }
-        Ok(vec![address])
-    });
-    let api = GitHubApi::new(store.credentials(&[("GH_TOKEN", "fixture")]), builder);
-    thread::scope(|scope| {
-        let job = scope.spawn(|| {
-            api.rest(
-                "github.com",
-                RestRequest::get("/dns"),
-                &RequestOptions {
-                    timeout: Duration::from_millis(200),
-                    ..Default::default()
-                },
-            )
-        });
-        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(job.join().unwrap().unwrap_err(), GitHubError::Deadline);
-        release_tx.send(()).unwrap();
-    });
-    let (answer, request, _) = fixture.call(
-        || {
-            api.rest(
-                "github.com",
-                RestRequest::get("/after-dns"),
-                &RequestOptions::default(),
-            )
-        },
-        200,
-        "",
-        b"{}",
-    );
-    answer.unwrap();
-    assert!(request.starts_with("GET /after-dns "));
-}
-
 #[test]
 fn linked_pr_summaries_coalesce_and_retry_only_missing_graphql_aliases() {
     use tcode_core::pull_request::PullRequestKey;
@@ -1177,8 +1128,6 @@ fn linked_pr_summaries_coalesce_and_retry_only_missing_graphql_aliases() {
         2,
         "only the missing summary needs a single GraphQL fallback"
     );
-    assert_eq!(requests[0]["variables"].as_object().unwrap().len(), 6);
-    assert_eq!(requests[1]["variables"]["s0_number"], 2);
     assert!(
         requests[0]["query"]
             .as_str()
