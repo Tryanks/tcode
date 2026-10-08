@@ -51,6 +51,16 @@ pub fn check() -> PermissionStatus {
     imp::check()
 }
 
+/// Whether the executable on disk no longer matches the code this process is
+/// running, which happens when the bundle is rebuilt, re-signed or replaced
+/// under a running instance. TCC validates every request against the code on
+/// disk, so both grants stop working until the app restarts even though
+/// System Settings still lists them as granted and [`check`] keeps returning
+/// the process-cached verdict from launch.
+pub fn code_changed_on_disk() -> bool {
+    imp::code_changed_on_disk()
+}
+
 /// Non-prompting host snapshot including whether these grants apply at all.
 pub fn host_status() -> ComputerUsePermissions {
     if cfg!(target_os = "macos") {
@@ -121,11 +131,40 @@ mod imp {
         fn CGRequestScreenCaptureAccess() -> bool;
     }
 
+    type SecCodeRef = *const std::ffi::c_void;
+    type OSStatus = i32;
+    const SEC_CS_DEFAULT_FLAGS: u32 = 0;
+    const ERR_SEC_CS_STATIC_CODE_CHANGED: OSStatus = -67034;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecCodeCopySelf(flags: u32, out: *mut SecCodeRef) -> OSStatus;
+        fn SecCodeCheckValidity(
+            code: SecCodeRef,
+            flags: u32,
+            requirement: *const std::ffi::c_void,
+        ) -> OSStatus;
+    }
+
     pub(super) fn check() -> PermissionStatus {
         PermissionStatus {
             accessibility: unsafe { AXIsProcessTrusted() },
             screen_recording: unsafe { CGPreflightScreenCaptureAccess() },
         }
+    }
+
+    pub(super) fn code_changed_on_disk() -> bool {
+        let mut code: SecCodeRef = std::ptr::null();
+        // SAFETY: SecCodeCopySelf follows the create rule; the reference is
+        // released below after the validity check.
+        let status = unsafe { SecCodeCopySelf(SEC_CS_DEFAULT_FLAGS, &mut code) };
+        if status != 0 || code.is_null() {
+            return false;
+        }
+        let validity =
+            unsafe { SecCodeCheckValidity(code, SEC_CS_DEFAULT_FLAGS, std::ptr::null()) };
+        unsafe { core_foundation::base::CFRelease(code) };
+        validity == ERR_SEC_CS_STATIC_CODE_CHANGED
     }
 
     pub(super) fn request(kind: PermissionKind) -> bool {
@@ -165,6 +204,10 @@ mod imp {
         }
     }
 
+    pub(super) fn code_changed_on_disk() -> bool {
+        false
+    }
+
     pub(super) fn request(_kind: PermissionKind) -> bool {
         true
     }
@@ -180,6 +223,10 @@ mod imp {
         // Unsupported platforms have no TCC; the settings UI shows the
         // platform as unsupported rather than ungranted.
         PermissionStatus::default()
+    }
+
+    pub(super) fn code_changed_on_disk() -> bool {
+        false
     }
 
     pub(super) fn request(_kind: PermissionKind) -> bool {
