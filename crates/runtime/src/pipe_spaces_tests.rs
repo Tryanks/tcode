@@ -421,6 +421,14 @@ fn space_index_and_scope_project_only_the_members_projects() {
 fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
     let mut host = SpaceHost::new();
     let member = host.member("one");
+    for command in [
+        Command::CreateNewProject {
+            name: "outside-space".into(),
+        },
+        Command::StartScratchDraft,
+    ] {
+        denied(host.request(member.clone(), ClientPayload::Command(command)));
+    }
     for topic in [
         Topic::Index,
         Topic::Settings,

@@ -1618,7 +1618,6 @@ impl WorkspaceStore {
         else {
             return;
         };
-        self.draft_fallback_pending = true;
         self.start_draft(project.id, project.root, cx);
     }
 
