@@ -161,7 +161,7 @@ fn localized_callback_state(state: &str) -> Cow<'static, str> {
     }
 }
 
-fn truncate_chars(text: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     let text = one_line(text);
     if text.chars().count() <= max {
         return text;

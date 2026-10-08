@@ -1480,8 +1480,6 @@ fn compact_label(key: &str) -> String {
 }
 
 impl AppShell {
-    /// Back to whatever is under this page, labelled with that destination's
-    /// short fixed label. `None` at the root, where the platform owns Back.
     /// The lead thread of the open agent, when one is open.
     fn agent_lead(&self, cx: &App) -> Option<(Entity<WorkspaceStore>, String)> {
         let store = self.attachment.as_ref()?.link.store.clone();
@@ -1502,6 +1500,8 @@ impl AppShell {
         Some((store, parent))
     }
 
+    /// Back to whatever is under this page, labelled with that destination's
+    /// short fixed label. `None` at the root, where the platform owns Back.
     fn back_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let label = if self.destination(cx) == Destination::Thread && self.agent_lead(cx).is_some()
         {

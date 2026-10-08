@@ -348,6 +348,8 @@ pub struct SettingsPage {
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     section: Section,
+    /// Whether this page holds the store's archived threads.
+    archived_held: bool,
     capabilities: SettingsCapabilities,
     /// Whether the machine group's **Advanced** subgroup is open, once the user
     /// has said. `None` keeps the capability-derived default.
@@ -591,6 +593,7 @@ impl SettingsPage {
             },
             acp_cards: Vec::new(),
             section,
+            archived_held: false,
             capabilities,
             advanced_expanded: None,
             usage_refresh_sent: false,
@@ -659,8 +662,10 @@ impl SettingsPage {
         page.sync_acp_cards(window, cx);
         page.hydrate_inputs(window, cx);
         page._subscriptions.push(cx.on_release(|this, cx| {
-            this.store
-                .update(cx, |store, _| store.release_archived_sessions());
+            if this.archived_held {
+                this.store
+                    .update(cx, |store, _| store.release_archived_sessions());
+            }
         }));
         page.sync_archived(cx);
         page
@@ -811,11 +816,15 @@ impl SettingsPage {
 
     /// The index leaves archived threads out; the Archived section holds
     /// them only while it is open.
-    fn sync_archived(&self, cx: &mut Context<Self>) {
+    fn sync_archived(&mut self, cx: &mut Context<Self>) {
         let open = self.section == Section::Archived;
+        if open == self.archived_held {
+            return;
+        }
+        self.archived_held = open;
         self.store.update(cx, |store, cx| {
             if open {
-                store.load_archived_sessions(cx);
+                store.hold_archived_sessions(cx);
             } else {
                 store.release_archived_sessions();
             }
@@ -826,6 +835,7 @@ impl SettingsPage {
         self.host_permissions = None;
         if !self.section_applies(&section, cx) {
             self.section = Section::General;
+            self.sync_archived(cx);
             Self::return_to_settings_root(&self.window_state, cx);
             cx.notify();
             return;

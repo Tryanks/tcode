@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 pub(crate) mod components;
 mod model;
+pub(crate) use model::format_duration;
 mod residency;
 
 use crate::overlay::OverlayExt as _;
@@ -683,7 +684,7 @@ impl ChatView {
             )
         });
         let agents =
-            cx.new(|cx| crate::agents_panel::AgentsPanel::new(workspace_store.clone(), cx));
+            cx.new(|cx| crate::agents_panel::AgentsPanel::for_sheet(workspace_store.clone(), cx));
         let terminal_was_open = workspace_store.read(cx).panel_state().terminal_open;
 
         let mut this = Self {
@@ -2226,16 +2227,15 @@ impl ChatView {
 
     /// The phone entry to the Agents view: a pill above the composer that
     /// opens the sheet, shown while the thread has agents.
-    fn render_agents_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_agents_pill(
+        &self,
+        agents: Option<&crate::agents_panel::Agents>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.window_state.read(cx).compact {
             return None;
         }
-        let store = self.workspace_store.read(cx);
-        let id = store.active_session_id()?;
-        if !crate::agents_panel::has_agents(store, &id) {
-            return None;
-        }
-        let agents = crate::agents_panel::Agents::of(store, &id);
+        let agents = agents?;
         let label: SharedString = match agents.count() {
             1 => crate::tr!("agents.pill_one").into_owned(),
             count => crate::tr!("agents.pill", count = count).into_owned(),
@@ -2243,6 +2243,7 @@ impl ChatView {
         .into();
         let cue = agents.cue(cx);
         let panel = self.agents.clone();
+        let shown = self.agents.downgrade();
         let pill = crate::material::accessible_clickable(
             h_flex(),
             "agents-pill",
@@ -2275,6 +2276,14 @@ impl ChatView {
                 .child(
                     crate::widgets::Popover::new("agents-sheet")
                         .bottom_sheet(crate::tr!("agents.title"))
+                        .on_open_change(move |open, _, cx| {
+                            // Opening an agent dismisses the sheet from inside
+                            // the panel's own update.
+                            let (shown, open) = (shown.clone(), *open);
+                            cx.defer(move |cx| {
+                                let _ = shown.update(cx, |panel, cx| panel.set_shown(open, cx));
+                            });
+                        })
                         .trigger_with(move |_, _, _| pill.into_any_element())
                         .content(move |_, window, cx| {
                             let sheet = cx.entity().downgrade();
@@ -2302,7 +2311,7 @@ impl ChatView {
             .clone()?;
         let parent = sessions.iter().find(|meta| meta.id == parent_id)?;
         let title = parent.title.clone();
-        let short = truncate_title(&title, 24);
+        let short = components::disclosure::truncate_chars(&title, 24);
         Some(
             Button::new("agent-parent-link")
                 .debug_selector(|| "agent-parent-link".into())
@@ -2455,6 +2464,7 @@ impl ChatView {
         title: Option<String>,
         is_draft: bool,
         cwd: Option<PathBuf>,
+        agents: Option<&crate::agents_panel::Agents>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2565,15 +2575,7 @@ impl ChatView {
         let right_tab = panel.right_tab;
         let plan_showing = right_panel_open && right_tab == RightTab::Plan;
         let agents_showing = right_panel_open && right_tab == RightTab::Agents;
-        let agents_cue = self
-            .workspace_store
-            .read(cx)
-            .active_session_id()
-            .and_then(|id| {
-                let store = self.workspace_store.read(cx);
-                crate::agents_panel::has_agents(store, &id)
-                    .then(|| crate::agents_panel::Agents::of(store, &id).cue(cx))
-            });
+        let agents_cue = agents.map(|agents| agents.cue(cx));
         let preview_showing = right_panel_open && right_tab == RightTab::Preview;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
@@ -3461,13 +3463,27 @@ impl Render for ChatView {
         let Some((title, cwd, is_draft)) = active else {
             return root
                 .when(!self.window_state.read(cx).compact, |el| {
-                    el.child(self.render_header(None, false, None, window, cx))
+                    el.child(self.render_header(None, false, None, None, window, cx))
                 })
                 .child(self.render_empty_state(window, cx));
         };
 
         let title = if is_draft { None } else { Some(title) };
-        let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
+        let agents = {
+            let store = self.workspace_store.read(cx);
+            store
+                .active_session_id()
+                .map(|id| crate::agents_panel::Agents::of(store, &id))
+                .filter(|agents| !agents.is_empty())
+        };
+        let header = self.render_header(
+            title,
+            is_draft,
+            Some(cwd.clone()),
+            agents.as_ref(),
+            window,
+            cx,
+        );
         let panel = self.workspace_store.read(cx).panel_state();
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let terminal_height = panel.terminal_height;
@@ -3800,7 +3816,7 @@ impl Render for ChatView {
                     .gap_2()
                     .children(delivery_rows),
             )
-            .children(self.render_agents_pill(cx))
+            .children(self.render_agents_pill(agents.as_ref(), cx))
             .child(
                 div()
                     .id("chat-composer")
@@ -3842,14 +3858,6 @@ impl Render for ChatView {
         };
         root.when(!self.window_state.read(cx).compact, |el| el.child(header))
             .child(body)
-    }
-}
-
-fn truncate_title(title: &str, max: usize) -> String {
-    if title.chars().count() <= max {
-        title.to_string()
-    } else {
-        format!("{}…", title.chars().take(max).collect::<String>())
     }
 }
 

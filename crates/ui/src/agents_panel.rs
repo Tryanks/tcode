@@ -2,18 +2,19 @@
 //! subagents of its transcript, in the desktop right panel and the phone sheet.
 //! It shows what the host reports; delivery is never decided here.
 
-use std::collections::HashMap;
+use std::time::Duration;
 
-use agent::{ItemContent, ItemStatus};
+use agent::{ItemContent, ItemStatus, ProviderKind};
 use gpui::{
     Action, AnyElement, App, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::session::{EntryContent, parse_orchestrate_callback};
 use tcode_core::settlement::{AgentDelivery, AgentExecution};
+use tcode_core::ui::RightTab;
 
 use crate::icon::{Icon, IconName};
 use crate::material;
@@ -44,6 +45,8 @@ struct AgentCancel(String);
 struct AgentRow {
     key: String,
     title: String,
+    provider: Option<ProviderKind>,
+    /// "provider · model".
     detail: String,
     /// Absent for an archived agent, whose host reports no activity.
     execution: Option<AgentExecution>,
@@ -57,6 +60,31 @@ struct AgentRow {
     agent: Option<String>,
     /// The provider that manages a native subagent.
     managed_by: Option<&'static str>,
+    /// A native subagent's type, which its provider names it by.
+    agent_type: Option<String>,
+    /// When the latest run started and, once it has, ended (unix ms).
+    started_at: Option<u64>,
+    ended_at: Option<u64>,
+}
+
+impl AgentRow {
+    fn elapsed(&self) -> Option<String> {
+        let started = self.started_at?;
+        // A start no later than the last end belongs to a finished run: a
+        // running agent whose next run has not started yet has no elapsed time.
+        let run_ended = self.ended_at.filter(|ended| *ended >= started);
+        let ended = match (
+            self.execution.is_some_and(AgentExecution::running),
+            run_ended,
+        ) {
+            (true, None) => tcode_core::project::now_secs() * 1000,
+            (false, Some(ended)) => ended,
+            _ => return None,
+        };
+        Some(crate::chat::format_duration(
+            ended.saturating_sub(started) / 1000,
+        ))
+    }
 }
 
 /// A lead thread's agents in the Agents view's groups, newest first.
@@ -69,127 +97,96 @@ pub(crate) struct Agents {
 }
 
 impl Agents {
+    /// The thread's agents as the host reports them. Results are left out:
+    /// only the panel itself shows them, see [`Self::with_results`].
     pub(crate) fn of(store: &WorkspaceStore, parent_id: &str) -> Self {
         let live = store.sidebar_sessions();
         let parent = live.iter().find(|meta| meta.id == parent_id);
-        let mut previews = HashMap::new();
         let mut native = Vec::new();
         store.with_active_timeline(|timeline| {
             for entry in &timeline.entries {
-                match &entry.content {
-                    EntryContent::Item(ItemContent::UserMessage {
-                        text,
-                        context_len: None,
-                        ..
-                    })
-                    | EntryContent::Steer {
-                        text,
-                        context_len: None,
-                        ..
-                    } => {
-                        if let Some(callback) = parse_orchestrate_callback(text)
-                            && !callback.body.trim().is_empty()
-                        {
-                            previews.insert(callback.child_id, compact(&callback.body));
-                        }
-                    }
-                    EntryContent::Item(ItemContent::Subagent {
-                        agent_type,
-                        description,
-                        status,
-                        summary,
-                        model,
-                        ..
-                    }) => {
-                        let mirror = live.iter().find(|meta| {
-                            meta.parent_session_id.as_deref() == Some(parent_id)
-                                && meta.native_subagent.as_deref() == Some(entry.id.as_str())
-                        });
-                        native.push(AgentRow {
-                            key: entry.id.clone(),
-                            title: Some(compact(description))
-                                .filter(|title| !title.is_empty())
-                                .unwrap_or_else(|| agent_type.clone()),
-                            detail: [Some(agent_type.as_str()), model.as_deref()]
-                                .into_iter()
-                                .flatten()
-                                .collect::<Vec<_>>()
-                                .join(" · "),
-                            execution: Some(match status {
-                                ItemStatus::InProgress => AgentExecution::Working,
-                                ItemStatus::Completed => AgentExecution::Finished,
-                                ItemStatus::Interrupted => AgentExecution::Interrupted,
-                                ItemStatus::Failed | ItemStatus::Declined => AgentExecution::Failed,
-                            }),
-                            delivery: None,
-                            archived: false,
-                            preview: summary.as_deref().map(compact).filter(|s| !s.is_empty()),
-                            open: mirror.map(|meta| meta.id.clone()),
-                            agent: None,
-                            managed_by: parent.map(|parent| parent.provider.display_name()),
-                        });
-                    }
-                    _ => {}
-                }
+                let EntryContent::Item(ItemContent::Subagent {
+                    agent_type,
+                    description,
+                    status,
+                    summary,
+                    model,
+                    ..
+                }) = &entry.content
+                else {
+                    continue;
+                };
+                let mirror = live.iter().find(|meta| {
+                    meta.parent_session_id.as_deref() == Some(parent_id)
+                        && meta.native_subagent.as_deref() == Some(entry.id.as_str())
+                });
+                let provider = parent.map(|parent| parent.provider);
+                let execution = match status {
+                    ItemStatus::InProgress => AgentExecution::Working,
+                    ItemStatus::Completed => AgentExecution::Finished,
+                    ItemStatus::Interrupted => AgentExecution::Interrupted,
+                    ItemStatus::Failed | ItemStatus::Declined => AgentExecution::Failed,
+                };
+                native.push(AgentRow {
+                    key: entry.id.clone(),
+                    title: Some(compact(description))
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| agent_type.clone()),
+                    provider,
+                    detail: detail(provider, model.as_deref()),
+                    execution: Some(execution),
+                    delivery: None,
+                    archived: false,
+                    preview: summary.as_deref().map(compact).filter(|s| !s.is_empty()),
+                    open: mirror.map(|meta| meta.id.clone()),
+                    agent: None,
+                    managed_by: provider.map(|provider| provider.display_name()),
+                    agent_type: Some(agent_type.clone()),
+                    // A native subagent's end is not reported, only its start.
+                    started_at: entry.ts.filter(|_| execution.running()),
+                    ended_at: None,
+                });
             }
         });
         native.reverse();
 
         let mut dispatched: Vec<_> = live
             .iter()
-            .filter(|meta| meta.native_subagent.is_none())
-            .map(|meta| {
-                (
-                    meta,
-                    store
-                        .agent_status(&meta.id)
-                        .map(|s| (s.execution, s.delivery)),
-                )
-            })
-            .chain(store.archived_sessions().iter().map(|meta| {
-                // An archived agent has no reported activity; only its
-                // settlement is known.
-                (
-                    meta,
-                    Some((
-                        AgentExecution::Finished,
-                        AgentDelivery::of(meta, AgentExecution::Finished),
-                    )),
-                )
-            }))
-            .filter(|(meta, _)| {
-                meta.parent_session_id.as_deref() == Some(parent_id)
-                    && meta.native_subagent.is_none()
+            .chain(store.archived_sessions())
+            .filter(|meta| {
+                meta.is_dispatched() && meta.parent_session_id.as_deref() == Some(parent_id)
             })
             .collect();
-        dispatched.sort_by_key(|(meta, _)| std::cmp::Reverse(meta.created_at));
+        dispatched.sort_by_key(|meta| std::cmp::Reverse(meta.created_at));
         let mut agents = Self {
             native,
             ..Self::default()
         };
-        for (meta, status) in dispatched {
+        for meta in dispatched {
             let archived = meta.archived_at.is_some();
-            let (execution, delivery) =
-                status.unwrap_or((AgentExecution::Working, AgentDelivery::Running));
+            // An archived agent has no reported activity; only its
+            // settlement is known.
+            let status = (!archived).then(|| store.agent_status(&meta.id)).flatten();
+            let (execution, delivery) = match status {
+                Some(status) => (Some(status.execution), status.delivery),
+                None if archived => (None, AgentDelivery::of(meta, AgentExecution::Finished)),
+                None => (Some(AgentExecution::Working), AgentDelivery::Running),
+            };
             let row = AgentRow {
                 key: meta.id.clone(),
                 title: meta.title.clone(),
-                detail: [Some(meta.provider.display_name()), meta.model.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-                execution: (!archived).then_some(execution),
+                provider: Some(meta.provider),
+                detail: detail(Some(meta.provider), meta.model.as_deref()),
+                execution,
                 delivery: Some(delivery),
                 archived,
-                // A result belongs to the run that delivered it, not to one
-                // still going.
-                preview: (delivery != AgentDelivery::Running)
-                    .then(|| previews.get(&meta.id).cloned())
-                    .flatten(),
+                preview: None,
                 open: Some(meta.id.clone()),
                 agent: Some(meta.id.clone()),
                 managed_by: None,
+                agent_type: None,
+                started_at: status.and_then(|status| status.run_started_at),
+                ended_at: status.and_then(|status| status.run_completed_at),
             };
             match delivery {
                 AgentDelivery::AwaitingSettle => agents.needs_settle.push(row),
@@ -198,6 +195,45 @@ impl Agents {
             }
         }
         agents
+    }
+
+    /// Add each dispatched agent's result: the report its latest callback
+    /// delivered to the lead, as the child wrote it.
+    fn with_results(mut self, store: &WorkspaceStore) -> Self {
+        let mut results = std::collections::HashMap::new();
+        store.with_active_timeline(|timeline| {
+            for entry in &timeline.entries {
+                if let EntryContent::Item(ItemContent::UserMessage {
+                    text,
+                    context_len: None,
+                    ..
+                })
+                | EntryContent::Steer {
+                    text,
+                    context_len: None,
+                    ..
+                } = &entry.content
+                    && let Some(callback) = parse_orchestrate_callback(text)
+                {
+                    let report = compact(callback.report());
+                    if !report.is_empty() {
+                        results.insert(callback.child_id, report);
+                    }
+                }
+            }
+        });
+        for row in self.needs_settle.iter_mut().chain(&mut self.done) {
+            row.preview = results.remove(&row.key);
+        }
+        self
+    }
+
+    fn any_running(&self) -> bool {
+        !self.running.is_empty()
+            || self
+                .native
+                .iter()
+                .any(|row| row.execution.is_some_and(AgentExecution::running))
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -219,11 +255,7 @@ impl Agents {
     /// The cue on the panel toggle and the phone pill: running work first,
     /// then results awaiting settle.
     pub(crate) fn cue(&self, cx: &App) -> Option<Hsla> {
-        let native_running = self
-            .native
-            .iter()
-            .any(|row| row.execution.is_some_and(AgentExecution::running));
-        if !self.running.is_empty() || native_running {
+        if self.any_running() {
             Some(cx.theme().primary)
         } else if !self.needs_settle.is_empty() {
             Some(cx.theme().warning)
@@ -252,22 +284,12 @@ fn compact(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether the thread has any agent to show, from what the host already sent.
-pub(crate) fn has_agents(store: &WorkspaceStore, parent_id: &str) -> bool {
-    store
-        .sidebar_sessions()
-        .iter()
-        .any(|meta| meta.parent_session_id.as_deref() == Some(parent_id))
-        || store
-            .with_active_timeline(|timeline| {
-                timeline.entries.iter().any(|entry| {
-                    matches!(
-                        entry.content,
-                        EntryContent::Item(ItemContent::Subagent { .. })
-                    )
-                })
-            })
-            .unwrap_or(false)
+fn detail(provider: Option<ProviderKind>, model: Option<&str>) -> String {
+    [provider.map(|provider| provider.display_name()), model]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Open a thread reached from its lead. An archived agent is reached the way
@@ -283,6 +305,13 @@ pub(crate) fn open_agent(store: &Entity<WorkspaceStore>, id: String, cx: &mut Ap
         }
         store.select_session(id);
     });
+}
+
+#[derive(Clone, Copy)]
+enum BadgeStyle {
+    Plain,
+    Outline,
+    Warning,
 }
 
 fn execution_color(execution: AgentExecution, cx: &App) -> Hsla {
@@ -310,31 +339,103 @@ fn execution_label(execution: AgentExecution) -> SharedString {
 
 pub struct AgentsPanel {
     store: Entity<WorkspaceStore>,
+    /// Whether the panel is on screen and so holds the store's archived
+    /// threads, from which archived agents come.
+    shown: bool,
     done_expanded: bool,
     /// The phone sheet this panel fills, dismissed when an agent opens.
     sheet: Option<WeakEntity<PopoverState>>,
     vscroll: ScrollHandle,
+    /// Whether the last frame showed a running agent, whose elapsed time
+    /// the tick advances.
+    live: bool,
+    tick: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl AgentsPanel {
+    /// The panel of the desktop right panel's Agents tab.
     pub fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
-        let subscriptions = vec![observe_store_topics(
-            &store,
-            &[
-                TopicKind::ActiveSession,
-                TopicKind::SessionEvents,
-                TopicKind::Index,
-            ],
+        let mut panel = Self::unshown(store.clone(), cx);
+        panel
+            ._subscriptions
+            .push(cx.observe(&store, |this, store, cx| {
+                let panel = store.read(cx).panel_state();
+                this.set_shown(
+                    panel.right_panel_open && panel.right_tab == RightTab::Agents,
+                    cx,
+                );
+            }));
+        let state = store.read(cx).panel_state();
+        panel.set_shown(
+            state.right_panel_open && state.right_tab == RightTab::Agents,
             cx,
-        )];
+        );
+        panel
+    }
+
+    /// The panel of the phone's Agents sheet, shown through [`Self::set_shown`].
+    pub(crate) fn for_sheet(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+        Self::unshown(store, cx)
+    }
+
+    fn unshown(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![
+            observe_store_topics(
+                &store,
+                &[
+                    TopicKind::ActiveSession,
+                    TopicKind::SessionEvents,
+                    TopicKind::Index,
+                ],
+                cx,
+            ),
+            cx.on_release(|this, cx| {
+                if this.shown {
+                    this.store
+                        .update(cx, |store, _| store.release_archived_sessions());
+                }
+            }),
+        ];
         Self {
             store,
+            shown: false,
             done_expanded: false,
             sheet: None,
             vscroll: ScrollHandle::new(),
+            live: false,
+            tick: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    pub(crate) fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if shown == self.shown {
+            return;
+        }
+        self.shown = shown;
+        self.store.update(cx, |store, cx| {
+            if shown {
+                store.hold_archived_sessions(cx);
+            } else {
+                store.release_archived_sessions();
+            }
+        });
+        self.tick = shown.then(|| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let ticked = this.update(cx, |this, cx| {
+                        if this.live {
+                            cx.notify();
+                        }
+                    });
+                    if ticked.is_err() {
+                        break;
+                    }
+                }
+            })
+        });
     }
 
     pub(crate) fn in_sheet(&mut self, sheet: WeakEntity<PopoverState>) {
@@ -418,7 +519,8 @@ impl AgentsPanel {
         actions
     }
 
-    fn badge(label: SharedString, color: Hsla, wash: Option<Hsla>, cx: &App) -> gpui::Div {
+    fn badge(label: SharedString, style: BadgeStyle, cx: &App) -> gpui::Div {
+        let muted = cx.theme().muted_foreground;
         h_flex()
             .flex_none()
             .h(px(18.))
@@ -428,44 +530,36 @@ impl AgentsPanel {
             .rounded(cx.theme().tokens.radius.sm)
             .text_size(px(11.))
             .font_medium()
-            .text_color(color)
-            .map(|badge| match wash {
-                Some(wash) => badge.bg(wash),
-                None => badge.border_1().border_color(cx.theme().border),
+            .map(|badge| match style {
+                BadgeStyle::Plain => badge.text_color(muted),
+                BadgeStyle::Outline => badge
+                    .text_color(muted)
+                    .border_1()
+                    .border_color(cx.theme().border),
+                BadgeStyle::Warning => badge
+                    .text_color(cx.theme().warning)
+                    .bg(cx.theme().warning.opacity(0.1)),
             })
             .child(label)
     }
 
     fn delivery_badges(row: &AgentRow, cx: &App) -> Vec<AnyElement> {
-        let muted = cx.theme().muted_foreground;
+        let label = |key: &str| SharedString::from(crate::tr!(key).into_owned());
         let mut badges = Vec::new();
         match row.delivery {
             Some(AgentDelivery::AwaitingSettle) => badges.push(
-                Self::badge(
-                    crate::tr!("agents.delivery_awaiting").into_owned().into(),
-                    cx.theme().warning,
-                    Some(cx.theme().warning.opacity(0.1)),
-                    cx,
-                )
-                .into_any_element(),
+                Self::badge(label("agents.delivery_awaiting"), BadgeStyle::Warning, cx)
+                    .into_any_element(),
             ),
             Some(AgentDelivery::Settled) => badges.push(
-                Self::badge(
-                    crate::tr!("agents.delivery_settled").into_owned().into(),
-                    muted,
-                    Some(cx.theme().muted.opacity(0.5)),
-                    cx,
-                )
-                .child(Icon::new(IconName::Check).size(px(10.)))
-                .into_any_element(),
+                Self::badge(label("agents.delivery_settled"), BadgeStyle::Plain, cx)
+                    .child(Icon::new(IconName::Check).size(px(10.)))
+                    .into_any_element(),
             ),
             Some(AgentDelivery::NotDelivered) => badges.push(
                 Self::badge(
-                    crate::tr!("agents.delivery_not_delivered")
-                        .into_owned()
-                        .into(),
-                    muted,
-                    Some(cx.theme().muted.opacity(0.5)),
+                    label("agents.delivery_not_delivered"),
+                    BadgeStyle::Plain,
                     cx,
                 )
                 .into_any_element(),
@@ -474,13 +568,7 @@ impl AgentsPanel {
         }
         if row.archived {
             badges.push(
-                Self::badge(
-                    crate::tr!("agents.archived").into_owned().into(),
-                    muted,
-                    None,
-                    cx,
-                )
-                .into_any_element(),
+                Self::badge(label("agents.archived"), BadgeStyle::Outline, cx).into_any_element(),
             );
         }
         badges
@@ -512,6 +600,72 @@ impl AgentsPanel {
             row.title.clone()
         };
         let actions = Self::row_actions(row);
+        // Hover reveals the actions over the elapsed time; a touch screen has
+        // no hover, so there they stand in its place.
+        let coarse = crate::window_seam::is_mobile(cx);
+        let inline_actions = !compact && !actions.is_empty();
+        let elapsed = row.elapsed().filter(|_| !(inline_actions && coarse));
+        let trailing = (inline_actions || elapsed.is_some()).then(|| {
+            let cluster_width =
+                actions.len() as f32 * 20. + actions.len().saturating_sub(1) as f32 * 2.;
+            div()
+                .relative()
+                .flex_none()
+                .h(px(20.))
+                .when(inline_actions, |slot| slot.min_w(px(cluster_width)))
+                .when_some(elapsed, |slot, elapsed| {
+                    slot.child(
+                        h_flex()
+                            .h_full()
+                            .justify_end()
+                            .items_center()
+                            .whitespace_nowrap()
+                            .text_size(px(if compact { 13. } else { 11. }))
+                            .text_color(muted)
+                            .when(inline_actions, |time| {
+                                time.group_hover(group.clone(), |time| time.invisible())
+                            })
+                            .child(elapsed),
+                    )
+                })
+                .when(inline_actions, |slot| {
+                    slot.child(
+                        h_flex()
+                            .absolute()
+                            .right_0()
+                            .top_0()
+                            .gap_0p5()
+                            // Opacity, not visibility, keeps the buttons tab
+                            // stops so keyboard focus can reveal them.
+                            .when(!coarse, |cluster| {
+                                cluster
+                                    .opacity(0.)
+                                    .group_hover(group.clone(), |cluster| cluster.opacity(1.))
+                            })
+                            .children(actions.iter().enumerate().map(
+                                |(index, (icon, label, action))| {
+                                    let action = action.boxed_clone();
+                                    Button::new(SharedString::from(format!(
+                                        "agent-action-{}-{index}",
+                                        row.key
+                                    )))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icon::new(icon.clone()).text_color(muted))
+                                    .aria_label(label.clone())
+                                    .tooltip(label.clone())
+                                    .focus_visible(|button| button.opacity(1.))
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            crate::widgets::stop_click_propagation(window, cx);
+                                            window.dispatch_action(action.boxed_clone(), cx);
+                                        },
+                                    )
+                                },
+                            )),
+                    )
+                })
+        });
         let line_one = h_flex()
             .w_full()
             .min_w_0()
@@ -528,38 +682,7 @@ impl AgentsPanel {
                     .child(title.clone()),
             )
             .children(Self::delivery_badges(row, cx))
-            .when(!compact && !actions.is_empty(), |line| {
-                line.child(
-                    h_flex()
-                        .flex_none()
-                        .gap_0p5()
-                        // Opacity, not visibility, keeps the buttons tab stops
-                        // so keyboard focus can reveal them.
-                        .opacity(0.)
-                        .group_hover(group.clone(), |cluster| cluster.opacity(1.))
-                        .children(actions.iter().enumerate().map(
-                            |(index, (icon, label, action))| {
-                                let action = action.boxed_clone();
-                                Button::new(SharedString::from(format!(
-                                    "agent-action-{}-{index}",
-                                    row.key
-                                )))
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(icon.clone()).text_color(muted))
-                                .aria_label(label.clone())
-                                .tooltip(label.clone())
-                                .focus_visible(|button| button.opacity(1.))
-                                .on_click(
-                                    move |_, window, cx| {
-                                        crate::widgets::stop_click_propagation(window, cx);
-                                        window.dispatch_action(action.boxed_clone(), cx);
-                                    },
-                                )
-                            },
-                        )),
-                )
-            });
+            .children(trailing);
         let line_two = h_flex()
             .w_full()
             .min_w_0()
@@ -567,6 +690,16 @@ impl AgentsPanel {
             .items_center()
             .text_size(px(if compact { 13. } else { 11. }))
             .text_color(muted)
+            .when_some(row.provider, |line, provider| {
+                line.child(
+                    match provider {
+                        ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
+                        kind => crate::provider_card::provider_glyph(kind),
+                    }
+                    .size(px(12.))
+                    .flex_none(),
+                )
+            })
             .child(div().min_w_0().truncate().child(row.detail.clone()))
             .when_some(row.execution, |line, execution| {
                 line.child(div().flex_none().child("·")).child(
@@ -600,9 +733,13 @@ impl AgentsPanel {
             });
         let label = SharedString::from(title);
         let open = row.open.clone();
-        let readonly = row
-            .managed_by
-            .map(|provider| crate::tr!("agents.readonly", provider = provider).into_owned());
+        let readonly = row.managed_by.map(|provider| {
+            let note = crate::tr!("agents.readonly", provider = provider).into_owned();
+            match &row.agent_type {
+                Some(agent_type) => format!("{agent_type}\n{note}"),
+                None => note,
+            }
+        });
         let base =
             if compact {
                 material::list_row(SharedString::from(format!("agent-{}", row.key)), label, cx)
@@ -709,17 +846,15 @@ impl AgentsPanel {
 
 impl Render for AgentsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Archived agents come from the same listing as Settings → Archived
-        // Threads; keep it current while the view is shown.
-        self.store
-            .update(cx, |store, cx| store.hold_archived_sessions(cx));
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let agents = self
-            .store
-            .read(cx)
-            .active_session_id()
-            .map(|id| Agents::of(self.store.read(cx), &id))
-            .unwrap_or_default();
+        let agents = {
+            let store = self.store.read(cx);
+            store
+                .active_session_id()
+                .map(|id| Agents::of(store, &id).with_results(store))
+                .unwrap_or_default()
+        };
+        self.live = agents.any_running();
         let root = v_flex()
             .id("agents-panel")
             .size_full()
@@ -731,6 +866,11 @@ impl Render for AgentsPanel {
         if agents.is_empty() {
             return root.child(Self::render_empty(cx));
         }
+        let inset = px(if compact {
+            material::COMPACT_PAGE_INSET
+        } else {
+            12.
+        });
         let mut column = v_flex()
             .w_full()
             .min_w_0()
@@ -740,11 +880,7 @@ impl Render for AgentsPanel {
         if let Some(summary) = agents.summary() {
             column = column.child(
                 div()
-                    .px(px(if compact {
-                        material::COMPACT_PAGE_INSET
-                    } else {
-                        12.
-                    }))
+                    .px(inset)
                     .py_2()
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
@@ -767,11 +903,7 @@ impl Render for AgentsPanel {
             if let Some(provider) = agents.native.first().and_then(|row| row.managed_by) {
                 column = column.child(
                     div()
-                        .px(px(if compact {
-                            material::COMPACT_PAGE_INSET
-                        } else {
-                            12.
-                        }))
+                        .px(inset)
                         .py_1()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
@@ -785,42 +917,40 @@ impl Render for AgentsPanel {
                 .into_owned()
                 .into();
             column = column.child(
-                material::accessible_clickable(
-                    h_flex(),
-                    "agents-done",
-                    Role::Button,
-                    label.clone(),
-                    cx,
-                )
-                .aria_expanded(expanded)
-                .w_full()
-                .h(px(32.))
-                .px(px(if compact {
-                    material::COMPACT_PAGE_INSET
-                } else {
-                    12.
-                }))
-                .gap_1p5()
-                .items_center()
-                .rounded(cx.theme().tokens.radius.md)
-                .text_size(px(if compact { 13. } else { 11. }))
-                .font_medium()
-                .text_color(cx.theme().muted_foreground)
-                .cursor_pointer()
-                .hover(|row| row.bg(cx.theme().sidebar_accent))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.done_expanded = !this.done_expanded;
-                    cx.notify();
-                }))
-                .child(
-                    Icon::new(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
+                gpui_base::Button::new("agents-done")
+                    .accessibility_label(label.clone())
+                    .aria_expanded(expanded)
+                    .w_full()
+                    .h(px(32.))
+                    .px(inset)
+                    .flex()
+                    .items_center()
+                    .rounded(cx.theme().tokens.radius.md)
+                    .when(!crate::window_seam::is_mobile(cx), |header| {
+                        header.hover(|header| header.bg(cx.theme().sidebar_accent))
                     })
-                    .size(px(12.)),
-                )
-                .child(label),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.done_expanded = !this.done_expanded;
+                        cx.notify();
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_1p5()
+                            .items_center()
+                            .text_size(px(if compact { 13. } else { 11. }))
+                            .font_medium()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(px(12.)),
+                            )
+                            .child(label),
+                    ),
             );
             if expanded {
                 for row in &agents.done {

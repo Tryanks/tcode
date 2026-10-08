@@ -703,15 +703,13 @@ impl DiffPanel {
         let store_plan = self.workspace_store.clone();
         let store_pr = self.workspace_store.clone();
         let store_agents = self.workspace_store.clone();
-        let agents = self
-            .workspace_store
-            .read(cx)
-            .active_session_id()
-            .and_then(|id| {
-                let store = self.workspace_store.read(cx);
-                (crate::agents_panel::has_agents(store, &id) || active == RightTab::Agents)
-                    .then(|| Agents::of(store, &id).outstanding())
-            });
+        let agents = {
+            let store = self.workspace_store.read(cx);
+            store.active_session_id().and_then(|id| {
+                let agents = Agents::of(store, &id);
+                (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
+            })
+        };
         let muted = cx.theme().muted_foreground;
         let tab_active = cx.theme().tab_active;
 

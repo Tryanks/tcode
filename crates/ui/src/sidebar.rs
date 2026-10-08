@@ -25,6 +25,7 @@ use gpui::{
 };
 use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
+use tcode_core::settlement::AgentDelivery;
 use tcode_protocol::{Command, ThreadExportFormat};
 
 use tcode_core::{
@@ -114,6 +115,41 @@ impl ThreadRowState {
     fn waiting(&self) -> bool {
         self.waiting_for_approval || self.waiting_for_input
     }
+}
+
+/// What a Waiting thread waits on, from the agents its host reports: those
+/// still running, those awaiting its settle, or else its own background work.
+fn waiting_reason(store: &WorkspaceStore, session_id: &str) -> String {
+    let (mut running, mut unsettled) = (0, 0);
+    for meta in store.sidebar_sessions() {
+        if meta.parent_session_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        match store.agent_status(&meta.id).map(|status| status.delivery) {
+            Some(AgentDelivery::Running) => running += 1,
+            Some(AgentDelivery::AwaitingSettle) => unsettled += 1,
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    match running {
+        0 => {}
+        1 => parts.push(crate::tr!("sidebar.waiting_agents_running_one").into_owned()),
+        count => {
+            parts.push(crate::tr!("sidebar.waiting_agents_running", count = count).into_owned())
+        }
+    }
+    match unsettled {
+        0 => {}
+        1 => parts.push(crate::tr!("sidebar.waiting_agents_unsettled_one").into_owned()),
+        count => {
+            parts.push(crate::tr!("sidebar.waiting_agents_unsettled", count = count).into_owned())
+        }
+    }
+    if parts.is_empty() {
+        parts.push(crate::tr!("sidebar.waiting_background").into_owned());
+    }
+    parts.join(" · ")
 }
 
 fn partition_settled(sessions: &[SessionMeta]) -> (Vec<SessionMeta>, Vec<SessionMeta>) {
@@ -2226,39 +2262,69 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
-    /// Status text and colour shared by every thread row shape.
+    /// Status text and colour shared by every thread row shape, and whether
+    /// it is the Waiting status.
     fn thread_status_label(
         state: &ThreadRowState,
         working: bool,
         cx: &Context<Self>,
-    ) -> Option<(gpui::Hsla, std::borrow::Cow<'static, str>)> {
+    ) -> Option<(gpui::Hsla, std::borrow::Cow<'static, str>, bool)> {
         if state.waiting_for_approval {
-            Some((cx.theme().warning, crate::tr!("sidebar.waiting_approval")))
+            Some((
+                cx.theme().warning,
+                crate::tr!("sidebar.waiting_approval"),
+                false,
+            ))
         } else if state.waiting_for_input {
-            Some((cx.theme().primary, crate::tr!("sidebar.waiting_input")))
+            Some((
+                cx.theme().primary,
+                crate::tr!("sidebar.waiting_input"),
+                false,
+            ))
         } else if state.failed {
-            Some((cx.theme().danger, crate::tr!("sidebar.failed")))
+            Some((cx.theme().danger, crate::tr!("sidebar.failed"), false))
         } else if working {
-            Some((cx.theme().primary, crate::tr!("sidebar.working")))
+            Some((cx.theme().primary, crate::tr!("sidebar.working"), false))
         } else if state.waiting {
-            Some((cx.theme().muted_foreground, crate::tr!("sidebar.waiting")))
+            Some((
+                cx.theme().muted_foreground,
+                crate::tr!("sidebar.waiting"),
+                true,
+            ))
         } else {
             None
         }
     }
 
+    /// Explain a Waiting status on hover with what the thread waits on.
+    fn waiting_tooltip(
+        element: gpui::Stateful<gpui::Div>,
+        store: &Entity<WorkspaceStore>,
+        session_id: &str,
+    ) -> gpui::Stateful<gpui::Div> {
+        let store = store.clone();
+        let session_id = session_id.to_owned();
+        element.tooltip(move |window, cx| {
+            Tooltip::new(waiting_reason(store.read(cx), &session_id)).build(window, cx)
+        })
+    }
+
     fn thread_status_badge(
         state: &ThreadRowState,
         working: bool,
+        store: &Entity<WorkspaceStore>,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let (color, label) = Self::thread_status_label(state, working, cx)?;
+        let (color, label, waiting) = Self::thread_status_label(state, working, cx)?;
         Some(
             h_flex()
                 .id(SharedString::from(format!(
                     "thread-status-{}",
                     state.session_id
                 )))
+                .when(waiting, |badge| {
+                    Self::waiting_tooltip(badge, store, &state.session_id)
+                })
                 .flex_none()
                 .items_center()
                 .gap_1()
@@ -2431,7 +2497,7 @@ impl SessionsSidebar {
                 |row, mark| row.relative().child(mark),
             )
             .when_some(
-                Self::thread_status_badge(&state, working, cx),
+                Self::thread_status_badge(&state, working, &self.store, cx),
                 |row, badge| row.child(badge),
             );
 
@@ -2618,7 +2684,7 @@ impl SessionsSidebar {
                 .then(|| {
                     show_unread
                         .then(|| cx.theme().primary)
-                        .or(status.as_ref().map(|(color, _)| *color))
+                        .or(status.as_ref().map(|(color, _, _)| *color))
                 })
                 .flatten();
             let line_one = h_flex()
@@ -2644,8 +2710,17 @@ impl SessionsSidebar {
                 .gap_1()
                 .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
-                .when_some(status, |line, (color, label)| {
-                    line.child(div().flex_none().text_color(color).child(label))
+                .when_some(status, |line, (color, label, waiting)| {
+                    line.child(
+                        div()
+                            .id(SharedString::from(format!("thread-status-{session_id}")))
+                            .flex_none()
+                            .text_color(color)
+                            .when(waiting, |status| {
+                                Self::waiting_tooltip(status, &self.store, &session_id)
+                            })
+                            .child(label),
+                    )
                 })
                 .when((waiting || working) && has_project, |line| {
                     line.child(div().flex_none().child("·"))
@@ -5370,10 +5445,16 @@ mod tests {
         store.update(cx, |store, _| store.select_session("child".into()));
         sidebar.update(cx, |_, cx| cx.notify());
         draw(cx);
-        assert_eq!(
-            store.read_with(cx, |store, _| store.roster_session_id()),
-            Some("parent".into()),
-            "the lead's row stands for its open agent"
+        let lead = cx.debug_bounds("compact-row-parent").unwrap();
+        let selected = cx.update(|window, cx| {
+            window.painted_quads().iter().any(|quad| {
+                quad.bounds == lead.scale(window.scale_factor())
+                    && quad.background == gpui::Background::from(cx.theme().list_active)
+            })
+        });
+        assert!(
+            selected,
+            "the lead's row is drawn selected for its open agent"
         );
     }
 
