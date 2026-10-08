@@ -154,7 +154,7 @@ impl WorkspaceStore {
         }
     }
 
-    pub(super) fn command(
+    pub(crate) fn command(
         &self,
         command: Command,
         cx: &mut App,

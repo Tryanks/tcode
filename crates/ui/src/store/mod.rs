@@ -1892,6 +1892,24 @@ impl WorkspaceStore {
         cx.notify();
     }
 
+    pub fn open_pull_requests_panel(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.active_session_id() else {
+            return;
+        };
+        let destination = self
+            .active_destination
+            .clone()
+            .unwrap_or(ConversationDestination::Thread(id));
+        let ui = self.conversation_ui.entry(destination).or_insert_with(|| {
+            ConversationUiState::new(self.settings_replica.word_wrap_diffs, false, 200.)
+        });
+        ui.right_panel_open = true;
+        ui.right_tab = RightTab::PullRequests;
+        cx.notify();
+    }
+    pub fn toggle_pull_requests_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_tab_panel(RightTab::PullRequests, cx);
+    }
     pub fn toggle_plan_panel(&mut self, cx: &mut Context<Self>) {
         self.toggle_tab_panel(RightTab::Plan, cx);
     }
@@ -2974,6 +2992,22 @@ impl WorkspaceStore {
         )
     }
 
+    pub(crate) fn pull_request_repository(
+        &self,
+        session_id: String,
+        cx: &mut App,
+    ) -> Task<Option<String>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::PullRequestRepository { session_id })
+                .await
+            {
+                Ok(QueryResponse::PullRequestRepository(repo)) => repo,
+                _ => None,
+            }
+        })
+    }
     pub fn hosting(
         &self,
         action: tcode_protocol::HostingAction,

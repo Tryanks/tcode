@@ -253,6 +253,7 @@ pub struct DiffPanel {
     window_state: Entity<WindowState>,
     /// The Plan/Tasks tab content (the other tab in this right panel).
     plan: Entity<PlanPanel>,
+    pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     ignore_ws: bool,
     show_invisibles: bool,
     scopes: HashMap<String, DiffScope>,
@@ -273,6 +274,8 @@ impl DiffPanel {
         window_state: Entity<WindowState>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let pull_requests =
+            cx.new(|cx| crate::pull_requests::PullRequestsPanel::new(workspace_store.clone(), cx));
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
         let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
             let comments = store.read(cx).review_comments();
@@ -286,6 +289,7 @@ impl DiffPanel {
             workspace_store,
             window_state,
             plan,
+            pull_requests,
             ignore_ws: false,
             show_invisibles: false,
             scopes: HashMap::new(),
@@ -688,6 +692,8 @@ impl DiffPanel {
         let store_close = self.workspace_store.clone();
         let store_diff = self.workspace_store.clone();
         let store_plan = self.workspace_store.clone();
+        let store_preview = self.workspace_store.clone();
+        let store_pr = self.workspace_store.clone();
         let muted = cx.theme().muted_foreground;
         let tab_active = cx.theme().tab_active;
 
@@ -754,6 +760,49 @@ impl DiffPanel {
                     store_plan.update(cx, |store, cx| {
                         store.set_right_tab(RightTab::Plan, cx);
                     });
+                }),
+            )
+            .child(
+                tab(
+                    "preview-tab",
+                    IconName::Globe,
+                    crate::tr!("preview.title").into_owned().into(),
+                    active == RightTab::Preview,
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    store_preview.update(cx, |store, cx| store.set_right_tab(RightTab::Preview, cx))
+                }),
+            )
+            .child(
+                tab(
+                    "pull-requests-tab",
+                    IconName::GitPullRequest,
+                    {
+                        let count =
+                            self.workspace_store
+                                .read(cx)
+                                .session_status()
+                                .map_or(0, |status| {
+                                    status
+                                        .pull_requests
+                                        .iter()
+                                        .filter(|link| link.visible())
+                                        .count()
+                                });
+                        if count == 0 {
+                            crate::tr!("pull_requests.title").into_owned().into()
+                        } else {
+                            format!("{} · {count}", crate::tr!("pull_requests.title")).into()
+                        }
+                    },
+                    active == RightTab::PullRequests,
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    store_pr.update(cx, |store, cx| {
+                        store.set_right_tab(RightTab::PullRequests, cx)
+                    })
                 }),
             )
             // The gap between the tabs and the icon cluster holds nothing, so
@@ -2129,6 +2178,9 @@ impl Render for DiffPanel {
             RightTab::Diff | RightTab::Preview => root
                 .child(self.render_toolbar(cx))
                 .child(self.render_body(cx)),
+            RightTab::PullRequests => {
+                root.child(div().flex_1().min_h_0().child(self.pull_requests.clone()))
+            }
             RightTab::Plan => root.child(div().flex_1().min_h_0().child(self.plan.clone())),
         };
         root

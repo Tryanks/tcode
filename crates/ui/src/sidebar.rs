@@ -478,6 +478,10 @@ struct ThreadMergeWorktree(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadMarkUnread(String);
+
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct ThreadLinkPullRequest(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadCopyPath(String);
@@ -1118,6 +1122,14 @@ impl SessionsSidebar {
             .update(cx, |state, cx| state.open_thread(cx));
     }
 
+    fn on_link_pull_request(
+        &mut self,
+        action: &ThreadLinkPullRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::pull_requests::open_link_dialog(self.store.clone(), action.0.clone(), window, cx);
+    }
     fn on_rename(&mut self, action: &ThreadRename, window: &mut Window, cx: &mut Context<Self>) {
         let session_id = action.0.clone();
         let title = self
@@ -2562,6 +2574,10 @@ impl SessionsSidebar {
                 )
             })
             .menu(
+                crate::tr!("pull_requests.link_menu").into_owned(),
+                Box::new(ThreadLinkPullRequest(id.clone())),
+            )
+            .menu(
                 crate::tr!("sidebar.ctx_mark_unread").into_owned(),
                 Box::new(ThreadMarkUnread(id.clone())),
             )
@@ -2712,6 +2728,19 @@ impl SessionsSidebar {
                         cx,
                     ))
             })
+            .when_some(
+                (state.renaming.is_none())
+                    .then(|| {
+                        crate::pull_requests::sidebar_badge(
+                            &meta.pull_requests,
+                            &meta.id,
+                            self.store.clone(),
+                            cx,
+                        )
+                    })
+                    .flatten(),
+                |row, badge| row.child(badge),
+            )
             .when(!working, |row| {
                 row.child(self.render_flat_thread_right_slot(meta, &row_key, false, true, cx))
             })
@@ -2984,6 +3013,19 @@ impl SessionsSidebar {
                             cx,
                         ))
                 });
+            let line_two = line_two.when_some(
+                (!renaming)
+                    .then(|| {
+                        crate::pull_requests::sidebar_badge(
+                            &meta.pull_requests,
+                            &meta.id,
+                            self.store.clone(),
+                            cx,
+                        )
+                    })
+                    .flatten(),
+                |line, badge| line.child(badge),
+            );
             row.child(line_one).child(line_two)
         };
 
@@ -3537,6 +3579,7 @@ impl SessionsSidebar {
             .size_full()
             .bg(crate::material::content_surface(cx))
             .text_color(cx.theme().foreground)
+            .on_action(cx.listener(Self::on_link_pull_request))
             .on_action(cx.listener(Self::on_rename))
             .on_action(cx.listener(Self::on_regenerate_title))
             .on_action(cx.listener(Self::on_fork))
@@ -3712,7 +3755,11 @@ impl SessionsSidebar {
             cx,
         );
 
-        let row = crate::material::list_row(cached.row_id.clone(), cached.label.clone(), cx)
+        let label = crate::pull_requests::badge_label(&meta.pull_requests, cx).map_or_else(
+            || cached.label.to_string(),
+            |badge| format!("{}, {badge}", cached.label),
+        );
+        let row = crate::material::list_row(cached.row_id.clone(), label.into(), cx)
             .debug_selector({
                 let id = session_id.clone();
                 move || format!("compact-row-{id}")
@@ -3812,6 +3859,10 @@ impl SessionsSidebar {
                                 line.child(div().flex_none().text_color(color).child(label))
                                     .child(div().flex_none().child("·"))
                             })
+                            .when_some(
+                                crate::pull_requests::badge(&meta.pull_requests, 14., cx),
+                                |line, badge| line.child(badge).child("·"),
+                            )
                             .child(div().flex_none().child(cached.relative_time.clone())),
                     ),
             )
@@ -4235,6 +4286,7 @@ impl Render for SessionsSidebar {
             .size_full()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
+            .on_action(cx.listener(Self::on_link_pull_request))
             .on_action(cx.listener(Self::on_rename))
             .on_action(cx.listener(Self::on_regenerate_title))
             .on_action(cx.listener(Self::on_fork))

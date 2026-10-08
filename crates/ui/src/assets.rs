@@ -4,6 +4,24 @@ use gpui::{AssetSource, Result, SharedString};
 #[cfg(not(target_arch = "wasm32"))]
 use gpui_component_assets::Assets as ComponentAssets;
 
+gpui_component_assets::icon_assets!(
+    PullRequestAssets,
+    [
+        GitPullRequest,
+        GitPullRequestDraft,
+        GitPullRequestClosed,
+        GitMerge,
+        GitMergeConflict,
+        Layers,
+        CircleCheck,
+        CircleDashed,
+        CircleX,
+        BadgeCheck,
+        MessageSquareMore,
+        MessageSquareWarning,
+    ]
+);
+
 pub const DM_SANS: &[u8] = include_bytes!("../../../assets/fonts/DMSans[wght].ttf");
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const LILEX_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
@@ -158,6 +176,9 @@ impl AssetSource for Assets {
         if let Some((_, bytes)) = EXTRA_ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
+        if let Some(bytes) = PullRequestAssets.load(path)? {
+            return Ok(Some(bytes));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             ComponentAssets.load(path)
@@ -180,6 +201,7 @@ impl AssetSource for Assets {
         if DM_SANS_PATH.starts_with(path) {
             paths.push(DM_SANS_PATH.into());
         }
+        paths.extend(PullRequestAssets.list(path)?);
         for (name, _) in EXTRA_ICONS {
             if name.starts_with(path) {
                 paths.push((*name).into());
