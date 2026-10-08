@@ -856,10 +856,12 @@ impl SettingsPage {
         {
             return Section::ThreadBehavior.label();
         }
+        // The phone page names just the project: the nav bar has no room for
+        // the dialog's sentence-long title.
         if self.section == Section::ProjectThreadRules
             && let Some(editor) = &self.project_rules_editor
         {
-            return editor.read(cx).title();
+            return editor.read(cx).project.name.clone().into();
         }
         self.section.label()
     }

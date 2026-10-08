@@ -2748,10 +2748,11 @@ impl SessionsSidebar {
                     .right_0()
                     .top_0()
                     // Opacity, not visibility, keeps the button a tab stop so
-                    // keyboard focus can reveal it.
+                    // keyboard focus can reveal it; a click's focus must not
+                    // keep it over the time once the row moves.
                     .opacity(0.)
                     .group_hover(row_key, |button| button.opacity(1.))
-                    .focus(|button| button.opacity(1.))
+                    .focus_visible(|button| button.opacity(1.))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         crate::widgets::stop_click_propagation(window, cx);
                         if settled {

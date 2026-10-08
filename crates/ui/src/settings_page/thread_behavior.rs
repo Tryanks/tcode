@@ -332,7 +332,7 @@ fn days_label(value: Option<f64>) -> SharedString {
 
 pub(super) struct ProjectRulesEditor {
     store: Entity<WorkspaceStore>,
-    project: Project,
+    pub(super) project: Project,
     draft: ProjectSettlementSettings,
     days: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
@@ -500,33 +500,66 @@ impl Render for ProjectRulesEditor {
             crate::material::grouped(rows, cx).into_any_element()
         } else {
             crate::material::overlay_popover("project-auto-settle", cx)
+                // The same trigger as the settings page's dropdown rows.
                 .trigger(
                     Button::new("project-auto-settle-choice")
                         .ghost()
                         .outline()
-                        .label(trigger_label)
-                        .icon(IconName::ChevronDown),
+                        .compact()
+                        .child(
+                            gpui_base::h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .text_size(px(13.))
+                                .child(trigger_label.clone())
+                                .child(
+                                    Icon::new(IconName::ChevronDown)
+                                        .xsmall()
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        ),
                 )
                 .content(move |_, _, cx| {
                     let popover = cx.entity();
                     v_flex()
                         .p_1()
+                        .min_w(px(240.))
+                        .gap_0p5()
                         .children(choices.clone().into_iter().enumerate().map(
                             |(index, (value, label))| {
                                 let editor = editor.clone();
                                 let popover = popover.clone();
-                                Button::new(("project-rules-option", index))
-                                    .ghost()
-                                    .label(label)
-                                    .justify_start()
-                                    .on_click(move |_, window, cx| {
-                                        editor.update(cx, |editor, cx| {
-                                            editor.draft.auto_settle_after_days = value;
-                                            cx.notify();
-                                        });
-                                        popover
-                                            .update(cx, |popover, cx| popover.dismiss(window, cx));
-                                    })
+                                let checked = trigger_label == label;
+                                crate::material::accessible_clickable(
+                                    gpui_base::h_flex(),
+                                    ("project-rules-option", index),
+                                    Role::MenuItem,
+                                    SharedString::from(label.clone()),
+                                    cx,
+                                )
+                                .aria_selected(checked)
+                                .w_full()
+                                .px_2()
+                                .py_1()
+                                .gap_2()
+                                .items_center()
+                                .text_size(px(13.))
+                                .rounded(crate::material::radius_button(cx))
+                                .cursor_pointer()
+                                .hover(|item| item.bg(cx.theme().accent))
+                                .child(div().flex_1().child(label))
+                                .when(checked, |item| {
+                                    item.child(Icon::new(IconName::Check).xsmall())
+                                })
+                                .on_click(move |_, window, cx| {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.draft.auto_settle_after_days = value;
+                                        cx.notify();
+                                    });
+                                    popover.update(cx, |popover, cx| popover.dismiss(window, cx));
+                                })
                             },
                         ))
                 })
