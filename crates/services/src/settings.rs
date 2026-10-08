@@ -10,23 +10,12 @@ use tcode_core::settings::Settings;
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode, TraverseSetting};
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Secrets {
-    version: u32,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    github: BTreeMap<String, String>,
-    #[serde(default)]
-    profiles: BTreeMap<String, BTreeMap<String, String>>,
-}
-impl Default for Secrets {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            github: BTreeMap::new(),
-            profiles: BTreeMap::new(),
-        }
-    }
-}
+type Secrets = BTreeMap<String, BTreeMap<String, String>>;
+
+/// GitHub tokens by host. Profile ids are built-in ids or slugs of ASCII
+/// alphanumerics and hyphens, so this key never names a profile, and a build
+/// that predates it keeps the entry as an unknown profile's secrets.
+const GITHUB_SECRETS: &str = "@github";
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
@@ -48,7 +37,6 @@ impl SettingsStore {
         };
         match serde_json::from_slice::<Settings>(&bytes) {
             Ok(mut settings) => {
-                settings.github.status.clear();
                 settings.migrate_legacy();
                 settings
             }
@@ -59,40 +47,21 @@ impl SettingsStore {
         }
     }
 
+    /// Fails on an unreadable file so a write never replaces secrets it could not read.
     fn read_secrets(&self) -> std::io::Result<Secrets> {
-        let bytes = match fs::read(&self.secrets_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Secrets::default());
-            }
-            Err(error) => return Err(error),
-        };
-        let invalid =
-            || std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid secrets file");
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-        // Legacy root values are profile maps, so a numeric version cannot collide
-        // with a provider id (including profiles named github, profiles or version).
-        if let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) {
-            if version != 1 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Unsupported secrets version",
-                ));
-            }
-            serde_json::from_value(value).map_err(|_| invalid())
-        } else {
-            Ok(Secrets {
-                profiles: serde_json::from_value(value).map_err(|_| invalid())?,
-                ..Default::default()
-            })
+        match fs::read(&self.secrets_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Secrets::new()),
+            Err(error) => Err(error),
         }
     }
 
     /// Every stored provider secret, keyed by profile id then variable name.
     pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
-        self.read_secrets()
-            .map(|all| all.profiles)
-            .unwrap_or_default()
+        let mut all = self.read_secrets().unwrap_or_default();
+        all.remove(GITHUB_SECRETS);
+        all
     }
 
     /// The sensitive env values for one profile id: a built-in profile's
@@ -102,19 +71,26 @@ impl SettingsStore {
     }
 
     pub(crate) fn github_token(&self, host: &str) -> Option<String> {
-        self.read_secrets().ok()?.github.get(host).cloned()
+        self.read_secrets()
+            .ok()?
+            .remove(GITHUB_SECRETS)?
+            .remove(host)
     }
 
     pub fn set_github_token(&self, host: &str, token: Option<&str>) -> std::io::Result<()> {
         let host = crate::github::normalize_host(host).map_err(std::io::Error::other)?;
         let mut all = self.read_secrets()?;
+        let tokens = all.entry(GITHUB_SECRETS.to_owned()).or_default();
         match token.map(str::trim).filter(|token| !token.is_empty()) {
             Some(token) => {
-                all.github.insert(host, token.to_owned());
+                tokens.insert(host, token.to_owned());
             }
             None => {
-                all.github.remove(&host);
+                tokens.remove(&host);
             }
+        }
+        if tokens.is_empty() {
+            all.remove(GITHUB_SECRETS);
         }
         self.write_secrets(&all)
     }
@@ -127,7 +103,7 @@ impl SettingsStore {
         value: Option<&str>,
     ) -> std::io::Result<()> {
         let mut all = self.read_secrets()?;
-        let entry = all.profiles.entry(profile_id.to_string()).or_default();
+        let entry = all.entry(profile_id.to_string()).or_default();
         match value {
             Some(value) => {
                 entry.insert(name.to_string(), value.to_string());
@@ -137,7 +113,7 @@ impl SettingsStore {
             }
         }
         if entry.is_empty() {
-            all.profiles.remove(profile_id);
+            all.remove(profile_id);
         }
         self.write_secrets(&all)
     }
@@ -145,7 +121,7 @@ impl SettingsStore {
     /// Drop every secret stored for a profile id (used when deleting a profile).
     pub fn clear_profile_secrets(&self, profile_id: &str) -> std::io::Result<()> {
         let mut all = self.read_secrets()?;
-        if all.profiles.remove(profile_id).is_some() {
+        if all.remove(profile_id).is_some() {
             return self.write_secrets(&all);
         }
         Ok(())
@@ -171,10 +147,8 @@ impl SettingsStore {
     }
 
     pub fn save(&self, settings: &Settings) -> std::io::Result<()> {
-        let mut settings = settings.clone();
-        settings.github.status.clear();
         let tmp = self.path.with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(&settings)
+        let data = serde_json::to_vec_pretty(settings)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(&tmp, data)?;
         fs::rename(tmp, &self.path)
