@@ -3076,6 +3076,32 @@ impl WorkspaceStore {
         )
     }
 
+    pub fn read_pull_request(
+        &self,
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        read: tcode_protocol::PullRequestRead,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::PullRequestReadResponse, ProtocolError>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::PullRequest {
+                    session_id,
+                    key,
+                    read,
+                })
+                .await?
+            {
+                QueryResponse::PullRequest(response) => Ok(*response),
+                _ => Err(ProtocolError {
+                    code: "invalid_pull_request_response".into(),
+                    message: "Unexpected pull request response".into(),
+                }),
+            }
+        })
+    }
+
     pub(crate) fn message_byline(&self, entry_id: &str) -> Option<String> {
         let held = self
             .threads

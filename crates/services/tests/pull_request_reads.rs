@@ -661,15 +661,20 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
         "a failure is kept for no one; the next reader asks again"
     );
 
+    let first = reads.conversation(&key()).unwrap().account.clone();
     store
         .store
         .set_github_token("github.com", Some("second-account"))
         .unwrap();
-    reads.conversation(&key()).unwrap();
+    let second = reads.conversation(&key()).unwrap().account.clone();
     assert_eq!(
         count("PullRequestConversation"),
         4,
         "another account reads its own"
+    );
+    assert_ne!(
+        first, second,
+        "media a client keys by the account misses after a switch"
     );
     assert_eq!(
         log.lock().unwrap().last().unwrap().authorization.as_deref(),

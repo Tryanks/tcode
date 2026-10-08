@@ -149,6 +149,9 @@ pub struct PullRequestConversation {
     pub threads: Vec<PullRequestReviewThread>,
     /// False when a list ran past the pages the host reads.
     pub complete: bool,
+    /// Opaque, and different for each GitHub account the host reads as: a client keys the
+    /// media this conversation shows by it, so no copy outlives an account change.
+    pub account: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

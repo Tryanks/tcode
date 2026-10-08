@@ -303,6 +303,7 @@ impl Reader<'_> {
                 comments,
                 threads,
                 complete,
+                account: super::digest(&self.account)[..16].to_owned(),
             },
             if merged { MERGED_TTL } else { READ_TTL },
         ))
