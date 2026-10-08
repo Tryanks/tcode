@@ -320,7 +320,7 @@ impl ClientHost for NativeClientHost {
                 let (_, from_host) = async_channel::unbounded();
                 let (state_tx, state) = async_channel::unbounded();
                 let _ = state_tx.try_send(tcode_client::ConnectionState::Offline {
-                    reason: tcode_client::ConnectionFailure::Unreachable,
+                    reason: tcode_client::ConnectionFailure::Unreachable(Some(error.to_string())),
                 });
                 Transport {
                     to_host: to_host.into(),

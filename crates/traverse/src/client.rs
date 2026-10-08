@@ -457,7 +457,9 @@ async fn pair_exchange(
     )
     .await
     .map_err(|_| PairError::Unreachable("connection timed out".into()))?
-    .map_err(|error| PairError::Unreachable(error.to_string()))?;
+    // iroh's plain `Display` stops at "Unable to connect to remote"; the
+    // alternate form carries the cause the user needs to act on.
+    .map_err(|error| PairError::Unreachable(format!("{error:#}")))?;
     client.lookups.lan.connected(connection.remote_id());
     let exchange = async {
         let (mut send, recv) = connection
@@ -726,7 +728,7 @@ async fn connection_loop(
         let _ = state
             .send(ConnectionState::Reconnecting {
                 attempt: backoff.attempt(),
-                reason,
+                reason: reason.clone(),
             })
             .await;
         let mut stable_ms = 0;
@@ -808,7 +810,7 @@ async fn connection_loop(
         let _ = state
             .send(ConnectionState::Reconnecting {
                 attempt: backoff.attempt(),
-                reason,
+                reason: reason.clone(),
             })
             .await;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(delay);
@@ -828,10 +830,10 @@ async fn establish(
 ) -> Result<Established, ConnectionFailure> {
     let client = device.client().await.map_err(|error| {
         log::error!("device endpoint unavailable: {error}");
-        ConnectionFailure::Unreachable
+        ConnectionFailure::Unreachable(Some(format!("device endpoint unavailable: {error}")))
     })?;
     let addr = dial_addr(&host.host_id, host.relay.as_deref(), &host.addrs)
-        .ok_or(ConnectionFailure::Unreachable)?;
+        .ok_or_else(|| ConnectionFailure::Unreachable(Some("invalid machine id".into())))?;
     client.ensure_lookups(host.traverse.as_deref()).await;
     let connection = match tokio::time::timeout(
         CONNECT_BUDGET,
@@ -841,8 +843,8 @@ async fn establish(
     {
         Ok(Ok(connection)) => connection,
         Ok(Err(error)) => {
-            log::debug!("connection to {} failed: {error}", host.host_id);
-            return Err(ConnectionFailure::Unreachable);
+            log::debug!("connection to {} failed: {error:#}", host.host_id);
+            return Err(ConnectionFailure::Unreachable(Some(format!("{error:#}"))));
         }
         Err(_) => return Err(ConnectionFailure::Timeout),
     };
@@ -851,7 +853,7 @@ async fn establish(
         let (mut send, recv) = connection
             .open_bi()
             .await
-            .map_err(|_| ConnectionFailure::Unreachable)?;
+            .map_err(|error| ConnectionFailure::Unreachable(Some(error.to_string())))?;
         wire::write_line(
             &mut send,
             &ClientLine::Hello {
@@ -860,7 +862,7 @@ async fn establish(
             },
         )
         .await
-        .map_err(|_| ConnectionFailure::Unreachable)?;
+        .map_err(|error| ConnectionFailure::Unreachable(Some(error.to_string())))?;
         let mut reader = wire::reader(recv);
         let reply = match wire::read_control::<HostLine>(&mut reader).await {
             Ok(reply) => reply,
@@ -872,7 +874,7 @@ async fn establish(
                         if error.kind() == io::ErrorKind::TimedOut {
                             ConnectionFailure::Timeout
                         } else {
-                            ConnectionFailure::Unreachable
+                            ConnectionFailure::Unreachable(Some(error.to_string()))
                         }
                     }));
             }
@@ -888,7 +890,9 @@ async fn establish(
             HostLine::HelloRejected {
                 reason: HelloRejection::Unpaired,
             } => Err(ConnectionFailure::AuthenticationRejected),
-            _ => Err(ConnectionFailure::Unreachable),
+            other => Err(ConnectionFailure::Unreachable(Some(format!(
+                "unexpected reply {other:?}"
+            )))),
         }
     };
     match handshake.await {
@@ -917,7 +921,7 @@ fn close_failure(reason: &ConnectionError) -> ConnectionFailure {
             ConnectionFailure::HostClosed
         }
         ConnectionError::TimedOut => ConnectionFailure::Timeout,
-        _ => ConnectionFailure::Unreachable,
+        other => ConnectionFailure::Unreachable(Some(other.to_string())),
     }
 }
 
@@ -1047,7 +1051,7 @@ async fn relay_connected(
             Tick::Ping => {
                 if wire_tx.send(ping_line()).await.is_err() {
                     break Lost {
-                        failure: ConnectionFailure::Unreachable,
+                        failure: ConnectionFailure::Unreachable(None),
                         healthy,
                         wake: None,
                     };
@@ -1069,7 +1073,7 @@ async fn relay_connected(
                         subscriptions.insert(key, line.clone());
                     }
                     if wire_tx.send(line).await.is_err() {
-                        break Lost { failure: ConnectionFailure::Unreachable, healthy, wake: None };
+                        break Lost { failure: ConnectionFailure::Unreachable(None), healthy, wake: None };
                     }
                 }
                 Err(_) => break Lost { failure: ConnectionFailure::HostClosed, healthy, wake: None },
@@ -1100,7 +1104,7 @@ async fn relay_connected(
             _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
             wake = outgoing.wake.recv() => match wake {
                 Ok(Wake::Reconnect) => {
-                    break Lost { failure: ConnectionFailure::Unreachable, healthy, wake: Some(Wake::Reconnect) };
+                    break Lost { failure: ConnectionFailure::Unreachable(None), healthy, wake: Some(Wake::Reconnect) };
                 }
                 // Probe now: rewind the idle window so the next tick pings.
                 Ok(Wake::Probe) => {

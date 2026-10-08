@@ -429,7 +429,7 @@ impl RemotePanel {
                         div()
                             .text_size(px(13.))
                             .text_color(cx.theme().danger_foreground)
-                            .child(failure_label(reason)),
+                            .child(failure_description(&reason)),
                     )
                 }),
         )
@@ -971,22 +971,33 @@ pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String 
         ConnectionState::Offline { reason } => format!(
             "{} · {}",
             crate::tr!("remote.path.offline"),
-            failure_label(*reason)
+            failure_label(reason)
         ),
     }
 }
 
 /// The same recovery wording is used in the shell and the machine row.
-pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
+pub(crate) fn failure_label(reason: &tcode_client::ConnectionFailure) -> String {
     use tcode_client::ConnectionFailure::*;
     match reason {
-        Unreachable => crate::tr!("remote.failure.unreachable"),
+        Unreachable(_) => crate::tr!("remote.failure.unreachable"),
         Timeout => crate::tr!("remote.failure.timeout"),
         AuthenticationRejected => crate::tr!("remote.failure.authentication_rejected"),
         ProtocolMismatch => crate::tr!("remote.failure.protocol_mismatch"),
         HostClosed => crate::tr!("remote.failure.host_closed"),
     }
     .into_owned()
+}
+
+/// The machine row has room for the transport's cause; the shell's status
+/// line does not.
+fn failure_description(reason: &tcode_client::ConnectionFailure) -> String {
+    match reason {
+        tcode_client::ConnectionFailure::Unreachable(Some(cause)) => {
+            crate::tr!("remote.failure.unreachable_cause", reason = cause).into_owned()
+        }
+        reason => failure_label(reason),
+    }
 }
 
 #[cfg(test)]
@@ -1068,6 +1079,25 @@ mod tests {
                 reason: ConnectionFailure::AuthenticationRejected
             }),
             "Offline · Access rejected · Pair again"
+        );
+        let unreachable = ConnectionFailure::Unreachable(Some(
+            "No addressing information available: Address lookup failed".into(),
+        ));
+        assert_eq!(
+            connection_label(&ConnectionState::Offline {
+                reason: unreachable.clone()
+            }),
+            "Offline · Host unreachable",
+            "the status line has no room for the cause"
+        );
+        assert_eq!(
+            failure_description(&unreachable),
+            "Host unreachable: No addressing information available: Address lookup failed",
+            "the machine row says why"
+        );
+        assert_eq!(
+            failure_description(&ConnectionFailure::Unreachable(None)),
+            "Host unreachable"
         );
     }
 
