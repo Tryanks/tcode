@@ -252,7 +252,6 @@ impl AppState {
                 | Command::UnarchiveSession { session_id }
                 | Command::SettleSession { session_id }
                 | Command::UnsettleSession { session_id }
-                | Command::PinSession { session_id, .. }
                 | Command::SetAutoSettle { session_id, .. }
                 | Command::RewindTurn { session_id, .. }
                 | Command::AddReviewComment { session_id, .. }

@@ -137,10 +137,10 @@ fn load_process(_pid: u32) -> Option<ProcessInfo> {
 }
 
 impl PtyInfo {
-    /// Fresh subprocess inspection complements the shell prompt evidence.
-    /// Unknown inspection results are never treated as permission to terminate it.
+    /// Whether the shell is in the foreground with no child process, by
+    /// inspecting the process tree now. `None` when it cannot be told.
     #[cfg(unix)]
-    pub fn idle_prompt(&self, shell_name: &str) -> Option<bool> {
+    pub fn idle_shell(&self, shell_name: &str) -> Option<bool> {
         let foreground = unsafe { libc::tcgetpgrp(self.file.as_raw_fd()) };
         if foreground <= 0 || self.fallback_pid == 0 {
             return None;
@@ -156,7 +156,7 @@ impl PtyInfo {
     }
 
     #[cfg(not(unix))]
-    pub fn idle_prompt(&self, _shell_name: &str) -> Option<bool> {
+    pub fn idle_shell(&self, _shell_name: &str) -> Option<bool> {
         None
     }
 }

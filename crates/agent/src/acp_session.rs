@@ -1140,7 +1140,6 @@ async fn handle_command<D: Dialect>(
             }
         }
         SessionCommand::RespondUserInput {
-            message_request_id: _,
             request_id,
             answers,
         } => {

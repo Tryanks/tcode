@@ -209,19 +209,7 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 
 impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
-        let visible_ids: HashSet<_> = self
-            .sessions
-            .iter()
-            .filter(|meta| meta.archived_at.is_none())
-            .map(|meta| meta.id.as_str())
-            .collect();
         let mut summary = IndexSummary {
-            activity_clocks: self
-                .thread_activity
-                .iter()
-                .filter(|(id, _)| visible_ids.contains(id.as_str()))
-                .map(|(id, clocks)| (id.clone(), clocks.clone()))
-                .collect(),
             title_generating: self.title_generating.clone(),
             archived_revision: self.archived_revision,
             ..IndexSummary::default()
@@ -320,11 +308,6 @@ impl AppState {
                 meta.id.clone(),
                 self.session_activity(resident.map_or(meta, |s| &s.meta), resident),
             );
-            if let Some(activity) = self.thread_activity.get(&meta.id) {
-                summary
-                    .activity_clocks
-                    .insert(meta.id.clone(), activity.clone());
-            }
             if self.title_generating.contains(&meta.id) {
                 summary.title_generating.insert(meta.id.clone());
             }
@@ -675,6 +658,10 @@ impl AppState {
                 || self.children_unfinished(&meta.id),
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
+            failed: self
+                .thread_activity
+                .get(&meta.id)
+                .is_some_and(|activity| activity.failed),
             unread: self.session_unread(meta),
             fork: Self::session_fork_availability(meta, resident),
         }
@@ -788,7 +775,6 @@ impl AppState {
                 .iter()
                 .map(|message| QueuedMessageStatus {
                     delivery_key: message.delivery_key.clone(),
-                    origin: Some(message.origin),
                     id: message.id,
                     editable: Self::queued_message_editable(session, message.id),
                     text: message.text.clone(),

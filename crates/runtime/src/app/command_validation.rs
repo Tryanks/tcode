@@ -38,19 +38,6 @@ impl AppState {
         };
         self.validate_plugin_command(command)?;
         if let Command::PatchSettings { patch } = command {
-            let days = match patch {
-                SettingsPatch::AutoSettleAfterDays(days) => *days,
-                SettingsPatch::ProjectSettlement {
-                    value: Some(value), ..
-                } => value.auto_settle_after_days.flatten(),
-                _ => None,
-            };
-            if days.is_some_and(|days| !days.is_finite() || !(1.0..=90.0).contains(&days)) {
-                return Err(error(
-                    "invalid_settlement_days",
-                    "Auto-settle days must be between 1 and 90.",
-                ));
-            }
             if let SettingsPatch::ProjectSettlement { project_id, .. } = patch
                 && !self
                     .projects
@@ -62,6 +49,10 @@ impl AppState {
                     "This project is no longer available.",
                 ));
             }
+            self.settings
+                .clone()
+                .apply(patch.clone())
+                .map_err(|message| error("invalid_settings", message))?;
         }
         match command {
             Command::SetGitHubToken { host, .. }
@@ -180,9 +171,7 @@ impl AppState {
         };
         if matches!(
             command,
-            Command::SettleSession { .. }
-                | Command::UnsettleSession { .. }
-                | Command::PinSession { .. }
+            Command::SettleSession { .. } | Command::UnsettleSession { .. }
         ) && self
             .find_meta(session_id)
             .is_some_and(|meta| meta.archived_at.is_some())
@@ -198,20 +187,11 @@ impl AppState {
                 "Wait for this thread to finish before settling.",
             ));
         }
-        if let Command::PinSession {
-            order_key: Some(key),
-            ..
-        } = command
-            && tcode_core::thread_sort::order_key_between(Some(key), None).is_none()
-        {
-            return Err(error("invalid_order", "Invalid pin order key."));
-        }
         // Index mutations operate on stored sessions, without requiring a live provider.
         if matches!(
             command,
             Command::SettleSession { .. }
                 | Command::UnsettleSession { .. }
-                | Command::PinSession { .. }
                 | Command::SetAutoSettle { .. }
                 | Command::ArchiveSession { .. }
                 | Command::UnarchiveSession { .. }

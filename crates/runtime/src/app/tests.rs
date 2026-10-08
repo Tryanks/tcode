@@ -108,19 +108,6 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         state.on_event(
             "parent",
             AgentEvent::ItemCompleted(ThreadItem {
-                id: "delegated-prompt".into(),
-                parent_item_id: Some("spawn-1".into()),
-                content: ItemContent::UserMessage {
-                    text: "Inspect the delegated task".into(),
-                    context_len: None,
-                    attachments: vec![],
-                },
-            }),
-            cx,
-        );
-        state.on_event(
-            "parent",
-            AgentEvent::ItemCompleted(ThreadItem {
                 id: "child-answer".into(),
                 parent_item_id: Some("spawn-1".into()),
                 content: ItemContent::AssistantMessage {
@@ -193,19 +180,6 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             serde_json::json!("low")
         );
         let mirror_events = state.store.read_events(&mirror.id).unwrap();
-        let delegated = mirror_events
-            .iter()
-            .find(|stored| {
-                matches!(&stored.event,
-                    AgentEvent::ItemCompleted(ThreadItem { id, .. }) if id == "delegated-prompt"
-                )
-            })
-            .unwrap();
-        assert_eq!(delegated.origin, Some(MessageOrigin::Agent));
-        let activity = tcode_core::settlement::ThreadActivity::fold_stored(&mirror_events, true);
-        assert_eq!(activity.last_message_at, delegated.ts);
-        assert_eq!(activity.last_human_message_at, None);
-
         assert!(mirror_events.iter().any(|stored| matches!(
             &stored.event,
             AgentEvent::ItemCompleted(ThreadItem {
@@ -7629,12 +7603,6 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
     };
     receive_turn(&first_commands, "from desktop");
     receive_turn(&second_commands, "from phone");
-    // Fence admission events separately from the tail fixture. New canonical
-    // lifecycle entries must not change the offset being tested below.
-    for link in [&one, &two] {
-        link.command_blocking(Command::ClearRelaunchMarker).unwrap();
-        while link.events().try_recv().is_ok() {}
-    }
     let ids = (id_one.clone(), id_two.clone());
     smol::block_on(host.update_state_for_test(move |state, cx| {
         for id in [&ids.0, &ids.1] {
@@ -7669,7 +7637,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
             topic: Topic::SessionEvents {
                 session_id: id.clone(),
             },
-            after: Some(3),
+            after: Some(1),
         })
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
@@ -7677,7 +7645,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         let ServerEvent::SessionSnapshot { from, records, .. } = snapshot.event else {
             panic!("expected tail")
         };
-        assert_eq!(from, 3);
+        assert_eq!(from, 1);
         assert_eq!(records.len(), 2);
         assert!(
             matches!(&records[0].event, AgentEvent::Warning { message } if message == "second")
@@ -7692,7 +7660,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         assert!(
-            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records, .. } if records.len() == 5)
+            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records, .. } if records.len() == 3)
         );
     }
     assert!(
@@ -9983,62 +9951,8 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
     let root = TestStore::new("cold-open-mux");
     open_stored_session(&root, "cold");
     let persisted = persist_streamed_turns(&root, "cold", 3).len() as u64;
-    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
-    host.to_host
-        .send_blocking(
-            tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
-                id: 100,
-                key: None,
-                principal: Default::default(),
-                payload: tcode_protocol::ClientPayload::Subscribe(Subscription {
-                    topic: Topic::Index,
-                    after: None,
-                }),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-    loop {
-        let message =
-            tcode_protocol::decode_host_line(&host.from_host.recv_blocking().unwrap()).unwrap();
-        let summary = match message {
-            HostMessage::Event(EventEnvelope {
-                event: ServerEvent::IndexSnapshot(snapshot),
-                ..
-            }) => Some(snapshot.summary),
-            HostMessage::Event(EventEnvelope {
-                event: ServerEvent::IndexSummaryReplaced(summary),
-                ..
-            }) => Some(summary),
-            _ => None,
-        };
-        if summary.is_some_and(|summary| summary.activity_clocks.contains_key("cold")) {
-            break;
-        }
-    }
-    host.to_host
-        .send_blocking(
-            tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
-                id: 101,
-                key: None,
-                principal: Default::default(),
-                payload: tcode_protocol::ClientPayload::Unsubscribe(Subscription {
-                    topic: Topic::Index,
-                    after: None,
-                }),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-    loop {
-        if matches!(
-            tcode_protocol::decode_host_line(&host.from_host.recv_blocking().unwrap()).unwrap(),
-            HostMessage::Ack { id: 101, .. }
-        ) {
-            break;
-        }
-    }
     let reads_before_open = root.event_reads();
+    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
     let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
     let clients: Vec<HostLink> = (0..2)
         .map(|_| {
@@ -10254,7 +10168,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
 }
 
 #[test]
-fn admitted_message_origins_survive_queue_acknowledgement_and_callback_steering() {
+fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("message-origin");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -10284,102 +10198,51 @@ fn admitted_message_origins_survive_queue_acknowledgement_and_callback_steering(
             cx,
         );
         state.deliver_orchestrate_callback_to_parent("thread", "agent completion".into(), cx);
-    });
-    let SessionCommand::Steer { request_id, .. } = received.try_recv().unwrap() else {
-        panic!("steer")
-    };
-    state.update(cx, |state, cx| {
-        state.on_event("thread", AgentEvent::SteerAccepted { request_id }, cx)
-    });
-    cx.run_until_parked();
-    let records = store.read_events("thread").unwrap();
-    assert_eq!(
-        records
-            .iter()
-            .filter_map(|record| record.origin)
-            .collect::<Vec<_>>(),
-        [
-            MessageOrigin::Human,
-            MessageOrigin::Human,
-            MessageOrigin::Agent,
-            MessageOrigin::Agent,
-            MessageOrigin::Agent
-        ]
-    );
-    let mut activity = tcode_core::settlement::ThreadActivity::default();
-    for record in &records {
-        activity.apply(record, false);
-    }
-    assert_eq!(
-        activity.last_human_message_at,
-        records
-            .iter()
-            .find(|record| matches!(record.event, AgentEvent::ItemCompleted(_)))
-            .unwrap()
-            .ts
-    );
-    let request = records
-        .iter()
-        .rev()
-        .find(|record| matches!(record.event, AgentEvent::SteerRequested { .. }))
-        .unwrap();
-    assert_eq!(activity.last_message_at, request.ts);
-    state.update(cx, |state, cx| {
-        state.on_event(
-            "thread",
-            AgentEvent::UserInputRequested {
-                request_id: "async-question".into(),
-                questions: vec![],
-                delivery: agent::UserInputDelivery::Async,
-            },
-            cx,
-        );
-    });
-    state.dispatch_command(
-        cx,
-        2,
-        Command::RespondUserInput {
-            session_id: "thread".into(),
-            request_id: "async-question".into(),
-            answers: serde_json::Map::from_iter([("answer".into(), serde_json::json!("A"))]),
-        },
-    );
-    let SessionCommand::RespondUserInput {
-        message_request_id: Some(reply_id),
-        ..
-    } = received.try_recv().unwrap()
-    else {
-        panic!("message-capable reply must carry admission identity")
-    };
-    state.update(cx, |state, cx| {
-        cx.origin = MessageOrigin::Server;
+        // A message the provider reports on its own, such as an answer it
+        // steers into the running turn.
         state.on_event(
             "thread",
             AgentEvent::SteerRequested {
-                request_id: reply_id.clone(),
+                request_id: "provider-reply".into(),
                 text: "A".into(),
                 attachments: vec![],
             },
             cx,
         );
-        state.on_event(
-            "thread",
-            AgentEvent::SteerAccepted {
-                request_id: reply_id,
-            },
-            cx,
-        );
     });
+    assert!(matches!(
+        received.try_recv().unwrap(),
+        SessionCommand::Steer { .. }
+    ));
     cx.run_until_parked();
     let records = store.read_events("thread").unwrap();
+    let messages: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.event,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::UserMessage { .. },
+                    ..
+                }) | AgentEvent::SteerRequested { .. }
+            )
+        })
+        .collect();
     assert_eq!(
-        records
+        messages
             .iter()
-            .rev()
-            .filter_map(|record| record.origin)
-            .take(3)
+            .map(|record| record.origin)
             .collect::<Vec<_>>(),
-        [MessageOrigin::Human; 3]
+        [Some(MessageOrigin::Human), Some(MessageOrigin::Agent), None]
+    );
+    let fold = |record: &SessionEventRecord| {
+        tcode_core::settlement::ThreadActivity::fold_stored([record], false)
+    };
+    assert_eq!(fold(messages[1]).last_human_message_at, None);
+    assert_eq!(
+        fold(messages[2]).last_human_message_at,
+        messages[2].ts,
+        "a top-level thread's own provider message is the human's"
     );
 }
 
@@ -10408,7 +10271,6 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
         ("aged", None),
         ("untouched", None),
         ("never", None),
-        ("blocked", None),
     ] {
         let meta: SessionMeta = serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "provider": "codex", "cwd": store.root(),
@@ -10418,7 +10280,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
         .unwrap();
         store.upsert_meta(&meta).unwrap();
     }
-    for id in ["aged", "never", "blocked"] {
+    for id in ["aged", "never"] {
         store
             .append_event(
                 id,
@@ -10435,25 +10297,13 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
             )
             .unwrap();
     }
-    store
-        .append_event(
-            "blocked",
-            stamp + 1,
-            &AgentEvent::UserInputRequested {
-                request_id: "cold-input".into(),
-                questions: vec![],
-                delivery: agent::UserInputDelivery::Blocking,
-            },
-        )
-        .unwrap();
     // Literal persisted settings distinguish an omitted project value from
-    // explicit null, and exercise removal of the former idle-archive keys.
+    // an explicit null.
     std::fs::write(
         store.root().join("settings.json"),
         r#"{
         "auto_settle_after_days":null,
-        "project_settlement_overrides":{"inherit":{},"never":{"auto_settle_after_days":null}},
-        "auto_archive_disabled":false,"auto_archive_max_idle_days":7,"auto_archive_keep_count":4
+        "project_settlement_overrides":{"inherit":{},"never":{"auto_settle_after_days":null}}
     }"#,
     )
     .unwrap();
@@ -10464,57 +10314,28 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
         after: None,
     })
     .unwrap();
-    loop {
-        let event = next_host_event(&link).event;
-        let summary = match event {
-            ServerEvent::IndexSnapshot(snapshot) => Some(snapshot.summary),
-            ServerEvent::IndexSummaryReplaced(summary) => Some(summary),
-            _ => None,
-        };
-        if summary.is_some_and(|summary| {
-            summary
-                .activity_clocks
-                .get("aged")
-                .is_some_and(|activity| activity.last_human_message_at == Some(stamp))
-        }) {
-            break;
-        }
-    }
     link.command_blocking(Command::RenameSession {
         session_id: "aged".into(),
         title: "Recently renamed".into(),
     })
     .unwrap();
-    assert_eq!(
-        link.command_blocking(Command::PatchSettings {
-            patch: SettingsPatch::AutoSettleAfterDays(Some(0.5))
-        })
-        .unwrap_err()
-        .code,
-        "invalid_settlement_days"
-    );
-    assert_eq!(
-        link.command_blocking(Command::SettleSession {
-            session_id: "blocked".into()
-        })
-        .unwrap_err()
-        .code,
-        "thread_busy"
-    );
-    assert_eq!(
-        link.command_blocking(Command::PatchSettings {
-            patch: SettingsPatch::ProjectSettlement {
-                project_id: "never".into(),
-                value: Some(tcode_core::settings::ProjectSettlementSettings {
-                    auto_settle_after_days: Some(Some(0.5)),
-                    ..Default::default()
-                })
-            },
-        })
-        .unwrap_err()
-        .code,
-        "invalid_settlement_days"
-    );
+    for patch in [
+        SettingsPatch::AutoSettleAfterDays(Some(0.5)),
+        SettingsPatch::ProjectSettlement {
+            project_id: "never".into(),
+            value: Some(tcode_core::settings::ProjectSettlementSettings {
+                auto_settle_after_days: Some(Some(91.0)),
+                ..Default::default()
+            }),
+        },
+    ] {
+        assert_eq!(
+            link.command_blocking(Command::PatchSettings { patch })
+                .unwrap_err()
+                .code,
+            "invalid_settings"
+        );
+    }
     link.command_blocking(Command::PatchSettings {
         patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
     })
@@ -10557,10 +10378,6 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
                 "explicit project null survives settings save and restart"
             );
             assert!(
-                !find("blocked").is_settled(),
-                "cold callback input blocks settlement"
-            );
-            assert!(
                 !find("untouched").is_settled(),
                 "no event activity never ages"
             );
@@ -10593,9 +10410,6 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
     state.update(cx, |state, _| {
         let mut parent = live_session(ProviderKind::Codex, commands);
         parent.meta.id = "parent".into();
-        parent.meta.pinned_at = Some(1);
-        parent.meta.pin_order = Some("m".into());
-        parent.meta.active_order = Some("n".into());
         parent.meta.unsettled_at = Some(1);
         parent.push_or_merge_orchestrate_callback("queued completion".into());
         let wake = parent.push_queued("automatic wake".into(), vec![]);
@@ -10638,7 +10452,10 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
             session_id: "parent".into(),
         }),
     );
-    assert!(denied.iter().any(|message| matches!(message, HostMessage::Ack { id: 2, result: Err(error) } if error.code == "thread_busy")));
+    assert!(denied.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack { id: 2, result: Err(error) } if error.code == "thread_busy"
+    )));
     let human = state.read(|state| {
         state
             .resident("parent")
@@ -10696,7 +10513,10 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
                 session_id: "parent".into(),
             }),
         );
-        assert!(denied.iter().any(|message| matches!(message, HostMessage::Ack { id:20, result:Err(error) } if error.code == "thread_busy")));
+        assert!(denied.iter().any(|message| matches!(
+            message,
+            HostMessage::Ack { id: 20, result: Err(error) } if error.code == "thread_busy"
+        )));
         state.update(cx, |state, cx| state.on_event("parent", resolved, cx));
     }
     state.update(cx, |state, cx| {
@@ -10728,12 +10548,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
     state.read(|state| {
         let parent = state.resident("parent").unwrap();
         assert!(parent.meta.is_settled());
-        assert!(
-            parent.meta.pinned_at.is_none()
-                && parent.meta.pin_order.is_none()
-                && parent.meta.active_order.is_none()
-                && parent.meta.unsettled_at.is_none()
-        );
+        assert!(parent.meta.unsettled_at.is_none());
         assert!(parent.queue.is_empty());
         assert_eq!(state.active_session_id(), Some("parent"));
         assert!(state.resident("child").unwrap().turn_in_flight);
@@ -10856,10 +10671,10 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
 
 #[cfg(target_os = "macos")]
 #[test]
-fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
+fn settling_closes_only_idle_real_shells_and_spares_new_terminal_input() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("settlement-real-pty");
-    for id in ["idle", "busy", "builtin", "input"] {
+    for id in ["idle", "busy", "input"] {
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.id = id.into();
         store.upsert_meta(&meta).unwrap();
@@ -10867,7 +10682,7 @@ fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let mut request = 0;
     let mut terminals = HashMap::new();
-    for id in ["idle", "busy", "builtin", "input"] {
+    for id in ["idle", "busy", "input"] {
         request += 1;
         through_pipe(
             &state,
@@ -10894,34 +10709,18 @@ fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
                 .resident(id)
                 .is_some_and(|session| session.terminal_workspace.active_id.is_some())
         });
-        let terminal = state.read(|state| {
-            state
-                .resident(id)
-                .unwrap()
-                .terminal_workspace
-                .active()
-                .unwrap()
-                .terminal
-                .clone()
+        let (terminal_id, terminal) = state.read(|state| {
+            let workspace = &state.resident(id).unwrap().terminal_workspace;
+            (
+                workspace.active_id.unwrap(),
+                workspace.active().unwrap().terminal.clone(),
+            )
         });
-        cx.run_until(|_| terminal.idle_prompt() == Some(true));
-        let terminal_id = state.read(|state| {
-            state
-                .resident(id)
-                .unwrap()
-                .terminal_workspace
-                .active_id
-                .unwrap()
-        });
+        cx.run_until(|_| terminal.idle_shell() == Some(true));
         let (command, marker, idle) = match id {
             "busy" => (
                 "printf '__BUSY_CHILD__\\n'; sleep 60\r",
                 "__BUSY_CHILD__",
-                false,
-            ),
-            "builtin" => (
-                "printf '__BUSY_BUILTIN__\\n'; while true; do :; done\r",
-                "__BUSY_BUILTIN__",
                 false,
             ),
             _ => (
@@ -10946,11 +10745,11 @@ fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
                 .text()
                 .lines()
                 .any(|line| line.trim() == marker)
-                && terminal.idle_prompt() == Some(idle)
+                && terminal.idle_shell() == Some(idle)
         });
         terminals.insert(id, (terminal_id, terminal));
     }
-    for id in ["idle", "busy", "builtin"] {
+    for id in ["idle", "busy"] {
         request += 1;
         through_pipe(
             &state,
@@ -10970,13 +10769,14 @@ fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
             .contains("__IDLE_OUTPUT__")
     );
     assert!(!terminals["busy"].1.exited());
-    assert!(!terminals["builtin"].1.exited());
     state.read(|state| {
         assert!(
             state.terminal_handle(terminals["idle"].0).is_some(),
             "closed shell output remains in its tab"
         )
     });
+    // Input typed after the settle and before its inspection finishes keeps
+    // the shell.
     request += 1;
     state.dispatch_command(
         cx,
@@ -10985,9 +10785,6 @@ fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
             session_id: "input".into(),
         },
     );
-    while !state.read(|state| state.find_meta("input").unwrap().is_settled()) {
-        cx.run_next();
-    }
     request += 1;
     state.dispatch_command(
         cx,
@@ -11005,11 +10802,10 @@ fn settling_real_shells_keeps_busy_builtins_and_new_terminal_input() {
             .lines()
             .any(|line| line.trim() == "__NEW_INPUT_SURVIVED__")
     });
+    cx.run_until_parked();
     assert!(!terminals["input"].1.exited());
     for (_, terminal) in terminals.values() {
-        if !terminal.exited() {
-            terminal.terminate().unwrap();
-        }
+        terminal.kill();
     }
     cx.run_until(|_| terminals.values().all(|(_, terminal)| terminal.exited()));
 }
@@ -11029,7 +10825,7 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
         let state = cx.new_entity(TestClientState::new((*store).clone()));
         let (parent_commands, parent_received) = smol::channel::unbounded();
         let (child_commands, _child_received) = smol::channel::unbounded();
-        let completion = state.update(cx, |state, cx| {
+        state.update(cx, |state, cx| {
             let mut ancestor = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
             ancestor.id = "ancestor".into();
             ancestor.settled_at = Some(1);
@@ -11046,9 +10842,9 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
                 .extend([ancestor, parent.meta.clone(), child.meta.clone()]);
             state.residents.parked.insert("parent".into(), parent);
             state.install_selected(child);
-            state.record_event(
+            state.on_event(
                 "child",
-                &AgentEvent::TurnStarted {
+                AgentEvent::TurnStarted {
                     turn_id: "finished-run".into(),
                 },
                 cx,
@@ -11058,17 +10854,17 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
                 persisted_assistant_event("completion evidence"),
                 cx,
             );
-            state.record_event(
+            state.on_event(
                 "child",
-                &AgentEvent::TurnCompleted {
+                AgentEvent::TurnCompleted {
                     turn_id: "finished-run".into(),
                     status: TurnStatus::Completed,
                     usage: None,
                 },
                 cx,
             );
-            state.deliver_child_callback("child", TurnStatus::Completed, cx)
         });
+        // Each command lands while the child's log is read for its completion.
         let command = match case {
             "renamed" => Some(Command::RenameSession {
                 session_id: "child".into(),
@@ -11094,15 +10890,6 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
         if let Some(command) = command {
             state.dispatch_command(cx, 1, command);
         }
-        let (finished, done) = smol::channel::bounded(1);
-        smol::spawn(async move {
-            if let Some(completion) = completion {
-                completion.await;
-            }
-            finished.send(()).await.unwrap();
-        })
-        .detach();
-        cx.run_until(|_| !done.is_empty());
         if case == "valid" || case == "renamed" {
             cx.run_until(|_| !parent_received.is_empty());
             assert!(
@@ -11110,6 +10897,7 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
             );
             state.read(|state| assert!(!state.find_meta("parent").unwrap().is_settled()));
         } else {
+            cx.run_until_parked();
             state.read(|state| {
                 if let Some(parent) = state.find_meta("parent") {
                     assert!(parent.is_settled(), "{case}");
@@ -11126,11 +10914,11 @@ fn child_completion_admission_reopens_only_its_parent_and_rejects_stale_targets(
         state.read(|state| assert!(state.find_meta("ancestor").unwrap().is_settled(), "{case}"));
     }
 }
+
 #[test]
-fn cancelling_provider_retires_its_requests_and_native_work_without_stopping_independent_children()
-{
+fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
     let cx = &mut TestAppContext::default();
-    let store = TestStore::new("settlement-cancel-native");
+    let store = TestStore::new("settlement-own-provider");
     let stamp = now_millis() - 10 * 86_400_000;
     let mut lead = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
     lead.id = "lead".into();
@@ -11152,10 +10940,10 @@ fn cancelling_provider_retires_its_requests_and_native_work_without_stopping_ind
         )
         .unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (worker_commands, worker_received) = smol::channel::unbounded();
     state.update(cx, |state, cx| {
         state.settings.auto_settle_after_days = None;
-        let (commands, _) = smol::channel::unbounded();
-        let mut worker = live_session(ProviderKind::Codex, commands);
+        let mut worker = live_session(ProviderKind::Codex, worker_commands);
         worker.meta.id = "worker".into();
         worker.meta.parent_session_id = Some("lead".into());
         let mut independent = ActiveSession::new(
@@ -11191,37 +10979,17 @@ fn cancelling_provider_retires_its_requests_and_native_work_without_stopping_ind
                 cx,
             );
         }
-        state.on_event(
-            "worker",
-            AgentEvent::UserInputRequested {
-                request_id: "blocking".into(),
-                questions: vec![],
-                delivery: agent::UserInputDelivery::Blocking,
-            },
-            cx,
-        );
     });
-    let denied = through_pipe(
-        &state,
+    // An unsettled dispatched child holds its lead out of settlement.
+    state.dispatch_command(
         cx,
         1,
-        tcode_protocol::ClientPayload::Command(Command::SettleSession {
-            session_id: "worker".into(),
-        }),
+        Command::PatchSettings {
+            patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
+        },
     );
-    assert!(denied.iter().any(|message| matches!(message, HostMessage::Ack { id:1, result:Err(error) } if error.code == "thread_busy")));
-    state.update(cx, |state, cx| {
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Cancel {
-                parent_id: "lead".into(),
-                thread_id: "worker".into(),
-            },
-            reply,
-            cx,
-        );
-        assert!(response.try_recv().unwrap().is_ok());
-    });
+    cx.run_until(|state| state.thread_activity.contains_key("lead"));
+    state.read(|state| assert!(!state.find_meta("lead").unwrap().is_settled()));
     let accepted = through_pipe(
         &state,
         cx,
@@ -11237,6 +11005,10 @@ fn cancelling_provider_retires_its_requests_and_native_work_without_stopping_ind
             result: Ok(_)
         }
     )));
+    assert!(matches!(
+        worker_received.try_recv().unwrap(),
+        SessionCommand::Shutdown
+    ));
     state.read(|state| {
         let mirror = |spawn| {
             state
@@ -11262,78 +11034,18 @@ fn cancelling_provider_retires_its_requests_and_native_work_without_stopping_ind
         );
         assert!(state.resident("independent").unwrap().turn_in_flight);
     });
-    // A provider may ask during startup before there is transcript content.
-    // Changing that provider is a fresh switch, and must retire the question
-    // before shutdown hides provider ownership from the cold activity fold.
-    let (switch_commands, switch_received) = smol::channel::unbounded();
-    state.update(cx, |state, cx| {
-        let mut opening = live_session(ProviderKind::Codex, switch_commands);
-        opening.meta.id = "opening".into();
-        state.persist_meta(&opening.meta, cx);
-        state.install_selected(opening);
-        state.on_event(
-            "opening",
-            AgentEvent::UserInputRequested {
-                request_id: "startup-question".into(),
-                questions: vec![],
-                delivery: agent::UserInputDelivery::Blocking,
-            },
-            cx,
-        );
-    });
     state.dispatch_command(
         cx,
-        5,
-        Command::SetActiveModel {
-            session_id: "opening".into(),
-            provider: ProviderKind::ClaudeCode,
-            model: None,
-            profile_id: None,
-        },
-    );
-    assert!(matches!(
-        switch_received.try_recv().unwrap(),
-        SessionCommand::Shutdown
-    ));
-    let switched = through_pipe(
-        &state,
-        cx,
-        6,
-        tcode_protocol::ClientPayload::Command(Command::SettleSession {
-            session_id: "opening".into(),
-        }),
-    );
-    assert!(switched.iter().any(|message| matches!(
-        message,
-        HostMessage::Ack {
-            id: 6,
-            result: Ok(_)
-        }
-    )));
-    through_pipe(
-        &state,
-        cx,
         3,
-        tcode_protocol::ClientPayload::Command(Command::PatchSettings {
-            patch: SettingsPatch::AutoSettleAfterDays(Some(3.0)),
-        }),
+        Command::PatchSettings {
+            patch: SettingsPatch::AutoSettleAfterDays(Some(2.0)),
+        },
     );
     cx.run_until(|state| {
         state
             .find_meta("lead")
-            .is_some_and(|meta| meta.is_settled())
+            .is_some_and(|meta| meta.settled_at == Some(stamp / 1000))
     });
-    through_pipe(
-        &state,
-        cx,
-        4,
-        tcode_protocol::ClientPayload::Command(Command::ShutdownAllAndFlush),
-    );
-    let records = store.read_events("worker").unwrap();
-    assert!(
-        !tcode_core::settlement::ThreadActivity::fold_stored(&records, true).has_pending_input(),
-        "cancellation survives a cold fold"
-    );
 }
 
 #[test]

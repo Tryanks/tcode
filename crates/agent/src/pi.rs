@@ -431,7 +431,6 @@ impl SessionActor for PiActor {
                 .map_err(|err| err.to_string())
             }
             SessionCommand::RespondUserInput {
-                message_request_id: _,
                 request_id,
                 answers,
             } => {

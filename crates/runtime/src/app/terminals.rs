@@ -719,33 +719,10 @@ impl AppState {
 }
 
 impl AppState {
-    pub(crate) fn note_terminal_input(&mut self, terminal_id: u64) {
-        let id = self
-            .residents
-            .live
-            .values()
-            .chain(self.residents.parked.values())
-            .find(|session| session.terminal_workspace.terminal(terminal_id).is_some())
-            .map(|session| session.meta.id.clone())
-            .or_else(|| {
-                self.terminal_workspaces
-                    .iter()
-                    .find_map(|(destination, workspace)| {
-                        if workspace.terminal(terminal_id).is_some() {
-                            match destination {
-                                ConversationDestination::Thread(id) => Some(id.clone()),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        }
-                    })
-            });
-        if let Some(id) = id {
-            self.advance_decision_revision(&id);
-        }
-    }
-
+    /// Close the thread's terminals that fresh process inspection proves are
+    /// at an idle shell, keeping their output. A terminal used since the
+    /// settle, one that cannot be inspected, and a thread re-engaged
+    /// meanwhile all keep their shells.
     pub(super) fn close_settled_idle_terminals(&mut self, id: &str, cx: &mut HostCx) {
         let terminals: Vec<_> = self
             .resident(id)
@@ -756,9 +733,15 @@ impl AppState {
             })
             .into_iter()
             .flat_map(|workspace| &workspace.terminals)
-            .map(|entry| (entry.id, entry.terminal.clone()))
+            .map(|entry| {
+                let terminal = entry.terminal.clone();
+                (entry.id, terminal.activity_mark(), terminal)
+            })
             .collect();
-        let revision = self.decision_revisions.get(id).copied().unwrap_or(0);
+        if terminals.is_empty() {
+            return;
+        }
+        let revision = self.decision_revision(id);
         let id = id.to_owned();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
@@ -766,25 +749,25 @@ impl AppState {
                 .unblock(move || {
                     terminals
                         .into_iter()
-                        .filter(|(_, terminal)| terminal.idle_prompt() == Some(true))
+                        .filter(|(_, _, terminal)| terminal.idle_shell() == Some(true))
                         .collect::<Vec<_>>()
                 })
                 .await;
             host_cx.enqueue(move |state, _cx| {
-                if state.decision_revisions.get(&id).copied().unwrap_or(0) != revision
+                if state.decision_revision(&id) != revision
                     || !state.find_meta(&id).is_some_and(|meta| meta.is_settled())
                 {
                     return;
                 }
-                for (terminal_id, terminal) in idle {
-                    if state
-                        .terminal_handle(terminal_id)
-                        .is_some_and(|current| Arc::ptr_eq(&current, &terminal))
+                for (terminal_id, mark, terminal) in idle {
+                    if terminal.activity_mark() == mark
+                        && state
+                            .terminal_handle(terminal_id)
+                            .is_some_and(|current| Arc::ptr_eq(&current, &terminal))
                     {
-                        // Retain the emulator and tab: process exit leaves its output readable.
-                        if let Err(error) = terminal.terminate() {
-                            log::warn!("settled terminal {terminal_id}: {error}");
-                        }
+                        // The tab and its emulator stay: an exited shell's
+                        // output remains readable.
+                        terminal.kill();
                     }
                 }
             });

@@ -601,7 +601,6 @@ fn questions_and_todos_are_answered_in_cursors_nested_shapes() {
         handle
             .commands
             .send(SessionCommand::RespondUserInput {
-                message_request_id: None,
                 request_id: request_id.clone(),
                 answers,
             })
@@ -726,7 +725,6 @@ fn native_plan_requests_return_the_users_choice_and_cancel_on_interrupt() {
                 handle
                     .commands
                     .send(SessionCommand::RespondUserInput {
-                        message_request_id: None,
                         request_id: request_id.clone(),
                         answers: Map::from_iter([("decision".into(), json!(choice))]),
                     })

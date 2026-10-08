@@ -25,7 +25,7 @@ use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
 use tcode_core::project::{
-    Project, SessionMeta, WorktreeInfo, WorktreeSharing, descendant_session_ids,
+    Project, SessionMeta, SettledOverride, WorktreeInfo, WorktreeSharing, descendant_session_ids,
 };
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
@@ -353,7 +353,6 @@ pub struct AppState {
     // Archive replies remain ordered after the last subscriber releases a projection.
     space_archive_revisions: HashMap<String, u64>,
     decision_authors: HashMap<(String, String), Author>,
-    steer_admissions: HashMap<(String, String), (MessageOrigin, Option<Author>)>,
     pub projects: Vec<Project>,
     pub residents: ResidentSessions,
     /// Terminal resources parked by conversation destination. Drawer chrome is
@@ -570,7 +569,6 @@ impl AppState {
             space_archives: HashMap::new(),
             space_archive_revisions: HashMap::new(),
             decision_authors: HashMap::new(),
-            steer_admissions: HashMap::new(),
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
             terminal_registry: TerminalRegistry::default(),

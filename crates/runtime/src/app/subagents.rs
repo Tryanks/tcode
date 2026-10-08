@@ -45,9 +45,7 @@ impl AppState {
             if !self.native_subagent_turns.contains_key(&mirror_id) {
                 self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             }
-            let mut delegated = cx.clone();
-            delegated.origin = MessageOrigin::Agent;
-            self.record_event(&mirror_id, &strip_parent_item_id(event), &mut delegated);
+            self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
             if matches!(item.content, ItemContent::Subagent { .. }) {
                 self.nested_subagent_spawns.insert(
                     (parent_session_id.to_string(), item.id.clone()),
@@ -222,7 +220,16 @@ impl AppState {
                 },
                 cx,
             );
-            self.request_settlement_sweep(cx);
+            // The mirror no longer holds the thread whose provider runs it.
+            let mut owner = self.find_meta(mirror_id);
+            while let Some(meta) = owner.take_if(|meta| meta.native_subagent.is_some()) {
+                owner = meta
+                    .parent_session_id
+                    .and_then(|parent| self.find_meta(&parent));
+            }
+            if let Some(owner) = owner {
+                self.evaluate_thread_settlement(&owner.id, cx);
+            }
         }
     }
 

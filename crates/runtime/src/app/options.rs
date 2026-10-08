@@ -26,7 +26,6 @@ impl AppState {
         let permission_default = self.initial_permission_selection(project_id.as_deref(), provider);
         let provider_commands =
             self.cached_provider_commands(provider, profile_id.as_deref(), None);
-        let mut detached = false;
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -92,8 +91,7 @@ impl AppState {
             } else if has_meaningful_history(&active.timeline) {
                 active.pending_relay = Some(source);
             } else {
-                active.clear_provider_resume();
-                detached = true;
+                active.resume_cursor_for_fresh_provider();
             }
             active.meta.provider = provider;
             active.meta.acp_agent_id = None;
@@ -107,9 +105,6 @@ impl AppState {
             active.confirmed_option_selections.clear();
             if active.pending_relay.is_some() {
                 return;
-            }
-            if detached {
-                self.detach_provider_to_idle(target_id, cx);
             }
             self.preview_draft_or_persist_active(target_id, cx);
             return;

@@ -1016,6 +1016,16 @@ const fn default_auto_settle_after_days() -> Option<f64> {
     Some(3.0)
 }
 
+/// Auto-settle after 1 to 90 days, or never.
+fn auto_settle_days(days: Option<f64>) -> Result<Option<f64>, &'static str> {
+    match days {
+        Some(days) if !(1.0..=90.0).contains(&days) => {
+            Err("Auto-settle days must be between 1 and 90.")
+        }
+        days => Ok(days),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSettlementSettings {
     #[serde(
@@ -1081,8 +1091,9 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Apply one field-scoped mutation without replacing sibling fields.
-    pub fn apply(&mut self, patch: SettingsPatch) {
+    /// Apply one field-scoped mutation without replacing sibling fields. A
+    /// value outside its field's range is refused and changes nothing.
+    pub fn apply(&mut self, patch: SettingsPatch) -> Result<(), &'static str> {
         match patch {
             SettingsPatch::GitHubHost {
                 host,
@@ -1130,20 +1141,15 @@ impl Settings {
                 self.fallback_review_advisor = value;
             }
             SettingsPatch::AutoSettleAfterDays(value) => {
-                if value.is_none_or(|days| days.is_finite() && (1.0..=90.0).contains(&days)) {
-                    self.auto_settle_after_days = value;
-                }
+                self.auto_settle_after_days = auto_settle_days(value)?;
             }
             SettingsPatch::AutoSettleOnMerge(value) => self.auto_settle_on_merge = value,
             SettingsPatch::ProjectSettlement { project_id, value } => {
-                if let Some(value) = value {
-                    if value
-                        .auto_settle_after_days
-                        .flatten()
-                        .is_none_or(|days| days.is_finite() && (1.0..=90.0).contains(&days))
-                    {
-                        self.project_settlement_overrides.insert(project_id, value);
+                if let Some(mut value) = value {
+                    if let Some(days) = value.auto_settle_after_days {
+                        value.auto_settle_after_days = Some(auto_settle_days(days)?);
                     }
+                    self.project_settlement_overrides.insert(project_id, value);
                 } else {
                     self.project_settlement_overrides.remove(&project_id);
                 }
@@ -1203,6 +1209,7 @@ impl Settings {
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
         }
+        Ok(())
     }
 }
 
@@ -1383,20 +1390,6 @@ impl Settings {
     /// Fold the pre-`providers` binary overrides into the map (once, on load)
     /// and drop the port of the retired HTTP listener, which no build reads.
     pub fn migrate_legacy(&mut self) {
-        for key in [
-            "auto_archive_disabled",
-            "auto_archive_max_idle_days",
-            "auto_archive_keep_count",
-            "auto_archive_notice_shown",
-        ] {
-            self.unknown.remove(key);
-        }
-        if self
-            .auto_settle_after_days
-            .is_some_and(|days| !days.is_finite() || !(1.0..=90.0).contains(&days))
-        {
-            self.auto_settle_after_days = default_auto_settle_after_days();
-        }
         self.unknown.remove("remote_port");
         for (provider, legacy) in [
             (ProviderKind::Codex, self.codex_binary.take()),
@@ -1451,6 +1444,8 @@ mod tests {
     #[test]
     fn older_settings_preserve_access_policy_and_accept_partial_feature_blocks() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert_eq!(legacy.auto_settle_after_days, Some(3.0));
+        assert!(legacy.auto_settle_on_merge);
         assert!(!legacy.sidebar_provider_marks);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);
@@ -1785,10 +1780,14 @@ mod tests {
             description: String::new(),
             bundled: None,
         });
-        settings.apply(SettingsPatch::OrchestrateChildModels(children));
+        settings
+            .apply(SettingsPatch::OrchestrateChildModels(children))
+            .unwrap();
         let mut decisions = settings.orchestrate.decision_models.clone();
         decisions[0].description = "Mine.".into();
-        settings.apply(SettingsPatch::OrchestrateDecisionModels(decisions));
+        settings
+            .apply(SettingsPatch::OrchestrateDecisionModels(decisions))
+            .unwrap();
         let saved = serde_json::to_value(&settings.orchestrate).unwrap();
         assert_eq!(
             saved["decision_models"],
@@ -2142,7 +2141,9 @@ mod tests {
         duplicate.description = "must not overwrite".into();
         let mut children = settings.orchestrate.child_models.clone();
         children.push(duplicate);
-        settings.apply(SettingsPatch::OrchestrateChildModels(children));
+        settings
+            .apply(SettingsPatch::OrchestrateChildModels(children))
+            .unwrap();
         assert_eq!(settings.orchestrate.child_models.len(), 2);
         assert_eq!(settings.orchestrate.child_models[0], executor);
 
@@ -2151,7 +2152,9 @@ mod tests {
         duplicate.description = "must not overwrite".into();
         let mut decisions = settings.orchestrate.decision_models.clone();
         decisions.push(duplicate);
-        settings.apply(SettingsPatch::OrchestrateDecisionModels(decisions));
+        settings
+            .apply(SettingsPatch::OrchestrateDecisionModels(decisions))
+            .unwrap();
         assert_eq!(settings.orchestrate.decision_models.len(), 2);
         assert_eq!(settings.orchestrate.decision_models[0], peer);
         assert_eq!(settings.orchestrate.child_models[0], executor);
@@ -2307,7 +2310,9 @@ mod tests {
         assert_eq!(off.traverse, TraverseSetting::Off);
 
         let mut patched = Settings::default();
-        patched.apply(SettingsPatch::Traverse(TraverseSetting::Off));
+        patched
+            .apply(SettingsPatch::Traverse(TraverseSetting::Off))
+            .unwrap();
         assert_eq!(
             serde_json::to_value(&patched).unwrap().get("traverse"),
             Some(&serde_json::json!({"mode": "off"}))

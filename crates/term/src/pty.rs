@@ -72,7 +72,9 @@ struct Shared {
     exited: bool,
     command_line: String,
     command_label: Option<String>,
-    prompt: crate::shell_integration::PromptEvidence,
+    /// Grows with every input write and every output read, so a command
+    /// started while the shell is inspected still changes it.
+    activity: u64,
 }
 
 /// Host-side handle for a child process running in a pseudoterminal.
@@ -88,8 +90,6 @@ pub(crate) struct PtyHandle {
     cwd: PathBuf,
     pty_info: Arc<pty_info::PtyInfo>,
     refresh_running: Arc<AtomicBool>,
-    #[cfg(unix)]
-    _shell_integration: Option<tempfile::TempDir>,
 }
 
 impl PtyHandle {
@@ -109,16 +109,11 @@ impl PtyHandle {
         let cwd = cwd.as_ref().to_path_buf();
         let size = initial_window_size();
         #[cfg(unix)]
-        let mut environment = vec![
+        let environment = Some(vec![
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
             ("TERM_PROGRAM".to_string(), "tcode".to_string()),
-        ];
-        #[cfg(unix)]
-        let shell_integration =
-            crate::shell_integration::zsh_environment(&program, &mut environment)?;
-        #[cfg(unix)]
-        let environment = Some(environment);
+        ]);
         #[cfg(unix)]
         let working_directory = Some(cwd.to_string_lossy().into_owned());
         #[cfg(unix)]
@@ -147,7 +142,7 @@ impl PtyHandle {
             exited: false,
             command_line: String::new(),
             command_label: None,
-            prompt: Default::default(),
+            activity: 0,
         }));
         let refresh_running = Arc::new(AtomicBool::new(false));
         let (notifications, events) = async_channel::unbounded();
@@ -196,8 +191,6 @@ impl PtyHandle {
             cwd,
             pty_info,
             refresh_running,
-            #[cfg(unix)]
-            _shell_integration: shell_integration,
         })
     }
 
@@ -229,11 +222,14 @@ impl PtyHandle {
             .unwrap_or_else(|| self.shell_name.clone())
     }
 
-    pub fn idle_prompt(&self) -> Option<bool> {
-        match self.shared.lock_recover().prompt.at_prompt() {
-            Some(true) => self.pty_info.idle_prompt(&self.shell_name),
-            other => other,
-        }
+    pub fn activity_mark(&self) -> u64 {
+        self.shared.lock_recover().activity
+    }
+
+    /// Fresh inspection: the shell itself is in the foreground with no child
+    /// process. `None` when the platform cannot tell.
+    pub fn idle_shell(&self) -> Option<bool> {
+        self.pty_info.idle_shell(&self.shell_name)
     }
 
     pub fn exited(&self) -> bool {
@@ -244,7 +240,7 @@ impl PtyHandle {
         let label_changed = {
             let mut shared = self.shared.lock_recover();
             if !bytes.is_empty() {
-                shared.prompt.input();
+                shared.activity += 1;
             }
             let previous_label = shared.command_label.clone();
             track_command_input(&mut shared, &bytes);
@@ -467,7 +463,7 @@ impl RawPtyEventLoop {
                 Ok(0) => break,
                 Ok(read) => {
                     read_any = true;
-                    self.shared.lock_recover().prompt.output(&buffer[..read]);
+                    self.shared.lock_recover().activity += 1;
                     let _ = self
                         .notifications
                         .try_send(PtyEvent::Output(buffer[..read].to_vec()));

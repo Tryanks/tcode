@@ -269,23 +269,6 @@ fn space_index_and_scope_project_only_the_members_projects() {
     assert_eq!(summary.archived_counts.get(&host.a.id), Some(&1));
     assert_eq!(summary.archived_counts.len(), 1);
     assert_eq!(summary.activity.keys().collect::<Vec<_>>(), ["a"]);
-    let clocks = if summary.activity_clocks.contains_key("a") {
-        summary.activity_clocks.clone()
-    } else {
-        let ServerEvent::IndexSummaryReplaced(summary) = host
-            .event(|event| {
-                event.topic == topic
-                    && matches!(&event.event, ServerEvent::IndexSummaryReplaced(summary)
-                        if summary.activity_clocks.contains_key("a"))
-            })
-            .event
-        else {
-            unreachable!()
-        };
-        summary.activity_clocks
-    };
-    assert_eq!(clocks.keys().collect::<Vec<_>>(), ["a"]);
-    assert_eq!(clocks["a"].last_human_message_at, Some(10));
 
     host.subscribe(member.clone(), Topic::Scope);
     let scope = host.event(|event| event.topic == Topic::Scope && event.request_id.is_some());

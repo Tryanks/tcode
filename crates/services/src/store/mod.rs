@@ -280,19 +280,10 @@ impl Mutation {
     /// Append one event, wrapped in a timestamped envelope
     /// (`{"ts": <unix_ms>, "event": {…}}`).
     pub fn append_event(session_id: &str, ts: u64, event: &AgentEvent) -> io::Result<Self> {
-        Self::append_authored_event(session_id, ts, event, None)
+        Self::append_authored_event(session_id, ts, event, None, None)
     }
 
     pub fn append_authored_event(
-        session_id: &str,
-        ts: u64,
-        event: &AgentEvent,
-        author: Option<&Author>,
-    ) -> io::Result<Self> {
-        Self::append_message_event(session_id, ts, event, author, None)
-    }
-
-    pub fn append_message_event(
         session_id: &str,
         ts: u64,
         event: &AgentEvent,

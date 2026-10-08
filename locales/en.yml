@@ -122,7 +122,6 @@ sidebar:
   active_empty: "Nothing active. Settled threads are below."
   failed: "Failed"
   failed_tooltip: "The last turn failed"
-  unsettle: "Un-settle"
   ctx_settle: "Settle thread"
   ctx_unsettle: "Un-settle thread"
   ctx_auto_settle: "Auto-settle behavior"
@@ -197,7 +196,6 @@ sidebar:
   waiting_input_tooltip: "Waiting for your answer"
   undo: "Undo"
   settled: "Settled"
-  settle: "Settle"
   archive: "Archive thread"
   archive_title: "Archive thread?"
   archive_description: 'Archive "%{title}"? Its agent stops, and the thread moves to Settings → Archived Threads, where you can restore it.'

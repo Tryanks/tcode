@@ -1152,7 +1152,6 @@ mod tests {
                             questions,
                             ..
                         } => Some(SessionCommand::RespondUserInput {
-                            message_request_id: None,
                             request_id: request_id.clone(),
                             answers: questions
                                 .iter()

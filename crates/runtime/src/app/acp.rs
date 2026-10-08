@@ -201,7 +201,6 @@ impl AppState {
     /// models over the wire once the session starts.
     pub fn set_active_acp_agent(&mut self, target_id: &str, id: &str, cx: &mut HostCx) {
         let provider_commands = self.cached_provider_commands(ProviderKind::Acp, None, Some(id));
-        let mut detached = false;
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -221,8 +220,7 @@ impl AppState {
             } else if has_meaningful_history(&active.timeline) {
                 active.pending_relay = Some(source);
             } else {
-                active.clear_provider_resume();
-                detached = true;
+                active.resume_cursor_for_fresh_provider();
             }
         }
         active.meta.provider = ProviderKind::Acp;
@@ -233,9 +231,6 @@ impl AppState {
         active.provider_commands = provider_commands;
         if active.pending_relay.is_some() {
             return;
-        }
-        if detached {
-            self.detach_provider_to_idle(target_id, cx);
         }
         self.preview_draft_or_persist_active(target_id, cx);
     }

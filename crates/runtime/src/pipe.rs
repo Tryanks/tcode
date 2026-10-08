@@ -239,7 +239,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         principal,
     } = message;
     cx.principal = principal.unwrap_or(Principal::Full);
-    cx.origin = tcode_core::session::MessageOrigin::Human;
+    cx.origin = Some(tcode_core::session::MessageOrigin::Human);
     cx.author = match &cx.principal {
         Principal::Full => None,
         Principal::Space {
@@ -269,7 +269,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
         cx.send_message(reply);
         cx.principal = Principal::Full;
         cx.author = None;
-        cx.origin = tcode_core::session::MessageOrigin::Server;
+        cx.origin = None;
         return;
     }
     match payload {
@@ -289,7 +289,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
                     cx.send_message(HostMessage::Ack { id, result });
                     cx.principal = Principal::Full;
                     cx.author = None;
-                    cx.origin = tcode_core::session::MessageOrigin::Server;
+                    cx.origin = None;
                     return;
                 }
             }
@@ -349,7 +349,7 @@ pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, messa
     }
     cx.principal = Principal::Full;
     cx.author = None;
-    cx.origin = tcode_core::session::MessageOrigin::Server;
+    cx.origin = None;
 }
 
 fn complete_command(
@@ -390,7 +390,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
-            app.note_terminal_input(terminal_id);
             if let Some(terminal) = app.terminal_handle(terminal_id) {
                 terminal.write_input(bytes);
             }
@@ -643,18 +642,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             collapsed,
         } => app.set_thread_collapsed(&session_id, collapsed, cx),
         Command::PatchSettings { patch } => app.patch_settings(patch, cx),
-        Command::SettleSession { session_id } => {
-            return CommandOutcome::Pending(app.settle_command(session_id, cx));
-        }
-        Command::PinSession {
-            session_id,
-            order_key,
-        } => app.pin_session(&session_id, order_key, cx),
+        Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
         Command::SetAutoSettle {
             session_id,
             enabled,
         } => app.set_auto_settle(&session_id, enabled, cx),
-        Command::UnsettleSession { session_id } => app.make_session_active(&session_id, cx),
+        Command::UnsettleSession { session_id } => app.unsettle_session(&session_id, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),

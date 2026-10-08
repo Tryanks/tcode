@@ -47,7 +47,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
-            message.origin = cx.origin;
+            message.origin = cx.origin.unwrap_or(message.origin);
         }
         let should_start = matches!(active.runtime, Runtime::Idle)
             && !(active.draft
@@ -125,7 +125,7 @@ impl AppState {
                 continue;
             };
             let author = std::mem::replace(&mut cx.author, message.author);
-            let origin = std::mem::replace(&mut cx.origin, message.origin);
+            let origin = cx.origin.replace(message.origin);
             let key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
             self.send_turn_assembled(&session_id, message.text, message.attachments, cx);
             cx.author = author;
@@ -170,7 +170,9 @@ impl AppState {
                         "parked session {session_id}: deferring scheduled-send settings restart"
                     );
                 } else {
-                    self.detach_provider_to_idle(&session_id, cx);
+                    if let Some(parked) = self.residents.parked.get_mut(&session_id) {
+                        parked.shutdown_to_idle();
+                    }
                     self.ensure_session_started(&session_id, cx);
                 }
             } else if is_live {
@@ -239,7 +241,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
-            message.origin = cx.origin;
+            message.origin = cx.origin.unwrap_or(message.origin);
         }
 
         let model_changed = active.model_changed_while_live();
@@ -263,14 +265,10 @@ impl AppState {
                         "launch-time option changed while live; restarting provider before next turn"
                     );
                 }
+                active.shutdown_to_idle();
             }
         }
-        if (model_changed || options_changed) && !restart_deferred {
-            self.detach_provider_to_idle(target_id, cx);
-        }
-        let should_start = self
-            .resident(target_id)
-            .is_some_and(|active| matches!(active.runtime, Runtime::Idle));
+        let should_start = matches!(active.runtime, Runtime::Idle);
         let dispatch_failed =
             !restart_deferred && self.dispatch_next_queued(target_id, cx).is_err();
         if should_start {
@@ -348,12 +346,12 @@ impl AppState {
             to_model: active.meta.model.clone(),
         };
         let session_id = active.meta.id.clone();
+        active.shutdown_to_idle();
         active.meta.resume_cursor = None;
         active.meta.pending_fork = false;
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
 
-        self.detach_provider_to_idle(&session_id, cx);
         self.persist_meta(&meta, cx);
         self.record_event(&session_id, &event, cx);
 
@@ -364,7 +362,7 @@ impl AppState {
         if let Some(message) = active.queue.last_mut() {
             message.delivery_key = cx.delivery_key.clone();
             message.author = cx.author.clone();
-            message.origin = cx.origin;
+            message.origin = cx.origin.unwrap_or(message.origin);
         }
         if let Some(message) = active.queue.last_mut() {
             message.relay_transcript = Some(transcript);
@@ -382,7 +380,7 @@ impl AppState {
     pub(super) fn dispatch_next_queued(
         &mut self,
         target_id: &str,
-        cx: &mut HostCx,
+        _cx: &mut HostCx,
     ) -> Result<bool, ()> {
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
@@ -390,14 +388,9 @@ impl AppState {
         if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
-        let sent = self
-            .resident_mut(target_id)
+        self.resident_mut(target_id)
             .ok_or(())?
-            .dispatch_next_pending()?;
-        if sent {
-            self.record_event(target_id, &AgentEvent::RunRequested, cx);
-        }
-        Ok(sent)
+            .dispatch_next_pending()
     }
 
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
@@ -414,7 +407,7 @@ impl AppState {
             return;
         };
         let author = std::mem::replace(&mut cx.author, message.author.clone());
-        let origin = std::mem::replace(&mut cx.origin, message.origin);
+        let origin = cx.origin.replace(message.origin);
         self.record_user_message(
             session_id,
             &message.text,
@@ -455,7 +448,7 @@ impl AppState {
                 );
                 return;
             }
-            self.detach_provider_to_idle(session_id, cx);
+            parked.shutdown_to_idle();
             self.ensure_session_started(session_id, cx);
             return;
         }
@@ -470,7 +463,13 @@ impl AppState {
             self.mark_resident_idle(session_id, cx);
             return;
         }
-        match self.dispatch_next_queued(session_id, cx) {
+        match self
+            .residents
+            .parked
+            .get_mut(session_id)
+            .unwrap()
+            .dispatch_next_pending()
+        {
             Ok(true) => {}
             Ok(false) => {}
             Err(()) => {
@@ -525,10 +524,6 @@ impl AppState {
             cx.delivery_key
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-        );
-        self.steer_admissions.insert(
-            (session_id.to_owned(), request_id.clone()),
-            (cx.origin, cx.author.clone()),
         );
         self.record_event(
             session_id,
@@ -625,7 +620,7 @@ impl AppState {
         };
         let command_key = std::mem::replace(&mut cx.delivery_key, message.delivery_key);
         let author = std::mem::replace(&mut cx.author, message.author);
-        let origin = std::mem::replace(&mut cx.origin, message.origin);
+        let origin = cx.origin.replace(message.origin);
         self.steer_assembled(target_id, message.text, message.attachments, cx);
         cx.delivery_key = command_key;
         cx.author = author;
@@ -699,25 +694,12 @@ impl AppState {
         else {
             return Err(provider_command_error("The provider is no longer running."));
         };
-        let message_request_id = self
-            .resident(target_id)
-            .and_then(|session| session.timeline.pending_user_input.as_ref())
-            .filter(|input| !input.delivery.is_blocking() && !answers.is_empty())
-            .map(|_| uuid::Uuid::new_v4().to_string());
         commands
             .try_send(SessionCommand::RespondUserInput {
-                message_request_id: message_request_id.clone(),
                 request_id: request_id.clone(),
                 answers,
             })
             .map_err(provider_command_error)?;
-        if let Some(message_id) = message_request_id {
-            self.steer_admissions.insert(
-                (target_id.to_string(), message_id),
-                (cx.origin, cx.author.clone()),
-            );
-            self.reactivate_session(target_id, cx);
-        }
         self.decision_authors
             .remove(&(target_id.to_string(), request_id.clone()));
         if let Some(author) = &cx.author {

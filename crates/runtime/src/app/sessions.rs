@@ -31,6 +31,8 @@ impl ResidentSessions {
 }
 
 impl AppState {
+    /// Advanced by every record and metadata write for the thread, so a
+    /// decision read before an await can tell it is still current.
     pub(super) fn advance_decision_revision(&mut self, id: &str) {
         let revision = self.decision_revisions.entry(id.to_owned()).or_default();
         *revision = revision
@@ -38,11 +40,21 @@ impl AppState {
             .expect("thread decision revision overflow");
     }
 
+    pub(super) fn decision_revision(&self, id: &str) -> u64 {
+        self.decision_revisions.get(id).copied().unwrap_or(0)
+    }
+
+    /// Advanced when a child's completion in flight stops being the one to
+    /// deliver: new work was admitted for it, or it was cancelled or archived.
     pub(super) fn invalidate_child_callback(&mut self, id: &str) {
         let generation = self.callback_generations.entry(id.to_owned()).or_default();
         *generation = generation
             .checked_add(1)
             .expect("callback generation overflow");
+    }
+
+    pub(super) fn callback_generation(&self, id: &str) -> u64 {
+        self.callback_generations.get(id).copied().unwrap_or(0)
     }
 
     pub(crate) fn subscribe(
@@ -687,7 +699,6 @@ impl AppState {
     pub fn update_settings(&mut self, settings: Settings, cx: &mut HostCx) {
         let settlement_changed = self.settings.auto_settle_after_days
             != settings.auto_settle_after_days
-            || self.settings.auto_settle_on_merge != settings.auto_settle_on_merge
             || self.settings.project_settlement_overrides != settings.project_settlement_overrides;
         self.enqueue_settings(&settings, cx);
         if ProviderKind::NATIVE
@@ -733,8 +744,10 @@ impl AppState {
 
     pub fn patch_settings(&mut self, patch: tcode_protocol::SettingsPatch, cx: &mut HostCx) {
         let mut settings = self.settings.clone();
-        settings.apply(patch);
-        self.update_settings(settings, cx);
+        // Command validation already refused a patch `apply` would refuse.
+        if settings.apply(patch).is_ok() {
+            self.update_settings(settings, cx);
+        }
     }
 
     /// Persist a restart-continuity marker naming the Settings page to reopen and
@@ -790,10 +803,7 @@ impl AppState {
                     .queue
                     .iter()
                     .any(|message| message.origin == MessageOrigin::Human)
-        }) || self
-            .thread_activity
-            .get(id)
-            .is_some_and(|activity| activity.has_blocking_input())
+        })
     }
 
     pub fn settle_session(&mut self, id: &str, cx: &mut HostCx) {
@@ -802,28 +812,22 @@ impl AppState {
         }
     }
 
+    /// Settle this thread only: detach its provider, cancel its automatic
+    /// queue and close its idle terminals. Children are separate threads.
     pub(super) fn settle_session_at(&mut self, id: &str, timestamp: u64, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        if !meta.is_settled() || meta.pinned_at.is_some() {
+        if !meta.is_settled() {
             meta.settled_at = Some(timestamp);
             meta.updated_at = now_secs();
         }
-        let mut asynchronous = self
-            .thread_activity
-            .get(id)
-            .map(tcode_core::settlement::ThreadActivity::asynchronous_inputs)
-            .unwrap_or_default();
         if let Some(input) = self
             .resident(id)
             .and_then(|session| session.timeline.pending_user_input.as_ref())
-            && !input.delivery.is_blocking()
-            && !asynchronous.contains(&input.request_id)
+            .filter(|input| !input.delivery.is_blocking())
         {
-            asynchronous.push(input.request_id.clone());
-        }
-        for request_id in asynchronous {
+            let request_id = input.request_id.clone();
             self.on_event(
                 id,
                 AgentEvent::UserInputResolved {
@@ -833,11 +837,8 @@ impl AppState {
                 cx,
             );
         }
-        meta.settled_override = Some(tcode_core::project::SettledOverride::Settled);
+        meta.settled_override = Some(SettledOverride::Settled);
         meta.unsettled_at = None;
-        meta.pinned_at = None;
-        meta.pin_order = None;
-        meta.active_order = None;
         self.detach_provider_to_idle(id, cx);
         if let Some(session) = self.resident_mut(id) {
             session
@@ -850,42 +851,17 @@ impl AppState {
         self.close_settled_idle_terminals(id, cx);
     }
 
-    pub fn make_session_active(&mut self, id: &str, cx: &mut HostCx) {
+    pub fn unsettle_session(&mut self, id: &str, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        if meta.settled_override == Some(tcode_core::project::SettledOverride::Active) {
+        if meta.settled_override == Some(SettledOverride::Active) {
             return;
         }
-        meta.settled_override = Some(tcode_core::project::SettledOverride::Active);
+        meta.settled_override = Some(SettledOverride::Active);
         meta.settled_at = None;
         meta.unsettled_at = Some(now_secs());
         meta.updated_at = now_secs();
-        if let Some(session) = self.resident_mut(id) {
-            session.meta = meta.clone();
-        }
-        self.persist_meta(&meta, cx);
-    }
-
-    pub fn pin_session(&mut self, id: &str, order_key: Option<String>, cx: &mut HostCx) {
-        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
-            return;
-        };
-        if meta.is_settled() {
-            meta.unsettled_at = Some(now_secs());
-        }
-        meta.settled_at = None;
-        meta.settled_override = Some(tcode_core::project::SettledOverride::Active);
-        meta.pinned_at = Some(now_secs());
-        meta.pin_order = order_key.or_else(|| {
-            let first = self
-                .sessions
-                .iter()
-                .filter(|other| other.id != id && other.pinned_at.is_some())
-                .filter_map(|other| other.pin_order.as_deref())
-                .min();
-            tcode_core::thread_sort::order_key_between(None, first)
-        });
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -905,26 +881,29 @@ impl AppState {
             session.meta = meta.clone();
         }
         self.persist_meta(&meta, cx);
-        self.request_settlement_sweep(cx);
+        self.evaluate_thread_settlement(id, cx);
     }
 
+    /// A message accepted for this thread: reopen it and make any completion
+    /// already on its way from it stale. Its queued work blocks settlement
+    /// until the provider records it.
     pub(super) fn reactivate_session(&mut self, id: &str, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
             return;
         };
-        self.advance_decision_revision(id);
         self.invalidate_child_callback(id);
-        self.record_event(id, &AgentEvent::MessageAdmitted, cx);
+        if meta.settled_override.is_none() && meta.settled_at.is_none() {
+            return;
+        }
         if meta.is_settled() {
             meta.unsettled_at = Some(now_secs());
         }
-        if meta.settled_override.take().is_some() || meta.settled_at.take().is_some() {
-            meta.settled_at = None;
-            if let Some(session) = self.resident_mut(id) {
-                session.meta = meta.clone();
-            }
-            self.persist_meta(&meta, cx);
+        meta.settled_override = None;
+        meta.settled_at = None;
+        if let Some(session) = self.resident_mut(id) {
+            session.meta = meta.clone();
         }
+        self.persist_meta(&meta, cx);
     }
 
     pub(super) fn repair_auto_archived_mirrors(
@@ -1035,6 +1014,7 @@ impl AppState {
 
         for id in &ids {
             self.invalidate_child_callback(id);
+            self.retire_provider_work(id, cx);
             self.shutdown_active(id, cx);
             // An archived conversation must not leave an off-screen PTY running.
             self.terminal_workspaces
@@ -1229,8 +1209,6 @@ impl AppState {
             .retain(|id, _| !deleted.contains(id.as_str()));
         self.callback_generations
             .retain(|id, _| !deleted.contains(id.as_str()));
-        self.steer_admissions
-            .retain(|(id, _), _| !deleted.contains(id.as_str()));
         let mut kept_worktrees = Vec::new();
         let mut worktree_removals = Vec::new();
         let sharing = self.worktree_sharing();

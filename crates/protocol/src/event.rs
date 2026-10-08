@@ -394,6 +394,8 @@ pub struct SessionActivity {
     pub waiting: bool,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
+    /// The latest run ended in an error and nothing has run since.
+    pub failed: bool,
     pub unread: bool,
     pub fork: ForkAvailability,
 }
@@ -490,8 +492,6 @@ pub struct TerminalContextStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessageStatus {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<tcode_core::session::MessageOrigin>,
     pub id: u64,
     pub editable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -516,8 +516,6 @@ pub struct IndexSnapshot {
 /// Index facts that are not one thread's metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexSummary {
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub activity_clocks: HashMap<String, tcode_core::settlement::ThreadActivity>,
     /// Host-authored activity for every unarchived stored session.
     #[serde(default)]
     pub activity: HashMap<String, SessionActivity>,

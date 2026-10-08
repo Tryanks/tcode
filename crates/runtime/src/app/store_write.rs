@@ -116,16 +116,12 @@ impl StoreWrite {
                 event,
                 joined,
             } => {
-                let mut mutations = match Mutation::append_message_event(
-                    id,
-                    *ts,
-                    event,
-                    author.as_ref(),
-                    *origin,
-                ) {
-                    Ok(mutation) => vec![mutation],
-                    Err(error) => return Some(Err(error.to_string())),
-                };
+                let mut mutations =
+                    match Mutation::append_authored_event(id, *ts, event, author.as_ref(), *origin)
+                    {
+                        Ok(mutation) => vec![mutation],
+                        Err(error) => return Some(Err(error.to_string())),
+                    };
                 match joined {
                     Joined::Folded {
                         superseded,

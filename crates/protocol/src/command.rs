@@ -293,10 +293,6 @@ pub enum Command {
     SettleSession {
         session_id: String,
     },
-    PinSession {
-        session_id: String,
-        order_key: Option<String>,
-    },
     SetAutoSettle {
         session_id: String,
         enabled: bool,
@@ -463,7 +459,6 @@ impl Command {
             | Self::RemoveReviewComment { session_id, .. }
             | Self::SettleSession { session_id, .. }
             | Self::UnsettleSession { session_id, .. }
-            | Self::PinSession { session_id, .. }
             | Self::SetAutoSettle { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
             | Self::UnarchiveSession { session_id, .. }
