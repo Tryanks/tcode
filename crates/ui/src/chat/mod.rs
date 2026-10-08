@@ -2818,10 +2818,6 @@ impl ChatView {
                 crate::add_project_dialog::open(this.workspace_store.clone(), window, cx);
             }));
 
-        // With a project on file the store opens that project's draft instead
-        // of this page, so the empty workspace is the deliberate
-        // add-a-project state; the launcher below only covers the moment
-        // before the draft arrives.
         let mut content = v_flex()
             .w_full()
             .max_w(px(420.))
@@ -2846,7 +2842,20 @@ impl ChatView {
                         .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!("chat.no_projects_description")),
                 )
-                .child(add_project);
+                .child(h_flex().gap_2().child(add_project).when(
+                    self.workspace_store.read(cx).scope().is_full(),
+                    |row| {
+                        row.child(
+                            Button::new("quick-chat-empty")
+                                .small()
+                                .label(crate::tr!("sidebar.quick_chat"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.workspace_store
+                                        .update(cx, |store, cx| store.start_scratch_draft(cx));
+                                })),
+                        )
+                    },
+                ));
         } else {
             let mut launcher = v_flex().w_full().gap_1().child(
                 div()

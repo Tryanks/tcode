@@ -216,7 +216,9 @@ impl SpaceHost {
         let reopened = SessionStore::open_at(root.clone()).unwrap();
         let records = reopened.read_events("a").unwrap();
         reopened.close().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows may still hold a terminal's cwd under the root for a moment
+        // after shutdown; a leftover temp dir is not a test failure.
+        let _ = std::fs::remove_dir_all(root);
         records
     }
 }
@@ -421,6 +423,14 @@ fn space_index_and_scope_project_only_the_members_projects() {
 fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
     let mut host = SpaceHost::new();
     let member = host.member("one");
+    for command in [
+        Command::CreateNewProject {
+            name: "outside-space".into(),
+        },
+        Command::StartScratchDraft,
+    ] {
+        denied(host.request(member.clone(), ClientPayload::Command(command)));
+    }
     for topic in [
         Topic::Index,
         Topic::Settings,

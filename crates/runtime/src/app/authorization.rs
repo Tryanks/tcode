@@ -273,6 +273,8 @@ impl AppState {
                 Command::DeleteSession { .. }
                 | Command::DeleteProject { .. }
                 | Command::CreateProject { .. }
+                | Command::CreateNewProject { .. }
+                | Command::StartScratchDraft
                 | Command::SetProjectIcon { .. }
                 | Command::StartExternalImport { .. }
                 | Command::OpenLatestSession

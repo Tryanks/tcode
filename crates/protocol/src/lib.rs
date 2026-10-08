@@ -71,7 +71,8 @@ pub use wire::{
 // ReadItemImage for fetching model-read image bytes outside timeline windows.
 //
 // Unreleased: replaces SessionActivity.background_only with waiting, which
-// also covers unfinished child threads.
+// also covers unfinished child threads; adds the CreateNewProject and
+// StartScratchDraft commands.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

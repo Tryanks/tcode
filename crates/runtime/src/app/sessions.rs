@@ -195,6 +195,43 @@ impl AppState {
         Ok(id)
     }
 
+    pub fn create_new_project(
+        &self,
+        name: String,
+        cx: &HostCx,
+    ) -> HostTask<Result<String, ProtocolError>> {
+        let directories = self.user_directories.clone();
+        let task = cx.unblock(move || directories.new_project_root(&name));
+        let host = cx.clone();
+        cx.spawn_background(async move {
+            let root = task.await.map_err(project_directory_error)?;
+            host.enqueue_and_wait(move |app, cx| app.create_project(root, cx))
+                .await
+                .map_err(|_| ProtocolError {
+                    code: "transport_closed".into(),
+                    message: "Host stopped before creating the project.".into(),
+                })?
+        })
+    }
+
+    pub fn start_scratch_draft(&self, cx: &HostCx) -> HostTask<Result<String, ProtocolError>> {
+        let directories = self.user_directories.clone();
+        let task = cx.unblock(move || directories.scratch_directory());
+        let host = cx.clone();
+        cx.spawn_background(async move {
+            let (root, cwd) = task.await.map_err(project_directory_error)?;
+            host.enqueue_and_wait(move |app, cx| {
+                let project_id = app.create_project(root, cx)?;
+                Ok(app.start_draft(project_id, cwd, cx))
+            })
+            .await
+            .map_err(|_| ProtocolError {
+                code: "transport_closed".into(),
+                message: "Host stopped before creating the project.".into(),
+            })?
+        })
+    }
+
     /// Scan supported external-agent histories without exposing the import
     /// service or application stores to callers.
     pub fn scan_external_history(&self, executor: &HostCx) -> HostTask<Vec<RecentDir>> {
@@ -1783,5 +1820,17 @@ impl AppState {
             self.reopen_persisted_terminals(&session_id, terminal_preferences, cx);
         }
         self.refresh_git_status(&session_id, cx);
+    }
+}
+
+fn project_directory_error(error: std::io::Error) -> ProtocolError {
+    ProtocolError {
+        code: if error.kind() == std::io::ErrorKind::InvalidInput {
+            "invalid_project_root"
+        } else {
+            "create_project_failed"
+        }
+        .into(),
+        message: error.to_string(),
     }
 }
