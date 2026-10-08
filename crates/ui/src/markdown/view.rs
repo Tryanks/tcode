@@ -638,6 +638,56 @@ mod tests {
     }
 
     #[gpui::test]
+    fn math_render_source_switch_and_streaming_fallback(cx: &mut TestAppContext) {
+        let (root, cx) = open_timeline_row("```latex\n1+2=3\n```", cx);
+        assert!(cx.debug_bounds("markdown-math-root-0").is_some());
+        assert!(cx.debug_bounds("markdown-code-line-0").is_none());
+        let first = cx.debug_bounds("math-glyph-0").unwrap();
+        let end = cx.debug_bounds("math-glyph-3").unwrap();
+        cx.simulate_mouse_down(
+            point(first.left(), first.center().y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        drag_to(cx, point(end.left(), end.center().y));
+        assert_eq!(release(cx, point(end.left(), end.center().y)), "1+2");
+        let source = cx.debug_bounds("math-mode-true-root-0").unwrap();
+        cx.simulate_click(source.center(), Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("markdown-code-line-0").is_some());
+        let rendered = cx.debug_bounds("math-mode-false-root-0").unwrap();
+        cx.simulate_click(rendered.center(), Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("markdown-code-line-0").is_none());
+        root.update(cx, |root, cx| {
+            root.markdown
+                .update(cx, |md, cx| md.set_text("```latex\n\\frac{1}{", cx))
+        });
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("markdown-code-line-0").is_some());
+        root.update(cx, |root, cx| {
+            root.markdown
+                .update(cx, |md, cx| md.push_str("2}\n```", cx))
+        });
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("markdown-code-line-0").is_none());
+        root.update(cx, |root, cx| {
+            root.markdown
+                .update(cx, |md, cx| md.set_text("before $1+2=3$ after", cx))
+        });
+        cx.update(|window, cx| _ = window.draw(cx));
+        let first = cx.debug_bounds("math-glyph-0").unwrap();
+        let end = point(px(380.), first.center().y);
+        cx.simulate_mouse_down(
+            point(first.left(), first.center().y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        drag_to(cx, end);
+        assert_eq!(release(cx, end), "1+2=3 after");
+    }
+
+    #[gpui::test]
     fn mermaid_fence_paints_a_diagram_and_unparsable_source_stays_code(cx: &mut TestAppContext) {
         let (_, cx) = open_timeline_row(
             "```mermaid\nflowchart LR\n  A --> B\n```\n\n```mermaid\nnot a diagram\n```",

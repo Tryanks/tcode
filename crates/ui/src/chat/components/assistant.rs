@@ -195,6 +195,7 @@ mod tests {
             "你好，世界！（测试）",
             "&#32; literal entity",
             "<div>not html</div>",
+            r"Literal \(x_i\), \[y^2\], $z$ and $$w$$",
         ];
 
         let cases = cases

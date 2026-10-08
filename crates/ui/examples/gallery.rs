@@ -19,6 +19,13 @@ const ASSISTANT_MARKDOWN: &str = r#"Here is a compact result with **real markdow
 fn soft_wrapping_example(request: &str) -> Result<String, GalleryError> { process_request_without_truncating_the_important_context(request) }
 ```
 
+For \(H(\theta)=\nabla^2 L(\theta)\), a smooth curvature measure is
+
+\[
+F_\tau(H)=\tau\log\operatorname{tr}\exp(H/\tau),\qquad
+\rho_\tau(H)=\frac{\exp(H/\tau)}{\operatorname{tr}\exp(H/\tau)}.
+\]
+
 | State | Result | Duration |
 | --- | ---: | ---: |
 | Parsed | 24 files | 1.2s |

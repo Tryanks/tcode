@@ -9,6 +9,9 @@ mod image_link;
 mod inline;
 mod inline_flow;
 mod link_target;
+mod math;
+mod math_layout;
+mod math_parse;
 mod mermaid;
 pub(crate) mod nodes;
 pub(crate) mod parse;
@@ -31,6 +34,11 @@ pub(super) const CONTEXT: &str = "MarkdownView";
 /// Register Markdown select-all bindings. Copying the window selection is
 /// the window root's.
 pub fn init(cx: &mut App) {
+    cx.text_system()
+        .add_fonts(vec![std::borrow::Cow::Borrowed(
+            latex_rust::STIX_TWO_MATH_OTF,
+        )])
+        .expect("embedded math font must load");
     cx.bind_keys(vec![
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),

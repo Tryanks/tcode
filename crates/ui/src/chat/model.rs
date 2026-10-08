@@ -787,9 +787,11 @@ pub(crate) fn plain_text_as_markdown(text: &str) -> String {
         }
 
         if ch.is_ascii_punctuation() {
-            markdown.push('\\');
+            // Backslash-escaped brackets are LaTeX delimiters in Markdown.
+            markdown.push_str(&format!("&#{};", ch as u32));
+        } else {
+            markdown.push(ch);
         }
-        markdown.push(ch);
     }
 
     markdown
