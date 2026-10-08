@@ -2421,28 +2421,52 @@ impl ChatView {
         };
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
-            .child(window_caption::drag_region(title_el).context_menu(title_menu))
-            .when_some(
-                self.workspace_store
-                    .read(cx)
-                    .session_status()
-                    .and_then(|s| crate::pull_requests::badge(&s.pull_requests, 14., cx)),
-                |header, badge| {
-                    header.child(
-                        Button::new("header-pr-badge")
-                            .ghost()
-                            .small()
-                            .compact()
-                            .selected(right_panel_open && right_tab == RightTab::PullRequests)
-                            .tooltip(crate::tr!("pull_requests.toggle"))
-                            .aria_label(crate::tr!("pull_requests.toggle"))
-                            .child(badge)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.workspace_store
-                                    .update(cx, |store, cx| store.toggle_pull_requests_panel(cx))
-                            })),
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w(px(168.))
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        window_caption::drag_region(title_el.flex_grow(0.))
+                            .context_menu(title_menu),
                     )
-                },
+                    .when_some(
+                        self.workspace_store
+                            .read(cx)
+                            .session_status()
+                            .and_then(|s| crate::pull_requests::badge(&s.pull_requests, 14., cx)),
+                        |header, badge| {
+                            header.child(
+                                Button::new("header-pr-badge")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .selected(
+                                        right_panel_open && right_tab == RightTab::PullRequests,
+                                    )
+                                    .tooltip(crate::tr!("pull_requests.toggle"))
+                                    .aria_label(
+                                        self.workspace_store
+                                            .read(cx)
+                                            .session_status()
+                                            .and_then(|s| {
+                                                crate::pull_requests::badge_label(
+                                                    &s.pull_requests,
+                                                    cx,
+                                                )
+                                            })
+                                            .unwrap_or_default(),
+                                    )
+                                    .child(badge)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.toggle_pull_requests_panel(cx)
+                                        })
+                                    })),
+                            )
+                        },
+                    ),
             )
             .when(show_actions, |this| {
                 this.children(self.render_git_button(cx))
@@ -3598,6 +3622,15 @@ impl Render for ChatView {
                                                 Button::new("phone-pr-pill")
                                                     .ghost()
                                                     .small()
+                                                    .aria_label(
+                                                        crate::pull_requests::badge_label(
+                                                            &status.pull_requests,
+                                                            cx,
+                                                        )
+                                                        .unwrap_or_default(),
+                                                    )
+                                                    .rounded_full()
+                                                    .bg(cx.theme().secondary)
                                                     .min_h(px(44.))
                                                     .child(badge),
                                             )

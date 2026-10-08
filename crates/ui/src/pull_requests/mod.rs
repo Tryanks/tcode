@@ -418,14 +418,16 @@ impl PullRequestsPanel {
             detail.push_str(&format!(" · {}", crate::tr!(state_label)));
         }
         if let Some((index, count)) = position {
-            detail.push_str(&format!(
-                " · {}",
-                crate::tr!(
-                    "pull_requests.layer_position",
-                    index = index.to_string(),
-                    count = count.to_string()
-                )
-            ));
+            let layer = crate::tr!(
+                "pull_requests.layer_position",
+                index = index.to_string(),
+                count = count.to_string()
+            );
+            detail = if compact {
+                format!("{layer} · {detail}")
+            } else {
+                format!("{detail} · {layer}")
+            };
         }
         let action = ChangeLink {
             key: key.clone(),
@@ -526,166 +528,170 @@ impl PullRequestsPanel {
             "pr-row-{}-{}-{}",
             key.host, key.repository, key.number
         ));
-        let row = h_flex()
-            .id(row_id.clone())
-            .group(row_id.clone())
-            .w_full()
-            .min_w_0()
-            .min_h(px(if compact { 64. } else { 52. }))
-            .px_3()
-            .py_2()
-            .pl(px(12. + depth.min(3) as f32 * 16.))
-            .gap_2()
-            .items_start()
-            .rounded_md()
-            .hover(|s| s.bg(cx.theme().sidebar_accent))
-            .cursor_pointer()
-            .on_click(move |_, _, cx| cx.open_url(&url))
-            .when(depth > 0, |row| {
-                row.child(div().w(px(1.)).h(px(24.)).bg(cx.theme().border))
-            })
-            .child(
-                Icon::new(glyph)
-                    .size(px(if compact { 20. } else { 16. }))
-                    .text_color(color),
+        let label = SharedString::from(format!("#{} {title}", key.number));
+        let row = if compact {
+            crate::material::list_row(row_id.clone(), label, cx)
+        } else {
+            crate::material::accessible_clickable(
+                h_flex(),
+                row_id.clone(),
+                gpui::Role::Button,
+                label,
+                cx,
             )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                div()
-                                    .font_family("monospace")
-                                    .text_size(px(if compact { 14. } else { 12. }))
-                                    .id("pr-number")
-                                    .tooltip({
-                                        let label = crate::tr!(
-                                            "pull_requests.number_tooltip",
-                                            source = source.clone(),
-                                            ago = crate::time::humanize_ago(
-                                                tcode_core::project::now_secs().saturating_sub(
-                                                    link.and_then(|link| link.linked_at)
-                                                        .unwrap_or_default()
-                                                )
+            .hover(|s| s.bg(cx.theme().sidebar_accent))
+        }
+        .group(row_id.clone())
+        .w_full()
+        .min_w_0()
+        .min_h(px(if compact { 64. } else { 52. }))
+        .px_3()
+        .py_2()
+        .pl(px(12. + depth.min(3) as f32 * 16.))
+        .gap_2()
+        .items_start()
+        .rounded_md()
+        .cursor_pointer()
+        .on_click(move |_, _, cx| cx.open_url(&url))
+        .when(depth > 0, |row| {
+            row.child(div().w(px(1.)).h(px(24.)).bg(cx.theme().border))
+        })
+        .child(
+            Icon::new(glyph)
+                .size(px(if compact { 20. } else { 16. }))
+                .text_color(color),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_size(px(if compact { 14. } else { 12. }))
+                                .id("pr-number")
+                                .tooltip({
+                                    let label = crate::tr!(
+                                        "pull_requests.number_tooltip",
+                                        source = source.clone(),
+                                        ago = crate::time::humanize_ago(
+                                            tcode_core::project::now_secs().saturating_sub(
+                                                link.and_then(|link| link.linked_at)
+                                                    .unwrap_or_default()
                                             )
                                         )
-                                        .into_owned();
-                                        move |window, cx| {
-                                            crate::widgets::tooltip::Tooltip::new(label.clone())
-                                                .build(window, cx)
-                                        }
-                                    })
-                                    .child(format!("#{}", key.number)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(if compact { 15. } else { 13. }))
-                                    .text_color(if visible {
-                                        cx.theme().foreground
-                                    } else {
-                                        cx.theme().muted_foreground
-                                    })
-                                    .child(title),
-                            )
-                            .when(
-                                snapshot.is_some_and(|snapshot| {
-                                    snapshot.is_draft && snapshot.state == PullRequestState::Open
-                                }),
-                                |row| {
-                                    row.child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(crate::tr!("pull_requests.draft")),
                                     )
-                                },
-                            )
-                            .child(signals),
-                    )
-                    .child(
-                        // gpui-base has no middle truncation; the tooltip retains the complete branch pair.
-                        div()
-                            .id("pr-detail")
-                            .truncate()
-                            .text_size(px(if compact { 13. } else { 11. }))
-                            .text_color(cx.theme().muted_foreground)
-                            .tooltip({
-                                let detail = detail.clone();
-                                move |window, cx| {
-                                    crate::widgets::tooltip::Tooltip::new(detail.clone())
-                                        .build(window, cx)
-                                }
-                            })
-                            .child(detail),
-                    ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .min_w(px(if compact { 44. } else { 36. }))
-                    .min_h(px(if compact { 44. } else { 24. }))
-                    .when(!compact, |slot| {
-                        slot.child(
+                                    .into_owned();
+                                    move |window, cx| {
+                                        crate::widgets::tooltip::Tooltip::new(label.clone())
+                                            .build(window, cx)
+                                    }
+                                })
+                                .child(format!("#{}", key.number)),
+                        )
+                        .child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .group_hover(row_id.clone(), |time| time.invisible())
-                                .children(
-                                    snapshot
-                                        .and_then(|snapshot| {
-                                            chrono::DateTime::parse_from_rfc3339(
-                                                &snapshot.updated_at,
-                                            )
-                                            .ok()
-                                        })
-                                        .map(|updated| {
-                                            crate::time::humanize_ago(
-                                                tcode_core::project::now_secs().saturating_sub(
-                                                    updated.timestamp().max(0) as u64,
-                                                ),
-                                            )
-                                        }),
-                                ),
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(if compact { 15. } else { 13. }))
+                                .text_color(if visible {
+                                    cx.theme().foreground
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(title),
                         )
-                    })
-                    .child(
-                        Button::new(SharedString::from(format!(
-                            "pr-menu-{}-{}-{}",
-                            key.host, key.repository, key.number
-                        )))
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Ellipsis)
-                        .tooltip(
-                            crate::tr!(
-                                "pull_requests.actions_for",
-                                number = key.number.to_string()
-                            )
-                            .into_owned(),
+                        .when(
+                            snapshot.is_some_and(|snapshot| {
+                                snapshot.is_draft && snapshot.state == PullRequestState::Open
+                            }),
+                            |row| {
+                                row.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(crate::tr!("pull_requests.draft")),
+                                )
+                            },
                         )
-                        .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)))
-                        .when(!compact, |button| {
-                            button
-                                .absolute()
-                                .right_0()
-                                .top_0()
-                                .opacity(0.)
-                                .group_hover(row_id.clone(), |button| button.opacity(1.))
-                                .focus(|button| button.opacity(1.))
+                        .child(signals),
+                )
+                .child(
+                    // gpui-base has no middle truncation; the tooltip retains the complete branch pair.
+                    div()
+                        .id("pr-detail")
+                        .truncate()
+                        .text_size(px(if compact { 13. } else { 11. }))
+                        .text_color(cx.theme().muted_foreground)
+                        .tooltip({
+                            let detail = detail.clone();
+                            move |window, cx| {
+                                crate::widgets::tooltip::Tooltip::new(detail.clone())
+                                    .build(window, cx)
+                            }
                         })
-                        .dropdown_menu(menu.clone()),
-                    ),
-            );
+                        .child(detail),
+                ),
+        )
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .min_w(px(if compact { 44. } else { 36. }))
+                .min_h(px(if compact { 44. } else { 24. }))
+                .when(!compact, |slot| {
+                    slot.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .group_hover(row_id.clone(), |time| time.invisible())
+                            .children(
+                                snapshot
+                                    .and_then(|snapshot| {
+                                        chrono::DateTime::parse_from_rfc3339(&snapshot.updated_at)
+                                            .ok()
+                                    })
+                                    .map(|updated| {
+                                        crate::time::humanize_ago(
+                                            tcode_core::project::now_secs()
+                                                .saturating_sub(updated.timestamp().max(0) as u64),
+                                        )
+                                    }),
+                            ),
+                    )
+                })
+                .child(
+                    Button::new(SharedString::from(format!(
+                        "pr-menu-{}-{}-{}",
+                        key.host, key.repository, key.number
+                    )))
+                    .ghost()
+                    .small()
+                    .compact()
+                    .icon(IconName::Ellipsis)
+                    .tooltip(
+                        crate::tr!("pull_requests.actions_for", number = key.number.to_string())
+                            .into_owned(),
+                    )
+                    .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)))
+                    .when(!compact, |button| {
+                        button
+                            .absolute()
+                            .right_0()
+                            .top_0()
+                            .opacity(0.)
+                            .group_hover(row_id.clone(), |button| button.opacity(1.))
+                            .focus(|button| button.opacity(1.))
+                    })
+                    .dropdown_menu(menu.clone()),
+                ),
+        );
 
         row.context_menu(menu).into_any_element()
     }
