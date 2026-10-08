@@ -857,6 +857,25 @@ impl WorkspaceStore {
     pub fn reload_provider(&mut self) {
         self.dispatch(Command::ReloadProvider);
     }
+    pub fn refresh_github_credentials(&mut self) {
+        self.dispatch(Command::RefreshGitHubCredentials);
+    }
+    pub fn set_github_token(&mut self, host: String, token: Option<String>) {
+        self.dispatch(Command::SetGitHubToken { host, token });
+    }
+    pub fn patch_github_host(
+        &mut self,
+        host: String,
+        enabled: Option<bool>,
+        account: Option<Option<String>>,
+    ) {
+        self.patch_settings(SettingsPatch::GitHubHost {
+            host,
+            enabled,
+            account,
+        });
+    }
+
     pub fn set_profile_secret(&mut self, profile_id: String, name: String, value: Option<String>) {
         self.dispatch(Command::SetProfileSecret {
             profile_id,

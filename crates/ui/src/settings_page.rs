@@ -65,6 +65,7 @@ const CONTENT_MAX_WIDTH: f32 = 768.;
 enum Section {
     General,
     Providers,
+    SourceControl,
     Usage,
     Browser,
     ComputerUse,
@@ -81,10 +82,11 @@ enum Section {
 /// headless listener in a browser. Choosing a machine, and the invitation other
 /// devices pair with, live in `crate::remote`.
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-const SECTIONS: [Section; 9] = [
+const SECTIONS: [Section; 10] = [
     Section::General,
     Section::Remote,
     Section::Providers,
+    Section::SourceControl,
     Section::Usage,
     Section::Orchestrate,
     Section::Plugins,
@@ -93,9 +95,10 @@ const SECTIONS: [Section; 9] = [
     Section::Archived,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 8] = [
+const SECTIONS: [Section; 9] = [
     Section::General,
     Section::Providers,
+    Section::SourceControl,
     Section::Usage,
     Section::Orchestrate,
     Section::Plugins,
@@ -156,7 +159,8 @@ impl Section {
                     SectionGroup::Device
                 }
             }
-            Self::Providers
+            Self::SourceControl
+            | Self::Providers
             | Self::Usage
             | Self::Browser
             | Self::ComputerUse
@@ -181,6 +185,7 @@ impl Section {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => cx.hosting,
             Self::General
+            | Self::SourceControl
             | Self::Providers
             | Self::Usage
             | Self::ComputerUse
@@ -193,6 +198,7 @@ impl Section {
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-nav-general",
+            Self::SourceControl => "settings-nav-source-control",
             Self::Providers => "settings-nav-providers",
             Self::Usage => "settings-nav-usage",
             Self::Browser => "settings-nav-browser",
@@ -208,6 +214,7 @@ impl Section {
     fn icon(self) -> IconName {
         match self {
             Self::General => IconName::Settings,
+            Self::SourceControl => IconName::Github,
             Self::Providers => IconName::Bot,
             Self::Usage => IconName::ChartPie,
             Self::Browser => IconName::Globe,
@@ -223,6 +230,7 @@ impl Section {
     fn label(self) -> SharedString {
         match self {
             Self::General => crate::tr!("settings.general"),
+            Self::SourceControl => crate::tr!("settings.source_control"),
             Self::Providers => crate::tr!("settings.providers"),
             Self::Usage => crate::tr!("settings.usage"),
             Self::Browser => crate::tr!("settings.browser"),
@@ -311,6 +319,7 @@ pub struct SettingsPage {
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
     /// Each enabled profile's native plugin catalog.
     plugins_panel: Entity<PluginsSettingsPanel>,
+    github_panel: Entity<crate::github_settings::GitHubSettingsPanel>,
     /// Hosting this machine. Absent where the client cannot listen at all.
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     #[cfg(not(target_family = "wasm"))]
@@ -375,6 +384,7 @@ impl SettingsPage {
             .map(|section| match section.as_str() {
                 "providers" => Section::Providers,
                 "usage" => Section::Usage,
+                "source_control" => Section::SourceControl,
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
@@ -544,6 +554,8 @@ impl SettingsPage {
             let store = store.clone();
             cx.new(|cx| crate::local_permissions::LocalPermissions::new(store, window, cx))
         });
+        let github_panel = cx
+            .new(|cx| crate::github_settings::GitHubSettingsPanel::new(store.clone(), window, cx));
         let mut page = Self {
             store,
             window_state,
@@ -552,6 +564,7 @@ impl SettingsPage {
             acp_panel,
             orchestrate_panel,
             plugins_panel,
+            github_panel,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             hosting_panel,
             title_model_picker,
@@ -1314,8 +1327,14 @@ impl SettingsPage {
         if self.section != Section::Plugins {
             self.plugins_panel.update(cx, |panel, _| panel.hide());
         }
+        if self.section == Section::SourceControl {
+            self.github_panel.update(cx, |panel, cx| panel.show(cx));
+        } else {
+            self.github_panel.update(cx, |panel, _| panel.hide());
+        }
         let column = match self.section {
             Section::General => self.render_general(cx),
+            Section::SourceControl => v_flex().child(self.github_panel.clone()),
             Section::Providers => self.render_providers(window, cx),
             Section::Usage => self.render_usage(cx),
             Section::Browser => self.render_browser(cx),
