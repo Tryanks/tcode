@@ -11,7 +11,6 @@ use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
         Project, ProjectGroup, SessionMeta, WorktreeInfo, descendant_session_ids, group_sessions,
-        order_sessions_with_children,
     },
     provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
@@ -2009,11 +2008,18 @@ impl WorkspaceStore {
             .filter(|meta| meta.archived_at.is_none())
             .cloned()
             .collect();
-        group_sessions(
+        let mut groups = group_sessions(
             &self.index_replica.1,
             &visible,
             self.settings_replica.project_sort,
-        )
+        );
+        for group in &mut groups {
+            tcode_core::thread_sort::sort_threads(
+                &mut group.sessions,
+                &self.index_summary.activity_clocks,
+            );
+        }
+        groups
     }
 
     pub fn settings(&self) -> Settings {
@@ -2245,14 +2251,16 @@ impl WorkspaceStore {
     }
 
     pub fn flat_sessions(&self) -> Vec<SessionMeta> {
-        let visible = self
+        let visible: Vec<_> = self
             .index_replica
             .0
             .iter()
             .filter(|meta| meta.archived_at.is_none())
             .cloned()
             .collect();
-        order_sessions_with_children(visible)
+        let mut visible = visible;
+        tcode_core::thread_sort::sort_threads(&mut visible, &self.index_summary.activity_clocks);
+        visible
     }
 
     pub(crate) fn project(&self, id: &str) -> Option<&Project> {
@@ -2295,6 +2303,20 @@ impl WorkspaceStore {
             .activity
             .get(session_id)
             .is_some_and(|activity| activity.working)
+    }
+
+    pub fn failed_for(&self, session_id: &str) -> bool {
+        self.index_summary
+            .activity_clocks
+            .get(session_id)
+            .is_some_and(|clocks| clocks.failed)
+    }
+
+    pub fn thread_activity(
+        &self,
+        session_id: &str,
+    ) -> Option<&tcode_core::settlement::ThreadActivity> {
+        self.index_summary.activity_clocks.get(session_id)
     }
 
     pub fn waiting_for(&self, session_id: &str) -> bool {
@@ -4991,6 +5013,7 @@ pub(crate) mod tests {
         });
         crate::store::tests::seed_full_scope(&workspace, &incoming, Vec::new(), cx);
         let message = |id: &str, author: Option<Author>| StoredEvent {
+            origin: None,
             author,
             ts: Some(1),
             event: agent::AgentEvent::ItemCompleted(agent::ThreadItem {

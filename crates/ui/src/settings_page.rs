@@ -1,4 +1,4 @@
-//! Full-page settings route with section navigation and editable settings.
+pub(crate) mod thread_behavior;
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -32,10 +32,7 @@ use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
-use tcode_core::settings::{
-    DEFAULT_AUTO_ARCHIVE_KEEP_COUNT, DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS, FallbackReviewSettings,
-    TitleGenerationSettings,
-};
+use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
 /// Left inset so branding clears the native macOS 26 traffic lights near x=72.
 #[cfg(target_os = "macos")]
@@ -64,6 +61,8 @@ const CONTENT_MAX_WIDTH: f32 = 768.;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     General,
+    ThreadBehavior,
+    ProjectThreadRules,
     Providers,
     Usage,
     Browser,
@@ -81,9 +80,10 @@ enum Section {
 /// headless listener in a browser. Choosing a machine, and the invitation other
 /// devices pair with, live in `crate::remote`.
 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-const SECTIONS: [Section; 9] = [
+const SECTIONS: [Section; 10] = [
     Section::General,
     Section::Remote,
+    Section::ThreadBehavior,
     Section::Providers,
     Section::Usage,
     Section::Orchestrate,
@@ -93,8 +93,9 @@ const SECTIONS: [Section; 9] = [
     Section::Archived,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 8] = [
+const SECTIONS: [Section; 9] = [
     Section::General,
+    Section::ThreadBehavior,
     Section::Providers,
     Section::Usage,
     Section::Orchestrate,
@@ -156,7 +157,9 @@ impl Section {
                     SectionGroup::Device
                 }
             }
-            Self::Providers
+            Self::ThreadBehavior
+            | Self::ProjectThreadRules
+            | Self::Providers
             | Self::Usage
             | Self::Browser
             | Self::ComputerUse
@@ -180,7 +183,9 @@ impl Section {
             Self::Browser => cx.preview_backend,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => cx.hosting,
-            Self::General
+            Self::ThreadBehavior
+            | Self::ProjectThreadRules
+            | Self::General
             | Self::Providers
             | Self::Usage
             | Self::ComputerUse
@@ -193,6 +198,8 @@ impl Section {
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-nav-general",
+            Self::ThreadBehavior => "settings-nav-thread-behavior",
+            Self::ProjectThreadRules => "settings-nav-project-rules",
             Self::Providers => "settings-nav-providers",
             Self::Usage => "settings-nav-usage",
             Self::Browser => "settings-nav-browser",
@@ -208,6 +215,7 @@ impl Section {
     fn icon(self) -> IconName {
         match self {
             Self::General => IconName::Settings,
+            Self::ThreadBehavior | Self::ProjectThreadRules => IconName::Inbox,
             Self::Providers => IconName::Bot,
             Self::Usage => IconName::ChartPie,
             Self::Browser => IconName::Globe,
@@ -223,6 +231,9 @@ impl Section {
     fn label(self) -> SharedString {
         match self {
             Self::General => crate::tr!("settings.general"),
+            Self::ThreadBehavior | Self::ProjectThreadRules => {
+                crate::tr!("settings.thread_behavior")
+            }
             Self::Providers => crate::tr!("settings.providers"),
             Self::Usage => crate::tr!("settings.usage"),
             Self::Browser => crate::tr!("settings.browser"),
@@ -335,9 +346,10 @@ pub struct SettingsPage {
     usage_refresh_sent: bool,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: SettingsInput,
-    auto_archive_idle_input: SettingsInput,
+    auto_settle_input: SettingsInput,
+    project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
+    project_rules_subscription: Option<Subscription>,
     remote_attachment_limit_input: SettingsInput,
-    auto_archive_keep_input: SettingsInput,
     /// Zero-based page shown by the Archived Threads list.
     archived_page: usize,
     /// Whether the editable fields have been seeded from the host's settings.
@@ -362,7 +374,8 @@ pub struct SettingsPage {
 
 impl SettingsPage {
     fn section_applies(&self, section: &Section, cx: &App) -> bool {
-        section.applies(&self.capabilities)
+        (section != &Section::ThreadBehavior || self.window_state.read(cx).compact)
+            && section.applies(&self.capabilities)
             && (self.store.read(cx).scope().is_full()
                 || matches!(section, Section::General | Section::Archived))
     }
@@ -382,6 +395,7 @@ impl SettingsPage {
                 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
                 "remote" => Section::Remote,
                 "archived" => Section::Archived,
+                "thread_behavior" => Section::ThreadBehavior,
                 _ => Section::General,
             })
     }
@@ -534,8 +548,6 @@ impl SettingsPage {
                 .placeholder(crate::tr!("settings.device_name.placeholder"))
                 .default_value(device_name.clone())
         });
-        let auto_archive_idle_input = cx.new(|cx| InputState::new(window, cx));
-        let auto_archive_keep_input = cx.new(|cx| InputState::new(window, cx));
         let remote_attachment_limit = remote_attachment_limit_value(store.read(cx));
         let remote_attachment_limit_input =
             cx.new(|cx| InputState::new(window, cx).default_value(remote_attachment_limit.clone()));
@@ -544,6 +556,7 @@ impl SettingsPage {
             let store = store.clone();
             cx.new(|cx| crate::local_permissions::LocalPermissions::new(store, window, cx))
         });
+        let auto_settle_input = cx.new(|cx| InputState::new(window, cx).step(1.).min(1.).max(90.));
         let mut page = Self {
             store,
             window_state,
@@ -567,13 +580,14 @@ impl SettingsPage {
             advanced_expanded: None,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
-            auto_archive_idle_input: SettingsInput::new(auto_archive_idle_input.clone()),
+            auto_settle_input: SettingsInput::new(auto_settle_input.clone()),
+            project_rules_editor: None,
+            project_rules_subscription: None,
             remote_attachment_limit_input: SettingsInput {
                 state: remote_attachment_limit_input.clone(),
                 pushed: remote_attachment_limit,
                 dirty: false,
             },
-            auto_archive_keep_input: SettingsInput::new(auto_archive_keep_input.clone()),
             archived_page: 0,
             hydrated: false,
             #[cfg(all(feature = "local-permissions", target_os = "macos"))]
@@ -613,25 +627,16 @@ impl SettingsPage {
                 }
             },
         ));
-        page._subscriptions.push(cx.subscribe(
-            &auto_archive_idle_input,
-            |this, input, event, cx| {
+
+        page._subscriptions.push(cx.subscribe_in(
+            &auto_settle_input,
+            window,
+            |this, input, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value().to_string();
-                    if this.auto_archive_idle_input.is_user_edit(&value) {
-                        this.commit_auto_archive_idle_days(cx);
-                    }
-                }
-            },
-        ));
-        page._subscriptions.push(cx.subscribe(
-            &auto_archive_keep_input,
-            |this, input, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value().to_string();
-                    if this.auto_archive_keep_input.is_user_edit(&value) {
-                        this.commit_auto_archive_keep_count(cx);
-                    }
+                    this.auto_settle_input
+                        .is_user_edit(input.read(cx).value().as_ref());
+                } else if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    this.commit_auto_settle_days(window, cx);
                 }
             },
         ));
@@ -658,17 +663,16 @@ impl SettingsPage {
         }
         self.hydrated = true;
         let settings = self.store.read(cx).settings();
+        if !self.auto_settle_input.dirty {
+            self.auto_settle_input.push(
+                settings.auto_settle_after_days.unwrap_or(3.).to_string(),
+                window,
+                cx,
+            );
+        }
         if !self.home_url_input.dirty {
             let value = settings.browser.home_url.clone().unwrap_or_default();
             self.home_url_input.push(value, window, cx);
-        }
-        if !self.auto_archive_idle_input.dirty {
-            let value = settings.auto_archive_max_idle_days.max(1).to_string();
-            self.auto_archive_idle_input.push(value, window, cx);
-        }
-        if !self.auto_archive_keep_input.dirty {
-            let value = settings.auto_archive_keep_count.max(1).to_string();
-            self.auto_archive_keep_input.push(value, window, cx);
         }
     }
 
@@ -710,42 +714,6 @@ impl SettingsPage {
         };
         self.dispatch_settings(
             move |store| store.set_client_remote_attachment_limit_mib(Some(limit)),
-            cx,
-        );
-    }
-
-    fn commit_auto_archive_idle_days(&self, cx: &mut Context<Self>) {
-        let Some(days) = self
-            .auto_archive_idle_input
-            .state
-            .read(cx)
-            .value()
-            .trim()
-            .parse::<u32>()
-            .ok()
-        else {
-            return;
-        };
-        self.dispatch_settings(
-            move |store| store.set_auto_archive_max_idle_days(days.max(1)),
-            cx,
-        );
-    }
-
-    fn commit_auto_archive_keep_count(&self, cx: &mut Context<Self>) {
-        let Some(keep) = self
-            .auto_archive_keep_input
-            .state
-            .read(cx)
-            .value()
-            .trim()
-            .parse::<usize>()
-            .ok()
-        else {
-            return;
-        };
-        self.dispatch_settings(
-            move |store| store.set_auto_archive_keep_count(keep.max(1)),
             cx,
         );
     }
@@ -866,7 +834,18 @@ impl SettingsPage {
 
     /// The open section's name, which is also this page's compact nav-bar
     /// title and the label its child's Back control carries.
-    pub(crate) fn section_title(&self) -> SharedString {
+    pub(crate) fn section_title(&self, cx: &App) -> SharedString {
+        if self.section == Section::ProjectThreadRules
+            && self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsThreadRules
+        {
+            return Section::ThreadBehavior.label();
+        }
+        if self.section == Section::ProjectThreadRules
+            && let Some(editor) = &self.project_rules_editor
+        {
+            return editor.read(cx).title();
+        }
         self.section.label()
     }
 
@@ -1275,16 +1254,6 @@ impl SettingsPage {
                         page.device_name_input.push(device_name, window, cx);
                         let limit = remote_attachment_limit_value(page.store.read(cx));
                         page.remote_attachment_limit_input.push(limit, window, cx);
-                        page.auto_archive_idle_input.push(
-                            DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(),
-                            window,
-                            cx,
-                        );
-                        page.auto_archive_keep_input.push(
-                            DEFAULT_AUTO_ARCHIVE_KEEP_COUNT.to_string(),
-                            window,
-                            cx,
-                        );
                     });
                     apply_theme(ThemeMode::System, window, cx);
                     true
@@ -1316,6 +1285,8 @@ impl SettingsPage {
         }
         let column = match self.section {
             Section::General => self.render_general(cx),
+            Section::ThreadBehavior => self.render_thread_behavior(cx),
+            Section::ProjectThreadRules => v_flex().children(self.project_rules_editor.clone()),
             Section::Providers => self.render_providers(window, cx),
             Section::Usage => self.render_usage(cx),
             Section::Browser => self.render_browser(cx),
@@ -1559,6 +1530,10 @@ impl SettingsPage {
                 v_flex()
                     .child(self.section_label(crate::tr!("settings.conversation_section"), cx))
                     .child(self.grouped_plain(conversation, cx)),
+            )
+            .when(
+                !self.window_state.read(cx).compact && self.store.read(cx).scope().is_full(),
+                |column| column.child(self.render_thread_behavior(cx)),
             )
             .child(
                 v_flex()
@@ -2114,101 +2089,10 @@ impl SettingsPage {
     fn render_archived(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let full = self.store.read(cx).scope().is_full();
         let groups = self.store.read(cx).archived_groups();
-        let settings = self.store.read(cx).settings();
-        let days = settings.auto_archive_max_idle_days.max(1);
-        let keep = settings.auto_archive_keep_count.max(1);
-        let auto_archive_reset = self.reset_action(
-            "reset-auto-archive",
-            settings.auto_archive_disabled,
-            cx,
-            |this, _, cx| {
-                this.dispatch_settings(|store| store.set_auto_archive_disabled(false), cx)
-            },
-        );
-        let idle_days_reset = self.reset_action(
-            "reset-auto-archive-idle-days",
-            settings.auto_archive_max_idle_days != DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS,
-            cx,
-            |this, window, cx| {
-                this.dispatch_settings(
-                    |store| {
-                        store.set_auto_archive_max_idle_days(DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS)
-                    },
-                    cx,
-                );
-                this.auto_archive_idle_input.push(
-                    DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(),
-                    window,
-                    cx,
-                );
-            },
-        );
-        let keep_count_reset = self.reset_action(
-            "reset-auto-archive-keep-count",
-            settings.auto_archive_keep_count != DEFAULT_AUTO_ARCHIVE_KEEP_COUNT,
-            cx,
-            |this, window, cx| {
-                this.dispatch_settings(
-                    |store| store.set_auto_archive_keep_count(DEFAULT_AUTO_ARCHIVE_KEEP_COUNT),
-                    cx,
-                );
-                this.auto_archive_keep_input.push(
-                    DEFAULT_AUTO_ARCHIVE_KEEP_COUNT.to_string(),
-                    window,
-                    cx,
-                );
-            },
-        );
-        let rows = vec![
-            self.toggle_row(
-                "auto-archive",
-                crate::tr!("settings.auto_archive.title"),
-                crate::tr!(
-                    "settings.auto_archive.description",
-                    days = days,
-                    keep = keep
-                ),
-                !settings.auto_archive_disabled,
-                auto_archive_reset,
-                cx,
-                |store, checked| store.set_auto_archive_disabled(!checked),
-            ),
-            self.row_frame(cx)
-                .child(self.row_labels(
-                    crate::tr!("settings.auto_archive.idle_days"),
-                    crate::tr!("settings.auto_archive.idle_days_description"),
-                    idle_days_reset,
-                    cx,
-                ))
-                .child(
-                    Input::new(&self.auto_archive_idle_input.state)
-                        .w(px(72.))
-                        .rounded(crate::material::radius_input(cx)),
-                )
-                .into_any_element(),
-            self.row_frame(cx)
-                .child(self.row_labels(
-                    crate::tr!("settings.auto_archive.keep_count"),
-                    crate::tr!("settings.auto_archive.keep_count_description"),
-                    keep_count_reset,
-                    cx,
-                ))
-                .child(
-                    Input::new(&self.auto_archive_keep_input.state)
-                        .w(px(72.))
-                        .rounded(crate::material::radius_input(cx)),
-                )
-                .into_any_element(),
-        ];
-        let controls = v_flex()
-            .child(self.section_label(crate::tr!("settings.auto_archive.section"), cx))
-            .child(self.grouped_plain(rows, cx));
-
         if groups.is_empty() {
             let loading = self.store.read(cx).archived_loading();
             return v_flex()
                 .gap(px(20.))
-                .when(full, |column| column.child(controls))
                 .child(self.section_label(crate::tr!("settings.archived_section"), cx))
                 .child(
                     v_flex()
@@ -2258,7 +2142,6 @@ impl SettingsPage {
         let now = now_secs();
         let mut col = v_flex()
             .gap(px(20.))
-            .when(full, |column| column.child(controls))
             .child(
                 gpui_base::h_flex()
                     .items_center()
@@ -3109,6 +2992,13 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.section == Section::ProjectThreadRules
+            && self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsThreadRules
+        {
+            self.section = Section::ThreadBehavior;
+            self.project_rules_editor = None;
+        }
         self.render_content(window, cx)
     }
 }
@@ -3531,7 +3421,6 @@ mod tests {
         .expect("spawn settings test host");
         smol::block_on(host.update_state_for_test(|state, _| {
             state.settings.browser.home_url = Some("https://host.example".into());
-            state.settings.auto_archive_keep_count = 7;
         }))
         .expect("seed host settings");
 
@@ -3586,7 +3475,6 @@ mod tests {
                 page.home_url_input.state.read(cx).value(),
                 "https://host.example"
             );
-            assert_eq!(page.auto_archive_keep_input.state.read(cx).value(), "7");
         });
 
         // The user edits the field: `replace_all` takes the same path typing
