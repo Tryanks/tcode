@@ -584,7 +584,7 @@ impl AppState {
             // Answered from the session's log by `reply_to_subscription`.
             Topic::SessionEvents { .. } => return None,
             Topic::RuntimeEvents => return None,
-            Topic::Preview { .. } => return None,
+            Topic::Preview => return None,
             // Retained latest-run status, so a client that subscribes after a
             // fast completion still recovers the outcome. `None` means no run
             // has ever started for this project.

@@ -413,9 +413,6 @@ impl WorkspaceStore {
                 tcode_protocol::Topic::SessionPlan {
                     session_id: session_id.clone(),
                 },
-                tcode_protocol::Topic::Preview {
-                    session_id: session_id.clone(),
-                },
                 tcode_protocol::Topic::GitStatus { session_id },
             ] {
                 let _ = self
@@ -489,20 +486,8 @@ impl WorkspaceStore {
             tcode_protocol::Topic::GitStatus {
                 session_id: session_id.clone(),
             },
-            tcode_protocol::Topic::Preview {
-                session_id: session_id.clone(),
-            },
             tcode_protocol::Topic::SessionEvents { session_id },
         ] {
-            // A client with no preview backend must not become a competing
-            // owner of the session's preview: it would win requests it can only
-            // refuse. It still answers `unsupported` for anything that reaches
-            // it through an already-open subscription.
-            if matches!(topic, tcode_protocol::Topic::Preview { .. })
-                && (!crate::preview_panel::PREVIEW_BACKEND || !self.scope.is_full())
-            {
-                continue;
-            }
             let _ = self.host.subscribe(tcode_protocol::Subscription {
                 after: if matches!(topic, tcode_protocol::Topic::SessionEvents { .. }) {
                     after

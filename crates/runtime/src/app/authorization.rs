@@ -119,7 +119,7 @@ impl AppState {
                 | Topic::Settings
                 | Topic::Providers
                 | Topic::RuntimeEvents
-                | Topic::Preview { .. }
+                | Topic::Preview
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },
             ClientPayload::Command(command) => match command {
