@@ -1658,6 +1658,7 @@ pull_requests:
     more_replies_one: "Show 1 more reply"
     more_replies_unknown: "Show more replies"
     loading: "Loading…"
+    replies_failed: "More replies could not be loaded: %{reason}"
     replies_capped: "Some replies aren't shown."
     capped_unknown: "Some of this conversation isn't shown."
     empty_title: "No conversation yet"

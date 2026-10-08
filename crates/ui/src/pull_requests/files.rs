@@ -59,9 +59,9 @@ enum FilesOption {
 /// How a file's viewed mark reads to the account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Viewed {
-    Viewed,
-    Unviewed,
-    ChangedSince,
+    Marked,
+    Unmarked,
+    Changed,
     Unknown,
 }
 
@@ -89,19 +89,19 @@ impl PullRequestView {
         };
         if let Some(mark) = page.viewed_marks.get(path) {
             return if *mark {
-                Viewed::Viewed
+                Viewed::Marked
             } else {
-                Viewed::Unviewed
+                Viewed::Unmarked
             };
         }
         let Some(viewed) = page.viewed.data.as_ref() else {
             return Viewed::Unknown;
         };
         match viewed.files.iter().find(|(file, _)| file == path) {
-            Some((_, PullRequestViewedState::Viewed)) => Viewed::Viewed,
-            Some((_, PullRequestViewedState::Dismissed)) => Viewed::ChangedSince,
-            Some((_, PullRequestViewedState::Unviewed)) => Viewed::Unviewed,
-            None if viewed.complete => Viewed::Unviewed,
+            Some((_, PullRequestViewedState::Viewed)) => Viewed::Marked,
+            Some((_, PullRequestViewedState::Dismissed)) => Viewed::Changed,
+            Some((_, PullRequestViewedState::Unviewed)) => Viewed::Unmarked,
+            None if viewed.complete => Viewed::Unmarked,
             None => Viewed::Unknown,
         }
     }
@@ -109,7 +109,7 @@ impl PullRequestView {
     fn collapsed(&self, path: &str) -> bool {
         self.page()
             .and_then(|page| page.files_view.collapsed.get(path).copied())
-            .unwrap_or_else(|| self.viewed_state(path) == Viewed::Viewed)
+            .unwrap_or_else(|| self.viewed_state(path) == Viewed::Marked)
     }
 
     fn layouts(&self) -> Vec<FileLayout> {
@@ -718,10 +718,10 @@ impl PullRequestView {
                     .into_any_element(),
             );
         }
-        let checked = state == Viewed::Viewed;
+        let checked = state == Viewed::Marked;
         let tooltip = if read_only {
             crate::tr!("pull_requests.files.viewed_read_only")
-        } else if state == Viewed::ChangedSince {
+        } else if state == Viewed::Changed {
             crate::tr!("pull_requests.files.changed_since_viewed_tooltip")
         } else if checked {
             crate::tr!("pull_requests.files.mark_unviewed")
@@ -775,7 +775,7 @@ impl PullRequestView {
             let viewed = files
                 .files
                 .iter()
-                .filter(|file| self.viewed_state(&file.path) == Viewed::Viewed)
+                .filter(|file| self.viewed_state(&file.path) == Viewed::Marked)
                 .count();
             let unknown = files
                 .files
@@ -1382,7 +1382,7 @@ impl DiffListHost for PullRequestView {
                 list.expand(file, lines, direction);
             }
         } else if let Some(page) = self.page_mut()
-            && page.files_view.texts.get(&path).is_none()
+            && !page.files_view.texts.contains_key(&path)
         {
             page.files_view.pending_expand = Some((path, lines.start, direction));
             self.read_text(file, cx);
@@ -1469,7 +1469,7 @@ impl DiffListHost for PullRequestView {
 
     fn header_note(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = &self.files_of()?.get(file)?.path;
-        (self.viewed_state(path) == Viewed::ChangedSince).then(|| {
+        (self.viewed_state(path) == Viewed::Changed).then(|| {
             div()
                 .text_size(px(11.))
                 .line_height(px(18.))

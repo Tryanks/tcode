@@ -14,7 +14,7 @@ use tcode_protocol::{
     PullRequestReviewThread,
 };
 
-use super::detail::{PullRequestView, Tab, ago_rfc3339, reason};
+use super::detail::{PullRequestView, Replies, Tab, ago_rfc3339, reason};
 use crate::{
     icon::{Icon, IconName},
     markdown::{ImageResolver, MarkdownState, MarkdownView},
@@ -568,11 +568,16 @@ impl PullRequestView {
             .or_else(|| thread.replies_after.clone());
         let Some(after) = after else { return };
         let Some(page) = self.page_mut() else { return };
-        page.conversation_view
+        let replies = page
+            .conversation_view
             .replies
             .entry(id.clone())
-            .or_default()
-            .loading = true;
+            .or_insert_with(|| Replies {
+                after: Some(after.clone()),
+                ..Default::default()
+            });
+        replies.loading = true;
+        replies.error = None;
         let key = id.clone();
         self.read(
             PullRequestRead::ThreadReplies {
@@ -591,9 +596,8 @@ impl PullRequestView {
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        replies.after = None;
+                        replies.error = Some(reason(&error));
                         page.conversation_view.list.remeasure();
-                        log::warn!("pull request replies: {}", reason(&error));
                     }
                 }
             },
@@ -827,6 +831,18 @@ impl PullRequestView {
                         ),
                 ),
             );
+            if let Some(error) = replies.and_then(|replies| replies.error.clone()) {
+                card = card.child(
+                    div()
+                        .px_3()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().warning)
+                        .child(
+                            crate::tr!("pull_requests.conversation.replies_failed", reason = error)
+                                .into_owned(),
+                        ),
+                );
+            }
         } else if read < thread.total_comments {
             card = card.child(
                 div()

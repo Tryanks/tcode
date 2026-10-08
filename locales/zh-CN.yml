@@ -1651,6 +1651,7 @@ pull_requests:
     more_replies_one: "显示另外 1 条回复"
     more_replies_unknown: "显示更多回复"
     loading: "正在加载…"
+    replies_failed: "无法加载更多回复：%{reason}"
     replies_capped: "部分回复未显示。"
     capped_unknown: "此讨论的部分内容未显示。"
     empty_title: "还没有讨论"

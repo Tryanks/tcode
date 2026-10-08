@@ -103,8 +103,10 @@ pub(super) struct FilesView {
 #[derive(Default)]
 pub(super) struct Replies {
     pub(super) comments: Vec<tcode_protocol::PullRequestComment>,
+    /// Where the next page carries on; `None` once every reply was read.
     pub(super) after: Option<String>,
     pub(super) loading: bool,
+    pub(super) error: Option<String>,
 }
 
 pub(super) struct ConversationView {

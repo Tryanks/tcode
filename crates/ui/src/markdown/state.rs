@@ -38,14 +38,17 @@ pub(super) enum PendingContextTarget {
     Image { url: SharedUri, title: String },
 }
 
+pub type ImageSourceFn = Rc<dyn Fn(&str) -> Option<ImageSource>>;
+pub type ImageStandInFn =
+    Rc<dyn Fn(&str, &str, &mut gpui::Window, &mut gpui::App) -> Option<gpui::AnyElement>>;
+
 /// Images a view reads through the host rather than by URL. The chat supplies none.
 #[derive(Clone)]
 pub struct ImageResolver {
     /// The source to draw a URL from, for a URL this resolver owns.
-    pub source: Rc<dyn Fn(&str) -> Option<ImageSource>>,
+    pub source: ImageSourceFn,
     /// What stands in for an owned URL until it can be drawn: a loading box, or why it cannot.
-    pub pending:
-        Rc<dyn Fn(&str, &str, &mut gpui::Window, &mut gpui::App) -> Option<gpui::AnyElement>>,
+    pub pending: ImageStandInFn,
 }
 
 /// State backing a [`super::MarkdownView`].
