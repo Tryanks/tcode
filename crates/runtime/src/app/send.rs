@@ -1,4 +1,4 @@
-use super::active_session::native_skill_invocation;
+use super::active_session::{QueuedMessageKind, native_skill_invocation};
 use super::*;
 
 impl AppState {
@@ -280,6 +280,55 @@ impl AppState {
         }
     }
 
+    /// Queue a turn the host or a child wrote for this thread behind any running turn, loading
+    /// and starting its provider in the background when the thread is not resident.
+    pub(super) fn queue_automatic_turn(
+        &mut self,
+        id: &str,
+        push: impl FnOnce(&mut ActiveSession),
+        cx: &mut HostCx,
+    ) {
+        if self.residents.live.contains_key(id) {
+            let session = self.resident_mut(id).unwrap();
+            push(session);
+
+            // Match ordinary sends when a launch-time selection changed while
+            // the provider was live. Background work keeps the old process
+            // alive; its final follow-up completion performs the restart.
+            let settings_changed = session.launch_settings_changed_while_live();
+            let restart_deferred = session.settings_restart_deferred();
+            if settings_changed && !restart_deferred {
+                session.shutdown_to_idle();
+            }
+            let should_start = matches!(session.runtime, Runtime::Idle);
+            if !restart_deferred && self.dispatch_next_queued(id, cx).is_err() {
+                self.report_error(RuntimeError::ProcessGone, cx);
+            }
+            if should_start {
+                self.ensure_started(id, cx);
+            }
+            return;
+        }
+
+        if !self.residents.parked.contains_key(id)
+            && let Some(meta) = self.sessions.iter().find(|meta| meta.id == id).cloned()
+        {
+            self.load_background_session(meta, cx);
+        }
+        if let Some(session) = self.resident_mut(id) {
+            push(session);
+            let idle_runtime = matches!(session.runtime, Runtime::Idle);
+            let can_dispatch =
+                !session.turn_in_flight && matches!(session.runtime, Runtime::Live(_));
+            if can_dispatch {
+                self.on_background_turn_completed(id, cx);
+            }
+            if idle_runtime {
+                self.ensure_session_started(id, cx);
+            }
+        }
+    }
+
     /// Display labels (from, to) for the confirmation dialog, when the current
     /// selection needs a canonical-timeline handoff before it can be sent.
     /// Custom profiles show their card title so a same-kind profile switch
@@ -420,6 +469,10 @@ impl AppState {
         );
         cx.author = author;
         cx.origin = origin;
+        self.clear_pull_request_watch_stop(session_id);
+        if let QueuedMessageKind::PullRequestWake { key, id } = &message.kind {
+            self.acknowledge_pull_request_wake(session_id, key, id, cx);
+        }
         if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
         }
@@ -644,13 +697,17 @@ impl AppState {
     pub fn interrupt(
         &mut self,
         target_id: &str,
-        _cx: &mut HostCx,
+        cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
+        let watches_ended = self.stop_pull_request_watches(target_id, cx);
         let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
         }) = self.resident(target_id)
         else {
+            if watches_ended {
+                return Ok(());
+            }
             return Err(provider_command_error("The provider is no longer running."));
         };
         commands

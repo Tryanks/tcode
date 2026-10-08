@@ -100,6 +100,11 @@ pub enum Command {
         session_id: String,
         key: tcode_core::pull_request::PullRequestKey,
     },
+    WatchPullRequest {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        watching: bool,
+    },
     SetProfileSecret {
         profile_id: String,
         name: String,
@@ -456,6 +461,7 @@ impl Command {
         match self {
             Self::LinkPullRequest { session_id, .. }
             | Self::UnlinkPullRequest { session_id, .. }
+            | Self::WatchPullRequest { session_id, .. }
             | Self::OrchestrateTurn { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }

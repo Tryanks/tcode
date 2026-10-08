@@ -463,6 +463,17 @@ pub struct SessionStatus {
     pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
+    /// The pull request tools and per-turn instructions this thread's provider is given, while
+    /// they are registered for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_tools: Option<InjectedPullRequestTools>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedPullRequestTools {
+    /// Each tool's name and the description the model reads.
+    pub tools: Vec<(String, String)>,
+    pub instructions: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +591,12 @@ pub enum MergeWorktreeFailure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeToast {
+    /// A watched pull request woke its thread's agent, or its watch ended with a notice.
+    PullRequestWatch {
+        session_id: String,
+        number: u64,
+        notice: tcode_core::pull_request_watch::WatchNotice,
+    },
     ProviderUpdatesAvailable {
         updates: Vec<ProviderUpdateAvailable>,
     },

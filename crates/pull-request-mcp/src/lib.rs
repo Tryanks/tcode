@@ -23,6 +23,8 @@ pub enum Operation {
     Link(Target),
     Unlink(Target),
     List,
+    Watch(Target),
+    Unwatch(Target),
 }
 pub struct BrokerRequest {
     pub session_id: String,
@@ -110,6 +112,35 @@ impl PullRequestTools {
     async fn list_thread_pull_requests(&self) -> CallToolResult {
         self.invoke(Operation::List).await
     }
+    #[tool(
+        description = "Have Tcode watch an open pull request for this thread, linking it first if needed. Tcode checks it every two minutes and wakes you with a message when a check fails, the required checks pass, someone else comments or reviews, or the branch starts to conflict with its base. Use this to monitor or babysit a pull request instead of polling, sleeping, or running a watcher. Only comments posted after this call wake you, so handle the existing ones first, then end your turn. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first. Watching ends when the pull request merges or closes, when its thread settles or is archived, when Tcode fails to read it 8 times in a row (a host rate limit only delays it), when the user stops this thread, or when you call unwatch_pull_request. Unsettle the thread before starting a new watch. A subagent cannot watch: its parent thread owns the pull request."
+    )]
+    async fn watch_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
+        self.invoke(Operation::Watch(target)).await
+    }
+    #[tool(
+        description = "Stop Tcode from watching a pull request for this thread. The pull request stays linked. Pass the URL, or repository plus number."
+    )]
+    async fn unwatch_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
+        self.invoke(Operation::Unwatch(target)).await
+    }
+}
+
+/// Every tool's name and the description its model reads, in the order they are listed.
+pub fn tool_descriptions() -> &'static [(String, String)] {
+    static TOOLS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    TOOLS.get_or_init(|| {
+        PullRequestTools::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| {
+                (
+                    tool.name.to_string(),
+                    tool.description.as_deref().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    })
 }
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PullRequestTools {

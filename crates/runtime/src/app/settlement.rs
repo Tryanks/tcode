@@ -144,7 +144,10 @@ impl AppState {
                     || session.timeline.turn_running
             }),
             completion_holding_work: holders.contains(meta.id.as_str())
-                || resident.is_some_and(|session| session.background_task_count > 0),
+                || resident.is_some_and(|session| session.background_task_count > 0)
+                || tcode_core::pull_request::watched(&meta.pull_requests)
+                    .next()
+                    .is_some(),
             pending_human_message: resident.is_some_and(|session| {
                 session
                     .queue

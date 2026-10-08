@@ -1281,49 +1281,13 @@ impl AppState {
         }
 
         self.reactivate_session(parent_id, cx);
-
-        if self.residents.live.contains_key(parent_id) {
-            let parent = self.resident_mut(parent_id).unwrap();
-            parent.push_or_merge_orchestrate_callback(text);
-
-            // Match ordinary sends when a launch-time selection changed while
-            // the provider was live. Background work keeps the old process
-            // alive; its final follow-up completion performs the restart.
-            let settings_changed = parent.launch_settings_changed_while_live();
-            let restart_deferred = parent.settings_restart_deferred();
-            if settings_changed && !restart_deferred {
-                parent.shutdown_to_idle();
-            }
-            let should_start = matches!(parent.runtime, Runtime::Idle);
-            if !restart_deferred && self.dispatch_next_queued(parent_id, cx).is_err() {
-                self.report_error(RuntimeError::ProcessGone, cx);
-            }
-            if should_start {
-                self.ensure_started(parent_id, cx);
-            }
-            return;
-        }
-
-        if !self.residents.parked.contains_key(parent_id)
-            && let Some(parent) = self
-                .sessions
-                .iter()
-                .find(|meta| meta.id == parent_id)
-                .cloned()
-        {
-            self.load_background_session(parent, cx);
-        }
-        if let Some(parent) = self.resident_mut(parent_id) {
-            parent.push_or_merge_orchestrate_callback(text);
-            let idle_runtime = matches!(parent.runtime, Runtime::Idle);
-            let can_dispatch = !parent.turn_in_flight && matches!(parent.runtime, Runtime::Live(_));
-            if can_dispatch {
-                self.on_background_turn_completed(parent_id, cx);
-            }
-            if idle_runtime {
-                self.ensure_session_started(parent_id, cx);
-            }
-        }
+        self.queue_automatic_turn(
+            parent_id,
+            |parent| {
+                parent.push_or_merge_orchestrate_callback(text);
+            },
+            cx,
+        );
     }
 }
 

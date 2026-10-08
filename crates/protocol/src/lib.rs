@@ -16,13 +16,13 @@ pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, Th
 pub use event::{
     AcpMarketplaceItem, ArchivedSessions, EventEnvelope, ExternalImportState, ExternalImportStatus,
     ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot, IndexSummary,
-    MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
-    PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable,
-    ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect,
-    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
-    ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
-    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    Topic,
+    InjectedPullRequestTools, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState,
+    PluginChallenge, PluginChallengeKind, PluginOperationTarget, PluginStaleReason,
+    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
+    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice,
@@ -83,6 +83,8 @@ pub use wire::{
 // idle-auto-archive settings are removed.
 // Unreleased: stored messages carry human/agent/server origin; absent origin
 // uses the historical top-level human / dispatched child agent fallback.
+// Unreleased: a pull request watch on linked PRs; the WatchPullRequest command,
+// the PullRequestWatch toast and SessionStatus.pull_request_tools.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

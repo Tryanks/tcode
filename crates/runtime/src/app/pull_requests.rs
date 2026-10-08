@@ -126,7 +126,7 @@ impl AppState {
             tokens.revoke(&registration.bearer_token);
         }
     }
-    fn handle_pull_request_request(
+    pub(super) fn handle_pull_request_request(
         &mut self,
         request: pull_request_mcp::BrokerRequest,
         cx: &mut HostCx,
@@ -194,9 +194,12 @@ impl AppState {
                 .try_send(Ok(serde_json::json!({"pullRequests":rows,"chains":chains})));
             return;
         }
-        let (target, linking) = match request.operation {
-            Operation::Link(target) => (target, true),
-            Operation::Unlink(target) => (target, false),
+        // `Some(linking)` links or unlinks; `None(watching)` starts or stops a watch.
+        let (target, linking, watching) = match request.operation {
+            Operation::Link(target) => (target, Some(true), false),
+            Operation::Unlink(target) => (target, Some(false), false),
+            Operation::Watch(target) => (target, None, true),
+            Operation::Unwatch(target) => (target, None, false),
             Operation::List => unreachable!(),
         };
         let cwd = self.pull_request_project_cwd(&meta);
@@ -222,6 +225,15 @@ impl AppState {
                 .await;
             host.enqueue(move |state, cx| {
                 let result = target.and_then(|(key, url)| {
+                    let Some(linking) = linking else {
+                        return state.watch_pull_request_from_agent(
+                            &request.session_id,
+                            key,
+                            url,
+                            watching,
+                            cx,
+                        );
+                    };
                     let linked = state
                         .find_meta(&request.session_id)
                         .ok_or_else(|| "Thread disappeared.".to_owned())?
@@ -298,7 +310,7 @@ impl AppState {
             })
         })
     }
-    fn save_pull_request_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
+    pub(super) fn save_pull_request_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         if let Some(resident) = self.meta_mut(&meta.id) {
             resident.pull_requests.clone_from(&meta.pull_requests);
         }
@@ -340,6 +352,7 @@ impl AppState {
             return;
         }
         if pull_request::unlink_pull_request(&mut meta.pull_requests, key) {
+            self.discard_pull_request_wakes(id, Some(key));
             self.save_pull_request_meta(meta, cx);
         }
     }
@@ -357,7 +370,7 @@ impl AppState {
             }
         }
     }
-    fn request_pull_request_sync(&mut self, key: PullRequestKey, cx: &mut HostCx) {
+    pub(super) fn request_pull_request_sync(&mut self, key: PullRequestKey, cx: &mut HostCx) {
         self.pull_requests.generation += 1;
         self.pull_requests
             .requested
@@ -377,6 +390,7 @@ impl AppState {
     }
     pub(super) fn stop_pull_request_workers(&mut self) {
         self.pull_requests.workers.clear();
+        self.stop_pull_request_watch_worker();
     }
     pub(crate) fn start_pull_request_workers(&mut self, cx: &mut HostCx) {
         for discovery in [false, true] {
@@ -399,6 +413,7 @@ impl AppState {
             });
             self.pull_requests.workers.push(task);
         }
+        self.start_pull_request_watch_worker(cx);
     }
     pub(super) fn sweep_pull_requests(
         &mut self,

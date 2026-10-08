@@ -5,12 +5,7 @@ use std::sync::Mutex;
 use tcode_core::pull_request::PullRequestStack;
 use tcode_services::{github::Credentials, settings::SettingsStore};
 
-#[path = "../../../services/tests/support/github.rs"]
-#[allow(
-    dead_code,
-    reason = "The same HTTP fixture also supplies exchange helpers to services tests."
-)]
-mod fixture;
+use crate::app::test_support::github_fixture as fixture;
 
 struct HostReply {
     state: &'static str,
