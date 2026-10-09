@@ -7,10 +7,10 @@
 //! `on_drop`, and GPUI does not cancel a drag on Escape by itself.
 
 use super::*;
-use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity};
+use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity, deferred};
 use tcode_core::thread_sort::{order_key_between, plan_reorder, thread_section};
 
-const BOUNDARY_LABEL_HEIGHT: f32 = 24.;
+const BOUNDARY_LABEL_HEIGHT: f32 = 18.;
 const EMPTY_TARGET_HEIGHT: f32 = 36.;
 const ARRANGE_HANDLE_SIZE: f32 = 44.;
 
@@ -777,43 +777,46 @@ impl SessionsSidebar {
                 .drop_zone(target, DropZone::Start(section), scope, 0., cx)
                 .into_any_element();
         }
-        // The first section starts the list, so its label sits inside the
-        // first row; the second straddles the seam between the sections.
-        let top = match section {
-            ThreadSection::Pinned => 0.,
-            _ => -BOUNDARY_LABEL_HEIGHT / 2.,
+        let rule = if targeted {
+            cx.theme().primary.opacity(0.5)
+        } else {
+            cx.theme().border
         };
+        // Deferred so the label paints after the rows on both sides of the
+        // seam, centered on the seam rather than on a row's title line. The
+        // sidebar background is transparent, so the hairline stops at the pill
+        // instead of running under it.
         div()
             .relative()
             .w_full()
             .h_0()
-            .child(
+            .child(deferred(
                 h_flex()
                     .absolute()
-                    .top(px(top))
+                    .top(px(-BOUNDARY_LABEL_HEIGHT / 2.))
                     .left_0()
                     .right_0()
                     .h(px(BOUNDARY_LABEL_HEIGHT))
-                    .px_2()
-                    .gap_2()
+                    .gap_1()
                     .items_center()
+                    .child(div().flex_none().w_2().h(px(1.)).bg(rule))
                     .child(
                         div()
                             .flex_none()
-                            .px_1()
-                            .rounded(cx.theme().tokens.radius.sm)
-                            .bg(cx.theme().sidebar)
-                            .text_size(px(12.))
-                            .font_medium()
-                            .text_color(color)
+                            .px_1p5()
+                            .rounded_full()
+                            .bg(cx.theme().muted)
+                            .text_size(px(11.))
+                            .line_height(px(BOUNDARY_LABEL_HEIGHT))
+                            .text_color(if targeted {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().muted_foreground
+                            })
                             .child(label),
                     )
-                    .child(div().flex_1().h(px(1.)).bg(if targeted {
-                        cx.theme().primary.opacity(0.5)
-                    } else {
-                        cx.theme().sidebar_foreground.opacity(0.25)
-                    })),
-            )
+                    .child(div().flex_1().h(px(1.)).bg(rule)),
+            ))
             .into_any_element()
     }
 
