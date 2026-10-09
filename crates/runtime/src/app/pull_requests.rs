@@ -367,6 +367,10 @@ impl AppState {
                     reads.reviewer_candidates(&key)?,
                     PullRequestReadResponse::ReviewerCandidates,
                 ),
+                PullRequestRead::ActionState => reply(
+                    reads.action_state(&key)?,
+                    PullRequestReadResponse::ActionState,
+                ),
                 PullRequestRead::Media { url, validator } => {
                     let media = reads.media(&key, &url, validator.as_deref())?;
                     let expires_at = match &media {
@@ -463,7 +467,8 @@ impl AppState {
         })
     }
     /// A write to the pull request. Whenever GitHub may have applied it, the sync reads the pull
-    /// request again. A review takes the account's draft and leaves it only once GitHub took it.
+    /// request again. A review takes the account's draft and leaves it only once GitHub took it;
+    /// a revert's new pull request is linked to the thread.
     pub fn run_pull_request_action(
         &mut self,
         session_id: &str,
@@ -473,6 +478,34 @@ impl AppState {
     ) -> HostTask<Result<CommandResponse, ProtocolError>> {
         if let Err(error) = self.linked_pull_request(session_id, &key) {
             return cx.spawn_background(async move { Err(error) });
+        }
+        // A native stack merges a layer with the layers below it, which is not one pull request's
+        // merge; until that route exists, nothing is sent for one, nor for a pull request whose
+        // stack is not known yet.
+        if matches!(
+            action,
+            PullRequestAction::Merge { .. } | PullRequestAction::UpdateBranch { .. }
+        ) {
+            let links = self
+                .find_meta(session_id)
+                .map(|meta| meta.pull_requests)
+                .unwrap_or_default();
+            let rejection = match pull_request::stack_route(&links, &key).0 {
+                pull_request::PullRequestStackRoute::Single => None,
+                pull_request::PullRequestStackRoute::Layer { index, layers } => {
+                    Some(tcode_protocol::PullRequestRejection::InStack { index, layers })
+                }
+                pull_request::PullRequestStackRoute::Unknown => {
+                    Some(tcode_protocol::PullRequestRejection::StackUnknown)
+                }
+            };
+            if let Some(rejection) = rejection {
+                return cx.spawn_background(async move {
+                    Ok(CommandResponse::PullRequestAction(
+                        PullRequestActionResult::Rejected(rejection),
+                    ))
+                });
+            }
         }
         let drafts = self.review_drafts(session_id);
         let reads = self.pull_requests.reads.clone();
@@ -513,8 +546,27 @@ impl AppState {
             let (review, outcome) = task.await;
             if !matches!(outcome, PullRequestActionResult::Rejected(_)) {
                 let applied = outcome == PullRequestActionResult::Applied;
+                let opened = match &outcome {
+                    PullRequestActionResult::Opened { number, url } => Some((
+                        PullRequestKey::new(&key.host, &key.repository, *number),
+                        url.clone(),
+                    )),
+                    _ => None,
+                };
                 let _ = host
                     .enqueue_and_wait(move |state, cx| {
+                        if let Some((opened, url)) = opened
+                            && let Err(error) = state.apply_pull_request_link(
+                                &id,
+                                opened,
+                                url,
+                                PullRequestSource::Created,
+                                true,
+                                cx,
+                            )
+                        {
+                            log::warn!("the revert pull request was not linked: {error}");
+                        }
                         if let Some((account, ids, body)) = review {
                             state.pull_requests.submissions += 1;
                             if let Some(mut meta) = state.find_meta(&id)

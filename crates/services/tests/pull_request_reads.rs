@@ -4,7 +4,7 @@ use std::{
     thread,
 };
 use tcode_core::{
-    pull_request::{PullRequestKey, PullRequestReviewDraftComment},
+    pull_request::{PullRequestKey, PullRequestMergeMethod, PullRequestReviewDraftComment},
     session::ReviewSide,
 };
 use tcode_protocol::{
@@ -1580,7 +1580,8 @@ fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
     let fixture = Fixture::new();
     let store = Store::new();
     let reads = reads(&fixture, &store);
-    let (_server, log) = serve(fixture, |seen| {
+    let model = Mutex::new(Lifecycle::default());
+    let (_server, log) = serve(fixture, move |seen| {
         if seen
             .line
             .starts_with("POST /repos/octo/repo/issues/7/labels ")
@@ -1588,8 +1589,11 @@ fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
             return (502, String::new(), Vec::new());
         }
         match seen.operation().as_deref() {
-            Some("AddPullRequestComment") => (0, String::new(), Vec::new()),
-            _ => writes_reply(seen),
+            Some("AddPullRequestComment" | "MergePullRequest") => (0, String::new(), Vec::new()),
+            Some("RevertPullRequest") => {
+                json_reply(json!({"data": {"revertPullRequest": {"revertPullRequest": null}}}))
+            }
+            _ => lifecycle_reply(&model, seen),
         }
     });
     let sent = |prefix: &str| {
@@ -1623,10 +1627,308 @@ fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
         "a server failure may have applied the write"
     );
     assert_eq!(
+        reads.act(
+            &key(),
+            &PullRequestAction::Merge {
+                head: HEAD.into(),
+                method: PullRequestMergeMethod::Squash,
+                auto: false,
+                remove_credits: false,
+            }
+        ),
+        PullRequestActionResult::Uncertain,
+        "a merge whose answer was lost may have merged"
+    );
+    assert_eq!(
+        reads.act(&key(), &PullRequestAction::Revert),
+        PullRequestActionResult::Uncertain,
+        "an answer that names no revert may still have opened one"
+    );
+    assert_eq!(
         (
             sent("AddPullRequestComment"),
-            sent("POST /repos/octo/repo/issues/7/labels ")
+            sent("POST /repos/octo/repo/issues/7/labels "),
+            sent("MergePullRequest"),
+            sent("RevertPullRequest"),
         ),
-        (1, 1)
+        (1, 1, 1, 1)
+    );
+}
+
+/// What GitHub holds of the pull request that the lifecycle reads and writes see.
+struct Lifecycle {
+    head: &'static str,
+    merge_state: &'static str,
+    behind_by: u64,
+    queue: bool,
+    rebase_allowed: bool,
+    message: &'static str,
+}
+
+impl Default for Lifecycle {
+    fn default() -> Self {
+        Self {
+            head: HEAD,
+            merge_state: "CLEAN",
+            behind_by: 2,
+            queue: false,
+            rebase_allowed: true,
+            message: "Fix the parser\n\nCo-authored-by: Ada <ada@example.com>",
+        }
+    }
+}
+
+fn lifecycle_reply(model: &Mutex<Lifecycle>, seen: &Seen) -> (u16, String, Vec<u8>) {
+    let model = model.lock().unwrap();
+    match seen.operation().as_deref() {
+        Some("PullRequestActionState") => json_reply(json!({"data": {"repository": {
+            "viewerPermission": "WRITE",
+            "mergeCommitAllowed": true, "squashMergeAllowed": true, "rebaseMergeAllowed": model.rebase_allowed,
+            "autoMergeAllowed": true,
+            "pullRequest": {
+                "id": "PR_node_7", "headRefOid": model.head,
+                "isMergeQueueEnabled": model.queue, "mergeStateStatus": model.merge_state,
+                "viewerCanUpdate": true, "viewerCanUpdateBranch": true,
+                "autoMergeRequest": null, "mergeQueueEntry": null,
+                "baseRef": {"compare": {"behindBy": model.behind_by}},
+                "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
+                    {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    {"__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": null},
+                ]}}}}]},
+            },
+        }}})),
+        Some("PullRequestMergeMessage") => {
+            json_reply(json!({"data": {"repository": {"pullRequest": {
+                "isMergeQueueEnabled": model.queue, "headRefOid": model.head,
+                "viewerMergeBodyText": model.message,
+            }}}}))
+        }
+        // GitHub merges at once, queues behind a merge queue, or arms auto-merge otherwise.
+        Some("MergePullRequest") => {
+            json_reply(json!({"data": {"mergePullRequest": {"pullRequest": {
+                "merged": true, "mergeQueueEntry": null, "autoMergeRequest": null,
+            }}}}))
+        }
+        Some("EnablePullRequestAutoMerge") => {
+            let method = seen.variables()["input"]["mergeMethod"].clone();
+            json_reply(
+                json!({"data": {"enablePullRequestAutoMerge": {"pullRequest": if model.queue {
+                    json!({"merged": false, "mergeQueueEntry": {"position": 2}, "autoMergeRequest": null})
+                } else {
+                    json!({"merged": false, "mergeQueueEntry": null, "autoMergeRequest": {"mergeMethod": method}})
+                }}}}),
+            )
+        }
+        Some("RevertPullRequest") => json_reply(json!({"data": {"revertPullRequest": {
+            "revertPullRequest": {"number": 8, "url": "https://github.com/octo/repo/pull/8"},
+        }}})),
+        _ => writes_reply(seen),
+    }
+}
+
+fn reads_of(log: &Log, operation: &str) -> usize {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|seen| seen.operation().as_deref() == Some(operation))
+        .count()
+}
+
+fn merge(method: PullRequestMergeMethod, auto: bool) -> PullRequestAction {
+    PullRequestAction::Merge {
+        head: HEAD.into(),
+        method,
+        auto,
+        remove_credits: false,
+    }
+}
+
+#[test]
+fn a_merge_reads_the_head_fresh_and_tells_merged_queued_and_armed_apart() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let model = Arc::new(Mutex::new(Lifecycle::default()));
+    let answering = model.clone();
+    let (_server, log) = serve(fixture, move |seen| lifecycle_reply(&answering, seen));
+    use PullRequestMergeMethod::*;
+
+    let state = reads.action_state(&key()).unwrap().value;
+    assert_eq!(
+        (
+            state.merge_methods.clone(),
+            state.failing_checks.clone(),
+            state.pending_checks,
+            state.behind_by
+        ),
+        (
+            vec![Merge, Squash, Rebase],
+            vec!["lint".to_owned()],
+            1,
+            Some(2)
+        )
+    );
+
+    assert_eq!(
+        reads.act(&key(), &merge(Squash, false)),
+        PullRequestActionResult::Applied
+    );
+    assert_eq!(
+        reads.act(&key(), &merge(Merge, true)),
+        PullRequestActionResult::Applied,
+        "auto-merge asked of a pull request that can merge now merges it"
+    );
+    model.lock().unwrap().merge_state = "BLOCKED";
+    assert_eq!(
+        reads.act(&key(), &merge(Squash, true)),
+        PullRequestActionResult::AutoMergeEnabled { method: Squash }
+    );
+    model.lock().unwrap().queue = true;
+    assert_eq!(
+        reads.act(&key(), &merge(Rebase, false)),
+        PullRequestActionResult::Queued { position: Some(2) },
+        "a merge queue takes the pull request; it is not merged"
+    );
+    model.lock().unwrap().rebase_allowed = false;
+    assert_eq!(
+        reads.act(&key(), &merge(Rebase, false)),
+        PullRequestActionResult::Rejected(PullRequestRejection::Invalid),
+        "a method the repository does not allow sends nothing"
+    );
+    model.lock().unwrap().head = BASE;
+    assert_eq!(
+        reads.act(&key(), &merge(Squash, false)),
+        PullRequestActionResult::Rejected(PullRequestRejection::StaleHead { head: BASE.into() }),
+        "a head that moved since the user looked sends nothing"
+    );
+
+    let input = |method: &str| json!({"input": {"pullRequestId": "PR_node_7", "mergeMethod": method, "expectedHeadOid": HEAD}});
+    assert_eq!(
+        mutations(&log),
+        vec![
+            ("MergePullRequest".into(), input("SQUASH")),
+            ("MergePullRequest".into(), input("MERGE")),
+            ("EnablePullRequestAutoMerge".into(), input("SQUASH")),
+            ("EnablePullRequestAutoMerge".into(), input("REBASE")),
+        ]
+    );
+}
+
+#[test]
+fn credits_leave_the_merge_message_only_when_it_has_some() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let model = Arc::new(Mutex::new(Lifecycle::default()));
+    let answering = model.clone();
+    let (_server, log) = serve(fixture, move |seen| lifecycle_reply(&answering, seen));
+    let cleaning = |method| PullRequestAction::Merge {
+        head: HEAD.into(),
+        method,
+        auto: false,
+        remove_credits: true,
+    };
+
+    reads.act(&key(), &cleaning(PullRequestMergeMethod::Squash));
+    model.lock().unwrap().message = "Fix the parser\n\nCo-authored-by: Ada <ada@example.com>\nCo-authored-by: Claude <noreply@anthropic.com>\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n";
+    reads.act(&key(), &cleaning(PullRequestMergeMethod::Merge));
+    reads.act(&key(), &cleaning(PullRequestMergeMethod::Rebase));
+
+    let bodies: Vec<_> = mutations(&log)
+        .into_iter()
+        .map(|(_, variables)| variables["input"]["commitBody"].clone())
+        .collect();
+    assert_eq!(
+        bodies,
+        vec![
+            Value::Null,
+            json!("Fix the parser\n\nCo-authored-by: Ada <ada@example.com>"),
+            Value::Null,
+        ],
+        "a message with no agent credit is GitHub's own; people stay credited"
+    );
+    assert_eq!(
+        reads_of(&log, "PullRequestMergeMessage"),
+        2,
+        "rebasing keeps each commit's message, so none is read"
+    );
+}
+
+#[test]
+fn a_branch_update_carries_the_head_and_is_nothing_when_not_behind() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let model = Arc::new(Mutex::new(Lifecycle::default()));
+    let answering = model.clone();
+    let (_server, log) = serve(fixture, move |seen| lifecycle_reply(&answering, seen));
+    let update = |head: &str, rebase| PullRequestAction::UpdateBranch {
+        head: head.into(),
+        rebase,
+    };
+
+    assert_eq!(
+        reads.act(&key(), &update(HEAD, false)),
+        PullRequestActionResult::Applied
+    );
+    assert_eq!(
+        reads.act(&key(), &update(HEAD, true)),
+        PullRequestActionResult::Applied
+    );
+    assert_eq!(
+        reads.act(&key(), &update(BASE, false)),
+        PullRequestActionResult::Rejected(PullRequestRejection::StaleHead { head: HEAD.into() })
+    );
+    model.lock().unwrap().behind_by = 0;
+    assert_eq!(
+        reads.act(&key(), &update(HEAD, false)),
+        PullRequestActionResult::UpToDate
+    );
+    let update = |method: &str| {
+        (
+            "UpdatePullRequestBranch".to_owned(),
+            json!({"pullRequestId": "PR_node_7", "expectedHeadOid": HEAD, "updateMethod": method}),
+        )
+    };
+    assert_eq!(mutations(&log), vec![update("MERGE"), update("REBASE")]);
+}
+
+#[test]
+fn lifecycle_writes_name_the_pull_request_and_a_revert_opens_one() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let model = Arc::new(Mutex::new(Lifecycle::default()));
+    let (_server, log) = serve(fixture, move |seen| lifecycle_reply(&model, seen));
+
+    for action in [
+        PullRequestAction::ReadyForReview,
+        PullRequestAction::ConvertToDraft,
+        PullRequestAction::Close,
+        PullRequestAction::Reopen,
+        PullRequestAction::DisableAutoMerge,
+    ] {
+        assert_eq!(reads.act(&key(), &action), PullRequestActionResult::Applied);
+    }
+    assert_eq!(
+        reads.act(&key(), &PullRequestAction::Revert),
+        PullRequestActionResult::Opened {
+            number: 8,
+            url: "https://github.com/octo/repo/pull/8".into()
+        }
+    );
+    let named = json!({"pullRequestId": "PR_node_7"});
+    assert_eq!(
+        mutations(&log),
+        [
+            "MarkPullRequestReady",
+            "ConvertPullRequestToDraft",
+            "ClosePullRequest",
+            "ReopenPullRequest",
+            "DisablePullRequestAutoMerge",
+            "RevertPullRequest",
+        ]
+        .map(|operation| (operation.to_owned(), named.clone()))
+        .to_vec()
     );
 }

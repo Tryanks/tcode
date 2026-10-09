@@ -313,7 +313,7 @@ fn check_status(raw: &Value) -> CheckStatus {
 
 /// One check per name and workflow, keeping its newest run: a rerun replaces the run before it
 /// where it stood. Survivors sharing a name across workflows are written `workflow / name`.
-fn checks(contexts: &[Value]) -> Vec<PullRequestCheck> {
+pub(super) fn checks(contexts: &[Value]) -> Vec<PullRequestCheck> {
     let at = |raw: &Value, field: &str| {
         trimmed(&raw[field]).filter(|value| value != "0001-01-01T00:00:00Z")
     };

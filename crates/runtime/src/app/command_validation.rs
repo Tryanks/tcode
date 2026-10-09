@@ -47,7 +47,8 @@ impl AppState {
         };
         self.validate_plugin_command(command)?;
         if let Command::PatchSettings { patch } = command {
-            if let SettingsPatch::ProjectSettlement { project_id, .. } = patch
+            if let SettingsPatch::ProjectSettlement { project_id, .. }
+            | SettingsPatch::ProjectMergeMethod { project_id, .. } = patch
                 && !self
                     .projects
                     .iter()

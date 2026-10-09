@@ -11,15 +11,16 @@ mod pull_request;
 mod query;
 pub use preview::{PreviewRequest, PreviewResponse};
 pub use pull_request::{
-    MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult, PullRequestActor,
-    PullRequestComment, PullRequestConversation, PullRequestFile, PullRequestFileText,
-    PullRequestFiles, PullRequestLabel, PullRequestLabelCandidate, PullRequestLabelCandidates,
-    PullRequestMedia, PullRequestPatch, PullRequestPermissions, PullRequestReaction,
-    PullRequestReactionContent, PullRequestRead, PullRequestReadResponse, PullRequestRejection,
-    PullRequestReviewAnchor, PullRequestReviewState, PullRequestReviewThread,
-    PullRequestReviewVerdict, PullRequestReviewer, PullRequestReviewerCandidate,
-    PullRequestReviewerCandidates, PullRequestReviewerKind, PullRequestReviewerState,
-    PullRequestThreadReplies, PullRequestViewedFiles, PullRequestViewedState,
+    MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult,
+    PullRequestActionState, PullRequestActor, PullRequestComment, PullRequestConversation,
+    PullRequestFile, PullRequestFileText, PullRequestFiles, PullRequestLabel,
+    PullRequestLabelCandidate, PullRequestLabelCandidates, PullRequestMedia, PullRequestMergeState,
+    PullRequestPatch, PullRequestPermissions, PullRequestReaction, PullRequestReactionContent,
+    PullRequestRead, PullRequestReadResponse, PullRequestRejection, PullRequestReviewAnchor,
+    PullRequestReviewState, PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestReviewerKind,
+    PullRequestReviewerState, PullRequestThreadReplies, PullRequestViewedFiles,
+    PullRequestViewedState,
 };
 pub mod terminal;
 mod wire;
@@ -123,6 +124,12 @@ pub use wire::{
 // candidates; a reaction's content is a typed name; the conversation carries
 // the account's permissions, labels and reviewers, and comments and threads
 // what the account may do to them.
+// Unreleased: RunPullRequestAction also marks ready, converts to draft,
+// closes, reopens, reverts, updates the branch, merges and disables
+// auto-merge, answering UpToDate, Queued, AutoMergeEnabled and Opened, or a
+// rejection InStack or StackUnknown; Query::PullRequest reads ActionState;
+// settings carry project_merge_methods and remove_agent_credits_on_merge,
+// patched by ProjectMergeMethod and RemoveAgentCreditsOnMerge.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

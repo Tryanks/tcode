@@ -456,6 +456,23 @@ impl Composer {
         self.set_input_text(prefill, window, cx);
     }
 
+    /// Text another surface put here goes after what the user typed, which it never replaces.
+    fn sync_composer_append(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .workspace_store
+            .update(cx, |store, _cx| store.take_composer_append())
+        else {
+            return;
+        };
+        let typed = self.input.read(cx).value().trim_end().to_owned();
+        let text = if typed.is_empty() {
+            text
+        } else {
+            format!("{typed}\n\n{text}")
+        };
+        self.set_input_text(text, window, cx);
+    }
+
     /// Replace the composer text with `text`, caret at the end.
     /// Software-keyboard devices wait for an explicit tap to focus.
     fn set_input_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1018,6 +1035,7 @@ impl Render for Composer {
         self.sync_text_destination(window, cx);
         self.sync_queued_refill(window, cx);
         self.sync_native_rewind_prefill(window, cx);
+        self.sync_composer_append(window, cx);
         self.sync_fallback_review_draft(window, cx);
         let composer_state = self.workspace_store.read(cx).composer_state();
         let readonly = composer_state.conversation_read_only;

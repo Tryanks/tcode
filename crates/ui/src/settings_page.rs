@@ -1319,7 +1319,7 @@ impl SettingsPage {
             Section::General => self.render_general(cx),
             Section::ThreadBehavior => self.render_thread_behavior(cx),
             Section::ProjectThreadRules => v_flex().children(self.project_rules_editor.clone()),
-            Section::SourceControl => v_flex().child(self.github_panel.clone()),
+            Section::SourceControl => self.render_source_control(cx),
             Section::Providers => self.render_providers(window, cx),
             Section::Usage => self.render_usage(cx),
             Section::Browser => self.render_browser(cx),
@@ -2737,6 +2737,31 @@ impl SettingsPage {
             .py_2p5()
             .gap_3()
             .items_center()
+    }
+
+    fn render_source_control(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let remove_credits = self.store.read(cx).settings().remove_agent_credits_on_merge;
+        let reset = self.reset_action(
+            "reset-remove-agent-credits",
+            remove_credits,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(|store| store.set_remove_agent_credits_on_merge(false), cx)
+            },
+        );
+        let row = self.toggle_row(
+            "remove-agent-credits",
+            crate::tr!("source_control.remove_agent_credits"),
+            crate::tr!("source_control.remove_agent_credits_description"),
+            remove_credits,
+            reset,
+            cx,
+            WorkspaceStore::set_remove_agent_credits_on_merge,
+        );
+        v_flex()
+            .gap(px(24.))
+            .child(self.github_panel.clone())
+            .child(self.grouped_plain(vec![row], cx))
     }
 
     #[allow(clippy::too_many_arguments)]
