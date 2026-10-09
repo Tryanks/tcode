@@ -1086,6 +1086,7 @@ impl PullRequestView {
             (state.can_update_branch && state.capabilities.update_branch && !self.read_only(cx))
                 .then(|| key.clone());
         let busy = offer.busy;
+        let merges = super::lifecycle::merges_base(Some(state));
         let chip = Button::new("pr-behind")
             .ghost()
             .compact()
@@ -1101,17 +1102,21 @@ impl PullRequestView {
                             kind,
                         })
                     };
-                    menu.label(tooltip.clone())
-                        .menu_with_enable(
+                    let menu = menu.label(tooltip.clone());
+                    let menu = if merges {
+                        menu.menu_with_enable(
                             crate::tr!("pull_requests.actions.update_branch").into_owned(),
                             item(super::lifecycle::Lifecycle::UpdateBranch),
                             !busy,
                         )
-                        .menu_with_enable(
-                            crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
-                            item(super::lifecycle::Lifecycle::UpdateRebase),
-                            !busy,
-                        )
+                    } else {
+                        menu
+                    };
+                    menu.menu_with_enable(
+                        crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
+                        item(super::lifecycle::Lifecycle::UpdateRebase),
+                        !busy,
+                    )
                 })
                 .into_any_element(),
             // News, not an offer, for an account that may not update the branch.
