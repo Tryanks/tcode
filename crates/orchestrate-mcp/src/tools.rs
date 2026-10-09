@@ -130,8 +130,29 @@ struct SendParams {
     fast: Option<bool>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DispatchBatch {
+    #[schemars(
+        description = "One entry per child thread to open. All entries start concurrently; the response lists one object per entry in the same order, each carrying the entry's title and either its thread_id or an error."
+    )]
+    children: Vec<DispatchParams>,
+}
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SendBatch {
+    #[schemars(
+        description = "One entry per message, each to one child thread. The response lists one object per entry in the same order, each carrying the entry's thread_id and either its delivery or an error."
+    )]
+    messages: Vec<SendParams>,
+}
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ThreadParams {
     thread_id: String,
+}
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ThreadsParams {
+    #[schemars(
+        description = "Child thread ids. The response lists one object per id in the same order, each carrying the thread_id and either the outcome or an error."
+    )]
+    thread_ids: Vec<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ApproveParams {
@@ -172,28 +193,32 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch concrete execution work to an enabled execution-model profile in a new child Tcode thread. Use collaborate for peer decision discussions. Dispatch a brief to the thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. permission selects an exact native value listed for the target profile; omit it to use the child approval setting. The response records the resolved permission value. worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. When you accept the child's result, settle it: an unsettled finished child is not delivered and keeps your thread waiting. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
+        description = "Dispatch concrete execution work to enabled execution-model profiles, one new child Tcode thread per entry in children. Use collaborate for peer decision discussions. Entries start concurrently, so put every child that can advance at once in one call; the response lists one object per entry in order with its title and thread_id, or an error for that entry alone (the call fails only when every entry failed). profile is the provider-profile id from the fleet table, required when the entry names one. permission selects an exact native value listed for the target profile; omit it to use the child approval setting. Each entry's response records the resolved permission value. worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. When you accept a child's result, settle it: an unsettled finished child is not delivered and keeps your thread waiting. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
     )]
-    async fn dispatch(&self, Parameters(p): Parameters<DispatchParams>) -> CallToolResult {
-        run_op(
-            &self.broker,
-            OrchestrateOp::Dispatch {
-                purpose: ThreadPurpose::Execution,
-                parent_id: self.parent_id.clone(),
-                provider: p.provider,
-                model: p.model,
-                effort: p.effort,
-                profile: p.profile,
-                permission: p.permission,
-                title: p.title,
-                brief: p.brief,
-                cwd: p.cwd,
-                worktree: p.worktree,
-                result_max_chars: p.result_max_chars,
-                fast: p.fast,
-            },
-        )
-        .await
+    async fn dispatch(&self, Parameters(p): Parameters<DispatchBatch>) -> CallToolResult {
+        let ops = p
+            .children
+            .into_iter()
+            .map(|p| {
+                let op = OrchestrateOp::Dispatch {
+                    purpose: ThreadPurpose::Execution,
+                    parent_id: self.parent_id.clone(),
+                    provider: p.provider,
+                    model: p.model,
+                    effort: p.effort,
+                    profile: p.profile,
+                    permission: p.permission,
+                    title: p.title.clone(),
+                    brief: p.brief,
+                    cwd: p.cwd,
+                    worktree: p.worktree,
+                    result_max_chars: p.result_max_chars,
+                    fast: p.fast,
+                };
+                (("title", p.title), op)
+            })
+            .collect();
+        run_ops(&self.broker, ops).await
     }
 
     #[tool(
@@ -236,19 +261,23 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Send a follow-up message to one of this session's child threads. If the child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. The response reports which (delivery: steered | queued). A settled, cancelled or archived child reopens and must be settled again once you accept its new result."
+        description = "Send follow-up messages to this session's child threads, one entry per message in messages. If a child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. The response lists one object per entry in order with its thread_id and which happened (delivery: steered | queued), or an error for that entry alone. A settled, cancelled or archived child reopens and must be settled again once you accept its new result."
     )]
-    async fn send(&self, Parameters(p): Parameters<SendParams>) -> CallToolResult {
-        run_op(
-            &self.broker,
-            OrchestrateOp::Send {
-                parent_id: self.parent_id.clone(),
-                thread_id: p.thread_id,
-                message: p.message,
-                fast: p.fast,
-            },
-        )
-        .await
+    async fn send(&self, Parameters(p): Parameters<SendBatch>) -> CallToolResult {
+        let ops = p
+            .messages
+            .into_iter()
+            .map(|p| {
+                let op = OrchestrateOp::Send {
+                    parent_id: self.parent_id.clone(),
+                    thread_id: p.thread_id.clone(),
+                    message: p.message,
+                    fast: p.fast,
+                };
+                (("thread_id", p.thread_id), op)
+            })
+            .collect();
+        run_ops(&self.broker, ops).await
     }
 
     #[tool(description = "Read a finished child thread's final assistant message.")]
@@ -264,31 +293,39 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Cancel and shut down one of this session's child threads. Its result is kept but not delivered, and it no longer keeps your thread waiting. To accept a result, use settle instead."
+        description = "Cancel and shut down this session's child threads named in thread_ids. Their results are kept but not delivered, and they no longer keep your thread waiting. The response lists one object per id in order, or an error for that id alone. To accept a result, use settle instead."
     )]
-    async fn cancel(&self, Parameters(p): Parameters<ThreadParams>) -> CallToolResult {
-        run_op(
-            &self.broker,
-            OrchestrateOp::Cancel {
-                parent_id: self.parent_id.clone(),
-                thread_id: p.thread_id,
-            },
-        )
-        .await
+    async fn cancel(&self, Parameters(p): Parameters<ThreadsParams>) -> CallToolResult {
+        let ops = p
+            .thread_ids
+            .into_iter()
+            .map(|thread_id| {
+                let op = OrchestrateOp::Cancel {
+                    parent_id: self.parent_id.clone(),
+                    thread_id: thread_id.clone(),
+                };
+                (("thread_id", thread_id), op)
+            })
+            .collect();
+        run_ops(&self.broker, ops).await
     }
 
     #[tool(
-        description = "Settle one of this session's finished child threads once you have accepted its result. Settling is the delivery: until then a finished child is not delivered and keeps your thread waiting. The child's provider stops; send reopens it. Refused while the child still runs or waits for an answer."
+        description = "Settle this session's finished child threads named in thread_ids once you have accepted their results. Settling is the delivery: until then a finished child is not delivered and keeps your thread waiting. Each child's provider stops; send reopens it. The response lists one object per id in order; an id is refused with an error of its own while that child still runs or waits for an answer."
     )]
-    async fn settle(&self, Parameters(p): Parameters<ThreadParams>) -> CallToolResult {
-        run_op(
-            &self.broker,
-            OrchestrateOp::Settle {
-                parent_id: self.parent_id.clone(),
-                thread_id: p.thread_id,
-            },
-        )
-        .await
+    async fn settle(&self, Parameters(p): Parameters<ThreadsParams>) -> CallToolResult {
+        let ops = p
+            .thread_ids
+            .into_iter()
+            .map(|thread_id| {
+                let op = OrchestrateOp::Settle {
+                    parent_id: self.parent_id.clone(),
+                    thread_id: thread_id.clone(),
+                };
+                (("thread_id", thread_id), op)
+            })
+            .collect();
+        run_ops(&self.broker, ops).await
     }
 
     #[tool(
@@ -352,6 +389,37 @@ impl ChildReportTools {
     }
 }
 
+/// Run one op per entry concurrently and answer with one object per entry in
+/// the same order, tagged with the entry's `(key, label)`. An entry that fails
+/// carries its own `error`; the call as a whole fails only when every entry
+/// did, so one bad entry does not hide the children that did start.
+async fn run_ops(
+    broker: &Broker,
+    ops: Vec<((&'static str, String), OrchestrateOp)>,
+) -> CallToolResult {
+    if ops.is_empty() {
+        return CallToolResult::error(vec![ContentBlock::text("no entries")]);
+    }
+    let items = futures::future::join_all(ops.into_iter().map(|((key, label), op)| async move {
+        let mut item = broker
+            .invoke(|reply| crate::BrokerRequest { op, reply })
+            .await
+            .unwrap_or_else(|error| serde_json::json!({ "error": error }));
+        if let serde_json::Value::Object(map) = &mut item {
+            map.insert(key.to_string(), serde_json::Value::String(label));
+        }
+        item
+    }))
+    .await;
+    let all_failed = items.iter().all(|item| item.get("error").is_some());
+    let text = ContentBlock::text(serde_json::Value::Array(items).to_string());
+    if all_failed {
+        CallToolResult::error(vec![text])
+    } else {
+        CallToolResult::success(vec![text])
+    }
+}
+
 async fn run_op(broker: &Broker, op: OrchestrateOp) -> CallToolResult {
     match broker
         .invoke(|reply| crate::BrokerRequest { op, reply })
@@ -390,7 +458,7 @@ impl ServerHandler for OrchestrateTools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted.")
+            .with_instructions("Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted. dispatch, send, cancel and settle take a list, so act on every child that is ready in one call.")
     }
 }
 
@@ -495,9 +563,13 @@ mod tests {
             }
         });
         let result = tools.dispatch(Parameters(serde_json::from_value(serde_json::json!({
-            "provider":"codex", "permission":"auto_review", "title":"Inspect", "brief":"Inspect the code"
+            "children": [{"provider":"codex", "permission":"auto_review", "title":"Inspect", "brief":"Inspect the code"}]
         })).unwrap())).await;
         assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            text(&result),
+            serde_json::json!([{"thread_id":"child", "permission":"auto_review", "title":"Inspect"}])
+        );
         for params in [
             serde_json::json!({"thread_id":"child", "option":"Allow:Session"}),
             serde_json::json!({"thread_id":"child", "cancel":true}),
@@ -507,6 +579,89 @@ mod tests {
                 .await;
             assert_eq!(result.is_error, Some(false));
         }
+        resolver.await.unwrap();
+    }
+
+    fn text(result: &CallToolResult) -> serde_json::Value {
+        let [block] = result.content.as_slice() else {
+            panic!("one content block");
+        };
+        serde_json::from_str(&block.as_text().unwrap().text).unwrap()
+    }
+
+    /// One bad entry answers for itself: the others still run, the response
+    /// keeps the request order, and the call fails only when every entry did.
+    #[tokio::test]
+    async fn batch_entries_run_together_and_fail_alone() {
+        let (tx, rx) = async_channel::unbounded();
+        let tools = OrchestrateTools::new(
+            broker(tx, std::time::Duration::from_secs(30)),
+            "parent".into(),
+        );
+        let resolver = tokio::spawn(async move {
+            // Both requests are already queued before either is answered, and
+            // the second is answered first.
+            let first = rx.recv().await.unwrap();
+            let second = rx.recv().await.unwrap();
+            assert!(
+                matches!(&second.op, OrchestrateOp::Send { thread_id, message, fast: None, .. }
+                if thread_id == "gone" && message == "retry")
+            );
+            second
+                .reply
+                .send(Err("unknown child: gone".into()))
+                .await
+                .unwrap();
+            assert!(
+                matches!(&first.op, OrchestrateOp::Send { thread_id, message, fast: Some(true), .. }
+                if thread_id == "alive" && message == "go on")
+            );
+            first
+                .reply
+                .send(Ok(serde_json::json!({"ok":true, "delivery":"steered"})))
+                .await
+                .unwrap();
+            let request = rx.recv().await.unwrap();
+            assert!(
+                matches!(&request.op, OrchestrateOp::Cancel { thread_id, .. } if thread_id == "gone")
+            );
+            request
+                .reply
+                .send(Err("unknown child: gone".into()))
+                .await
+                .unwrap();
+        });
+        let result = tools
+            .send(Parameters(
+                serde_json::from_value(serde_json::json!({"messages": [
+                    {"thread_id":"alive", "message":"go on", "fast":true},
+                    {"thread_id":"gone", "message":"retry"},
+                ]}))
+                .unwrap(),
+            ))
+            .await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            text(&result),
+            serde_json::json!([
+                {"ok":true, "delivery":"steered", "thread_id":"alive"},
+                {"error":"unknown child: gone", "thread_id":"gone"},
+            ])
+        );
+        let result = tools
+            .cancel(Parameters(ThreadsParams {
+                thread_ids: vec!["gone".into()],
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            text(&result),
+            serde_json::json!([{"error":"unknown child: gone", "thread_id":"gone"}])
+        );
+        let empty = tools
+            .settle(Parameters(ThreadsParams { thread_ids: vec![] }))
+            .await;
+        assert_eq!(empty.is_error, Some(true));
         resolver.await.unwrap();
     }
 

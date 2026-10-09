@@ -7641,6 +7641,7 @@ name = "orchestrate-mcp"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "futures",
  "log",
  "mcp-host",
  "rmcp",
