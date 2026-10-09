@@ -210,6 +210,7 @@ pub fn automatic_settlement_at(
         || meta.settled_override.is_some()
         || meta.is_settled()
         || meta.auto_settle_disabled_at.is_some()
+        || meta.pinned_at.is_some()
         || meta.parent_session_id.is_some()
         || blockers.any()
         || activity.queued_turn_start(now_ms)
@@ -276,6 +277,7 @@ mod tests {
             "active",
             "settled",
             "disabled",
+            "pinned",
             "child",
             "input",
             "run",
@@ -289,6 +291,7 @@ mod tests {
                 "active" => blocked.settled_override = Some(SettledOverride::Active),
                 "settled" => blocked.settled_override = Some(SettledOverride::Settled),
                 "disabled" => blocked.auto_settle_disabled_at = Some(1),
+                "pinned" => blocked.pinned_at = Some(1),
                 "child" => blocked.parent_session_id = Some("lead".into()),
                 _ => {}
             }
@@ -445,6 +448,9 @@ mod tests {
             worked_at,
             "inactivity still settles"
         );
+        let mut pinned = merged.clone();
+        pinned.pinned_at = Some(1);
+        assert_eq!(settle_at(&pinned, &records, NOW, true), None, "pinned");
         let closed = thread(&[Some((Closed, Some(NOW - 3 * HOUR)))]);
         assert_eq!(settle_at(&closed, &records, NOW, false), worked_at);
         assert_eq!(

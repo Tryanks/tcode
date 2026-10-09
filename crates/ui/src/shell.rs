@@ -157,6 +157,7 @@ impl Render for DestinationView {
                     Destination::SettingsSection | Destination::SettingsThreadRules => {
                         shell.render_settings_page(true, window, cx)
                     }
+                    Destination::ArrangeThreads => shell.render_arrange_page(window, cx),
                 })
             })
             .unwrap_or_else(|| div().into_any_element())
@@ -1679,6 +1680,44 @@ impl AppShell {
                 title,
                 None,
                 vec![self.palette_action(cx)],
+                window,
+                cx,
+            ))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn render_arrange_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(sidebar) = self
+            .attachment
+            .as_ref()
+            .map(|attachment| attachment.sidebar.clone())
+        else {
+            return div().into_any_element();
+        };
+        use crate::widgets::button::{Button, ButtonVariants as _};
+        let done = div()
+            // A control press must not arm the ancestor window drag region.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new("arrange-done")
+                    .ghost()
+                    .label(crate::tr!("sidebar.arrange_done"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.back(window, cx);
+                    })),
+            )
+            .into_any_element();
+        let body = sidebar.update(cx, |sidebar, cx| sidebar.render_arrange(window, cx));
+        v_flex()
+            .debug_selector(|| "compact-arrange-page".into())
+            .size_full()
+            .bg(crate::material::content_surface(cx))
+            .child(nav_bar(
+                None,
+                crate::tr!("sidebar.arrange_title").into_owned().into(),
+                None,
+                vec![done],
                 window,
                 cx,
             ))

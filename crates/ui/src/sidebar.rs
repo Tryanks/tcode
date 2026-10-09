@@ -26,6 +26,7 @@ use gpui::{
 use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::settlement::AgentDelivery;
+use tcode_core::thread_sort::{ThreadSection, ThreadSections, partition_threads};
 use tcode_protocol::{Command, ThreadExportFormat};
 
 use tcode_core::{
@@ -38,6 +39,9 @@ use crate::store::{ForkAvailability, StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
+
+mod arrange;
+use arrange::{DraggedThread, DropZone, ThreadDrag};
 
 /// The provider mark behind a thread row: its provider's glyph at this alpha,
 /// sized to the row height minus this vertical inset so it sits inside the row.
@@ -168,23 +172,19 @@ fn waiting_reason(store: &WorkspaceStore, session_id: &str, watching: &[u64]) ->
     parts.join(" · ")
 }
 
-fn partition_settled(sessions: &[SessionMeta]) -> (Vec<SessionMeta>, Vec<SessionMeta>) {
-    tcode_core::thread_sort::partition_threads(sessions)
+/// The rows a list shows by section, narrowed to one project when a filter is set.
+fn project_threads<'a>(
+    sessions: &'a [SessionMeta],
+    project: Option<&str>,
+) -> ThreadSections<&'a SessionMeta> {
+    partition_threads(
+        sessions
+            .iter()
+            .filter(|meta| project.is_none_or(|id| meta.project_id.as_deref() == Some(id))),
+    )
 }
 
-/// The rows a list shows, narrowed to one project when a filter is set.
-fn project_threads<'a>(sessions: &'a [SessionMeta], project: Option<&str>) -> Vec<&'a SessionMeta> {
-    sessions
-        .iter()
-        .filter(|meta| project.is_none_or(|id| meta.project_id.as_deref() == Some(id)))
-        .collect()
-}
-
-fn animate_flat_thread_position(
-    row: gpui::Div,
-    session_id: &str,
-    target_top: f32,
-) -> impl IntoElement + use<> {
+fn animate_flat_thread_position(row: gpui::Div, session_id: &str, target_top: f32) -> gpui::Div {
     // `list` positions each item root explicitly during prepaint, which
     // overrides relative offsets applied to that root. Keep an unanimated
     // outer item for the list to position and move the row inside it instead.
@@ -246,17 +246,33 @@ struct ThreadAutoSettle(String, bool);
 #[action(namespace = tcode, no_json)]
 pub(crate) struct ThreadUndo;
 
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadPin(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadUnpin(String);
+/// Move a thread one place up (`false`) or down (`true`) within its section.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadMove(String, bool);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadArrange(String);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UndoKind {
     Settle,
+    Unpin,
     Archive,
 }
 struct LifecycleUndo {
     kind: UndoKind,
     entries: Vec<UndoEntry>,
 }
+/// What reverses one undoable action, sent in order.
 struct UndoEntry {
-    command: Command,
+    commands: Vec<Command>,
     reopen: Option<String>,
 }
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -369,6 +385,7 @@ struct CompactProjectRow {
 #[derive(Clone)]
 enum CompactListRow {
     Project(CompactProjectRow),
+    Caption { key: String, label: SharedString },
     Settled { key: String, count: usize },
     More { key: String, count: usize },
     Empty { key: String },
@@ -380,6 +397,7 @@ impl CompactListRow {
     fn key(&self) -> &str {
         match self {
             Self::Project(row) => &row.row_id,
+            Self::Caption { key, .. } => key,
             Self::Settled { key, .. } => key,
             Self::More { key, .. } => key,
             Self::Empty { key } => key,
@@ -391,6 +409,9 @@ impl CompactListRow {
 
 enum FlatListRow {
     Thread(Box<SessionMeta>, f32),
+    /// The start of Pinned or Active, drawn only while dragging; whether the
+    /// section is empty.
+    Boundary(ThreadSection, bool),
     Settled,
     More(usize),
     Empty,
@@ -399,11 +420,28 @@ enum FlatListRow {
 /// A row of the desktop grouped list. Project-scoped rows index into the
 /// frame's `grouped_sessions`.
 enum GroupedListRow {
-    Project { group: usize, collapsed: bool },
+    Project {
+        group: usize,
+        collapsed: bool,
+    },
+    /// The start of a group's Pinned or Active rows, drawn only while dragging.
+    Boundary {
+        group: usize,
+        section: ThreadSection,
+        empty: bool,
+    },
     Thread(Box<SessionMeta>),
-    More { group: usize, count: usize },
-    Empty { group: usize },
-    Settled { group: usize, count: usize },
+    More {
+        group: usize,
+        count: usize,
+    },
+    Empty {
+        group: usize,
+    },
+    Settled {
+        group: usize,
+        count: usize,
+    },
 }
 
 impl GroupedListRow {
@@ -411,6 +449,12 @@ impl GroupedListRow {
         let project = |group: &usize| groups[*group].project.id.as_str();
         match self {
             Self::Project { group, .. } => ("project", project(group)),
+            Self::Boundary {
+                group,
+                section: ThreadSection::Pinned,
+                ..
+            } => ("pinned", project(group)),
+            Self::Boundary { group, .. } => ("active", project(group)),
             Self::Thread(meta) => ("thread", &meta.id),
             Self::More { group, .. } => ("more", project(group)),
             Self::Empty { group } => ("empty", project(group)),
@@ -434,6 +478,12 @@ pub struct SessionsSidebar {
     expanded_settled: HashSet<String>,
     settled_limits: HashMap<String, usize>,
     lifecycle_undo: Option<LifecycleUndo>,
+    drag: Option<ThreadDrag>,
+    /// The project the Arrange threads page shows; `None` is every project.
+    arrange_scope: Option<String>,
+    arrange_settled_expanded: bool,
+    arrange_list_state: ListState,
+    arrange_row_keys: Vec<String>,
     last_selected: Option<String>,
     /// Optional project id filter for the session-local flat list.
     project_filter: Option<String>,
@@ -458,9 +508,9 @@ pub struct SessionsSidebar {
 
 /// Included desktop rows plus the pre-disclosure counts used by list controls.
 struct ThreadRows<'a> {
+    pinned: Vec<&'a SessionMeta>,
     active: Vec<&'a SessionMeta>,
     settled: Vec<&'a SessionMeta>,
-    active_count: usize,
     settled_count: usize,
     settled_hidden_count: usize,
 }
@@ -485,45 +535,30 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
 }
 
 impl SessionsSidebar {
-    fn flat_thread_rows<'a>(
+    /// The rows `scope` shows, as a drag over them would leave them.
+    fn thread_rows<'a>(
         &self,
-        active: &'a [SessionMeta],
-        settled: &'a [SessionMeta],
+        sessions: &'a [SessionMeta],
+        scope: Option<&str>,
+        key: &str,
     ) -> ThreadRows<'a> {
-        let active = project_threads(active, self.project_filter.as_deref());
-        let mut settled = project_threads(settled, self.project_filter.as_deref());
-        let active_count = active.len();
-        let settled_count = settled.len();
-        self.limit_settled_rows("recent", &mut settled);
-        let settled_hidden_count = settled_count - settled.len();
-        ThreadRows {
+        let sections = project_threads(sessions, scope);
+        let ThreadSections {
+            pinned,
             active,
-            settled,
-            active_count,
-            settled_count,
-            settled_hidden_count,
-        }
-    }
-
-    fn group_thread_rows<'a>(
-        &self,
-        project_id: &str,
-        active: &'a [SessionMeta],
-        settled: &'a [SessionMeta],
-    ) -> ThreadRows<'a> {
-        let active = project_threads(active, None);
-        let active_count = active.len();
+            mut settled,
+        } = match &self.drag {
+            Some(drag) => drag.preview(scope, sections),
+            None => sections,
+        };
         let settled_count = settled.len();
-        let mut settled = project_threads(settled, None);
-        let eligible = settled.len();
-        self.limit_settled_rows(project_id, &mut settled);
-        let settled_hidden_count = eligible - settled.len();
+        self.limit_settled_rows(key, &mut settled);
         ThreadRows {
+            pinned,
             active,
+            settled_hidden_count: settled_count - settled.len(),
             settled,
-            active_count,
             settled_count,
-            settled_hidden_count,
         }
     }
 
@@ -536,28 +571,29 @@ impl SessionsSidebar {
             if collapsed {
                 continue;
             }
-            let (active, settled) = partition_settled(&project.sessions);
-            let threads = self.group_thread_rows(project_id, &active, &settled);
-            rows.extend(
-                threads
-                    .active
-                    .into_iter()
-                    .map(|meta| GroupedListRow::Thread(Box::new(meta.clone()))),
-            );
+            let threads = self.thread_rows(&project.sessions, Some(project_id), project_id);
+            let thread = |meta: &&SessionMeta| GroupedListRow::Thread(Box::new((*meta).clone()));
+            rows.push(GroupedListRow::Boundary {
+                group,
+                section: ThreadSection::Pinned,
+                empty: threads.pinned.is_empty(),
+            });
+            rows.extend(threads.pinned.iter().map(thread));
+            rows.push(GroupedListRow::Boundary {
+                group,
+                section: ThreadSection::Active,
+                empty: threads.active.is_empty(),
+            });
+            rows.extend(threads.active.iter().map(thread));
             if threads.settled_count > 0 {
-                if threads.active_count == 0 {
+                if threads.pinned.is_empty() && threads.active.is_empty() {
                     rows.push(GroupedListRow::Empty { group });
                 }
                 rows.push(GroupedListRow::Settled {
                     group,
                     count: threads.settled_count,
                 });
-                rows.extend(
-                    threads
-                        .settled
-                        .into_iter()
-                        .map(|meta| GroupedListRow::Thread(Box::new(meta.clone()))),
-                );
+                rows.extend(threads.settled.iter().map(thread));
                 if let Some(count) =
                     self.settled_more_count(project_id, threads.settled_hidden_count)
                 {
@@ -588,11 +624,11 @@ impl SessionsSidebar {
         match store.sidebar_layout() {
             SidebarLayout::Flat => {
                 let sessions = store.flat_sessions();
-                let (active, settled) = partition_settled(&sessions);
-                let rows = self.flat_thread_rows(&active, &settled);
+                let rows = self.thread_rows(&sessions, self.project_filter.as_deref(), "recent");
                 ids.extend(
-                    rows.active
+                    rows.pinned
                         .into_iter()
+                        .chain(rows.active)
                         .chain(rows.settled)
                         .map(|meta| meta.id.clone()),
                 );
@@ -686,6 +722,11 @@ impl SessionsSidebar {
             expanded_settled: HashSet::new(),
             settled_limits: HashMap::new(),
             lifecycle_undo: None,
+            drag: None,
+            arrange_scope: None,
+            arrange_settled_expanded: false,
+            arrange_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            arrange_row_keys: Vec::new(),
             last_selected: None,
             project_filter: None,
             settled_scope: None,
@@ -950,51 +991,76 @@ impl SessionsSidebar {
     }
 
     fn on_settle(&mut self, action: &ThreadSettle, window: &mut Window, cx: &mut Context<Self>) {
+        self.settle_thread(&action.0, window, cx);
+    }
+
+    /// Settle a thread; its undo also restores a pin it loses.
+    fn settle_thread(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let pin = self
+            .store
+            .read(cx)
+            .thread_meta(id)
+            .filter(|meta| meta.pinned_at.is_some())
+            .map(|meta| Command::PinSession {
+                session_id: id.to_owned(),
+                order_key: meta.pin_order.clone(),
+            });
+        let undo = std::iter::once(Command::UnsettleSession {
+            session_id: id.to_owned(),
+        })
+        .chain(pin)
+        .collect();
         self.perform_lifecycle(
-            Command::SettleSession {
-                session_id: action.0.clone(),
-            },
-            Command::UnsettleSession {
-                session_id: action.0.clone(),
-            },
+            vec![Command::SettleSession {
+                session_id: id.to_owned(),
+            }],
+            Some((UndoKind::Settle, undo)),
             window,
             cx,
         );
     }
 
+    /// Send `commands` in order and stop at the first refusal; once every
+    /// one is accepted, offer `undo` in the shared toast.
     fn perform_lifecycle(
         &mut self,
-        command: Command,
-        reverse: Command,
+        commands: Vec<Command>,
+        undo: Option<(UndoKind, Vec<Command>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let reopen = match &command {
-            Command::ArchiveSession { session_id }
+        let reopen = match commands.first() {
+            Some(Command::ArchiveSession { session_id })
                 if self.store.read(cx).active_session_id().as_ref() == Some(session_id) =>
             {
                 Some(session_id.clone())
             }
             _ => None,
         };
-        let settling = matches!(command, Command::SettleSession { .. });
-        let request = self
-            .store
-            .update(cx, |store, cx| store.command(command, cx));
-        cx.spawn_in(window, async move |this, cx| match request.await {
-            Ok(_) => {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.push_lifecycle_undo(reverse, reopen, window, cx);
-                });
+        let store = self.store.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            for command in commands {
+                let settling = matches!(command, Command::SettleSession { .. });
+                let Ok(request) =
+                    cx.update(|_, cx| store.update(cx, |store, cx| store.command(command, cx)))
+                else {
+                    return;
+                };
+                if let Err(error) = request.await {
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        let message = if settling && error.code == "thread_busy" {
+                            crate::tr!("sidebar.settle_refused").into_owned()
+                        } else {
+                            error.message
+                        };
+                        window.push_notification(Notification::warning(message), cx)
+                    });
+                    return;
+                }
             }
-            Err(error) => {
-                let _ = this.update_in(cx, |_, window, cx| {
-                    let message = if settling && error.code == "thread_busy" {
-                        crate::tr!("sidebar.settle_refused").into_owned()
-                    } else {
-                        error.message
-                    };
-                    window.push_notification(Notification::warning(message), cx)
+            if let Some((kind, commands)) = undo {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.push_lifecycle_undo(kind, UndoEntry { commands, reopen }, window, cx);
                 });
             }
         })
@@ -1003,16 +1069,11 @@ impl SessionsSidebar {
 
     fn push_lifecycle_undo(
         &mut self,
-        command: Command,
-        reopen: Option<String>,
+        kind: UndoKind,
+        entry: UndoEntry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let kind = if matches!(command, Command::UnsettleSession { .. }) {
-            UndoKind::Settle
-        } else {
-            UndoKind::Archive
-        };
         let live = window.has_notification::<ThreadUndo>(cx);
         if !live
             || self
@@ -1025,16 +1086,14 @@ impl SessionsSidebar {
                 entries: vec![],
             });
         }
-        self.lifecycle_undo
-            .as_mut()
-            .unwrap()
-            .entries
-            .push(UndoEntry { command, reopen });
+        self.lifecycle_undo.as_mut().unwrap().entries.push(entry);
         let count = self.lifecycle_undo.as_ref().unwrap().entries.len();
         let title = match (kind, count) {
             (UndoKind::Settle, 1) => crate::tr!("sidebar.undo_settled_one"),
+            (UndoKind::Unpin, 1) => crate::tr!("sidebar.undo_unpinned_one"),
             (UndoKind::Archive, 1) => crate::tr!("sidebar.undo_archived_one"),
             (UndoKind::Settle, _) => crate::tr!("sidebar.undo_settled", count = count),
+            (UndoKind::Unpin, _) => crate::tr!("sidebar.undo_unpinned", count = count),
             (UndoKind::Archive, _) => crate::tr!("sidebar.undo_archived", count = count),
         }
         .into_owned();
@@ -1082,23 +1141,24 @@ impl SessionsSidebar {
         let store = self.store.clone();
         cx.spawn_in(window, async move |_, cx| {
             for entry in undo.entries.into_iter().rev() {
-                let command = entry.command;
-                let Ok(request) =
-                    cx.update(|_, cx| store.update(cx, |store, cx| store.command(command, cx)))
-                else {
-                    return;
-                };
-                if let Err(error) = request.await {
-                    let _ = cx.update(|window, cx| {
-                        window.push_notification(
-                            Notification::error(crate::tr!(
-                                "sidebar.undo_failed",
-                                reason = error.message
-                            )),
-                            cx,
-                        )
-                    });
-                    return;
+                for command in entry.commands {
+                    let Ok(request) =
+                        cx.update(|_, cx| store.update(cx, |store, cx| store.command(command, cx)))
+                    else {
+                        return;
+                    };
+                    if let Err(error) = request.await {
+                        let _ = cx.update(|window, cx| {
+                            window.push_notification(
+                                Notification::error(crate::tr!(
+                                    "sidebar.undo_failed",
+                                    reason = error.message
+                                )),
+                                cx,
+                            )
+                        });
+                        return;
+                    }
                 }
                 if let Some(id) = entry.reopen {
                     store.update(cx, |store, _| store.select_session(id));
@@ -1207,9 +1267,15 @@ impl SessionsSidebar {
         &self,
         key: &str,
         count: usize,
+        scope: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded_settled.contains(key);
+        let color = match &self.drag {
+            None => cx.theme().muted_foreground,
+            Some(drag) if drag.target(scope) == Some(ThreadSection::Settled) => cx.theme().primary,
+            Some(_) => cx.theme().sidebar_foreground,
+        };
         let key = key.to_string();
         crate::material::accessible_clickable(
             h_flex(),
@@ -1232,7 +1298,7 @@ impl SessionsSidebar {
         .gap_2()
         .px_3()
         .text_size(px(12.))
-        .text_color(cx.theme().muted_foreground)
+        .text_color(color)
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
             if !this.expanded_settled.remove(&key) {
@@ -1243,7 +1309,7 @@ impl SessionsSidebar {
             this.compact_model_dirty = true;
             cx.notify();
         }))
-        .child(collapse_chevron(!expanded, cx))
+        .child(collapse_chevron(!expanded, cx).text_color(color))
         .child(crate::tr!("sidebar.settled"))
         .child(count.to_string())
         .into_any_element()
@@ -1458,10 +1524,13 @@ impl SessionsSidebar {
         let session_id = session_id.to_string();
         if store.read(cx).settings().skip_delete_confirmation {
             self.perform_lifecycle(
-                Command::ArchiveSession {
+                vec![Command::ArchiveSession {
                     session_id: session_id.clone(),
-                },
-                Command::UnarchiveSession { session_id },
+                }],
+                Some((
+                    UndoKind::Archive,
+                    vec![Command::UnarchiveSession { session_id }],
+                )),
                 window,
                 cx,
             );
@@ -1484,12 +1553,15 @@ impl SessionsSidebar {
                 .on_ok(move |_, window, cx| {
                     let _ = sidebar.update(cx, |this, cx| {
                         this.perform_lifecycle(
-                            Command::ArchiveSession {
+                            vec![Command::ArchiveSession {
                                 session_id: session_id.clone(),
-                            },
-                            Command::UnarchiveSession {
-                                session_id: session_id.clone(),
-                            },
+                            }],
+                            Some((
+                                UndoKind::Archive,
+                                vec![Command::UnarchiveSession {
+                                    session_id: session_id.clone(),
+                                }],
+                            )),
                             window,
                             cx,
                         )
@@ -2081,30 +2153,67 @@ impl SessionsSidebar {
         active_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let element = match row {
-            GroupedListRow::Project { group, collapsed } => {
-                self.render_group_header(&groups[*group], flags, *collapsed, cx)
-            }
-            GroupedListRow::Thread(meta) => self
-                .render_thread(meta, flags, active_id == Some(meta.id.as_str()), cx)
+        let project = |group: &usize| Some(groups[*group].project.id.clone());
+        let item = v_flex().w_full().px_2().when(
+            index > 0 && matches!(row, GroupedListRow::Project { .. }),
+            |item| item.pt(px(2.)),
+        );
+        match row {
+            GroupedListRow::Project { group, collapsed } => item
+                .child(self.render_group_header(&groups[*group], flags, *collapsed, cx))
                 .into_any_element(),
-            GroupedListRow::More { group, count } => {
-                self.render_settled_more(&groups[*group].project.id, *count, cx)
+            GroupedListRow::Boundary {
+                group,
+                section,
+                empty,
+            } => item
+                .child(self.render_drag_boundary(*section, *empty, project(group), cx))
+                .into_any_element(),
+            GroupedListRow::Thread(meta) => {
+                let item = if self
+                    .drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.session_id == meta.id)
+                {
+                    item.child(Self::render_drag_gap(GROUPED_ROW_HEIGHT))
+                } else {
+                    item.child(self.render_thread(
+                        meta,
+                        flags,
+                        active_id == Some(meta.id.as_str()),
+                        cx,
+                    ))
+                };
+                let zone = DropZone::Row {
+                    id: meta.id.clone(),
+                    section: tcode_core::thread_sort::thread_section(meta),
+                };
+                self.drop_zone(item, zone, meta.project_id.clone(), 8., cx)
+                    .into_any_element()
             }
-            GroupedListRow::Empty { .. } => self.render_active_empty(cx),
+            GroupedListRow::More { group, count } => item
+                .child(self.render_settled_more(&groups[*group].project.id, *count, cx))
+                .into_any_element(),
+            GroupedListRow::Empty { .. } => {
+                item.child(self.render_active_empty(cx)).into_any_element()
+            }
             GroupedListRow::Settled { group, count } => {
-                self.render_settled_header(&groups[*group].project.id, *count, cx)
+                let header = self.render_settled_header(
+                    &groups[*group].project.id,
+                    *count,
+                    project(group).as_deref(),
+                    cx,
+                );
+                self.drop_zone(
+                    item.child(header),
+                    DropZone::Settled,
+                    project(group),
+                    8.,
+                    cx,
+                )
+                .into_any_element()
             }
-        };
-        v_flex()
-            .w_full()
-            .px_2()
-            .when(
-                index > 0 && matches!(row, GroupedListRow::Project { .. }),
-                |item| item.pt(px(2.)),
-            )
-            .child(element)
-            .into_any_element()
+        }
     }
 
     fn thread_row_state(
@@ -2190,7 +2299,7 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let session_id = state.session_id.clone();
-        crate::material::accessible_clickable(
+        let row = crate::material::accessible_clickable(
             base,
             row_id,
             Role::Button,
@@ -2218,8 +2327,15 @@ impl SessionsSidebar {
             this.window_state
                 .update(cx, |state, cx| state.open_thread(cx));
             cx.notify();
-        }))
-        .when(state.waiting_for_approval, |row| {
+        }));
+        let row = match self
+            .dragged_thread(meta, state, cx)
+            .filter(|_| !self.compact(cx))
+        {
+            Some(dragged) => Self::drag_source(row, dragged, cx),
+            None => row,
+        };
+        row.when(state.waiting_for_approval, |row| {
             row.tooltip(|window, cx| {
                 Tooltip::new(crate::tr!("sidebar.waiting_approval_tooltip").into_owned())
                     .build(window, cx)
@@ -2279,6 +2395,57 @@ impl SessionsSidebar {
                 )
             })
             .into_any_element()
+    }
+
+    /// A pinned row's pin; on row hover it becomes the Unpin button.
+    fn pin_glyph(
+        &self,
+        meta: &SessionMeta,
+        row_key: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        if meta.pinned_at.is_none() || meta.is_settled() {
+            return None;
+        }
+        let id = meta.id.clone();
+        let label = crate::tr!("sidebar.unpin_tooltip");
+        Some(
+            div()
+                .relative()
+                .flex_none()
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .group_hover(row_key.to_owned(), |glyph| glyph.invisible())
+                        .child(
+                            Icon::new(IconName::Pin)
+                                .size(px(12.))
+                                .text_color(cx.theme().muted_foreground),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("unpin-thread-{id}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::PinOff).text_color(cx.theme().muted_foreground))
+                        .aria_label(label.clone())
+                        .tooltip(label)
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        // Opacity keeps the button a tab stop, as the settle button does.
+                        .opacity(0.)
+                        .group_hover(row_key.to_owned(), |button| button.opacity(1.))
+                        .focus_visible(|button| button.opacity(1.))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            crate::widgets::stop_click_propagation(window, cx);
+                            this.unpin_thread(&id, window, cx);
+                        })),
+                ),
+        )
     }
 
     /// Status text and colour shared by every thread row shape, and whether
@@ -2368,15 +2535,19 @@ impl SessionsSidebar {
     }
 
     fn thread_context_menu(
+        &self,
         row: gpui::Stateful<gpui::Div>,
+        meta: &SessionMeta,
         state: &ThreadRowState,
         running: bool,
-        settled: bool,
         compact: bool,
-        share: Option<ShareTarget>,
-        scope: &crate::store::WorkspaceScope,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let scope = scope.clone();
+        let section = tcode_core::thread_sort::thread_section(meta);
+        let settled = section == ThreadSection::Settled;
+        let share = self.share_target(meta.project_id.as_deref(), cx);
+        let scope = self.store.read(cx).scope().clone();
+        let sidebar = cx.entity().downgrade();
         let session_id = state.session_id.clone();
         let can_fork = state.menu_can_fork;
         let is_worktree = state.is_worktree;
@@ -2385,6 +2556,11 @@ impl SessionsSidebar {
         let auto_settle_enabled = state.auto_settle_enabled;
         row.context_menu(move |menu, _window, cx| {
             let id = session_id.clone();
+            // Move up / Move down stay within the section the list shows.
+            let moves = sidebar
+                .upgrade()
+                .filter(|_| !settled && scope.is_full())
+                .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
             menu.menu(
                 crate::tr!("sidebar.ctx_rename").into_owned(),
                 Box::new(ThreadRename(id.clone())),
@@ -2419,6 +2595,18 @@ impl SessionsSidebar {
                 Box::new(ThreadMarkUnread(id.clone())),
             )
             .separator()
+            .menu(
+                if section == ThreadSection::Pinned {
+                    crate::tr!("sidebar.ctx_unpin").into_owned()
+                } else {
+                    crate::tr!("sidebar.ctx_pin").into_owned()
+                },
+                if section == ThreadSection::Pinned {
+                    Box::new(ThreadUnpin(id.clone())) as Box<dyn Action>
+                } else {
+                    Box::new(ThreadPin(id.clone()))
+                },
+            )
             .menu_with_enable(
                 if settled {
                     crate::tr!("sidebar.ctx_unsettle").into_owned()
@@ -2432,6 +2620,24 @@ impl SessionsSidebar {
                 },
                 settled || (!running && !blocked),
             )
+            .when_some(moves, |menu, (up, down)| {
+                menu.menu_with_enable(
+                    crate::tr!("sidebar.ctx_move_up").into_owned(),
+                    Box::new(ThreadMove(id.clone(), false)),
+                    up,
+                )
+                .menu_with_enable(
+                    crate::tr!("sidebar.ctx_move_down").into_owned(),
+                    Box::new(ThreadMove(id.clone(), true)),
+                    down,
+                )
+            })
+            .when(compact, |menu| {
+                menu.menu(
+                    crate::tr!("sidebar.ctx_arrange").into_owned(),
+                    Box::new(ThreadArrange(id.clone())),
+                )
+            })
             .separator()
             .label(crate::tr!("sidebar.ctx_auto_settle"))
             .menu_with_check(
@@ -2544,6 +2750,7 @@ impl SessionsSidebar {
                 )
             })
             .child(self.thread_title_or_input(meta, &state, false, cx))
+            .children(self.pin_glyph(meta, &row_key, cx))
             .when_some(
                 (state.renaming.is_none())
                     .then(|| {
@@ -2562,16 +2769,7 @@ impl SessionsSidebar {
             })
         };
 
-        let share = self.share_target(meta.project_id.as_deref(), cx);
-        Self::thread_context_menu(
-            row,
-            &state,
-            working,
-            meta.is_settled(),
-            false,
-            share,
-            self.store.read(cx).scope(),
-        )
+        self.thread_context_menu(row, meta, &state, working, false, cx)
     }
 
     fn render_flat_thread_right_slot(
@@ -2718,7 +2916,7 @@ impl SessionsSidebar {
                 })
                 .child(title_or_input)
                 .when(!renaming, |line| {
-                    line.child(
+                    line.children(self.pin_glyph(meta, &row_key, cx)).child(
                         self.render_flat_thread_right_slot(meta, &row_key, waiting, !working, cx),
                     )
                 });
@@ -2790,16 +2988,7 @@ impl SessionsSidebar {
             row.child(line_one).child(line_two)
         };
 
-        let share = self.share_target(meta.project_id.as_deref(), cx);
-        Self::thread_context_menu(
-            row,
-            &state,
-            working,
-            meta.is_settled(),
-            false,
-            share,
-            self.store.read(cx).scope(),
-        )
+        self.thread_context_menu(row, meta, &state, working, false, cx)
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3062,10 +3251,27 @@ impl SessionsSidebar {
                 rows
             };
             let grouped_rows = |project: Option<&str>, recent: bool, key: &str| {
-                let (active, settled) = partition_settled(&sessions);
-                let active = project_threads(&active, project);
-                let settled = project_threads(&settled, project);
-                let mut rows = thread_rows(active, recent);
+                let ThreadSections {
+                    pinned,
+                    active,
+                    settled,
+                } = project_threads(&sessions, project);
+                let mut rows = Vec::new();
+                // A phone has no hover to reveal section labels, so they stay.
+                if !pinned.is_empty() {
+                    rows.push(CompactListRow::Caption {
+                        key: format!("{key}-pinned"),
+                        label: crate::tr!("sidebar.pinned_caption").into_owned().into(),
+                    });
+                    rows.extend(thread_rows(pinned, recent));
+                    if !active.is_empty() {
+                        rows.push(CompactListRow::Caption {
+                            key: format!("{key}-active"),
+                            label: crate::tr!("sidebar.active_caption").into_owned().into(),
+                        });
+                    }
+                }
+                rows.extend(thread_rows(active, recent));
                 if rows.is_empty() && !settled.is_empty() {
                     rows.push(CompactListRow::Empty {
                         key: format!("{key}-empty"),
@@ -3094,7 +3300,10 @@ impl SessionsSidebar {
                 rows.extend(grouped_rows(None, true, "recent"));
             } else {
                 for group in &groups {
-                    let count = project_threads(&sessions, Some(&group.project.id)).len();
+                    let count = sessions
+                        .iter()
+                        .filter(|meta| meta.project_id.as_deref() == Some(&group.project.id))
+                        .count();
                     let collapsed =
                         groups.len() > 1 && collapsed_projects.contains(&group.project.id);
                     let start = rows.len();
@@ -3285,7 +3494,10 @@ impl SessionsSidebar {
                         self.compact_list_state.clone(),
                         cx.processor(move |this, index: usize, _, cx| match &model.rows[index] {
                             CompactListRow::Settled { key, count } => {
-                                this.render_settled_header(key, *count, cx)
+                                this.render_settled_header(key, *count, None, cx)
+                            }
+                            CompactListRow::Caption { label, .. } => {
+                                crate::material::list_caption(label.clone(), cx).into_any_element()
                             }
                             CompactListRow::More { key, count } => {
                                 this.render_settled_more(key.trim_end_matches("-more"), *count, cx)
@@ -3354,6 +3566,10 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_settle))
             .on_action(cx.listener(Self::on_auto_settle))
             .on_action(cx.listener(Self::on_make_active))
+            .on_action(cx.listener(Self::on_pin))
+            .on_action(cx.listener(Self::on_unpin))
+            .on_action(cx.listener(Self::on_move))
+            .on_action(cx.listener(Self::on_arrange))
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
             .child(self.render_compact_search(cx))
@@ -3581,6 +3797,14 @@ impl SessionsSidebar {
                                     })
                                     .child(cached.title.clone()),
                             )
+                            .when(meta.pinned_at.is_some() && !meta.is_settled(), |row| {
+                                row.child(
+                                    Icon::new(IconName::Pin)
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                            })
                             .when(state.title_generating, |row| {
                                 row.child(div().flex_none().child(
                                     Spinner::new().xsmall().color(cx.theme().muted_foreground),
@@ -3619,16 +3843,7 @@ impl SessionsSidebar {
                             .child(div().flex_none().child(cached.relative_time.clone())),
                     ),
             );
-        let share = self.share_target(meta.project_id.as_deref(), cx);
-        Self::thread_context_menu(
-            row,
-            state,
-            working,
-            meta.is_settled(),
-            true,
-            share,
-            self.store.read(cx).scope(),
-        )
+        self.thread_context_menu(row, meta, state, working, true, cx)
     }
 }
 
@@ -3760,6 +3975,7 @@ impl Render for SessionsSidebar {
             self.compact_model_dirty = true;
         }
         self.reveal_selected_settled(cx);
+        self.clear_finished_drag(cx);
         let spaces = spaces::for_store(&self.store, cx);
         self.spaces_observer.watch(spaces.as_ref(), cx);
         if self.compact(cx) {
@@ -3841,9 +4057,18 @@ impl Render for SessionsSidebar {
                     .min_h_0()
                     .pb_2();
                     v_flex()
+                        .id("grouped-thread-list")
                         .flex_1()
                         .min_h_0()
                         .relative()
+                        .on_drop(cx.listener(|this, _: &DraggedThread, window, cx| {
+                            this.drop_thread(window, cx)
+                        }))
+                        .on_drag_move(cx.listener(
+                            |this, event: &gpui::DragMoveEvent<DraggedThread>, _, cx| {
+                                this.drag_auto_scroll(event, cx)
+                            },
+                        ))
                         .child(crate::scroll::page_viewport(
                             "grouped-thread-bounce",
                             crate::wheel_easing::Handle::List(self.grouped_list_state.clone()),
@@ -3864,15 +4089,15 @@ impl Render for SessionsSidebar {
                 )
             }
             SidebarLayout::Flat => {
-                let (active, settled) = partition_settled(&flat_sessions);
+                let scope = self.project_filter.clone();
                 let ThreadRows {
-                    active: visible,
+                    pinned,
+                    active,
                     settled: settled_visible,
                     settled_count,
                     settled_hidden_count,
-                    ..
-                } = self.flat_thread_rows(&active, &settled);
-                if visible.is_empty() && settled_count == 0 {
+                } = self.thread_rows(&flat_sessions, scope.as_deref(), "recent");
+                if pinned.is_empty() && active.is_empty() && settled_count == 0 {
                     // An active project filter can empty the list while threads
                     // exist; that state gets its own hint, not the no-projects one.
                     let hint = if !self.store.read(cx).scope().is_full() && flat_sessions.is_empty()
@@ -3904,27 +4129,32 @@ impl Render for SessionsSidebar {
                         .into_any_element();
                     (self.render_flat_header(cx).into_any_element(), thread_list)
                 } else {
-                    let top_offsets = (0..).map(|index| index as f32 * FLAT_ROW_HEIGHT);
-                    let settled_top =
-                        visible.len() as f32 * FLAT_ROW_HEIGHT + SETTLED_HEADER_HEIGHT;
-                    let mut visible = visible
-                        .into_iter()
-                        .cloned()
-                        .zip(top_offsets.clone())
-                        .map(|(meta, offset)| FlatListRow::Thread(Box::new(meta), offset))
-                        .collect::<Vec<_>>();
+                    // Each row's resting top, so a row moved by a drag or a
+                    // section change springs from where it was.
+                    let mut top = 0.;
+                    let mut visible = Vec::new();
+                    for (section, rows) in [
+                        (ThreadSection::Pinned, &pinned),
+                        (ThreadSection::Active, &active),
+                    ] {
+                        let empty = rows.is_empty();
+                        visible.push(FlatListRow::Boundary(section, empty));
+                        top += self.drag_boundary_height(empty, scope.as_deref());
+                        for meta in rows.iter() {
+                            visible.push(FlatListRow::Thread(Box::new((*meta).clone()), top));
+                            top += FLAT_ROW_HEIGHT;
+                        }
+                    }
                     if settled_count > 0 {
-                        if visible.is_empty() {
+                        if pinned.is_empty() && active.is_empty() {
                             visible.push(FlatListRow::Empty);
                         }
                         visible.push(FlatListRow::Settled);
-                        visible.extend(
-                            settled_visible
-                                .into_iter()
-                                .cloned()
-                                .zip(top_offsets.map(|offset| offset + settled_top))
-                                .map(|(meta, offset)| FlatListRow::Thread(Box::new(meta), offset)),
-                        );
+                        top += SETTLED_HEADER_HEIGHT;
+                        for meta in settled_visible {
+                            visible.push(FlatListRow::Thread(Box::new(meta.clone()), top));
+                            top += FLAT_ROW_HEIGHT;
+                        }
                     }
                     if let Some(count) = self.settled_more_count("recent", settled_hidden_count) {
                         visible.push(FlatListRow::More(count));
@@ -3945,8 +4175,34 @@ impl Render for SessionsSidebar {
                             };
                             let (meta, target_top) = match row {
                                 FlatListRow::Thread(meta, top) => (meta, top),
+                                FlatListRow::Boundary(section, empty) => {
+                                    return div()
+                                        .w_full()
+                                        .px_2()
+                                        .child(this.render_drag_boundary(
+                                            *section,
+                                            *empty,
+                                            scope.clone(),
+                                            cx,
+                                        ))
+                                        .into_any_element();
+                                }
                                 FlatListRow::Settled => {
-                                    return this.render_settled_header("recent", settled_count, cx);
+                                    let header = this.render_settled_header(
+                                        "recent",
+                                        settled_count,
+                                        scope.as_deref(),
+                                        cx,
+                                    );
+                                    return this
+                                        .drop_zone(
+                                            div().w_full().child(header),
+                                            DropZone::Settled,
+                                            scope.clone(),
+                                            0.,
+                                            cx,
+                                        )
+                                        .into_any_element();
                                 }
                                 FlatListRow::More(count) => {
                                     return this.render_settled_more("recent", *count, cx);
@@ -3954,26 +4210,40 @@ impl Render for SessionsSidebar {
                                 FlatListRow::Empty => return this.render_active_empty(cx),
                             };
                             let target_top = *target_top;
-                            let project_name = meta
-                                .project_id
+                            let row = div().w_full().px_2().pb(px(2.));
+                            let row = if this
+                                .drag
                                 .as_ref()
-                                .and_then(|project_id| project_names.get(project_id))
-                                .cloned();
-                            let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                            let row =
-                                div()
-                                    .w_full()
-                                    .px_2()
-                                    .pb(px(2.))
-                                    .child(this.render_flat_thread(
-                                        meta,
-                                        &flags,
-                                        project_name,
-                                        is_active,
-                                        cx,
-                                    ));
-                            animate_flat_thread_position(row, &meta.id, target_top)
-                                .into_any_element()
+                                .is_some_and(|drag| drag.session_id == meta.id)
+                            {
+                                row.child(Self::render_drag_gap(FLAT_ROW_INNER_HEIGHT))
+                            } else {
+                                let project_name = meta
+                                    .project_id
+                                    .as_ref()
+                                    .and_then(|project_id| project_names.get(project_id))
+                                    .cloned();
+                                let is_active = active_id.as_deref() == Some(meta.id.as_str());
+                                row.child(this.render_flat_thread(
+                                    meta,
+                                    &flags,
+                                    project_name,
+                                    is_active,
+                                    cx,
+                                ))
+                            };
+                            let zone = DropZone::Row {
+                                id: meta.id.clone(),
+                                section: tcode_core::thread_sort::thread_section(meta),
+                            };
+                            this.drop_zone(
+                                animate_flat_thread_position(row, &meta.id, target_top),
+                                zone,
+                                scope.clone(),
+                                8.,
+                                cx,
+                            )
+                            .into_any_element()
                         }),
                     )
                     .flex_1()
@@ -3982,9 +4252,18 @@ impl Render for SessionsSidebar {
                     (
                         self.render_flat_header(cx).into_any_element(),
                         v_flex()
+                            .id("flat-thread-list")
                             .flex_1()
                             .min_h_0()
                             .relative()
+                            .on_drop(cx.listener(|this, _: &DraggedThread, window, cx| {
+                                this.drop_thread(window, cx)
+                            }))
+                            .on_drag_move(cx.listener(
+                                |this, event: &gpui::DragMoveEvent<DraggedThread>, _, cx| {
+                                    this.drag_auto_scroll(event, cx)
+                                },
+                            ))
                             .child(crate::scroll::page_viewport(
                                 "flat-thread-bounce",
                                 crate::wheel_easing::Handle::List(self.flat_list_state.clone()),
@@ -4020,6 +4299,10 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_settle))
             .on_action(cx.listener(Self::on_auto_settle))
             .on_action(cx.listener(Self::on_make_active))
+            .on_action(cx.listener(Self::on_pin))
+            .on_action(cx.listener(Self::on_unpin))
+            .on_action(cx.listener(Self::on_move))
+            .on_action(cx.listener(Self::on_arrange))
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_project_archive_all))
@@ -5820,5 +6103,276 @@ mod tests {
                 verify(cx, 10);
             }
         }
+    }
+
+    /// Pinned rows lead in key order with keyless pins after them, new and
+    /// reopened rows lead Active, and activity moves nothing. Dragging an
+    /// active row between two pins pins it with a key between theirs; Escape
+    /// cancels a drag; Move down writes only the moved key; unpinning or
+    /// settling a pinned thread undoes with its old key.
+    #[gpui::test]
+    fn pinned_rows_lead_and_a_drag_or_undo_writes_their_keys(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, CommandResponse, EventEnvelope, HostMessage, IndexSnapshot, ServerEvent,
+            Topic, decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        cx.update(crate::theme::init);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let mut project = Project::from_root(PathBuf::from("/sample"));
+        project.id = "sample".into();
+        let thread = |id: &str, created: u64| {
+            let mut meta = session(id, None);
+            meta.project_id = Some("sample".into());
+            meta.created_at = created;
+            meta.updated_at = created;
+            meta
+        };
+        let pinned = |id: &str, created: u64, key: Option<&str>| {
+            let mut meta = thread(id, created);
+            meta.pinned_at = Some(created);
+            meta.pin_order = key.map(str::to_owned);
+            meta
+        };
+        let mut reopened = thread("reopened", 10);
+        reopened.unsettled_at = Some(99);
+        let mut busy = thread("busy", 50);
+        busy.updated_at = 1_000;
+        let mut arranged = thread("arranged", 100);
+        arranged.active_order = Some("m".into());
+        let mut settled = thread("settled", 60);
+        settled.settled_at = Some(70);
+        let sessions = vec![
+            settled,
+            arranged,
+            busy,
+            reopened,
+            thread("fresh", 95),
+            pinned("pin-old", 80, None),
+            pinned("pin-new", 90, None),
+            pinned("pin-c", 3, Some("w")),
+            pinned("pin-b", 1, Some("t")),
+            pinned("pin-a", 2, Some("f")),
+        ];
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    sessions,
+                    projects: vec![project],
+                    summary: Default::default(),
+                }),
+            ),
+        ] {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        store.update(cx, |store, _| store.select_session("arranged".into()));
+        // A test store blocks on each command's acknowledgement, so the host
+        // side answers from its own threads: one pumps the link, one accepts
+        // and records every lifecycle command.
+        std::thread::spawn(move || smol::block_on(link.pump()));
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host_recorded = recorded.clone();
+        let host_incoming = incoming.clone();
+        std::thread::spawn(move || {
+            while let Ok(line) = outgoing.recv_blocking() {
+                let message = decode_client_line(&line).unwrap();
+                if let ClientPayload::Command(command) = message.payload {
+                    if matches!(
+                        command,
+                        Command::PinSession { .. }
+                            | Command::UnpinSession { .. }
+                            | Command::ReorderPinned { .. }
+                            | Command::ReorderActive { .. }
+                            | Command::SettleSession { .. }
+                            | Command::UnsettleSession { .. }
+                    ) {
+                        host_recorded.lock().unwrap().push(command);
+                    }
+                    let ack = HostMessage::Ack {
+                        id: message.id,
+                        result: Ok(CommandResponse::Unit),
+                    };
+                    let _ = host_incoming.send_blocking(encode_line(&ack).unwrap());
+                }
+            }
+        });
+        while store.read_with(cx, |store, _| store.flat_sessions().is_empty()) {
+            std::thread::yield_now();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        }
+        let window_state = cx.new(|_| WindowState::new(false));
+        let mut sidebar = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+            sidebar = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let sidebar = sidebar.unwrap();
+        cx.simulate_resize(size(px(393.), px(2000.)));
+        // The lifecycle commands accepted since the last call.
+        let sent = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            std::mem::take(&mut *recorded.lock().unwrap())
+        };
+        sent(cx);
+        draw(cx);
+        let order = [
+            "pin-a", "pin-b", "pin-c", "pin-new", "pin-old", "reopened", "fresh", "busy",
+            "arranged",
+        ];
+        for compact in [false, true] {
+            window_state.update(cx, |state, cx| {
+                state.compact = compact;
+                cx.notify();
+            });
+            sidebar.update(cx, |sidebar, _| sidebar.compact_model_dirty = true);
+            draw(cx);
+            let ids = sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx));
+            assert_eq!(ids, order, "compact={compact}");
+            let mut previous = None;
+            for id in order {
+                let selector = if compact {
+                    format!("compact-row-{id}")
+                } else {
+                    format!("sidebar-thread-{id}")
+                };
+                let top = cx.debug_bounds(selector.leak()).unwrap().top();
+                assert!(previous.is_none_or(|previous| top > previous), "{id}");
+                previous = Some(top);
+            }
+        }
+        window_state.update(cx, |state, cx| {
+            state.compact = false;
+            cx.notify();
+        });
+        draw(cx);
+
+        let left = gpui::MouseButton::Left;
+        let none = gpui::Modifiers::default();
+        let row = |cx: &mut VisualTestContext, id: &str| {
+            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
+                .unwrap()
+        };
+        let start = row(cx, "fresh").center();
+        cx.simulate_mouse_down(start, left, none);
+        cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
+        draw(cx);
+        let target = row(cx, "pin-b");
+        let over = gpui::point(target.center().x, target.top() + px(4.));
+        cx.simulate_mouse_move(over, left, none);
+        draw(cx);
+        cx.simulate_mouse_up(over, left, none);
+        let commands = sent(cx);
+        let [
+            Command::PinSession {
+                session_id,
+                order_key: Some(key),
+            },
+        ] = commands.as_slice()
+        else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(session_id, "fresh");
+        assert!("f" < key.as_str() && key.as_str() < "t", "{key}");
+
+        let start = row(cx, "busy").center();
+        cx.simulate_mouse_down(start, left, none);
+        cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
+        draw(cx);
+        let target = row(cx, "pin-a");
+        cx.simulate_mouse_move(target.center(), left, none);
+        cx.simulate_keystrokes("escape");
+        cx.simulate_mouse_up(target.center(), left, none);
+        assert_eq!(sent(cx), vec![], "Escape cancels the drag");
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_unpin(&ThreadUnpin("pin-a".into()), window, cx)
+        });
+        assert_eq!(
+            sent(cx),
+            vec![Command::UnpinSession {
+                session_id: "pin-a".into()
+            }]
+        );
+        sidebar.update_in(cx, |sidebar, window, cx| sidebar.undo_lifecycle(window, cx));
+        assert_eq!(
+            sent(cx),
+            vec![Command::PinSession {
+                session_id: "pin-a".into(),
+                order_key: Some("f".into()),
+            }]
+        );
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_move(&ThreadMove("pin-a".into(), true), window, cx)
+        });
+        let commands = sent(cx);
+        let [
+            Command::ReorderPinned {
+                session_id,
+                order_key,
+            },
+        ] = commands.as_slice()
+        else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(session_id, "pin-a");
+        assert!(
+            "t" < order_key.as_str() && order_key.as_str() < "w",
+            "{order_key}"
+        );
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.settle_thread("pin-b", window, cx)
+        });
+        assert_eq!(
+            sent(cx),
+            vec![Command::SettleSession {
+                session_id: "pin-b".into()
+            }]
+        );
+        sidebar.update_in(cx, |sidebar, window, cx| sidebar.undo_lifecycle(window, cx));
+        assert_eq!(
+            sent(cx),
+            vec![
+                Command::UnsettleSession {
+                    session_id: "pin-b".into()
+                },
+                Command::PinSession {
+                    session_id: "pin-b".into(),
+                    order_key: Some("t".into()),
+                },
+            ]
+        );
     }
 }
