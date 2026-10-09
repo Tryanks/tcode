@@ -1473,6 +1473,7 @@ impl DiffPanel {
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
+            .debug_selector(|| "diff-empty".into())
             .flex_1()
             .min_h_0()
             .items_center()

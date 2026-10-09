@@ -1886,10 +1886,10 @@ impl WorkspaceStore {
             return;
         }
         if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.right_tab = tab;
-            if tab == RightTab::Diff {
+            if tab == RightTab::Diff && ui.right_tab != RightTab::Diff {
                 ui.refresh_diff();
             }
+            ui.right_tab = tab;
             cx.notify();
         }
     }

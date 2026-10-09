@@ -5540,38 +5540,50 @@ mod tests {
     /// The panel first asks the host for each changed file's current text, then
     /// builds its rendered files off the render thread. This workspace has no
     /// checkout, so refuse those reads — the panel then renders from the stored
-    /// patch alone — and draw until the body is actually laid out.
+    /// patch alone — and draw until `selector` is actually laid out. A
+    /// working-tree read is answered with `git_diff` when given; returns how
+    /// many the client made.
     fn draw_until(
         shell: &Entity<AppShell>,
         cx: &mut VisualTestContext,
         host: &MountedShell,
         selector: &'static str,
-    ) {
+        git_diff: Option<&tcode_protocol::GitDiffResult>,
+    ) -> usize {
+        let mut git_diff_reads = 0;
         for _ in 0..12 {
             let store = store_of(shell, cx);
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             while let Ok(line) = host.outgoing.try_recv() {
                 let line = decode_client_line(&line).expect("client line");
-                if matches!(line.payload, ClientPayload::Query(_)) {
-                    host.incoming
-                        .try_send(
-                            encode_line(&HostMessage::QueryResult {
-                                id: line.id,
-                                result: Err(tcode_protocol::ProtocolError {
-                                    code: "not_found".into(),
-                                    message: "no checkout in this test".into(),
-                                }),
-                            })
-                            .unwrap(),
-                        )
-                        .unwrap();
-                }
+                let ClientPayload::Query(query) = line.payload else {
+                    continue;
+                };
+                let result = match (&query, git_diff) {
+                    (tcode_protocol::Query::LoadGitDiff { .. }, Some(diff)) => {
+                        git_diff_reads += 1;
+                        Ok(tcode_protocol::QueryResponse::GitDiff(diff.clone()))
+                    }
+                    _ => Err(tcode_protocol::ProtocolError {
+                        code: "not_found".into(),
+                        message: "no checkout in this test".into(),
+                    }),
+                };
+                host.incoming
+                    .try_send(
+                        encode_line(&HostMessage::QueryResult {
+                            id: line.id,
+                            result,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
             }
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(100));
             draw(cx);
             if cx.debug_bounds(selector).is_some() {
-                return;
+                return git_diff_reads;
             }
         }
         panic!("{selector} never laid out");
@@ -5590,14 +5602,14 @@ mod tests {
         seed_wide_diff(&shell, &host, cx);
         resize(cx, 1024.);
         store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
-        draw_until(&shell, cx, &host, "diff-body");
+        draw_until(&shell, cx, &host, "diff-body", None);
         assert!(cx.debug_bounds("right-panel-tabs").is_some());
         assert!(cx.debug_bounds("diff-close").is_some());
         as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.open_panels(cx));
         cx.executor().advance_clock(Duration::from_millis(250));
-        draw_until(&shell, cx, &host, "diff-body");
+        draw_until(&shell, cx, &host, "diff-body", None);
 
         assert!(
             cx.debug_bounds("right-panel-tabs").is_none(),
@@ -5622,50 +5634,6 @@ mod tests {
             "and ends at it: a 400-character line scrolls inside the body \
              instead of running off the page"
         );
-    }
-
-    /// Answers the client's queries for a few frames: each working-tree read
-    /// with `diff`, every other query with not-found. Returns how many
-    /// working-tree reads the client made.
-    fn answer_git_diff(
-        cx: &mut VisualTestContext,
-        host: &MountedShell,
-        shell: &Entity<AppShell>,
-        diff: &tcode_protocol::GitDiffResult,
-    ) -> usize {
-        let mut reads = 0;
-        for _ in 0..6 {
-            let store = store_of(shell, cx);
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            while let Ok(line) = host.outgoing.try_recv() {
-                let line = decode_client_line(&line).expect("client line");
-                let ClientPayload::Query(query) = line.payload else {
-                    continue;
-                };
-                let result = if matches!(query, tcode_protocol::Query::LoadGitDiff { .. }) {
-                    reads += 1;
-                    Ok(tcode_protocol::QueryResponse::GitDiff(diff.clone()))
-                } else {
-                    Err(tcode_protocol::ProtocolError {
-                        code: "not_found".into(),
-                        message: "not served in this test".into(),
-                    })
-                };
-                host.incoming
-                    .try_send(
-                        encode_line(&HostMessage::QueryResult {
-                            id: line.id,
-                            result,
-                        })
-                        .unwrap(),
-                    )
-                    .unwrap();
-            }
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(100));
-            draw(cx);
-        }
-        reads
     }
 
     /// The working tree changes outside any turn — the user edits a file while
@@ -5700,7 +5668,7 @@ mod tests {
 
         store.update(cx, |store, cx| store.toggle_diff_panel(cx));
         let clean = tcode_protocol::GitDiffResult::default();
-        assert_eq!(answer_git_diff(cx, &host, &shell, &clean), 1);
+        assert_eq!(draw_until(&shell, cx, &host, "diff-empty", Some(&clean)), 1);
         assert!(
             cx.debug_bounds("diff-body").is_none(),
             "a clean tree draws the empty state, not an empty list"
@@ -5709,7 +5677,7 @@ mod tests {
         store.update(cx, |store, cx| {
             store.set_right_tab(RightTab::PullRequests, cx)
         });
-        answer_git_diff(cx, &host, &shell, &clean);
+        draw(cx);
         let changed = tcode_protocol::GitDiffResult {
             changes: vec![agent::FileChange {
                 path: "README.md".into(),
@@ -5724,13 +5692,9 @@ mod tests {
         };
         store.update(cx, |store, cx| store.set_right_tab(RightTab::Diff, cx));
         assert_eq!(
-            answer_git_diff(cx, &host, &shell, &changed),
+            draw_until(&shell, cx, &host, "diff-body", Some(&changed)),
             1,
-            "choosing the Diff tab reads the working tree again"
-        );
-        assert!(
-            cx.debug_bounds("diff-body").is_some(),
-            "the changed file is listed"
+            "choosing the Diff tab reads the working tree again and lists the changed file"
         );
     }
 
