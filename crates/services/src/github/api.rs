@@ -13,19 +13,33 @@ use std::{
 
 pub type Headers = BTreeMap<String, String>;
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// Every request ends by this deadline; only diff and file reads ask for more than the default.
+pub const DEADLINE_CAP: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHubError {
     Credential(CredentialError),
-    Paused { retry_at: SystemTime },
-    RateLimited { status: u16, retry_at: SystemTime },
+    Paused {
+        retry_at: SystemTime,
+    },
+    RateLimited {
+        status: u16,
+        retry_at: SystemTime,
+    },
     Unauthorized,
     NotFound,
-    Response { status: u16, messages: Vec<String> },
+    Response {
+        status: u16,
+        messages: Vec<String>,
+    },
     Request,
     Deadline,
     BodyTooLarge,
     InvalidResponse,
+    /// A read Tcode refuses before any request: an invalid revision, path or media URL.
+    InvalidInput,
+    /// Media whose type is not an image, video or audio, or an image that does not decode.
+    UnsupportedMedia,
 }
 impl std::fmt::Display for GitHubError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -41,6 +55,8 @@ impl std::fmt::Display for GitHubError {
             Self::Deadline => "deadline",
             Self::BodyTooLarge => "body too large",
             Self::InvalidResponse => "invalid response",
+            Self::InvalidInput => "invalid input",
+            Self::UnsupportedMedia => "unsupported media",
         };
         write!(f, "GitHub request failed ({reason})")
     }
@@ -86,6 +102,8 @@ pub struct RestRequest<'a> {
     pub path: &'a str,
     pub body: Option<&'a serde_json::Value>,
     pub if_none_match: Option<&'a str>,
+    /// Replaces the JSON media type, for representations such as a raw diff or file.
+    pub accept: Option<&'a str>,
 }
 impl<'a> RestRequest<'a> {
     pub fn get(path: &'a str) -> Self {
@@ -94,6 +112,7 @@ impl<'a> RestRequest<'a> {
             path,
             body: None,
             if_none_match: None,
+            accept: None,
         }
     }
 }
@@ -116,13 +135,13 @@ impl Response {
 }
 
 #[derive(Default)]
-struct Gate {
+pub(super) struct Gate {
     active: Mutex<usize>,
     ready: Condvar,
 }
-struct Permit<'a>(&'a Gate);
+pub(super) struct Permit<'a>(&'a Gate);
 impl Gate {
-    fn acquire(&self) -> Permit<'_> {
+    pub(super) fn acquire(&self) -> Permit<'_> {
         let mut active = self.active.lock().unwrap();
         while *active >= 8 {
             active = self.ready.wait(active).unwrap();
@@ -145,8 +164,8 @@ struct CachedIdentity {
 
 pub struct GitHubApi {
     credentials: Arc<Credentials>,
-    agent: ureq::Agent,
-    gate: Gate,
+    pub(super) agent: ureq::Agent,
+    pub(super) gate: Gate,
     ledger: Mutex<Ledger>,
     identities: Mutex<HashMap<String, CachedIdentity>>,
 }
@@ -195,6 +214,7 @@ impl GitHubApi {
                 path: "/graphql",
                 body: Some(&body),
                 if_none_match: None,
+                accept: None,
             },
             Some(&document.query),
             options,
@@ -279,7 +299,7 @@ impl GitHubApi {
         } else {
             format!("{root}{}", input.path)
         };
-        let timeout = options.timeout.min(Duration::from_secs(30));
+        let timeout = options.timeout.min(DEADLINE_CAP);
         let started = Instant::now();
         let mut request = self
             .agent
@@ -290,7 +310,7 @@ impl GitHubApi {
                 if graphql.is_some() {
                     "application/json"
                 } else {
-                    "application/vnd.github+json"
+                    input.accept.unwrap_or("application/vnd.github+json")
                 },
             )
             .set("X-GitHub-Api-Version", "2022-11-28")

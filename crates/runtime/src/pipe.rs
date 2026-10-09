@@ -442,6 +442,26 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx,
             ));
         }
+        Command::RefreshPullRequest { session_id, key } => {
+            return CommandOutcome::Immediate(
+                app.refresh_pull_request(&session_id, key, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
+        Command::SetPullRequestFilesViewed {
+            session_id,
+            key,
+            paths,
+            viewed,
+        } => {
+            return CommandOutcome::Pending(app.set_pull_request_files_viewed(
+                &session_id,
+                key,
+                paths,
+                viewed,
+                cx,
+            ));
+        }
         Command::UnlinkPullRequest { session_id, key } => {
             app.unlink_pull_request(&session_id, &key, cx);
         }
@@ -943,6 +963,11 @@ fn dispatch_query(
             item_id,
             image_index,
         } => app.item_image(&session_id, item_id, image_index, cx),
+        Query::PullRequest {
+            session_id,
+            key,
+            read,
+        } => app.read_pull_request(&session_id, key, read, cx),
         Query::ArchivedSessions => {
             let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })

@@ -6,46 +6,16 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tcode_core::settings::GitHubHostSettings;
-use tcode_services::{
-    github::{
-        CredentialError, Credentials, GitHubApi, GitHubError, RequestOptions, RestRequest,
-        api::Authentication,
-        graphql::{self, AliasItem, Document},
-    },
-    settings::SettingsStore,
+use tcode_services::github::{
+    CredentialError, GitHubApi, GitHubError, RequestOptions, RestRequest,
+    api::Authentication,
+    graphql::{self, AliasItem, Document},
 };
 
 #[path = "support/github.rs"]
 mod fixture;
-use fixture::Fixture;
+use fixture::{Fixture, Store};
 
-struct Store {
-    store: SettingsStore,
-    root: std::path::PathBuf,
-}
-impl Store {
-    fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("tcode-github-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        Self {
-            store: SettingsStore::new(root.clone()),
-            root,
-        }
-    }
-    fn credentials(&self, environment: &[(&str, &str)]) -> Arc<Credentials> {
-        Credentials::new(
-            self.store.clone(),
-            environment
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.to_string())),
-        )
-    }
-}
-impl Drop for Store {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.root).unwrap();
-    }
-}
 fn quota(resource: &str, remaining: u64, reset: u64) -> String {
     format!(
         "x-ratelimit-resource: {resource}\r\nx-ratelimit-limit: 100\r\nx-ratelimit-remaining: {remaining}\r\nx-ratelimit-reset: {reset}\r\n"
@@ -785,6 +755,7 @@ if [ -n "$6" ]; then printf '%s' "account-$6"; else /bin/cat "$FIXTURE_ROOT/toke
 fn gh_process_boundary_honors_binding_pins_cache_invalidation_and_failure_ttls() {
     use std::os::unix::fs::PermissionsExt as _;
     use tcode_core::settings::GitHubCredentialSource;
+    use tcode_services::github::Credentials;
     let fixture = Fixture::new();
     let store = Store::new();
     let mut env = gh_fixture(&store);

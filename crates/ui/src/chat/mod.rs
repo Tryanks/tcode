@@ -2467,6 +2467,11 @@ impl ChatView {
         Some(store.pull_requests(&store.active_session_id()?).to_vec())
     }
 
+    /// The pull request page a phone pushes over the thread.
+    pub fn pull_request_view(&self, cx: &App) -> Entity<crate::pull_requests::PullRequestView> {
+        self.pull_requests.read(cx).detail()
+    }
+
     /// The phone's entry to the linked pull requests: a chip in the row above the
     /// composer that opens them in a bottom sheet.
     fn render_pull_request_pill(&self, cx: &App) -> Option<AnyElement> {

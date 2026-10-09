@@ -21,6 +21,8 @@ pub enum Destination {
     Thread,
     /// The thread's terminal, diff/plan or preview, full width.
     Panel,
+    /// One of the thread's pull requests, full width.
+    PullRequest,
     /// The settings root: the section list in compact, the whole route in wide.
     Settings,
     /// One settings section's detail. Which section it is belongs to the page;
@@ -78,6 +80,8 @@ impl NavigationSnapshot {
                     | Destination::SettingsThreadRules
                     | Destination::ArrangeThreads
                     | Destination::Pair
+                    // A cold start reads the pull request afresh from its thread.
+                    | Destination::PullRequest
             )
         });
         if snapshot.history.first() != Some(&Destination::Hosts) {
@@ -100,11 +104,12 @@ impl NavigationSnapshot {
 
     fn without_thread(&mut self) {
         self.session_id = None;
-        if let Some(index) = self
-            .history
-            .iter()
-            .position(|destination| matches!(destination, Destination::Thread | Destination::Panel))
-        {
+        if let Some(index) = self.history.iter().position(|destination| {
+            matches!(
+                destination,
+                Destination::Thread | Destination::Panel | Destination::PullRequest
+            )
+        }) {
             self.history.truncate(index);
         }
     }
@@ -117,7 +122,11 @@ impl Destination {
         match self {
             Self::Hosts | Self::Pair => Route::Hosts,
             Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => Route::Settings,
-            Self::Threads | Self::Thread | Self::Panel | Self::ArrangeThreads => Route::Chat,
+            Self::Threads
+            | Self::Thread
+            | Self::Panel
+            | Self::PullRequest
+            | Self::ArrangeThreads => Route::Chat,
         }
     }
 
@@ -132,6 +141,7 @@ impl Destination {
             Self::Threads | Self::ArrangeThreads => "mobile.threads",
             Self::Thread => "mobile.thread",
             Self::Panel => "chat.panels",
+            Self::PullRequest => "pull_requests.title",
             Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => "settings.title",
         })
         .into_owned()
@@ -200,11 +210,12 @@ impl WindowState {
 
     /// A restored thread was archived/deleted while this client was away.
     pub(crate) fn discard_restored_thread(&mut self, cx: &mut Context<Self>) {
-        if let Some(index) = self
-            .history
-            .iter()
-            .position(|destination| matches!(destination, Destination::Thread | Destination::Panel))
-        {
+        if let Some(index) = self.history.iter().position(|destination| {
+            matches!(
+                destination,
+                Destination::Thread | Destination::Panel | Destination::PullRequest
+            )
+        }) {
             self.history.truncate(index);
             cx.notify();
         }

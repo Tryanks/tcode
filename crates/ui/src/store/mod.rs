@@ -39,7 +39,10 @@ mod history;
 pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
 mod intents;
-pub(crate) use images::{host_image, item_image};
+pub(crate) use images::{
+    MediaState, host_image, item_image, pull_request_media, pull_request_media_state,
+    retry_failed_pull_request_media,
+};
 mod snapshots;
 
 pub use snapshots::ComposerState;
@@ -225,6 +228,8 @@ pub struct WorkspaceStore {
     fallback_blocks: HashMap<String, FallbackBlock>,
     fallback_reviews: HashMap<String, FallbackReview>,
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
+    /// The pull request each thread has open, in this run only.
+    open_pull_requests: HashMap<String, tcode_core::pull_request::PullRequestKey>,
     /// A project-draft fallback is in flight, so the reconcile step does not
     /// ask for one more draft per index event while it resolves.
     draft_fallback_pending: bool,
@@ -421,6 +426,7 @@ impl WorkspaceStore {
             fallback_blocks: HashMap::new(),
             fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
+            open_pull_requests: HashMap::new(),
             draft_fallback_pending: false,
         };
         let mut store = store;
@@ -1154,6 +1160,7 @@ impl WorkspaceStore {
                 self.index_replica
                     .0
                     .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
+                self.close_unshown_pull_requests();
             }
             (Topic::Index, ServerEvent::IndexUpsertProject(project)) => {
                 images::invalidate_project_icon(project, cx);
@@ -1181,6 +1188,7 @@ impl WorkspaceStore {
                 self.fallback_reviews.remove(session_id);
                 self.conversation_ui
                     .remove(&ConversationDestination::Thread(session_id.clone()));
+                self.open_pull_requests.remove(session_id);
             }
             (Topic::Index, ServerEvent::IndexRemoveProject { project_id }) => {
                 self.index_replica
@@ -1215,6 +1223,7 @@ impl WorkspaceStore {
                     }
                 }
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
+                self.close_unshown_pull_requests();
                 // Client state for a conversation the index no longer lists has
                 // nothing left to return to: a deleted project takes its draft's
                 // state, a deleted or archived thread its own.
@@ -1983,6 +1992,45 @@ impl WorkspaceStore {
     ) -> &[tcode_core::pull_request::ThreadPullRequestLink] {
         self.thread_meta(session_id)
             .map_or(&[], |meta| meta.pull_requests.as_slice())
+    }
+
+    /// The pull request the thread has open, read inside its Pull requests tab or page.
+    pub fn open_pull_request(
+        &self,
+        session_id: &str,
+    ) -> Option<&tcode_core::pull_request::PullRequestKey> {
+        self.open_pull_requests.get(session_id)
+    }
+
+    /// A pull request the thread no longer shows, unlinked or out of its stack, is not read
+    /// on through it: its view closes back to the list.
+    fn close_unshown_pull_requests(&mut self) {
+        let open = std::mem::take(&mut self.open_pull_requests);
+        self.open_pull_requests = open
+            .into_iter()
+            .filter(|(session_id, key)| {
+                tcode_core::pull_request::shown(self.pull_requests(session_id), key)
+            })
+            .collect();
+    }
+
+    pub fn set_open_pull_request(
+        &mut self,
+        session_id: &str,
+        key: Option<tcode_core::pull_request::PullRequestKey>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match key {
+            Some(key) => {
+                self.open_pull_requests
+                    .insert(session_id.to_owned(), key.clone())
+                    != Some(key)
+            }
+            None => self.open_pull_requests.remove(session_id).is_some(),
+        };
+        if changed {
+            cx.notify();
+        }
     }
 
     fn conversation_ui_by_key(&self, key: &str) -> Option<&ConversationUiState> {
@@ -3074,6 +3122,35 @@ impl WorkspaceStore {
                 Err(error) => Err(protocol_io_error(error.message)),
             },
         )
+    }
+
+    pub fn read_pull_request(
+        &self,
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        read: tcode_protocol::PullRequestRead,
+        cx: &mut App,
+    ) -> Task<Result<(tcode_protocol::PullRequestReadResponse, u64), ProtocolError>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::PullRequest {
+                    session_id,
+                    key,
+                    read,
+                })
+                .await?
+            {
+                QueryResponse::PullRequest {
+                    response,
+                    expires_at,
+                } => Ok((*response, expires_at)),
+                _ => Err(ProtocolError {
+                    code: "invalid_pull_request_response".into(),
+                    message: "Unexpected pull request response".into(),
+                }),
+            }
+        })
     }
 
     pub(crate) fn message_byline(&self, entry_id: &str) -> Option<String> {

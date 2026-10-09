@@ -588,6 +588,56 @@ mod tests {
         }
     }
 
+    struct ParagraphRoot {
+        markdown: Entity<MarkdownState>,
+    }
+
+    impl Render for ParagraphRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(TextSelectionLayer)
+                .child(MarkdownView::new(&self.markdown).selectable(true))
+        }
+    }
+
+    #[gpui::test]
+    fn text_wrapping_after_an_inline_image_paints_on_its_own_rows(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        // excalidraw#8530's body as GitHub stores it: one paragraph broken by CRLFs,
+        // too long a link for a phone row.
+        let source = "**Technical parts**\r\n![glyphs](https://example.invalid/glyphs.png)\r\n\
+                      https://link.excalidraw.com/readonly/MbbnWPSWXgadXdtmzgeO";
+        let (view, cx) = cx.add_window_view(|_, cx| ParagraphRoot {
+            markdown: cx.new(|cx| MarkdownState::new(source, cx)),
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+
+        let lines = view.read_with(cx, |root, cx| {
+            root.markdown
+                .read(cx)
+                .selection_adapter
+                .frame
+                .borrow()
+                .text_bounds
+                .clone()
+        });
+        assert!(lines.len() > 2, "the link must wrap: {lines:?}");
+        for (ix, line) in lines.iter().enumerate() {
+            for other in &lines[ix + 1..] {
+                let overlap = line.intersect(other);
+                assert!(
+                    overlap.size.width <= px(0.5) || overlap.size.height <= px(0.5),
+                    "{line:?} and {other:?} paint over each other in {lines:?}"
+                );
+            }
+        }
+    }
+
     #[gpui::test]
     fn drag_auto_scrolls_at_viewport_edge_not_participant_edge(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
