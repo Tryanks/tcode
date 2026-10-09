@@ -87,6 +87,10 @@ pub struct SessionMeta {
     /// Reviews being written in this thread, one per pull request it shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pull_request_reviews: Vec<crate::pull_request::PullRequestReviewDraft>,
+    /// Writes to the native stacks this thread shows that the host is running or could not
+    /// confirm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_request_operations: Vec<crate::pull_request::PullRequestStackOperation>,
     pub id: String,
     pub title: String,
     pub provider: ProviderKind,
@@ -279,6 +283,7 @@ impl SessionMeta {
             title: format!("New {} session", provider.display_name()),
             pull_requests: Vec::new(),
             pull_request_reviews: Vec::new(),
+            pull_request_operations: Vec::new(),
             provider,
             profile_id: None,
             cwd,

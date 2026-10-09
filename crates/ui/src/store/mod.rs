@@ -2017,6 +2017,31 @@ impl WorkspaceStore {
             .collect();
     }
 
+    /// Whether this device folded the stack map's note about GitHub stacks away.
+    pub fn stack_note_collapsed(&self) -> bool {
+        self.client_preferences
+            .navigation
+            .as_ref()
+            .and_then(|navigation| navigation["stack_note_collapsed"].as_bool())
+            .unwrap_or(false)
+    }
+
+    pub fn set_stack_note_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.client_preferences
+            .navigation
+            .get_or_insert_with(|| serde_json::json!({}))["stack_note_collapsed"] =
+            serde_json::json!(collapsed);
+        if let Some(host) = &self.client_host {
+            let mut preferences = host.load_preferences();
+            preferences
+                .navigation
+                .get_or_insert_with(|| serde_json::json!({}))["stack_note_collapsed"] =
+                serde_json::json!(collapsed);
+            host.save_preferences(&preferences);
+        }
+        cx.notify();
+    }
+
     pub fn set_open_pull_request(
         &mut self,
         session_id: &str,

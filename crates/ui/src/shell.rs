@@ -1211,6 +1211,22 @@ impl AppShell {
                 self.present_pull_request_watch(session_id, *number, notice, window, cx);
                 return;
             }
+            RuntimeEvent::Toast(RuntimeToast::PullRequestStack {
+                session_id,
+                target,
+                stack,
+                layers,
+                base,
+                result,
+                late,
+            }) => {
+                if let Some(store) = self.store() {
+                    crate::pull_requests::present_stack_result(
+                        &store, session_id, target, *stack, layers, base, result, *late, window, cx,
+                    );
+                }
+                return;
+            }
             RuntimeEvent::Toast(toast) => toast,
         };
 

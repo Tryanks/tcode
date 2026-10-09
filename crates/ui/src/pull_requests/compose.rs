@@ -127,14 +127,33 @@ pub(super) fn rejection_reason(rejection: &PullRequestRejection) -> String {
         }
         PullRequestRejection::Refused { .. } => crate::tr!("pull_requests.result.reason_invalid"),
         PullRequestRejection::Failed => crate::tr!("pull_requests.result.reason_failed"),
-        PullRequestRejection::InStack { index, layers } => crate::tr!(
-            "pull_requests.result.reason_stack",
-            index = index.to_string(),
-            count = layers.to_string()
-        ),
         PullRequestRejection::StackUnknown => {
             crate::tr!("pull_requests.result.reason_stack_unknown")
         }
+        PullRequestRejection::StackChanged => crate::tr!("pull_requests.stack.changed_layers"),
+        PullRequestRejection::LayerChanged { number, actual, .. } => crate::tr!(
+            "pull_requests.stack.changed_head",
+            number = number,
+            new = actual.chars().take(7).collect::<String>()
+        ),
+        PullRequestRejection::LayerNotOpen { number, .. }
+        | PullRequestRejection::LayerDraft { number } => {
+            crate::tr!("pull_requests.stack.changed_state", number = number)
+        }
+        PullRequestRejection::NoPushAccess { numbers } => crate::tr!(
+            "pull_requests.stack.result_no_push",
+            list = numbers
+                .iter()
+                .map(|number| format!("#{number}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PullRequestRejection::OperationRunning => crate::tr!("pull_requests.stack.waiting_state"),
+        PullRequestRejection::MergeRunning => {
+            crate::tr!("pull_requests.stack.result_409_no_id_body")
+        }
+        PullRequestRejection::NoGitIdentity => crate::tr!("pull_requests.stack.result_no_identity"),
+        PullRequestRejection::NotLinked => crate::tr!("pull_requests.stack.result_not_linked"),
     }
     .into_owned()
 }
@@ -220,7 +239,12 @@ fn toast(write: Write, result: &PullRequestActionResult, number: u64) -> Option<
         PullRequestActionResult::UpToDate
         | PullRequestActionResult::Queued { .. }
         | PullRequestActionResult::AutoMergeEnabled { .. }
-        | PullRequestActionResult::Opened { .. } => return None,
+        | PullRequestActionResult::Opened { .. }
+        | PullRequestActionResult::Pending { .. }
+        | PullRequestActionResult::MergeUnconfirmed { .. }
+        | PullRequestActionResult::RebaseStarted
+        | PullRequestActionResult::Rebased { .. }
+        | PullRequestActionResult::RebaseStopped { .. } => return None,
         PullRequestActionResult::Uncertain => match write {
             Write::Comment | Write::Edit => Notification::warning(
                 crate::tr!("pull_requests.result.uncertain_comment").into_owned(),
