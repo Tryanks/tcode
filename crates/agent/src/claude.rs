@@ -2016,6 +2016,23 @@ impl Mapper {
                 ));
                 events
             }
+            // Claude 5 models stream a thinking block whose deltas carry no
+            // text, so the block's start is the only sign the model is
+            // thinking: a placeholder reasoning item renders as "Thinking…"
+            // until text or the next block arrives.
+            Some("content_block_start")
+                if event.pointer("/content_block/type").and_then(Value::as_str)
+                    == Some("thinking") =>
+            {
+                let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+                vec![AgentEvent::ItemStarted(ThreadItem {
+                    id: self.block_item_id(index),
+                    parent_item_id: None,
+                    content: ItemContent::Reasoning {
+                        text: String::new(),
+                    },
+                })]
+            }
             Some("content_block_delta") => {
                 let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
                 let delta = match event.get("delta") {
@@ -4493,13 +4510,52 @@ mod tests {
         }
     }
 
+    /// Captured from Claude Code 2.1.294 with claude-opus-5-5: the thinking
+    /// block opens with `content_block_start`, every `thinking_delta` is empty
+    /// and the `assistant` line repeats the block with no text. The block's
+    /// start is the one event that can announce the thinking, so it must
+    /// become an in-progress reasoning item that the empty deltas and the
+    /// empty completion leave alone.
+    #[test]
+    fn hidden_thinking_announces_itself_from_the_block_start() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_h"}}}"#,
+        );
+        let started = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}"#,
+        );
+        assert!(
+            matches!(
+                started.as_slice(),
+                [AgentEvent::ItemStarted(ThreadItem {
+                    id,
+                    parent_item_id: None,
+                    content: ItemContent::Reasoning { text },
+                })] if id == "msg_h:0" && text.is_empty()
+            ),
+            "{started:?}"
+        );
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}}"#,
+            r#"{"type":"assistant","message":{"id":"msg_h","content":[{"type":"thinking","thinking":"","signature":"sig"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
+        ] {
+            let events = feed(&mut m, line);
+            assert!(events.is_empty(), "{line}: {events:?}");
+        }
+    }
+
     /// Captured from a real session: the CLI splits one message across several
     /// `assistant` lines, each carrying a single-element `content` array — a
     /// (redacted, empty) thinking block first, then the text block. Enumerating
     /// each array on its own numbered the text block 0 while its deltas streamed
     /// under index 1, so the timeline rendered the paragraph twice: once live,
     /// once again from the completion. The completed item must land on the
-    /// stream's id, and the empty thinking block must not become an item at all.
+    /// stream's id, and the empty thinking block must not complete an item.
     #[test]
     fn split_assistant_lines_keep_the_streams_block_numbering() {
         let mut m = Mapper::new();
