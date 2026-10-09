@@ -1,6 +1,7 @@
 //! The right-side diff panel view: scope controls, virtualized unified/split
 //! lists, expandable gaps, and line-anchored review comments.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
+use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -23,7 +25,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
+use gpui_base::{ElementExt as _, PopoverState, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use super::list::{
@@ -57,6 +59,18 @@ enum DiffViewOption {
     Wrap,
     Whitespace,
     Invisibles,
+}
+
+/// Below this tab strip width (caption buttons excluded) the tabs show their
+/// icons alone. All four tabs labelled, with two-digit counts, beside the
+/// panel's own controls fit in this much in English, the widest shipped
+/// locale, so no label is ever cut off; the default panel width is above it.
+const TAB_LABELS_MIN_WIDTH: f32 = 540.;
+
+/// Whether a strip last laid out `width` wide labels its tabs. Before the
+/// first layout it does.
+fn tab_labels_fit(width: Option<f32>, caption_width: f32) -> bool {
+    width.is_none_or(|width| width - caption_width >= TAB_LABELS_MIN_WIDTH)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -181,6 +195,9 @@ pub struct DiffPanel {
     render_loading_key: Option<RenderKey>,
     comment_input: Option<Entity<InputState>>,
     observed_review_comments: Vec<ReviewComment>,
+    /// The tab strip's laid-out width on the last frame, which decides whether
+    /// the next one labels its tabs.
+    strip_width: Rc<Cell<Option<f32>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -223,6 +240,7 @@ impl DiffPanel {
             render_loading_key: None,
             comment_input: None,
             observed_review_comments: Vec::new(),
+            strip_width: Rc::new(Cell::new(None)),
             _subscriptions: subscriptions,
         }
     }
@@ -595,7 +613,15 @@ impl DiffPanel {
         };
         let muted = cx.theme().muted_foreground;
         let tab_active = cx.theme().tab_active;
+        let caption_width = if hosts_caption {
+            window_caption::CAPTION_CLUSTER_WIDTH
+        } else {
+            0.
+        };
+        let show_labels = tab_labels_fit(self.strip_width.get(), caption_width);
 
+        // Without its label a tab is its icon, named by its tooltip and its
+        // accessibility label.
         let labelled = |id: &'static str,
                         icon: IconName,
                         label: gpui::SharedString,
@@ -604,9 +630,11 @@ impl DiffPanel {
                         cx: &mut Context<Self>|
          -> gpui_base::Tab {
             material::tab(id, label.clone(), is_active, cx)
+                .debug_selector(move || id.into())
+                .flex_none()
                 .h(px(28.))
-                .px_2p5()
-                .gap_1p5()
+                .when(show_labels, |s| s.px_2p5().gap_1p5())
+                .when(!show_labels, |s| s.w(px(28.)))
                 .rounded(material::radius_button(cx))
                 .text_size(px(13.))
                 .font_medium()
@@ -615,7 +643,13 @@ impl DiffPanel {
                     s.text_color(muted).hover(|s| s.bg(cx.theme().muted))
                 })
                 .child(Icon::new(icon).xsmall().text_color(muted))
-                .child(content)
+                .map(|s| {
+                    if show_labels {
+                        s.child(content)
+                    } else {
+                        s.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                    }
+                })
         };
         let tab = |id, icon, label: gpui::SharedString, is_active, cx: &mut Context<Self>| {
             labelled(
@@ -628,22 +662,20 @@ impl DiffPanel {
             )
         };
 
-        gpui_base::Tabs::new("right-panel-tabs")
+        let tabs = gpui_base::Tabs::new("right-panel-tabs")
             .flex()
             .items_center()
             .debug_selector(|| "right-panel-tabs".into())
             .aria_label(crate::tr!("diff.panel_tabs"))
-            .flex_none()
-            .h(px(if hosts_caption {
-                window_caption::CAPTION_STRIP_HEIGHT
-            } else {
-                40.
-            }))
-            .w_full()
-            .px_2()
-            .when(hosts_caption, |strip| strip.pr_0())
+            // The tabs give way before the window controls do, so the close
+            // button stays on screen at any panel width. The 2px inset keeps
+            // the focus ring of the first tab inside the clip.
+            .min_w_0()
+            .overflow_hidden()
+            .h_full()
+            .px(px(2.))
+            .ml(px(-2.))
             .gap_1()
-            .items_center()
             .child(
                 tab(
                     "diff-tab",
@@ -759,7 +791,28 @@ impl DiffPanel {
                         store.set_right_tab(RightTab::PullRequests, cx)
                     })
                 })
+            });
+
+        let strip_width = self.strip_width.clone();
+        h_flex()
+            .flex_none()
+            .h(px(if hosts_caption {
+                window_caption::CAPTION_STRIP_HEIGHT
+            } else {
+                40.
+            }))
+            .w_full()
+            .px_2()
+            .when(hosts_caption, |strip| strip.pr_0())
+            .gap_1()
+            .on_prepaint(move |bounds, window, _| {
+                let width = Some(f32::from(bounds.size.width));
+                let previous = strip_width.replace(width);
+                if tab_labels_fit(previous, caption_width) != tab_labels_fit(width, caption_width) {
+                    window.request_animation_frame();
+                }
             })
+            .child(tabs)
             // The gap between the tabs and the icon cluster holds nothing, so
             // it doubles as the window's drag handle: `window_drag_area` for the
             // app-owned move (macOS), `drag_region` for native HTCAPTION

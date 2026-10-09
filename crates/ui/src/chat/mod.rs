@@ -2797,6 +2797,7 @@ impl ChatView {
                             })
                             .child(
                                 Button::new("diff-panel")
+                                    .debug_selector(|| "diff-panel".into())
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })

@@ -276,6 +276,13 @@ pub struct AppShell {
 
 /// The right panel's default width.
 const RIGHT_PANEL_WIDTH: f32 = 560.;
+const RIGHT_PANEL_MIN_WIDTH: f32 = 320.;
+/// The chat column never gets narrower than this beside the right panel: its
+/// header with every control it can show — a title kept to a few words, the
+/// git and Open split buttons, five panel toggles — fits in it, in English, the
+/// widest shipped locale. Where this and the panel's minimum do not both fit
+/// beside the sidebar, the panel floats over the chat instead.
+const CHAT_MIN_WIDTH: f32 = 620.;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
@@ -2394,6 +2401,11 @@ impl AppShell {
         } else {
             attachment.diff.clone().into_any_element()
         };
+        let sidebar_layout_width = if collapsed {
+            px(0.)
+        } else {
+            attachment.sidebar_width.get()
+        };
 
         // Sidebar | chat | right panel live in ONE resizable group. Nesting a
         // second group inside the chat panel does not shrink the chat: it keeps
@@ -2440,10 +2452,24 @@ impl AppShell {
             }
         }
 
+        // Too narrow for the chat and the panel side by side: the panel floats
+        // over the chat's right edge, the way the collapsed sidebar floats over
+        // its left, and the chat keeps the whole column underneath.
+        let beside_sidebar = viewport_width - sidebar_layout_width;
+        let right_floats = diff_open
+            && chat_visible
+            && beside_sidebar < px(CHAT_MIN_WIDTH + RIGHT_PANEL_MIN_WIDTH);
+        let right_docked = diff_open && !right_floats;
+        let (docked_panel, floating_panel) = if right_floats {
+            (None, Some(right_panel))
+        } else {
+            (Some(right_panel), None)
+        };
+
         // Give the right panel its width once the group knows about it (the
         // panel count is synced while the group renders, so this lands on the
         // frame after it opens — the group notifies, so that frame comes).
-        if diff_open && chat_visible {
+        if right_docked && chat_visible {
             if !attachment.right_sized {
                 let width = attachment.right_width.get();
                 let sized = attachment.split.update(cx, |state, cx| {
@@ -2461,33 +2487,60 @@ impl AppShell {
         }
 
         // Chat and right-panel reading surfaces sit above the translucent canvas.
-        let chat_panel = resizable_panel().visible(chat_visible).child(
-            v_flex()
-                .size_full()
-                .bg(crate::material::content_surface(cx))
-                .shadow_sm()
-                .child(
-                    div().flex_1().min_h_0().child(
-                        self.attachment
-                            .as_ref()
-                            .expect("attachment checked above")
-                            .chat
-                            .clone(),
+        let chat_panel = resizable_panel()
+            .visible(chat_visible)
+            .when(right_docked, |panel| {
+                panel.size_range(px(CHAT_MIN_WIDTH)..Pixels::MAX)
+            })
+            .child(
+                v_flex()
+                    .size_full()
+                    .bg(crate::material::content_surface(cx))
+                    .shadow_sm()
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            self.attachment
+                                .as_ref()
+                                .expect("attachment checked above")
+                                .chat
+                                .clone(),
+                        ),
                     ),
-                ),
-        );
+            );
         let attachment = self.attachment.as_ref().expect("attachment checked above");
         let right = resizable_panel()
-            .visible(diff_open)
+            .visible(right_docked)
             .size(px(RIGHT_PANEL_WIDTH))
-            .size_range(px(320.)..px(1400.))
+            .size_range(px(RIGHT_PANEL_MIN_WIDTH)..px(1400.))
             .child(
                 div()
                     .size_full()
                     .bg(crate::material::content_surface(cx))
                     .shadow_sm()
-                    .child(right_panel),
+                    .children(docked_panel),
             );
+        let floating_right = floating_panel.map(|panel| {
+            div()
+                .id("right-panel-overlay")
+                .debug_selector(|| "right-panel-overlay".into())
+                .absolute()
+                .top_0()
+                .right_0()
+                .h_full()
+                .w(attachment
+                    .right_width
+                    .get()
+                    .min(beside_sidebar)
+                    .max(px(RIGHT_PANEL_MIN_WIDTH)))
+                // The same floating layer as the sidebar overlay: near-opaque,
+                // so the chat beneath does not bleed through.
+                .bg(cx.theme().popover)
+                .shadow_lg()
+                .border_l_1()
+                .border_color(cx.theme().border)
+                .occlude()
+                .child(panel)
+        });
 
         let remembered_right = attachment.right_width.clone();
         let remembered_sidebar = attachment.sidebar_width.clone();
@@ -2535,6 +2588,7 @@ impl AppShell {
                 .relative()
                 .size_full()
                 .child(group("chat-diff-panels").child(chat_panel).child(right))
+                .children(floating_right)
                 // This fixed transparent strip only opens the overlay. Its
                 // inevitable false transition when the overlay occludes it is
                 // deliberately ignored by the state machine.
@@ -2584,16 +2638,22 @@ impl AppShell {
                 })
                 .into_any_element()
         } else {
-            group("workspace-panels")
+            div()
+                .relative()
+                .size_full()
                 .child(
-                    resizable_panel()
-                        .flex_none()
-                        .size(px(SIDEBAR_WIDTH))
-                        .size_range(px(220.)..px(380.))
-                        .child(sidebar),
+                    group("workspace-panels")
+                        .child(
+                            resizable_panel()
+                                .flex_none()
+                                .size(px(SIDEBAR_WIDTH))
+                                .size_range(px(220.)..px(380.))
+                                .child(sidebar),
+                        )
+                        .child(chat_panel)
+                        .child(right),
                 )
-                .child(chat_panel)
-                .child(right)
+                .children(floating_right)
                 .into_any_element()
         };
 
@@ -5633,6 +5693,108 @@ mod tests {
             px(393. - crate::material::COMPACT_PAGE_INSET),
             "and ends at it: a 400-character line scrolls inside the body \
              instead of running off the page"
+        );
+    }
+
+    /// Beside the sidebar there is room for the chat with its whole header and
+    /// the right panel from 1200pt up, so the panel gives way: the
+    /// header's last toggle ends before the panel's tab strip, and the strip
+    /// keeps its labels only while it is wide enough for them. At 720pt there
+    /// is not, and the panel's close button is still on screen and closes it.
+    #[gpui::test]
+    fn the_right_panel_leaves_the_chat_header_clear_and_closes_at_any_width(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: Vec::new(),
+                    projects: Vec::new(),
+                }),
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        seed_wide_diff(&shell, &host, cx);
+        // A checkout with changes, so the header carries its Commit button.
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::GitStatus {
+                        session_id: "thread-1".into(),
+                    },
+                    event: ServerEvent::GitStatusReplaced(tcode_protocol::GitStatusStatus {
+                        status: Some(tcode_core::git::GitStatus {
+                            is_repo: true,
+                            has_working_tree_changes: true,
+                            ..Default::default()
+                        }),
+                        busy: false,
+                    }),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let store = store_of(&shell, cx);
+        resize(cx, 1400.);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+
+        for (width, labelled) in [(1600., true), (1400., false), (1200., false)] {
+            resize(cx, width);
+            draw_until(&shell, cx, &host, "diff-body", None);
+            draw(cx);
+            assert!(cx.debug_bounds("right-panel-overlay").is_none());
+            let toggle = cx
+                .debug_bounds("diff-panel")
+                .expect("the header's diff toggle");
+            let strip = cx.debug_bounds("right-panel-tabs").expect("the tab strip");
+            assert!(
+                toggle.right() <= strip.left(),
+                "{width}pt: the header ends at {:?}, under a strip starting at {:?}",
+                toggle.right(),
+                strip.left()
+            );
+            let tab = cx.debug_bounds("diff-tab").expect("the Diff tab");
+            assert_eq!(
+                tab.size.width > tab.size.height,
+                labelled,
+                "{width}pt: the Diff tab is {:?}",
+                tab.size
+            );
+        }
+
+        resize(cx, 720.);
+        draw_until(&shell, cx, &host, "diff-body", None);
+        draw(cx);
+        let close = cx.debug_bounds("diff-close").expect("the close button");
+        assert!(
+            close.right() <= px(720.),
+            "close at {close:?} is off the window"
+        );
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert!(
+            !store.read_with(cx, |store, _| store.panel_state().right_panel_open),
+            "nothing covers the close button"
         );
     }
 
