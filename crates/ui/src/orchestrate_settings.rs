@@ -47,7 +47,7 @@ impl OrchestrateSettingsPanel {
                 store.clone(),
                 "orchestrate-add-decision-popover",
                 "orchestrate-add-decision",
-                crate::tr!("orchestrate.decisions.add"),
+                "orchestrate.decisions.add",
                 cx,
             )
         });
@@ -56,7 +56,7 @@ impl OrchestrateSettingsPanel {
                 store.clone(),
                 "orchestrate-add-child-popover",
                 "orchestrate-add-child",
-                crate::tr!("orchestrate.children.add"),
+                "orchestrate.children.add",
                 cx,
             )
         });
@@ -201,7 +201,6 @@ impl OrchestrateSettingsPanel {
             let description = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 9)
-                    .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
                     .default_value(guidance)
             });
             self.input_subscriptions
@@ -938,7 +937,25 @@ impl OrchestrateSettingsPanel {
 }
 
 impl Render for OrchestrateSettingsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The textarea state owns its placeholder, so it is refreshed here for
+        // a language switch to reach it.
+        let placeholder = crate::tr!("orchestrate.children.description_placeholder");
+        for row in &self.child_rows {
+            if row
+                .description
+                .read(cx)
+                .presentation()
+                .placeholder()
+                .as_ref()
+                != placeholder.as_ref()
+            {
+                let placeholder = placeholder.clone().into_owned();
+                row.description.update(cx, |input, cx| {
+                    input.set_placeholder(placeholder, window, cx)
+                });
+            }
+        }
         v_flex()
             .w_full()
             .gap_6()
