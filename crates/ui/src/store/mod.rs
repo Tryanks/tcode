@@ -1887,6 +1887,9 @@ impl WorkspaceStore {
         }
         if let Some(ui) = self.active_conversation_ui_mut() {
             ui.right_tab = tab;
+            if tab == RightTab::Diff {
+                ui.refresh_diff();
+            }
             cx.notify();
         }
     }

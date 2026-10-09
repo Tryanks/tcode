@@ -5624,6 +5624,116 @@ mod tests {
         );
     }
 
+    /// Answers the client's queries for a few frames: each working-tree read
+    /// with `diff`, every other query with not-found. Returns how many
+    /// working-tree reads the client made.
+    fn answer_git_diff(
+        cx: &mut VisualTestContext,
+        host: &MountedShell,
+        shell: &Entity<AppShell>,
+        diff: &tcode_protocol::GitDiffResult,
+    ) -> usize {
+        let mut reads = 0;
+        for _ in 0..6 {
+            let store = store_of(shell, cx);
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            while let Ok(line) = host.outgoing.try_recv() {
+                let line = decode_client_line(&line).expect("client line");
+                let ClientPayload::Query(query) = line.payload else {
+                    continue;
+                };
+                let result = if matches!(query, tcode_protocol::Query::LoadGitDiff { .. }) {
+                    reads += 1;
+                    Ok(tcode_protocol::QueryResponse::GitDiff(diff.clone()))
+                } else {
+                    Err(tcode_protocol::ProtocolError {
+                        code: "not_found".into(),
+                        message: "not served in this test".into(),
+                    })
+                };
+                host.incoming
+                    .try_send(
+                        encode_line(&HostMessage::QueryResult {
+                            id: line.id,
+                            result,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            draw(cx);
+        }
+        reads
+    }
+
+    /// The working tree changes outside any turn — the user edits a file while
+    /// another tab is showing. Choosing the Diff tab reads the tree again, as
+    /// opening the panel does, and a tree with nothing to show draws the empty
+    /// state rather than an empty list.
+    #[gpui::test]
+    fn diff_tab_reads_the_working_tree_again_when_chosen(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        let session = "thread-1";
+        let cwd = std::path::Path::new("/tmp/tcode-working-tree");
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: session.into(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(Box::new(session_status(
+                        session, cwd,
+                    ))),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, _| store.select_session(session.into()));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        resize(cx, 1200.);
+
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        let clean = tcode_protocol::GitDiffResult::default();
+        assert_eq!(answer_git_diff(cx, &host, &shell, &clean), 1);
+        assert!(
+            cx.debug_bounds("diff-body").is_none(),
+            "a clean tree draws the empty state, not an empty list"
+        );
+
+        store.update(cx, |store, cx| {
+            store.set_right_tab(RightTab::PullRequests, cx)
+        });
+        answer_git_diff(cx, &host, &shell, &clean);
+        let changed = tcode_protocol::GitDiffResult {
+            changes: vec![agent::FileChange {
+                path: "README.md".into(),
+                kind: agent::FileChangeKind::Modify,
+                diff: Some("@@ -1 +1,2 @@\n # acme-api\n+Checkout service.\n".into()),
+            }],
+            texts: vec![tcode_protocol::GitFileText {
+                old: Some("# acme-api\n".into()),
+                new: Some("# acme-api\nCheckout service.\n".into()),
+            }],
+            ..Default::default()
+        };
+        store.update(cx, |store, cx| store.set_right_tab(RightTab::Diff, cx));
+        assert_eq!(
+            answer_git_diff(cx, &host, &shell, &changed),
+            1,
+            "choosing the Diff tab reads the working tree again"
+        );
+        assert!(
+            cx.debug_bounds("diff-body").is_some(),
+            "the changed file is listed"
+        );
+    }
+
     #[test]
     fn sidebar_overlay_follows_hover_only_on_collapsed_workspace_routes() {
         for (current, transition, popover, visible) in [
