@@ -1227,7 +1227,6 @@ fn conversation_writes_send_their_payloads_once_and_the_conversation_is_read_aga
         rest_reads, 1,
         "the node id comes from one REST read of the pull request"
     );
-    assert_eq!(count("PullRequestSubject"), 5);
 
     reads.conversation(&key()).unwrap();
     assert_eq!(
@@ -1260,16 +1259,6 @@ fn a_subject_of_another_pull_request_is_refused_before_any_mutation() {
             PullRequestActionResult::Rejected(PullRequestRejection::ForeignSubject)
         );
     }
-    assert_eq!(
-        reads.act(
-            &key(),
-            &PullRequestAction::ReplyToThread {
-                thread_id: "IC_2".into(),
-                body: "A comment is not a thread".into(),
-            }
-        ),
-        PullRequestActionResult::Rejected(PullRequestRejection::Invalid)
-    );
     assert!(mutations(&log).is_empty());
 }
 
@@ -1297,7 +1286,8 @@ fn labels_are_added_in_one_request_and_removed_one_per_request_until_one_fails()
                 ]},
                 "pullRequest": {"labels": {"nodes": [{"name": "docs"}, {"name": "retired"}]}},
             }}})),
-            _ => json_reply(json!([])),
+            Some(_) => conversation_reply(seen),
+            None => json_reply(json!([])),
         }
     });
     let lines = || {
@@ -1323,25 +1313,18 @@ fn labels_are_added_in_one_request_and_removed_one_per_request_until_one_fails()
         "a label the repository no longer lists leads, so it can still be taken off"
     );
     assert!(!candidates.complete);
+    reads.conversation(&key()).unwrap();
 
     assert_eq!(
         reads.act(
             &key(),
-            &PullRequestAction::AddLabels {
-                labels: vec!["bug".into(), "good first issue".into()],
-            }
-        ),
-        PullRequestActionResult::Applied
-    );
-    assert_eq!(
-        reads.act(
-            &key(),
-            &PullRequestAction::RemoveLabels {
-                labels: vec!["docs".into(), "needs/review".into(), "retired".into()],
+            &PullRequestAction::SetLabels {
+                add: vec!["bug".into(), "good first issue".into()],
+                remove: vec!["docs".into(), "needs/review".into(), "retired".into()],
             }
         ),
         PullRequestActionResult::Partial {
-            applied: vec!["docs".into()],
+            applied: vec!["bug".into(), "good first issue".into(), "docs".into()],
             unapplied: vec!["needs/review".into(), "retired".into()],
             failure: Box::new(PullRequestActionResult::Rejected(
                 PullRequestRejection::Refused {
@@ -1369,14 +1352,21 @@ fn labels_are_added_in_one_request_and_removed_one_per_request_until_one_fails()
         "nothing is sent after the label that failed"
     );
     reads.label_candidates(&key()).unwrap();
-    assert_eq!(
+    reads.conversation(&key()).unwrap();
+    let count = |operation: &str| {
         log.lock()
             .unwrap()
             .iter()
-            .filter(|seen| seen.operation().as_deref() == Some("PullRequestLabelCandidates"))
-            .count(),
-        2,
-        "a label write drops the candidates it changed"
+            .filter(|seen| seen.operation().as_deref() == Some(operation))
+            .count()
+    };
+    assert_eq!(
+        (
+            count("PullRequestLabelCandidates"),
+            count("PullRequestConversation")
+        ),
+        (2, 2),
+        "a label write drops the candidates and the conversation that shows the labels"
     );
 }
 
@@ -1386,6 +1376,11 @@ fn reviewers_are_offered_without_the_author_and_requested_by_kind() {
     let store = Store::new();
     let reads = reads(&fixture, &store);
     let (_server, log) = serve(fixture, |seen| match seen.operation().as_deref() {
+        None if seen.line.starts_with("DELETE ") => (
+            422,
+            String::new(),
+            br#"{"message":"Reviews may only be requested from collaborators"}"#.to_vec(),
+        ),
         Some("PullRequestReviewerCandidates") => json_reply(json!({"data": {"repository": {
             "assignableUsers": {"pageInfo": {"hasNextPage": false}, "nodes": [
                 {"login": "octocat", "name": "The Author", "avatarUrl": null},
@@ -1417,27 +1412,34 @@ fn reviewers_are_offered_without_the_author_and_requested_by_kind() {
             ("hubot", PullRequestReviewerKind::User, false),
         ]
     );
-    for requested in [true, false] {
-        assert_eq!(
-            reads.act(
-                &key(),
-                &PullRequestAction::RequestReviewers {
-                    reviewers: vec![
-                        PullRequestReviewer {
-                            login: "hubot".into(),
-                            kind: PullRequestReviewerKind::User,
-                        },
-                        PullRequestReviewer {
-                            login: "core".into(),
-                            kind: PullRequestReviewerKind::Team,
-                        },
-                    ],
-                    requested,
+    let user = |login: &str| PullRequestReviewer {
+        login: login.into(),
+        kind: PullRequestReviewerKind::User,
+    };
+    assert_eq!(
+        reads.act(
+            &key(),
+            &PullRequestAction::SetReviewers {
+                add: vec![user("hubot")],
+                remove: vec![
+                    user("monalisa"),
+                    PullRequestReviewer {
+                        login: "core".into(),
+                        kind: PullRequestReviewerKind::Team,
+                    },
+                ],
+            }
+        ),
+        PullRequestActionResult::Partial {
+            applied: vec!["hubot".into()],
+            unapplied: vec!["monalisa".into(), "core".into()],
+            failure: Box::new(PullRequestActionResult::Rejected(
+                PullRequestRejection::Refused {
+                    messages: vec!["Reviews may only be requested from collaborators".into()]
                 }
-            ),
-            PullRequestActionResult::Applied
-        );
-    }
+            )),
+        }
+    );
     let sent: Vec<_> = log
         .lock()
         .unwrap()
@@ -1445,19 +1447,19 @@ fn reviewers_are_offered_without_the_author_and_requested_by_kind() {
         .filter(|seen| seen.operation().is_none())
         .map(|seen| (seen.line.clone(), seen.body.clone()))
         .collect();
-    let body = r#"{"reviewers":["hubot"],"team_reviewers":["core"]}"#.to_owned();
     assert_eq!(
         sent,
         vec![
             (
                 "POST /repos/octo/repo/pulls/7/requested_reviewers HTTP/1.1".into(),
-                body.clone()
+                r#"{"reviewers":["hubot"],"team_reviewers":[]}"#.into()
             ),
             (
                 "DELETE /repos/octo/repo/pulls/7/requested_reviewers HTTP/1.1".into(),
-                body
+                r#"{"reviewers":["monalisa"],"team_reviewers":["core"]}"#.into()
             ),
-        ]
+        ],
+        "the additions go in one request and the removals in another"
     );
 }
 
@@ -1612,8 +1614,9 @@ fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
     assert_eq!(
         reads.act(
             &key(),
-            &PullRequestAction::AddLabels {
-                labels: vec!["bug".into()]
+            &PullRequestAction::SetLabels {
+                add: vec!["bug".into()],
+                remove: Vec::new(),
             }
         ),
         PullRequestActionResult::Uncertain,

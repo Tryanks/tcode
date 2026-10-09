@@ -387,10 +387,12 @@ pub(crate) trait DiffListHost: Sized + 'static {
 }
 
 /// The row under the last selected line that starts a comment on the selection; the Diff tab's
-/// comment for the agent and Files' review comment are both started from it.
+/// comment for the agent and Files' review comment are both started from it. `disabled` names
+/// why it cannot be started now.
 pub(crate) fn selection_row(
     id: &'static str,
     label: gpui::SharedString,
+    disabled: Option<gpui::SharedString>,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
@@ -406,6 +408,8 @@ pub(crate) fn selection_row(
                 .ghost()
                 .small()
                 .label(label)
+                .disabled(disabled.is_some())
+                .when_some(disabled, |button, reason| button.tooltip(reason))
                 .on_click(on_click),
         )
         .into_any_element()

@@ -1456,6 +1456,7 @@ impl DiffPanel {
                 rows.push(super::list::selection_row(
                     "diff-add-comment",
                     crate::tr!("diff.add_comment").into(),
+                    None,
                     cx.listener(|this, _, window, cx| {
                         this.start_comment(window, cx);
                     }),

@@ -459,7 +459,7 @@ impl PullRequestView {
         cx.notify();
     }
 
-    fn apply_option(&mut self, option: FilesOption, cx: &mut Context<Self>) {
+    fn apply_option(&mut self, option: FilesOption, window: &mut Window, cx: &mut Context<Self>) {
         match option {
             FilesOption::Split => {
                 let split = self.store.read(cx).diff_split();
@@ -473,7 +473,7 @@ impl PullRequestView {
             FilesOption::Invisibles => self.show_invisibles = !self.show_invisibles,
             FilesOption::CollapseAll => self.set_all_collapsed(true, cx),
             FilesOption::ExpandAll => self.set_all_collapsed(false, cx),
-            FilesOption::Review => self.open_sheet(Some(super::compose::Sheet::Review), cx),
+            FilesOption::Review => self.open_review(window, cx),
         }
         if let Some(list) = self.page().and_then(|page| page.files_view.list.as_ref()) {
             list.remeasure();
@@ -481,8 +481,8 @@ impl PullRequestView {
         cx.notify();
     }
 
-    fn on_option(&mut self, option: &FilesOption, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_option(*option, cx);
+    fn on_option(&mut self, option: &FilesOption, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_option(*option, window, cx);
     }
 
     pub(super) fn on_selection_menu(
@@ -928,7 +928,9 @@ impl PullRequestView {
                         .icon(icon)
                         .selected(on)
                         .tooltip(label)
-                        .on_click(cx.listener(move |this, _, _, cx| this.apply_option(option, cx))),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.apply_option(option, window, cx)
+                        })),
                 );
             }
             toolbar = toolbar
@@ -1319,7 +1321,6 @@ impl PullRequestView {
                     .child(body),
             )
             .children(footer);
-        self.ensure_summary(window, cx);
         let review_bar = self.review_bar(cx);
         v_flex()
             .size_full()

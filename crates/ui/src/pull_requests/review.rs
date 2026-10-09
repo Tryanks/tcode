@@ -107,6 +107,14 @@ impl PullRequestView {
         (current != draft.head).then_some(current)
     }
 
+    /// Why a new pending comment cannot be added now: a draft at an older head takes none until
+    /// it is moved, since the host would refuse it.
+    fn line_comment_blocked(&self, cx: &App) -> Option<SharedString> {
+        self.draft(cx)
+            .and_then(|draft| self.stale_head(&draft))
+            .map(|_| crate::tr!("pull_requests.review.move_first").into())
+    }
+
     /// What the selection menu offers on the Files diff.
     pub(super) fn line_comment_menu(&self, cx: &App) -> Option<(bool, SharedString)> {
         self.can_review(cx).then(|| {
@@ -114,7 +122,7 @@ impl PullRequestView {
                 .writes()
                 .is_some_and(|writes| writes.editors.contains_key(&Slot::Line));
             (
-                !open,
+                !open && self.line_comment_blocked(cx).is_none(),
                 crate::tr!("pull_requests.review.add_review_comment").into(),
             )
         })
@@ -266,6 +274,7 @@ impl PullRequestView {
                     rows.push(crate::diff::list::selection_row(
                         "pr-add-review-comment",
                         crate::tr!("pull_requests.review.add_review_comment").into(),
+                        self.line_comment_blocked(cx),
                         cx.listener(|this, _, window, cx| this.start_line_comment(window, cx)),
                         cx,
                     ));
@@ -392,7 +401,8 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    /// Removes a pending comment without asking; the toast can put it back.
+    /// Removes a pending comment without asking; the toast can put a placed one back. An
+    /// unplaced one cannot be: adding it again would anchor it at lines that changed.
     fn remove_pending(
         &mut self,
         comment: &PullRequestReviewDraftComment,
@@ -400,15 +410,17 @@ impl PullRequestView {
         cx: &mut Context<Self>,
     ) {
         let head = self.draft(cx).map(|draft| draft.head).unwrap_or_default();
-        let restore = PullRequestReviewDraftEdit::AddComment {
-            head,
-            revision: comment.revision.clone(),
-            path: comment.path.clone(),
-            side: comment.side,
-            start_line: comment.start_line,
-            end_line: comment.end_line,
-            body: comment.body.clone(),
-        };
+        let restore = comment
+            .placed
+            .then(|| PullRequestReviewDraftEdit::AddComment {
+                head,
+                revision: comment.revision.clone(),
+                path: comment.path.clone(),
+                side: comment.side,
+                start_line: comment.start_line,
+                end_line: comment.end_line,
+                body: comment.body.clone(),
+            });
         let view = cx.entity();
         self.edit_draft(
             PullRequestReviewDraftEdit::RemoveComment { id: comment.id },
@@ -418,13 +430,16 @@ impl PullRequestView {
                 if result.is_err() {
                     return;
                 }
+                let note = Notification::info(
+                    crate::tr!("pull_requests.review.removed_toast").into_owned(),
+                );
+                let Some(restore) = restore else {
+                    window.push_notification(note, cx);
+                    return;
+                };
                 let view = view.clone();
-                let restore = restore.clone();
                 window.push_notification(
-                    Notification::info(
-                        crate::tr!("pull_requests.review.removed_toast").into_owned(),
-                    )
-                    .action(move |_, _, _| {
+                    note.action(move |_, _, _| {
                         let view = view.clone();
                         let restore = restore.clone();
                         Button::new("pr-pending-undo")
@@ -556,10 +571,9 @@ impl PullRequestView {
             return None;
         }
         let merged = self.merged(cx);
-        // A phone reaches the sheet from the toolbar's overflow menu; the trigger only anchors it.
-        let trigger = if self.compact(cx) {
-            Button::new("pr-review-entry").ghost().w(px(0.)).invisible()
-        } else {
+        // A phone reaches the sheet from the toolbar's overflow menu, and a bottom sheet needs no
+        // trigger.
+        let trigger = (!self.compact(cx)).then(|| {
             Button::new("pr-review-entry")
                 .ghost()
                 .small()
@@ -569,8 +583,8 @@ impl PullRequestView {
                 .when(merged, |button| {
                     button.tooltip(crate::tr!("pull_requests.review.merged_disabled"))
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Some(Sheet::Review), cx)))
-        };
+                .on_click(cx.listener(|this, _, window, cx| this.open_review(window, cx)))
+        });
         Some(self.review_popover(trigger, cx))
     }
 
@@ -591,7 +605,7 @@ impl PullRequestView {
             .primary()
             .xsmall()
             .label(crate::tr!("pull_requests.review.finish"))
-            .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Some(Sheet::Review), cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.open_review(window, cx)));
         Some(
             h_flex()
                 .id("pr-review-bar")
@@ -638,13 +652,13 @@ impl PullRequestView {
                             ),
                     )
                 })
-                .child(self.review_popover(finish, cx))
+                .child(self.review_popover(Some(finish), cx))
                 .into_any_element(),
         )
     }
 
     /// The Review sheet around its trigger: anchored on a desktop, a bottom sheet on a phone.
-    fn review_popover(&self, trigger: Button, cx: &mut Context<Self>) -> AnyElement {
+    fn review_popover(&self, trigger: Option<Button>, cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity();
         let compact = self.compact(cx);
         let number = self
@@ -657,16 +671,23 @@ impl PullRequestView {
             .open(self.sheet_open(&Sheet::Review))
             .on_open_change({
                 let view = view.clone();
-                move |open, _, cx| {
+                move |open, window, cx| {
                     view.update(cx, |view, cx| {
-                        view.open_sheet(open.then_some(Sheet::Review), cx);
-                        if !*open && let Some(writes) = view.writes_mut() {
-                            writes.review.verdict = None;
+                        if *open {
+                            view.open_review(window, cx);
+                        } else {
+                            view.open_sheet(None, cx);
+                            if let Some(writes) = view.writes_mut() {
+                                writes.review.verdict = None;
+                            }
                         }
                     })
                 }
-            })
-            .trigger(trigger);
+            });
+        let popover = match trigger {
+            Some(trigger) => popover.trigger(trigger),
+            None => popover,
+        };
         let popover = if compact {
             popover.bottom_sheet(
                 crate::tr!("pull_requests.review.sheet_title", number = number).into_owned(),
@@ -679,19 +700,12 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    /// Creates the summary editor from the draft's summary while the sheet is open.
-    pub(super) fn ensure_summary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let open = self.sheet_open(&Sheet::Review);
-        let Some(writes) = self.writes_mut() else {
-            return;
-        };
-        if !open {
-            writes.review.summary = None;
+    /// Opens the Review sheet, its summary editor holding the draft's summary as it is now.
+    pub(super) fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sheet_open(&Sheet::Review) {
             return;
         }
-        if writes.review.summary.is_some() {
-            return;
-        }
+        self.open_sheet(Some(Sheet::Review), cx);
         let body = self.draft(cx).map(|draft| draft.body).unwrap_or_default();
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -1056,7 +1070,7 @@ impl PullRequestView {
                         .xsmall()
                         .label(crate::tr!("pull_requests.review.refresh"))
                         .on_click(move |_, window, cx| {
-                            refresh_view.update(cx, |view, cx| view.refresh_from_sheet(window, cx))
+                            refresh_view.update(cx, |view, cx| view.refresh(window, cx))
                         })
                         .into_any_element(),
                 ],
@@ -1209,21 +1223,14 @@ impl PullRequestView {
                         .ghost()
                         .xsmall()
                         .label(crate::tr!("pull_requests.review.finish"))
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             if let Some(page) = this.page_mut() {
                                 page.tab = Some(super::detail::Tab::Files);
-                                page.writes.sheet = Some(Sheet::Review);
                             }
-                            cx.notify();
+                            this.open_review(window, cx);
                         })),
                 )
                 .into_any_element(),
         )
-    }
-}
-
-impl PullRequestView {
-    fn refresh_from_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh(window, cx);
     }
 }

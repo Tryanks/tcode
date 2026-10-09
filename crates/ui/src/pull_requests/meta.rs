@@ -164,8 +164,7 @@ impl PullRequestView {
         cx.notify();
     }
 
-    /// Additions in one request, removals one by one (labels) or in one (reviewers); one answer
-    /// for the whole change.
+    /// The staged change as one write; the host answers for all of it.
     fn apply_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(current) = self.current.clone() else {
             return;
@@ -193,95 +192,24 @@ impl PullRequestView {
                 .filter_map(|row| row.reviewer.clone())
                 .collect()
         };
-        let actions: Vec<(PullRequestAction, Vec<String>)> = match kind {
-            PickerKind::Labels => [
-                (!adds.is_empty()).then(|| {
-                    (
-                        PullRequestAction::AddLabels {
-                            labels: adds.clone(),
-                        },
-                        adds.clone(),
-                    )
-                }),
-                (!removes.is_empty()).then(|| {
-                    (
-                        PullRequestAction::RemoveLabels {
-                            labels: removes.clone(),
-                        },
-                        removes.clone(),
-                    )
-                }),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-            PickerKind::Reviewers => [
-                (!adds.is_empty()).then(|| {
-                    (
-                        PullRequestAction::RequestReviewers {
-                            reviewers: reviewers(&adds),
-                            requested: true,
-                        },
-                        adds.clone(),
-                    )
-                }),
-                (!removes.is_empty()).then(|| {
-                    (
-                        PullRequestAction::RequestReviewers {
-                            reviewers: reviewers(&removes),
-                            requested: false,
-                        },
-                        removes.clone(),
-                    )
-                }),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
+        let action = match kind {
+            PickerKind::Labels => PullRequestAction::SetLabels {
+                add: adds,
+                remove: removes,
+            },
+            PickerKind::Reviewers => PullRequestAction::SetReviewers {
+                add: reviewers(&adds),
+                remove: reviewers(&removes),
+            },
         };
         let write = match kind {
             PickerKind::Labels => Write::Labels,
             PickerKind::Reviewers => Write::Reviewers,
         };
+        let task = self.command_write(action, cx);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let mut applied = Vec::new();
-            let mut unapplied = Vec::new();
-            let mut failure = None;
-            for (action, names) in actions {
-                if failure.is_some() {
-                    unapplied.extend(names);
-                    continue;
-                }
-                let Ok(task) = this.update(cx, |this, cx| this.command_write(action, cx)) else {
-                    return;
-                };
-                match task.await {
-                    PullRequestActionResult::Applied => applied.extend(names),
-                    PullRequestActionResult::Partial {
-                        applied: done,
-                        unapplied: rest,
-                        failure: why,
-                    } => {
-                        applied.extend(done);
-                        unapplied.extend(rest);
-                        failure = Some(*why);
-                    }
-                    result => {
-                        unapplied.extend(names);
-                        failure = Some(result);
-                    }
-                }
-            }
-            let result = match failure {
-                None => PullRequestActionResult::Applied,
-                Some(failure) if applied.is_empty() => failure,
-                Some(failure) => PullRequestActionResult::Partial {
-                    applied,
-                    unapplied,
-                    failure: Box::new(failure),
-                },
-            };
+            let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.written(&current, write, &result, window, cx);
                 if let Some(page) = this.pages.get_mut(&current) {

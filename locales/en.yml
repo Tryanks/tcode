@@ -1765,6 +1765,7 @@ pull_requests:
     stale_title: "#%{number} changed since you started this review."
     stale_body: "Its head moved from %{old} to %{new}. Your pending comments are kept. Move them to the new head to submit."
     move_to_head: "Move to the new head"
+    move_first: "Move to the new head first"
     unplaced: "Remove or re-add %{count} comments whose lines changed."
     unplaced_one: "Remove or re-add 1 comment whose line changed."
     uncertain_notice: "The last submission's result is unknown. Check the conversation before submitting again."
