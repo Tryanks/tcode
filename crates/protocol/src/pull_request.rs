@@ -331,7 +331,7 @@ pub struct PullRequestReviewerCandidates {
 pub enum PullRequestReadResponse {
     Files(PullRequestFiles),
     FileText(PullRequestFileText),
-    Conversation(PullRequestConversation),
+    Conversation(Box<PullRequestConversation>),
     ThreadReplies(PullRequestThreadReplies),
     ViewedFiles(PullRequestViewedFiles),
     Media(PullRequestMedia),

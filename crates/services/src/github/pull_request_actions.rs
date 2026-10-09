@@ -20,6 +20,9 @@ use tcode_protocol::{
     PullRequestReviewerKind,
 };
 
+/// A pending comment's id and the revision its lines now read at, if they still do.
+pub type Moved = (u64, Option<String>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anchoring {
     InDiff,
@@ -512,7 +515,7 @@ impl PullRequestReads {
         &self,
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
-    ) -> Result<(String, Vec<(u64, Option<String>)>), GitHubError> {
+    ) -> Result<(String, Vec<Moved>), GitHubError> {
         let (base, head, files) = self.diff(key)?;
         let lines = |revision: &str, comment: &PullRequestReviewDraftComment| {
             let text = self.file_text(key, revision, &comment.path)?.value;

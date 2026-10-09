@@ -337,10 +337,9 @@ impl AppState {
                     reads.file_text(&key, &revision, &path)?,
                     PullRequestReadResponse::FileText,
                 ),
-                PullRequestRead::Conversation => reply(
-                    reads.conversation(&key)?,
-                    PullRequestReadResponse::Conversation,
-                ),
+                PullRequestRead::Conversation => reply(reads.conversation(&key)?, |conversation| {
+                    PullRequestReadResponse::Conversation(Box::new(conversation))
+                }),
                 PullRequestRead::ThreadReplies { thread_id, after } => reply(
                     reads.thread_replies(&key, &thread_id, &after)?,
                     PullRequestReadResponse::ThreadReplies,

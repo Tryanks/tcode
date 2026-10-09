@@ -769,13 +769,18 @@ impl PullRequestReads {
         let mut comments = conversation_comments(&conversation)
             .chain(replies.iter().flat_map(|replies| replies.comments.iter()));
         let named = match source {
-            media::MediaSource::Avatar(_) => comments.any(|comment| {
-                comment
-                    .author
-                    .as_ref()
-                    .and_then(|author| author.avatar_url.as_deref())
-                    == Some(url)
-            }),
+            media::MediaSource::Avatar(_) => {
+                comments.any(|comment| {
+                    comment
+                        .author
+                        .as_ref()
+                        .and_then(|author| author.avatar_url.as_deref())
+                        == Some(url)
+                }) || conversation
+                    .reviewers
+                    .iter()
+                    .any(|reviewer| reviewer.avatar_url.as_deref() == Some(url))
+            }
             _ => comments.any(|comment| comment.body.contains(url)),
         };
         if !named {
