@@ -1081,7 +1081,7 @@ impl Render for MergeDialog {
                     .label(
                         crate::tr!(
                             "pull_requests.merge.make_default",
-                            method = method_label(method),
+                            method = segment_label(method),
                             project = project
                         )
                         .into_owned(),
