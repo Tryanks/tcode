@@ -4,7 +4,9 @@
 use super::{
     CredentialError, GitHubError, RequestOptions, RestRequest,
     graphql::Document,
-    pull_request_reads::{PullRequestReads, Reader, is_revision, percent_encode, reaction_name},
+    pull_request_reads::{
+        MAX_PAGES, PullRequestReads, Reader, is_revision, percent_encode, reaction_name,
+    },
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::UNIX_EPOCH};
@@ -13,9 +15,54 @@ use tcode_core::{
     session::ReviewSide,
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult as Outcome, PullRequestRejection as Rejection,
-    PullRequestReviewVerdict, PullRequestReviewerKind,
+    PullRequestAction, PullRequestActionResult as Outcome, PullRequestFile, PullRequestFileText,
+    PullRequestPatch, PullRequestRejection as Rejection, PullRequestReviewVerdict,
+    PullRequestReviewerKind,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchoring {
+    InDiff,
+    OutsideDiff,
+    /// The pull request is at another head now.
+    Moved,
+}
+
+/// Whether the lines fall inside one hunk of the file on that side; GitHub refuses a review
+/// comment anywhere else.
+fn in_hunks(
+    files: &[PullRequestFile],
+    path: &str,
+    side: ReviewSide,
+    (start, end): (u32, u32),
+) -> bool {
+    let Some(PullRequestPatch::Hunks(hunks)) = files
+        .iter()
+        .find(|file| file.path == path)
+        .map(|file| &file.patch)
+    else {
+        return false;
+    };
+    hunks
+        .lines()
+        .filter_map(|line| line.strip_prefix("@@ "))
+        .any(|header| {
+            let mut ranges = header.split_whitespace();
+            let range = match side {
+                ReviewSide::Old => ranges.next().and_then(|range| range.strip_prefix('-')),
+                ReviewSide::New => ranges.nth(1).and_then(|range| range.strip_prefix('+')),
+            };
+            let Some((first, count)) =
+                range.map(|range| range.split_once(',').unwrap_or((range, "1")))
+            else {
+                return false;
+            };
+            let (Ok(first), Ok(count)) = (first.parse::<u32>(), count.parse::<u32>()) else {
+                return false;
+            };
+            count > 0 && first <= start && end < first + count
+        })
+}
 
 /// The reads a write may change.
 #[derive(Clone, Copy)]
@@ -350,8 +397,8 @@ impl PullRequestReads {
     }
 
     /// The whole review in one request, so nothing of it is visible until the verdict is sent.
-    /// The head is read fresh first: a review read at `head` is not sent once the pull request
-    /// has moved past it, nor are comments on another commit's lines.
+    /// The head is read fresh first: a review anchored at `head` is not sent once the pull
+    /// request has moved past it, and an unplaced comment is never sent.
     pub fn submit_review(
         &self,
         key: &PullRequestKey,
@@ -376,6 +423,7 @@ impl PullRequestReads {
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<Outcome, Rejection> {
         if !is_revision(head)
+            || comments.iter().any(|comment| !comment.placed)
             || (verdict != PullRequestReviewVerdict::Approve && blank(body) && comments.is_empty())
         {
             return Err(Rejection::Invalid);
@@ -383,7 +431,7 @@ impl PullRequestReads {
         let reader = self.reader(key).map_err(rejection)?;
         self.revisions.invalidate(key);
         let current = self.revisions(&reader).map_err(rejection)?.head.clone();
-        if current != head || comments.iter().any(|comment| comment.revision != current) {
+        if current != head {
             return Err(Rejection::StaleHead { head: current });
         }
         let event = match verdict {
@@ -418,6 +466,86 @@ impl PullRequestReads {
                 "comments": comments,
             })),
         ))
+    }
+
+    /// The changed files at the pull request's current revisions, every page of them.
+    fn diff(
+        &self,
+        key: &PullRequestKey,
+    ) -> Result<(String, String, Vec<PullRequestFile>), GitHubError> {
+        let first = self.files(key, None)?.value;
+        let (base, head) = (first.base.clone(), first.head.clone());
+        let mut files = first.files.clone();
+        let mut next = first.next_page;
+        while let Some(page) = next.filter(|page| (*page as usize) <= MAX_PAGES) {
+            let more = self.files(key, Some(page))?.value;
+            files.extend(more.files.iter().cloned());
+            next = more.next_page;
+        }
+        Ok((base, head, files))
+    }
+
+    /// Whether GitHub takes a review comment on these lines: the pull request is still at
+    /// `head`, and they lie inside one of the file's hunks on that side.
+    pub fn commentable(
+        &self,
+        key: &PullRequestKey,
+        head: &str,
+        path: &str,
+        side: ReviewSide,
+        lines: (u32, u32),
+    ) -> Result<Anchoring, GitHubError> {
+        let (_, current, files) = self.diff(key)?;
+        if current != head {
+            return Ok(Anchoring::Moved);
+        }
+        Ok(if in_hunks(&files, path, side, lines) {
+            Anchoring::InDiff
+        } else {
+            Anchoring::OutsideDiff
+        })
+    }
+
+    /// The pull request's current head, and where each comment's lines are at it: the revision
+    /// its side now shows when the lines read the same and are still in the diff, else `None`.
+    pub fn reanchor(
+        &self,
+        key: &PullRequestKey,
+        comments: &[PullRequestReviewDraftComment],
+    ) -> Result<(String, Vec<(u64, Option<String>)>), GitHubError> {
+        let (base, head, files) = self.diff(key)?;
+        let lines = |revision: &str, comment: &PullRequestReviewDraftComment| {
+            let text = self.file_text(key, revision, &comment.path)?.value;
+            Ok::<_, GitHubError>(match &*text {
+                PullRequestFileText::Text(text) => {
+                    let lines: Vec<_> = text.lines().collect();
+                    lines
+                        .get(comment.start_line as usize - 1..comment.end_line as usize)
+                        .map(|lines| lines.join("\n"))
+                }
+                _ => None,
+            })
+        };
+        let mut moved = Vec::new();
+        for comment in comments {
+            let revision = match comment.side {
+                ReviewSide::Old => &base,
+                ReviewSide::New => &head,
+            };
+            let kept = comment.placed
+                && in_hunks(
+                    &files,
+                    &comment.path,
+                    comment.side,
+                    (comment.start_line, comment.end_line),
+                )
+                && (comment.revision == *revision || {
+                    let before = lines(&comment.revision, comment)?;
+                    before.is_some() && before == lines(revision, comment)?
+                });
+            moved.push((comment.id, kept.then(|| revision.clone())));
+        }
+        Ok((head, moved))
     }
 
     fn written(&self, key: &PullRequestKey, affects: Affects, outcome: &Outcome) {

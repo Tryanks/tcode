@@ -479,10 +479,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             key,
             edit,
         } => {
-            return CommandOutcome::Immediate(
-                app.edit_pull_request_review_draft(&session_id, key, edit, cx)
-                    .map(|()| CommandResponse::Unit),
-            );
+            return CommandOutcome::Pending(app.edit_pull_request_review_draft(
+                &session_id,
+                key,
+                edit,
+                cx,
+            ));
         }
         Command::UnlinkPullRequest { session_id, key } => {
             app.unlink_pull_request(&session_id, &key, cx);

@@ -1092,7 +1092,8 @@ fn reads_answer_only_a_linked_pull_request_and_a_synced_change_reads_it_fresh() 
 }
 
 #[test]
-fn a_review_draft_is_the_hosts_across_a_restart_and_a_stale_submission_keeps_it() {
+fn a_review_draft_is_the_hosts_across_a_restart_and_a_moved_head_keeps_it_until_moved() {
+    const BASE: &str = "3333333333333333333333333333333333333333";
     const OLD: &str = "1111111111111111111111111111111111111111";
     const NEW: &str = "2222222222222222222222222222222222222222";
     let dir = TestStore::new("tcode-pr-review");
@@ -1103,18 +1104,39 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_stale_submission_keeps_it(
     let responding = model.clone();
     let _server = fixture.serve(move |exchange| {
         let line = exchange.request.lines().next().unwrap().to_owned();
+        let diff = exchange.request.contains("application/vnd.github.diff");
         let body = String::from_utf8_lossy(&exchange.body).into_owned();
         let mut model = responding.lock().unwrap();
         model.1.push((line.clone(), body.clone()));
-        let reply = if line.starts_with("GET /repos/sample/project/pulls/1 ") {
-            json!({"base": {"sha": "3333333333333333333333333333333333333333"},
-                "head": {"sha": model.0}, "changed_files": 1, "node_id": "PR_1"})
+        let head = model.0;
+        // Line 8 is rewritten at the new head; every other line reads the same.
+        let text = (1..=12)
+            .map(|line| match (line, head) {
+                (8, NEW) => "changed".to_owned(),
+                _ => format!("line {line}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let reply = if diff {
+            "diff --git a/src/lib.rs b/src/lib.rs\nindex 1111111..2222222 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,10 +1,10 @@\n line 1\n".to_owned()
+        } else if line.starts_with("GET /repos/sample/project/pulls/1 ") {
+            json!({"base": {"sha": BASE}, "head": {"sha": head}, "changed_files": 1, "node_id": "PR_1"})
+                .to_string()
+        } else if line.starts_with("GET /repos/sample/project/contents/src/lib.rs?ref=") {
+            if line.contains(NEW) {
+                text
+            } else {
+                (1..=12)
+                    .map(|line| format!("line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         } else if body.contains("PullRequestSummaries") {
-            json!({"data": {"s0": {"pullRequest": pr(1, "OPEN", false)}}})
+            json!({"data": {"s0": {"pullRequest": pr(1, "OPEN", false)}}}).to_string()
         } else {
-            json!({"id": 1})
+            json!({"id": 1}).to_string()
         };
-        exchange.reply(200, "", &serde_json::to_vec(&reply).unwrap());
+        exchange.reply(200, "", reply.as_bytes());
     });
     let key = PullRequestKey::new("github.com", "sample/project", 1);
     let mut cx = TestAppContext::default();
@@ -1142,7 +1164,7 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_stale_submission_keeps_it(
                         _ => None,
                     })
             {
-                return result.unwrap();
+                return result;
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1157,6 +1179,7 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_stale_submission_keeps_it(
     };
     let add = |line: u32| {
         edit(PullRequestReviewDraftEdit::AddComment {
+            head: OLD.into(),
             revision: OLD.into(),
             path: "src/lib.rs".into(),
             side: tcode_core::session::ReviewSide::New,
@@ -1165,20 +1188,24 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_stale_submission_keeps_it(
             body: format!("Line {line}"),
         })
     };
-    command(&state, &mut cx, add(3));
-    command(&state, &mut cx, add(8));
-    command(
-        &state,
-        &mut cx,
-        edit(PullRequestReviewDraftEdit::RemoveComment { id: 1 }),
+    let drafts = |state: &TestEntity| {
+        state.read(|state| state.find_meta("active").unwrap().pull_request_reviews)
+    };
+    command(&state, &mut cx, add(3)).unwrap();
+    command(&state, &mut cx, add(8)).unwrap();
+    assert_eq!(
+        command(&state, &mut cx, add(11)).unwrap_err().code,
+        "pull_request_not_in_diff",
+        "a line outside every hunk is refused before GitHub would refuse the review"
     );
     command(
         &state,
         &mut cx,
         edit(PullRequestReviewDraftEdit::SetBody {
-            body: "One thing".into(),
+            body: "Two things".into(),
         }),
-    );
+    )
+    .unwrap();
 
     // A restart: a fresh host over the same data.
     state
@@ -1190,11 +1217,15 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_stale_submission_keeps_it(
     assert_eq!(draft.len(), 1);
     assert_eq!(
         (
+            draft[0].head.as_str(),
             draft[0].body.as_str(),
-            draft[0].comments.len(),
-            draft[0].comments[0].id
+            draft[0]
+                .comments
+                .iter()
+                .map(|comment| comment.end_line)
+                .collect::<Vec<_>>()
         ),
-        ("One thing", 1, 2)
+        (OLD, "Two things", vec![3, 8])
     );
     let state = cx.new_entity(TestClientState::new(store.clone()));
     state.update(&mut cx, |state, _| {
@@ -1216,35 +1247,70 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_stale_submission_keeps_it(
             .1
             .iter()
             .filter(|(line, _)| line.starts_with("POST /repos/sample/project/pulls/1/reviews "))
-            .count()
+            .map(|(_, body)| serde_json::from_str::<Value>(body).unwrap())
+            .collect::<Vec<_>>()
     };
 
     model.lock().unwrap().0 = NEW;
     assert_eq!(
-        command(&state, &mut cx, submit(OLD)),
+        command(&state, &mut cx, submit(OLD)).unwrap(),
         CommandResponse::PullRequestAction(PullRequestActionResult::Rejected(
             tcode_protocol::PullRequestRejection::StaleHead { head: NEW.into() }
         ))
     );
-    assert_eq!(reviews(), 0);
+    assert!(reviews().is_empty());
     assert_eq!(
-        state.read(|state| state.find_meta("active").unwrap().pull_request_reviews),
+        drafts(&state),
         draft,
-        "the draft written against the old head is kept whole"
+        "a stale submission keeps the draft whole"
     );
 
-    model.lock().unwrap().0 = OLD;
+    command(
+        &state,
+        &mut cx,
+        edit(PullRequestReviewDraftEdit::MoveToHead),
+    )
+    .unwrap();
+    let moved = drafts(&state);
+    assert_eq!(moved[0].head, NEW);
     assert_eq!(
-        command(&state, &mut cx, submit(OLD)),
+        moved[0]
+            .comments
+            .iter()
+            .map(|comment| (comment.end_line, comment.placed, comment.revision.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(3, true, NEW), (8, false, OLD)],
+        "a comment whose line reads the same moves; one whose line changed is kept unplaced"
+    );
+    assert_eq!(
+        command(&state, &mut cx, submit(NEW)).unwrap(),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Rejected(
+            tcode_protocol::PullRequestRejection::Invalid
+        )),
+        "an unplaced comment is never sent"
+    );
+    let unplaced = moved[0].comments[1].id;
+    command(
+        &state,
+        &mut cx,
+        edit(PullRequestReviewDraftEdit::RemoveComment { id: unplaced }),
+    )
+    .unwrap();
+    assert_eq!(
+        command(&state, &mut cx, submit(NEW)).unwrap(),
         CommandResponse::PullRequestAction(PullRequestActionResult::Applied)
     );
-    assert_eq!(reviews(), 1);
+    assert_eq!(
+        reviews(),
+        vec![json!({
+            "commit_id": NEW,
+            "event": "COMMENT",
+            "body": "Two things",
+            "comments": [{"path": "src/lib.rs", "line": 3, "side": "RIGHT", "body": "Line 3"}],
+        })]
+    );
     assert!(
-        state.read(|state| state
-            .find_meta("active")
-            .unwrap()
-            .pull_request_reviews
-            .is_empty()),
+        drafts(&state).is_empty(),
         "a submitted review leaves the draft"
     );
     cx.run_until(|state| !state.pull_requests.syncing && state.pull_requests.requested.is_empty());

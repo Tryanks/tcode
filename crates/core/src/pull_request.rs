@@ -448,6 +448,9 @@ pub fn groups(links: &[ThreadPullRequestLink]) -> Vec<PullRequestGroup<'_>> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestReviewDraft {
     pub key: PullRequestKey,
+    /// The head commit the comments are anchored at.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub head: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub body: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -455,29 +458,52 @@ pub struct PullRequestReviewDraft {
     /// Never reused, so an edit naming a removed comment cannot reach a later one.
     #[serde(default)]
     pub next_id: u64,
+    /// The last submission got no answer, so it may have been posted; set until the pull request
+    /// is read again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncertain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestReviewDraftComment {
     pub id: u64,
-    /// The head commit whose lines the comment is on.
+    /// The commit whose text the comment's side shows: the base for the old side, the head for
+    /// the new.
     pub revision: String,
     pub path: String,
     pub side: crate::session::ReviewSide,
     pub start_line: u32,
     pub end_line: u32,
     pub body: String,
+    /// False once the head moved and its lines no longer read as they did: kept, never sent.
+    #[serde(default = "placed", skip_serializing_if = "is_placed")]
+    pub placed: bool,
+}
+
+fn placed() -> bool {
+    true
+}
+
+fn is_placed(placed: &bool) -> bool {
+    *placed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum PullRequestReviewDraftEdit {
+    /// Lines of the diff read at `head`; a draft anchored at another head takes no new comments
+    /// until it is moved to this one.
     AddComment {
+        head: String,
         revision: String,
         path: String,
         side: crate::session::ReviewSide,
         start_line: u32,
         end_line: u32,
+        body: String,
+    },
+    EditComment {
+        id: u64,
         body: String,
     },
     RemoveComment {
@@ -486,10 +512,14 @@ pub enum PullRequestReviewDraftEdit {
     SetBody {
         body: String,
     },
+    /// Re-anchors the comments at the pull request's current head. The host applies it with
+    /// [`reanchor_review`], since only it can read whether each comment's lines changed.
+    MoveToHead,
     Discard,
 }
 
-/// Applies an edit to the thread's drafts; false when it changed nothing or was malformed.
+/// Applies an edit to the thread's drafts; false when it changed nothing, was malformed, or was
+/// [`PullRequestReviewDraftEdit::MoveToHead`].
 pub fn edit_review_draft(
     drafts: &mut Vec<PullRequestReviewDraft>,
     key: &PullRequestKey,
@@ -502,9 +532,11 @@ pub fn edit_review_draft(
         {
             drafts.push(PullRequestReviewDraft {
                 key: key.clone(),
+                head: String::new(),
                 body: String::new(),
                 comments: Vec::new(),
                 next_id: 1,
+                uncertain: false,
             });
             drafts.len() - 1
         }
@@ -513,6 +545,7 @@ pub fn edit_review_draft(
     let draft = &mut drafts[index];
     let changed = match edit {
         PullRequestReviewDraftEdit::AddComment {
+            head,
             revision,
             path,
             side,
@@ -520,10 +553,17 @@ pub fn edit_review_draft(
             end_line,
             body,
         } => {
-            if path.is_empty() || start_line == 0 || start_line > end_line || body.trim().is_empty()
+            let anchored = draft.comments.is_empty() || draft.head == head;
+            if !anchored
+                || head.is_empty()
+                || path.is_empty()
+                || start_line == 0
+                || start_line > end_line
+                || body.trim().is_empty()
             {
                 false
             } else {
+                draft.head = head;
                 draft.comments.push(PullRequestReviewDraftComment {
                     id: draft.next_id,
                     revision,
@@ -532,9 +572,19 @@ pub fn edit_review_draft(
                     start_line,
                     end_line,
                     body,
+                    placed: true,
                 });
                 draft.next_id += 1;
                 true
+            }
+        }
+        PullRequestReviewDraftEdit::EditComment { id, body } => {
+            match draft.comments.iter_mut().find(|comment| comment.id == id) {
+                Some(comment) if !body.trim().is_empty() && comment.body != body => {
+                    comment.body = body;
+                    true
+                }
+                _ => false,
             }
         }
         PullRequestReviewDraftEdit::RemoveComment { id } => {
@@ -545,6 +595,7 @@ pub fn edit_review_draft(
         PullRequestReviewDraftEdit::SetBody { body } => {
             body != std::mem::replace(&mut draft.body, body.clone())
         }
+        PullRequestReviewDraftEdit::MoveToHead => false,
         PullRequestReviewDraftEdit::Discard => {
             drafts.remove(index);
             return true;
@@ -556,27 +607,57 @@ pub fn edit_review_draft(
     changed
 }
 
-/// Takes what a submission sent out of the draft: its comments by id, and the body only while it
-/// still reads as sent, since a body revised meanwhile is new work.
+/// Anchors the draft at `head`. `moved` names where each comment's lines are now, or `None` when
+/// they changed, which leaves the comment unplaced.
+pub fn reanchor_review(
+    drafts: &mut [PullRequestReviewDraft],
+    key: &PullRequestKey,
+    head: &str,
+    moved: impl Fn(&PullRequestReviewDraftComment) -> Option<String>,
+) -> bool {
+    let Some(draft) = drafts.iter_mut().find(|draft| draft.key == *key) else {
+        return false;
+    };
+    if draft.head == head {
+        return false;
+    }
+    draft.head = head.to_owned();
+    for comment in &mut draft.comments {
+        match moved(comment) {
+            Some(revision) if comment.placed => comment.revision = revision,
+            _ => comment.placed = false,
+        }
+    }
+    true
+}
+
+/// What a submission did to the draft. Once GitHub took it, its comments go by id, and its body
+/// only while it still reads as sent, since a body revised meanwhile is new work. An unanswered
+/// one marks the draft until the pull request is read again.
 pub fn submitted_review(
     drafts: &mut Vec<PullRequestReviewDraft>,
     key: &PullRequestKey,
-    comments: &[u64],
-    body: &str,
-) {
+    sent: Option<(&[u64], &str)>,
+) -> bool {
     let Some(index) = drafts.iter().position(|draft| draft.key == *key) else {
-        return;
+        return false;
     };
     let draft = &mut drafts[index];
+    let Some((comments, body)) = sent else {
+        draft.uncertain = true;
+        return true;
+    };
     draft
         .comments
         .retain(|comment| !comments.contains(&comment.id));
     if draft.body == body {
         draft.body.clear();
     }
+    draft.uncertain = false;
     if draft.body.is_empty() && draft.comments.is_empty() {
         drafts.remove(index);
     }
+    true
 }
 
 /// A menu visibility hint only; the host forge adapter validates and canonicalizes the target.

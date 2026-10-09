@@ -9,8 +9,9 @@ use tcode_core::{
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult, PullRequestFileText, PullRequestMedia,
-    PullRequestPatch, PullRequestReactionContent, PullRequestRejection, PullRequestReviewAnchor,
-    PullRequestReviewVerdict, PullRequestReviewer, PullRequestReviewerKind, PullRequestViewedState,
+    PullRequestPatch, PullRequestPermissions, PullRequestReactionContent, PullRequestRejection,
+    PullRequestReviewAnchor, PullRequestReviewState, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestReviewerKind, PullRequestViewedState,
 };
 use tcode_services::github::{GitHubApi, GitHubError, pull_request_reads::PullRequestReads};
 
@@ -407,8 +408,19 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
         })
     };
     match seen.operation().as_deref() {
-        Some("PullRequestConversation") => {
-            json_reply(json!({"data": {"repository": {"pullRequest": {
+        Some("PullRequestConversation") => json_reply(
+            json!({"data": {"repository": {"viewerPermission": "TRIAGE", "pullRequest": {
+                "viewerCanUpdate": true, "viewerDidAuthor": true,
+                "labels": {"nodes": [{"name": "bug", "color": "d73a4a", "description": null}]},
+                "reviewRequests": {"nodes": [
+                    {"requestedReviewer": {"slug": "core"}},
+                    {"requestedReviewer": {"login": "monalisa", "avatarUrl": null}},
+                ]},
+                "latestReviews": {"nodes": [
+                    {"state": "CHANGES_REQUESTED", "author": {"login": "monalisa"}},
+                    {"state": "APPROVED", "author": {"login": "hubot", "avatarUrl": null}},
+                    {"state": "DISMISSED", "author": {"login": "octocat"}},
+                ]},
                 "id": "PR_7", "body": "Screenshot: ![shot](https://github.com/user-attachments/assets/abc-123)\n<video src=\"https://github.com/user-attachments/assets/vid-1\">\n![](https://github.com/user-attachments/assets/loop) ![](https://github.com/user-attachments/assets/huge) ![](https://github.com/user-attachments/assets/wide) ![](https://github.com/user-attachments/assets/page) ![](https://github.com/user-attachments/assets/dated) ![](https://github.com/user-attachments/assets/unsized) ![](https://user-images.githubusercontent.com/1/legacy.png) Not an avatar: https://avatars.githubusercontent.com/u/5",
                 "createdAt": "2026-10-01T00:00:00Z", "lastEditedAt": null,
                 "url": "https://github.com/octo/repo/pull/7", "author": author, "reactionGroups": [],
@@ -421,8 +433,8 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
                     {"id": "PRR_2", "body": "", "state": "APPROVED", "submittedAt": "2026-10-02T12:00:00Z",
                      "createdAt": "2026-10-02T12:00:00Z", "url": "", "author": author, "reactionGroups": []},
                 ]},
-            }}}}))
-        }
+            }}}}),
+        ),
         Some("PullRequestReviewThreads") => {
             let after = &seen.variables()["cursor"];
             if after.is_null() {
@@ -434,6 +446,7 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
                             "path": "src/lib.rs", "line": null, "startLine": null,
                             "originalLine": 12, "originalStartLine": 10,
                             "diffSide": "RIGHT", "startDiffSide": "RIGHT",
+                            "viewerCanReply": true, "viewerCanResolve": false, "viewerCanUnresolve": true,
                             "comments": {"totalCount": 12,
                                 "pageInfo": {"hasNextPage": true, "endCursor": "C10"},
                                 "nodes": [comment("RC_1", "These three lines ![x](https://github.com/user-attachments/assets/in-thread)", "2026-10-02T01:00:00Z")]},
@@ -487,9 +500,45 @@ fn conversation_keeps_an_outdated_multiline_thread_and_pages_its_replies_within_
     );
     assert_eq!(conversation.comments[1].reactions.len(), 1);
     assert!(conversation.comments[1].reactions[0].viewer_reacted);
+    assert_eq!(
+        conversation.permissions,
+        PullRequestPermissions {
+            update: true,
+            verdicts: vec![PullRequestReviewVerdict::Comment],
+            label: true,
+            request_reviewers: false,
+        },
+        "the author may only comment, and triage labels without requesting reviews"
+    );
+    assert_eq!(
+        conversation
+            .reviewers
+            .iter()
+            .map(|state| (
+                state.reviewer.login.as_str(),
+                state.reviewer.kind,
+                state.verdict
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("core", PullRequestReviewerKind::Team, None),
+            ("monalisa", PullRequestReviewerKind::User, None),
+            (
+                "hubot",
+                PullRequestReviewerKind::User,
+                Some(PullRequestReviewState::Approved)
+            ),
+        ],
+        "a request outstanding outranks the reviewer's last verdict; a dismissed review is none"
+    );
+    assert_eq!(conversation.labels[0].name, "bug");
     let thread = &conversation.threads[0];
     assert_eq!(thread.id, "PRRT_outdated");
     assert!(thread.outdated && thread.resolved);
+    assert!(
+        thread.viewer_can_reply && thread.viewer_can_resolve,
+        "a resolved thread's right is to unresolve it"
+    );
     assert_eq!(
         thread.anchor,
         Some(PullRequestReviewAnchor {
@@ -1426,6 +1475,7 @@ fn draft_comment(
         start_line: lines.0,
         end_line: lines.1,
         body: format!("Comment {id}"),
+        placed: true,
     }
 }
 
@@ -1479,20 +1529,18 @@ fn a_review_is_one_submission_at_the_head_read_fresh_and_a_moved_head_sends_noth
     );
     assert!(reviews().is_empty());
 
-    let moved = [
-        draft_comment(1, HEAD, (4, 4), ReviewSide::New),
-        draft_comment(2, MOVED, (9, 12), ReviewSide::Old),
-    ];
+    let mut unplaced = draft_comment(2, MOVED, (9, 12), ReviewSide::Old);
+    unplaced.placed = false;
     assert_eq!(
         reads.submit_review(
             &key(),
             PullRequestReviewVerdict::RequestChanges,
             MOVED,
             "Two things",
-            &moved
+            &[draft_comment(1, MOVED, (4, 4), ReviewSide::New), unplaced]
         ),
-        PullRequestActionResult::Rejected(PullRequestRejection::StaleHead { head: MOVED.into() }),
-        "a comment on an older commit's lines is not sent at the new head"
+        PullRequestActionResult::Rejected(PullRequestRejection::Invalid),
+        "a comment whose lines changed is never sent"
     );
     assert!(reviews().is_empty());
 

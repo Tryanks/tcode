@@ -150,6 +150,11 @@ pub struct PullRequestComment {
     /// Set for a review's own body.
     pub review_state: Option<PullRequestReviewState>,
     pub reactions: Vec<PullRequestReaction>,
+    /// GitHub lets the signed-in account change its text: its own, or a maintainer's right.
+    #[serde(default)]
+    pub viewer_can_update: bool,
+    #[serde(default)]
+    pub viewer_can_react: bool,
 }
 
 /// Where a review thread was left: lines of one side of a file at one commit.
@@ -177,6 +182,11 @@ pub struct PullRequestReviewThread {
     pub total_comments: u64,
     /// Where [`PullRequestRead::ThreadReplies`] carries on, while replies remain unread.
     pub replies_after: Option<String>,
+    #[serde(default)]
+    pub viewer_can_reply: bool,
+    /// Whether the signed-in account may resolve it, or unresolve it once resolved.
+    #[serde(default)]
+    pub viewer_can_resolve: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +200,41 @@ pub struct PullRequestConversation {
     /// Opaque, and different for each GitHub account the host reads as: a client keys the
     /// media this conversation shows by it, so no copy outlives an account change.
     pub account: String,
+    #[serde(default)]
+    pub permissions: PullRequestPermissions,
+    #[serde(default)]
+    pub labels: Vec<PullRequestLabel>,
+    /// Requested reviewers first, then whoever reviewed without a request outstanding.
+    #[serde(default)]
+    pub reviewers: Vec<PullRequestReviewerState>,
+}
+
+/// What the signed-in account may do to the pull request, as GitHub grants it. Per-comment and
+/// per-thread rights travel on the comment and thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestPermissions {
+    /// Edit the title and description.
+    pub update: bool,
+    /// Empty when the account may not review; the author may only comment.
+    pub verdicts: Vec<PullRequestReviewVerdict>,
+    pub label: bool,
+    pub request_reviewers: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestLabel {
+    pub name: String,
+    /// Hex without the `#`.
+    pub color: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReviewerState {
+    pub reviewer: PullRequestReviewer,
+    pub avatar_url: Option<String>,
+    /// `None` while a review is requested and not yet given.
+    pub verdict: Option<PullRequestReviewState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

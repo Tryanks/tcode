@@ -13,11 +13,12 @@ pub use preview::{PreviewRequest, PreviewResponse};
 pub use pull_request::{
     MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult, PullRequestActor,
     PullRequestComment, PullRequestConversation, PullRequestFile, PullRequestFileText,
-    PullRequestFiles, PullRequestLabelCandidate, PullRequestLabelCandidates, PullRequestMedia,
-    PullRequestPatch, PullRequestReaction, PullRequestReactionContent, PullRequestRead,
-    PullRequestReadResponse, PullRequestRejection, PullRequestReviewAnchor, PullRequestReviewState,
-    PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
-    PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestReviewerKind,
+    PullRequestFiles, PullRequestLabel, PullRequestLabelCandidate, PullRequestLabelCandidates,
+    PullRequestMedia, PullRequestPatch, PullRequestPermissions, PullRequestReaction,
+    PullRequestReactionContent, PullRequestRead, PullRequestReadResponse, PullRequestRejection,
+    PullRequestReviewAnchor, PullRequestReviewState, PullRequestReviewThread,
+    PullRequestReviewVerdict, PullRequestReviewer, PullRequestReviewerCandidate,
+    PullRequestReviewerCandidates, PullRequestReviewerKind, PullRequestReviewerState,
     PullRequestThreadReplies, PullRequestViewedFiles, PullRequestViewedState,
 };
 pub mod terminal;
@@ -119,7 +120,9 @@ pub use wire::{
 // and answers PullRequestAction with a typed result; EditPullRequestReviewDraft
 // edits the host-owned review draft that thread metadata carries as
 // pull_request_reviews; Query::PullRequest reads label and reviewer
-// candidates; a reaction's content is a typed name.
+// candidates; a reaction's content is a typed name; the conversation carries
+// the account's permissions, labels and reviewers, and comments and threads
+// what the account may do to them.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

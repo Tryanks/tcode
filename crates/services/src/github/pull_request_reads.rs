@@ -19,11 +19,13 @@ use std::{
 use tcode_core::{pull_request::PullRequestKey, session::ReviewSide};
 use tcode_protocol::{
     PullRequestActor, PullRequestComment, PullRequestConversation, PullRequestFile,
-    PullRequestFileText, PullRequestFiles, PullRequestLabelCandidate, PullRequestLabelCandidates,
-    PullRequestMedia, PullRequestPatch, PullRequestReaction, PullRequestReactionContent,
-    PullRequestReviewAnchor, PullRequestReviewState, PullRequestReviewThread, PullRequestReviewer,
+    PullRequestFileText, PullRequestFiles, PullRequestLabel, PullRequestLabelCandidate,
+    PullRequestLabelCandidates, PullRequestMedia, PullRequestPatch, PullRequestPermissions,
+    PullRequestReaction, PullRequestReactionContent, PullRequestReviewAnchor,
+    PullRequestReviewState, PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
     PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestReviewerKind,
-    PullRequestThreadReplies, PullRequestViewedFiles, PullRequestViewedState,
+    PullRequestReviewerState, PullRequestThreadReplies, PullRequestViewedFiles,
+    PullRequestViewedState,
 };
 
 const READ_TTL: Duration = Duration::from_secs(60);
@@ -36,7 +38,7 @@ const DIFF_BYTES: usize = 8 * 1024 * 1024;
 const FILE_BYTES: usize = 1024 * 1024;
 const FILES_PER_PAGE: usize = 100;
 /// Past this many requests a list is reported incomplete rather than read on.
-const MAX_PAGES: usize = 10;
+pub(super) const MAX_PAGES: usize = 10;
 const VIEWED_PAGES: usize = 5;
 const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 /// Pull requests whose node id is remembered; an id never changes, so this bounds memory only.
@@ -44,6 +46,7 @@ const NODE_IDS: usize = 128;
 
 const ACTOR: &str = "author { login avatarUrl(size: 64) }";
 const REACTIONS: &str = "reactionGroups { content viewerHasReacted reactors { totalCount } }";
+const VIEWER: &str = "viewerCanUpdate viewerCanReact";
 
 #[derive(Debug, Clone)]
 pub(super) struct Revisions {
@@ -248,12 +251,13 @@ impl Reader<'_> {
     }
 
     fn conversation(&self) -> Result<(PullRequestConversation, Duration), GitHubError> {
-        let comment = format!("id body createdAt lastEditedAt url {ACTOR} {REACTIONS}");
+        let comment = format!("id body createdAt lastEditedAt url {ACTOR} {REACTIONS} {VIEWER}");
         let query = format!(
-            "query PullRequestConversation($owner: String!, $name: String!, $number: Int!, $head: Boolean!, $withComments: Boolean!, $commentsAfter: String, $withReviews: Boolean!, $reviewsAfter: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ ... on PullRequest @include(if: $head) {{ {comment} mergedAt }} comments(first: 100, after: $commentsAfter) @include(if: $withComments) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} }} }} reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} state submittedAt }} }} }} }} }}"
+            "query PullRequestConversation($owner: String!, $name: String!, $number: Int!, $head: Boolean!, $withComments: Boolean!, $commentsAfter: String, $withReviews: Boolean!, $reviewsAfter: String) {{ repository(owner: $owner, name: $name) {{ viewerPermission @include(if: $head) pullRequest(number: $number) {{ ... on PullRequest @include(if: $head) {{ {comment} mergedAt viewerDidAuthor labels(first: 100) {{ nodes {{ name color description }} }} reviewRequests(first: 100) {{ nodes {{ requestedReviewer {{ ... on User {{ login avatarUrl(size: 64) }} ... on Bot {{ login avatarUrl(size: 64) }} ... on Team {{ slug }} }} }} }} latestReviews(first: 100) {{ nodes {{ state {ACTOR} }} }} }} comments(first: 100, after: $commentsAfter) @include(if: $withComments) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} }} }} reviews(first: 100, after: $reviewsAfter) @include(if: $withReviews) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} state submittedAt }} }} }} }} }}"
         );
         let mut description = None;
         let mut merged = false;
+        let mut head = Value::Null;
         let mut comments = Vec::new();
         let (mut more_comments, mut more_reviews) = (true, true);
         let (mut comments_after, mut reviews_after) = (Value::Null, Value::Null);
@@ -276,6 +280,7 @@ impl Reader<'_> {
             if page == 0 {
                 merged = pr["mergedAt"].is_string();
                 description = Some(comment_from(pr, None).ok_or(GitHubError::InvalidResponse)?);
+                head = response["data"]["repository"].clone();
             }
             if more_comments {
                 comments.extend(nodes(&pr["comments"]).filter_map(|raw| comment_from(raw, None)));
@@ -295,7 +300,7 @@ impl Reader<'_> {
         comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
 
         let thread_query = format!(
-            "query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ reviewThreads(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id isResolved isOutdated path line startLine originalLine originalStartLine diffSide startDiffSide comments(first: 10) {{ totalCount pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} diffHunk commit {{ oid }} originalCommit {{ oid }} }} }} }} }} }} }} }}"
+            "query PullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ reviewThreads(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id isResolved isOutdated path line startLine originalLine originalStartLine diffSide startDiffSide viewerCanReply viewerCanResolve viewerCanUnresolve comments(first: 10) {{ totalCount pageInfo {{ hasNextPage endCursor }} nodes {{ {comment} diffHunk commit {{ oid }} originalCommit {{ oid }} }} }} }} }} }} }} }}"
         );
         let mut threads = Vec::new();
         let mut cursor = Value::Null;
@@ -313,13 +318,45 @@ impl Reader<'_> {
                 None => break,
             }
         }
+        let description = description.ok_or(GitHubError::InvalidResponse)?;
+        let pr = &head["pullRequest"];
+        // Triage may label; write may also ask for reviews (study: provider permission map).
+        let role = head["viewerPermission"].as_str().unwrap_or_default();
+        let writes = matches!(role, "ADMIN" | "MAINTAIN" | "WRITE");
+        let permissions = PullRequestPermissions {
+            update: description.viewer_can_update,
+            // GitHub refuses an approval or a change request from the author.
+            verdicts: if pr["viewerDidAuthor"].as_bool() == Some(true) {
+                vec![PullRequestReviewVerdict::Comment]
+            } else {
+                vec![
+                    PullRequestReviewVerdict::Comment,
+                    PullRequestReviewVerdict::Approve,
+                    PullRequestReviewVerdict::RequestChanges,
+                ]
+            },
+            label: writes || role == "TRIAGE",
+            request_reviewers: writes,
+        };
+        let labels = nodes(&pr["labels"])
+            .filter_map(|label| {
+                Some(PullRequestLabel {
+                    name: text(label, "name")?,
+                    color: text(label, "color"),
+                    description: text(label, "description"),
+                })
+            })
+            .collect();
         Ok((
             PullRequestConversation {
-                description: description.ok_or(GitHubError::InvalidResponse)?,
+                description,
                 comments,
                 threads,
                 complete,
                 account: super::digest(&self.account)[..16].to_owned(),
+                permissions,
+                labels,
+                reviewers: reviewer_states(pr),
             },
             if merged { MERGED_TTL } else { READ_TTL },
         ))
@@ -331,7 +368,7 @@ impl Reader<'_> {
         after: &str,
     ) -> Result<PullRequestThreadReplies, GitHubError> {
         let query = format!(
-            "query PullRequestThreadReplies($owner: String!, $name: String!, $number: Int!, $thread: ID!, $cursor: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ id }} }} node(id: $thread) {{ ... on PullRequestReviewThread {{ pullRequest {{ id }} comments(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id body createdAt lastEditedAt url {ACTOR} {REACTIONS} }} }} }} }} }}"
+            "query PullRequestThreadReplies($owner: String!, $name: String!, $number: Int!, $thread: ID!, $cursor: String) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ id }} }} node(id: $thread) {{ ... on PullRequestReviewThread {{ pullRequest {{ id }} comments(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ id body createdAt lastEditedAt url {ACTOR} {REACTIONS} {VIEWER} }} }} }} }} }}"
         );
         let response = self.query(
             "PullRequestThreadReplies",
@@ -535,7 +572,8 @@ impl PullRequestReads {
         let reader = self.reader(key)?;
         let revisions = self.revisions(&reader)?;
         self.files.read(
-            reader.read_key(format!("files {page:?}")),
+            // Files are a head's: a moved head is a different read.
+            reader.read_key(format!("files {} {page:?}", revisions.head)),
             || {
                 let files = match page {
                     None => reader.whole_diff(&revisions)?,
@@ -893,6 +931,8 @@ fn comment_from(
         edited_at: text("lastEditedAt"),
         url: text("url").filter(|url| !url.is_empty()),
         review_state,
+        viewer_can_update: raw["viewerCanUpdate"].as_bool() == Some(true),
+        viewer_can_react: raw["viewerCanReact"].as_bool() == Some(true),
         reactions: raw["reactionGroups"]
             .as_array()
             .into_iter()
@@ -987,7 +1027,64 @@ fn thread_from(raw: &Value) -> Option<PullRequestReviewThread> {
             .collect(),
         total_comments: raw["comments"]["totalCount"].as_u64().unwrap_or(0),
         replies_after: next_cursor(&raw["comments"]),
+        viewer_can_reply: raw["viewerCanReply"].as_bool() == Some(true),
+        viewer_can_resolve: raw[if raw["isResolved"].as_bool() == Some(true) {
+            "viewerCanUnresolve"
+        } else {
+            "viewerCanResolve"
+        }]
+        .as_bool()
+            == Some(true),
     })
+}
+
+/// Requests lead, as GitHub's sidebar lists them; a latest review by someone not asked again
+/// follows with its verdict. A dismissed or pending review is no verdict.
+fn reviewer_states(pr: &Value) -> Vec<PullRequestReviewerState> {
+    let mut reviewers: Vec<PullRequestReviewerState> = Vec::new();
+    for node in nodes(&pr["reviewRequests"]) {
+        let raw = &node["requestedReviewer"];
+        let reviewer = match (text(raw, "slug"), text(raw, "login")) {
+            (Some(slug), _) => PullRequestReviewer {
+                login: slug,
+                kind: PullRequestReviewerKind::Team,
+            },
+            (None, Some(login)) => PullRequestReviewer {
+                login,
+                kind: PullRequestReviewerKind::User,
+            },
+            (None, None) => continue,
+        };
+        reviewers.push(PullRequestReviewerState {
+            reviewer,
+            avatar_url: text(raw, "avatarUrl"),
+            verdict: None,
+        });
+    }
+    for node in nodes(&pr["latestReviews"]) {
+        let verdict = match node["state"].as_str() {
+            Some("APPROVED") => PullRequestReviewState::Approved,
+            Some("CHANGES_REQUESTED") => PullRequestReviewState::ChangesRequested,
+            Some("COMMENTED") => PullRequestReviewState::Commented,
+            _ => continue,
+        };
+        let Some(login) = text(&node["author"], "login") else {
+            continue;
+        };
+        let reviewer = PullRequestReviewer {
+            login,
+            kind: PullRequestReviewerKind::User,
+        };
+        if reviewers.iter().any(|known| known.reviewer == reviewer) {
+            continue;
+        }
+        reviewers.push(PullRequestReviewerState {
+            reviewer,
+            avatar_url: text(&node["author"], "avatarUrl"),
+            verdict: Some(verdict),
+        });
+    }
+    reviewers
 }
 
 fn listed_file(row: &Value) -> Option<PullRequestFile> {
