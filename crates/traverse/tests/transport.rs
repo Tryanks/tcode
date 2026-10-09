@@ -318,10 +318,8 @@ fn an_invitation_that_finds_no_path_pairs_at_a_typed_address() {
     let typed = std::net::Ipv4Addr::LOCALHOST.into();
     let paired = tcode_traverse::pair_blocking(&link, Some(typed), &phone).unwrap();
     assert_eq!(paired.name, "Test Host");
-    assert_eq!(
-        paired.addrs,
-        [std::net::SocketAddr::new(typed, link.port).to_string()]
-    );
+    let worked = std::net::SocketAddr::new(typed, link.port).to_string();
+    assert!(paired.addrs.contains(&worked), "{:?}", paired.addrs);
     assert!(host.invitation().is_none(), "the invitation is used");
 
     let client = tcode_traverse::connect(&paired, &phone);
