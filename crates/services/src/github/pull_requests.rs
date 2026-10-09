@@ -406,7 +406,7 @@ impl PullRequests {
 fn string(raw: &Value, field: &str) -> Option<String> {
     raw[field].as_str().map(str::to_owned)
 }
-fn state(raw: &Value) -> Option<PullRequestState> {
+pub(super) fn state(raw: &Value) -> Option<PullRequestState> {
     if raw
         .get("mergedAt")
         .or_else(|| raw.get("merged_at"))
@@ -471,7 +471,7 @@ fn decode_summary(raw: &Value, key: &PullRequestKey) -> Option<Summary> {
         stack_number: raw.get("stack").map(|stack| stack["number"].as_u64()),
     })
 }
-fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullRequestStack> {
+pub(super) fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullRequestStack> {
     let number = raw["number"].as_u64()?;
     let id = raw["id"]
         .as_str()

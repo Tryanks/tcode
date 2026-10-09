@@ -2,7 +2,10 @@
 
 use agent::FileChangeKind;
 use serde::{Deserialize, Serialize};
-use tcode_core::{pull_request::PullRequestMergeMethod, session::ReviewSide};
+use tcode_core::{
+    pull_request::{PullRequestMergeMethod, PullRequestState, StackRebaseFailure},
+    session::ReviewSide,
+};
 
 /// The largest image a media read returns; past it the host stops reading.
 pub const MAX_PULL_REQUEST_MEDIA_BYTES: usize = 8 * 1024 * 1024;
@@ -41,6 +44,11 @@ pub enum PullRequestRead {
     ReviewerCandidates,
     /// What merging, updating the branch and the other lifecycle actions would meet now.
     ActionState,
+    /// The native stack the pull request is a layer of, as GitHub has it now, for a merge or,
+    /// with `rebase`, a rebase of the stack.
+    StackState {
+        rebase: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +383,51 @@ pub struct PullRequestActionState {
     pub can_merge: bool,
 }
 
+/// A native stack as GitHub has it now, read before a stack write is confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestStackActionState {
+    pub stack: u64,
+    pub base: String,
+    /// Bottom to top.
+    pub layers: Vec<PullRequestStackLayerState>,
+    /// The repository's enabled methods, in GitHub's order.
+    pub merge_methods: Vec<PullRequestMergeMethod>,
+    pub merge_queue: bool,
+    pub can_merge: bool,
+    /// Whether the host's Git has a name and an email to commit the rebased layers with; read
+    /// for a rebase only.
+    pub git_identity: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestStackLayerState {
+    pub number: u64,
+    pub title: String,
+    pub head_branch: String,
+    /// `None` when GitHub gave no head, which no stack write goes ahead without.
+    pub head: Option<String>,
+    pub state: PullRequestState,
+    pub draft: bool,
+    /// Read for a rebase only, for each unmerged layer.
+    pub push: Option<PullRequestStackPushAccess>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestStackPushAccess {
+    Write,
+    /// A fork's branch that allows maintainers to push.
+    MaintainerCanModify,
+    Denied,
+}
+
+/// The head a stack write was confirmed at, for one layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestStackHead {
+    pub number: u64,
+    pub head: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum PullRequestReadResponse {
@@ -387,6 +440,7 @@ pub enum PullRequestReadResponse {
     LabelCandidates(PullRequestLabelCandidates),
     ReviewerCandidates(PullRequestReviewerCandidates),
     ActionState(PullRequestActionState),
+    StackState(PullRequestStackActionState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +522,19 @@ pub enum PullRequestAction {
         remove_credits: bool,
     },
     DisableAutoMerge,
+    /// GitHub's asynchronous merge of this layer of native stack `stack` and every unmerged
+    /// layer below it, at the heads in `heads`, which must be exactly that scope's.
+    MergeStack {
+        stack: u64,
+        heads: Vec<PullRequestStackHead>,
+        method: PullRequestMergeMethod,
+    },
+    /// Rebases every unmerged layer of native stack `stack` onto the one below it on the host,
+    /// pushing each with a lease on its head in `heads`, which must be exactly those layers'.
+    RebaseStack {
+        stack: u64,
+        heads: Vec<PullRequestStackHead>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -500,6 +567,32 @@ pub enum PullRequestActionResult {
         number: u64,
         url: String,
     },
+    /// GitHub took a stack merge as operation `id` and works on it; the host follows it.
+    /// `adopted` when GitHub named an operation already running instead of taking this one.
+    Pending {
+        id: String,
+        adopted: bool,
+    },
+    /// Operation `id` was still pending when the host stopped following it; it was not
+    /// submitted again.
+    MergeUnconfirmed {
+        id: String,
+    },
+    /// The host started rebasing the stack; its progress is the stack's operation.
+    RebaseStarted,
+    /// Every layer was rebased: `pushed` were force-pushed, `current` needed nothing.
+    Rebased {
+        pushed: Vec<u64>,
+        current: Vec<u64>,
+    },
+    /// The rebase stopped at `failed`: `pushed` stay rebased on GitHub, `untouched` above it
+    /// were not changed.
+    RebaseStopped {
+        pushed: Vec<u64>,
+        failed: u64,
+        reason: StackRebaseFailure,
+        untouched: Vec<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,12 +618,33 @@ pub enum PullRequestRejection {
     },
     /// A read the write needed failed, so it was not sent.
     Failed,
-    /// Layer `index` of a native stack of `layers` merges with the layers below it, which Tcode
-    /// does not do yet.
-    InStack {
-        index: u32,
-        layers: u32,
-    },
     /// Whether the pull request is in a native stack is not known yet.
     StackUnknown,
+    /// The stack's number or its layers are not what the write was confirmed against.
+    StackChanged,
+    /// Layer `number`'s head is `actual`, not the `expected` one the write was confirmed at.
+    LayerChanged {
+        number: u64,
+        expected: String,
+        actual: String,
+    },
+    LayerNotOpen {
+        number: u64,
+        state: PullRequestState,
+    },
+    LayerDraft {
+        number: u64,
+    },
+    /// The account may not push to these layers' branches.
+    NoPushAccess {
+        numbers: Vec<u64>,
+    },
+    /// A write to the stack is already running or unconfirmed on the host.
+    OperationRunning,
+    /// GitHub reports a merge of the stack already running without naming it.
+    MergeRunning,
+    /// The host's Git has no name or email to commit rebased layers with.
+    NoGitIdentity,
+    /// Stack writes go only from a pull request the thread links.
+    NotLinked,
 }

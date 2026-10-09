@@ -254,6 +254,7 @@ mod options;
 mod orchestrate;
 mod plugins;
 mod providers;
+mod pull_request_stacks;
 mod pull_request_watch;
 mod pull_requests;
 mod send;

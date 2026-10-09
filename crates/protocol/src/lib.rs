@@ -19,8 +19,9 @@ pub use pull_request::{
     PullRequestRead, PullRequestReadResponse, PullRequestRejection, PullRequestReviewAnchor,
     PullRequestReviewState, PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
     PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestReviewerKind,
-    PullRequestReviewerState, PullRequestThreadReplies, PullRequestViewedFiles,
-    PullRequestViewedState,
+    PullRequestReviewerState, PullRequestStackActionState, PullRequestStackHead,
+    PullRequestStackLayerState, PullRequestStackPushAccess, PullRequestThreadReplies,
+    PullRequestViewedFiles, PullRequestViewedState,
 };
 pub mod terminal;
 mod wire;
@@ -130,6 +131,12 @@ pub use wire::{
 // rejection InStack or StackUnknown; Query::PullRequest reads ActionState;
 // settings carry project_merge_methods and remove_agent_credits_on_merge,
 // patched by ProjectMergeMethod and RemoveAgentCreditsOnMerge.
+// Unreleased: RunPullRequestAction merges a native stack through GitHub's
+// asynchronous merge (MergeStack) and rebases one on the host (RebaseStack),
+// answering Pending, MergeUnconfirmed, RebaseStarted, Rebased or RebaseStopped,
+// or the stack rejections; InStack is removed; Query::PullRequest reads
+// StackState; thread metadata carries pull_request_operations, the stack writes
+// running or unconfirmed; the PullRequestStack toast reports how one ended.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

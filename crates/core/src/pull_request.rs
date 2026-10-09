@@ -1,7 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+macro_rules! stacks_docs {
+    () => {
+        "https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests"
+    };
+}
+
+/// GitHub's documentation of native stacks, which the instructions and the stack map both link.
+pub const STACKS_DOCS_URL: &str = stacks_docs!();
+
 /// Prepended to each turn while the pull request tools are registered; the transcript shows it.
-pub const LINKING_INSTRUCTIONS: &str = "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests .\n</pull_request_linking>\n\n";
+pub const LINKING_INSTRUCTIONS: &str = concat!(
+    "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see ",
+    stacks_docs!(),
+    " .\n</pull_request_linking>\n\n"
+);
 
 /// The rest of a turn's injected context when it leads with [`LINKING_INSTRUCTIONS`].
 pub fn strip_linking_instructions(context: &str) -> Option<&str> {
@@ -233,6 +246,274 @@ pub fn stack_route(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> Pul
         }
         _ => PullRequestStackRoute::Unknown,
     }
+}
+
+/// The native stack a visible link of the thread carries with `key` among its layers.
+pub fn native_stack<'a>(
+    links: &'a [ThreadPullRequestLink],
+    key: &PullRequestKey,
+) -> Option<&'a PullRequestStack> {
+    links
+        .iter()
+        .filter(|link| link.visible())
+        .find_map(|link| match &link.stack {
+            PullRequestStackState::Native(stack)
+                if link.key.host == key.host
+                    && link.key.repository == key.repository
+                    && stack.layers.iter().any(|layer| layer.number == key.number) =>
+            {
+                Some(stack)
+            }
+            _ => None,
+        })
+}
+
+/// Why GitHub will not merge a layer the merge scope holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackBlocker {
+    Draft,
+    Closed,
+}
+
+/// How the thread holds a layer of its stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackLayerCondition {
+    Linked,
+    Dismissed,
+    NotLinked,
+}
+
+/// What a layer is to a merge of the selected one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackLayerRole {
+    Selected,
+    /// Merged already, below the selected layer: not part of the merge.
+    BelowMerged,
+    /// Lands together with the selected layer.
+    InScope,
+    /// In the scope, and GitHub refuses to merge it.
+    Blocks(StackBlocker),
+    Above,
+}
+
+#[derive(Debug, Clone)]
+pub struct StackMapRow<'a> {
+    pub layer: &'a PullRequestStackLayer,
+    /// The thread's visible link of the layer, whose snapshot titles it.
+    pub link: Option<&'a ThreadPullRequestLink>,
+    /// `None` where no snapshot of the layer says.
+    pub draft: Option<bool>,
+    pub condition: StackLayerCondition,
+    pub role: StackLayerRole,
+}
+
+/// A native stack from the selected layer's point of view: every layer bottom to top, the
+/// layers a merge of the selected one lands, and those GitHub refuses among them. Read from the
+/// stored topology and links only; a write reads GitHub again.
+#[derive(Debug, Clone)]
+pub struct StackMap<'a> {
+    pub stack: &'a PullRequestStack,
+    pub rows: Vec<StackMapRow<'a>>,
+    pub selected: usize,
+}
+
+impl StackMap<'_> {
+    pub fn selected(&self) -> &StackMapRow<'_> {
+        &self.rows[self.selected]
+    }
+
+    /// The unmerged layers from the bottom through the selected one, bottom first: what Merge
+    /// stack lands.
+    pub fn scope(&self) -> Vec<u64> {
+        self.rows[..=self.selected]
+            .iter()
+            .filter(|row| row.layer.state != PullRequestState::Merged)
+            .map(|row| row.layer.number)
+            .collect()
+    }
+
+    /// The scope's layers GitHub refuses, below the selected one, bottom first.
+    pub fn blockers(&self) -> Vec<(u64, StackBlocker)> {
+        self.rows
+            .iter()
+            .filter_map(|row| match row.role {
+                StackLayerRole::Blocks(blocker) => Some((row.layer.number, blocker)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The open layers a rebase moves, bottom first.
+    pub fn unmerged(&self) -> Vec<u64> {
+        self.rows
+            .iter()
+            .filter(|row| row.layer.state != PullRequestState::Merged)
+            .map(|row| row.layer.number)
+            .collect()
+    }
+}
+
+/// The selected layer's map of the native stack the thread shows it in. Every layer being
+/// merged must be open and ready for review: a closed or draft layer below the selected one
+/// blocks it, and one whose draft flag is unknown does not until a fresh read says.
+pub fn stack_map<'a>(
+    links: &'a [ThreadPullRequestLink],
+    key: &PullRequestKey,
+) -> Option<StackMap<'a>> {
+    let stack = native_stack(links, key)?;
+    let selected = stack
+        .layers
+        .iter()
+        .position(|layer| layer.number == key.number)?;
+    let rows = stack
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let held = links.iter().find(|link| {
+                link.key.host == key.host
+                    && link.key.repository == key.repository
+                    && link.key.number == layer.number
+            });
+            let link = held.filter(|link| link.visible());
+            let condition = match held {
+                Some(link) if link.visible() => StackLayerCondition::Linked,
+                Some(_) => StackLayerCondition::Dismissed,
+                None => StackLayerCondition::NotLinked,
+            };
+            let draft = link
+                .and_then(|link| link.snapshot.as_ref())
+                .map(|snapshot| snapshot.is_draft);
+            let role = if index == selected {
+                StackLayerRole::Selected
+            } else if index > selected {
+                StackLayerRole::Above
+            } else if layer.state == PullRequestState::Merged {
+                StackLayerRole::BelowMerged
+            } else if layer.state == PullRequestState::Closed {
+                StackLayerRole::Blocks(StackBlocker::Closed)
+            } else if draft == Some(true) {
+                StackLayerRole::Blocks(StackBlocker::Draft)
+            } else {
+                StackLayerRole::InScope
+            };
+            StackMapRow {
+                layer,
+                link,
+                draft,
+                condition,
+                role,
+            }
+        })
+        .collect();
+    Some(StackMap {
+        stack,
+        rows,
+        selected,
+    })
+}
+
+/// A write to a native stack that the host is running, or whose end it could not confirm. The
+/// host publishes it with every thread that shows the stack, so each device and a reconnecting
+/// one show the same state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestStackOperation {
+    #[serde(deserialize_with = "canonical_locator")]
+    pub host: String,
+    #[serde(deserialize_with = "canonical_locator")]
+    pub repository: String,
+    pub stack: u64,
+    pub started_at: u64,
+    pub kind: StackOperationKind,
+}
+
+impl PullRequestStackOperation {
+    pub fn is_for(&self, host: &str, repository: &str, stack: u64) -> bool {
+        self.host == host && self.repository == repository && self.stack == stack
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum StackOperationKind {
+    /// GitHub's asynchronous merge `id`, submitted from `target`, landing `layers` bottom first.
+    /// `adopted` when GitHub named an operation already running instead of taking a new one.
+    Merging {
+        id: String,
+        target: u64,
+        layers: Vec<u64>,
+        adopted: bool,
+    },
+    /// Still pending when the host stopped following it; never submitted again. `checked` once a
+    /// sync after that read the target still open, so the stack's writes are offered again.
+    MergeUnconfirmed {
+        id: String,
+        target: u64,
+        layers: Vec<u64>,
+        checked: bool,
+    },
+    Rebasing {
+        layers: Vec<StackRebaseLayer>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackRebaseLayer {
+    pub number: u64,
+    pub branch: String,
+    pub step: StackRebaseStep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum StackRebaseStep {
+    Waiting,
+    Rebasing,
+    Pushing,
+    Pushed { from: String, to: String },
+    AlreadyCurrent,
+    Failed { reason: StackRebaseFailure },
+    /// Above the layer the rebase stopped at.
+    NotStarted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum StackRebaseFailure {
+    /// The layer's own commits do not apply onto the layer below; the scratch rebase was
+    /// aborted and the branch left as it was.
+    Conflict,
+    /// The branch is no longer at the head that was reviewed, so the lease kept it.
+    LeaseRefused,
+    /// The push got no answer in time, so it may have landed.
+    PushUnconfirmed,
+    Git {
+        step: StackRebaseGitStep,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StackRebaseGitStep {
+    Preparing,
+    Fetching,
+    ForkPoint,
+    CheckingOut,
+    Rebasing,
+    Pushing,
+}
+
+/// The operation the thread shows for the native stack `key` is a layer of.
+pub fn stack_operation<'a>(
+    operations: &'a [PullRequestStackOperation],
+    links: &[ThreadPullRequestLink],
+    key: &PullRequestKey,
+) -> Option<&'a PullRequestStackOperation> {
+    let stack = native_stack(links, key)?;
+    operations
+        .iter()
+        .find(|operation| operation.is_for(&key.host, &key.repository, stack.number))
 }
 
 /// The visible links a watch holds, which keep their thread waiting between wakes.

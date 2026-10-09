@@ -180,6 +180,7 @@ impl Reader<'_> {
             &self.key.host,
             RestRequest {
                 accept: Some("application/vnd.github.diff"),
+                answers: &[],
                 ..RestRequest::get(&path)
             },
             &self.long_read("PullRequestDiff", DIFF_BYTES),
@@ -241,6 +242,7 @@ impl Reader<'_> {
             &self.key.host,
             RestRequest {
                 accept: Some("application/vnd.github.raw"),
+                answers: &[],
                 ..RestRequest::get(&self.rest_path(&format!("contents/{encoded}?ref={revision}")))
             },
             &self.long_read("PullRequestFileText", FILE_BYTES),

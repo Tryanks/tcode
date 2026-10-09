@@ -615,6 +615,19 @@ pub enum RuntimeToast {
         number: u64,
         notice: tcode_core::pull_request_watch::WatchNotice,
     },
+    /// How a write to a native stack ended after its command was answered: a followed merge,
+    /// a rebase, or an unconfirmed merge a sync has since read. `session_id` is the thread
+    /// `target` is opened from.
+    PullRequestStack {
+        session_id: String,
+        target: tcode_core::pull_request::PullRequestKey,
+        stack: u64,
+        layers: Vec<u64>,
+        base: String,
+        result: crate::PullRequestActionResult,
+        /// A merge that ended after the host stopped following it.
+        late: bool,
+    },
     ProviderUpdatesAvailable {
         updates: Vec<ProviderUpdateAvailable>,
     },

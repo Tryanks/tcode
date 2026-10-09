@@ -1624,10 +1624,7 @@ fn a_stack_layer_is_never_merged_alone_and_a_revert_is_linked_as_created() {
     for action in [merge(), update()] {
         assert_eq!(
             act(&state, &mut cx, action),
-            rejected(tcode_protocol::PullRequestRejection::InStack {
-                index: 2,
-                layers: 2
-            })
+            rejected(tcode_protocol::PullRequestRejection::Invalid)
         );
     }
     assert!(
@@ -1667,6 +1664,274 @@ fn a_stack_layer_is_never_merged_alone_and_a_revert_is_linked_as_created() {
             .iter()
             .any(|operation| operation == "PullRequestSummaries")
     });
+    state
+        .update(&mut cx, |state, _| state.close_store())
+        .unwrap();
+}
+
+/// GitHub as a stack merge meets it: stack #50 of #2 and #3 into `main`, an asynchronous merge
+/// of #3 answering by operation, and the summaries the sync reads.
+#[derive(Default)]
+struct StackHost {
+    submissions: usize,
+    mutations: usize,
+    asked: Vec<String>,
+    status: HashMap<String, &'static str>,
+    state: &'static str,
+}
+
+fn stack_reply(host: &Mutex<StackHost>, exchange: fixture::Exchange) {
+    let line = exchange.request.lines().next().unwrap_or_default().to_owned();
+    let mut host = host.lock().unwrap();
+    let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
+    let reply = if path.starts_with("/repos/sample/project/stacks?pull_request=") {
+        let layers: Vec<_> = [2, 3]
+            .map(|number| {
+                json!({
+                    "number": number, "title": format!("Change {number}"), "state": "open",
+                    "draft": false,
+                    "head": {"ref": format!("layer-{number}"), "sha": format!("{number}").repeat(40)},
+                })
+            })
+            .to_vec();
+        json!([{
+            "number": 50, "url": "https://api.github.com/repos/sample/project/stacks/50",
+            "base": {"ref": "main"},
+            "pull_requests": layers,
+        }])
+    } else if line.starts_with("PUT /repos/sample/project/pulls/3/merge-async ") {
+        host.submissions += 1;
+        json!({"status": "pending", "details": {"uuid": "op-1"}})
+    } else if let Some(id) = path.strip_prefix("/repos/sample/project/pulls/3/merge-async/") {
+        host.asked.push(id.to_owned());
+        json!({"status": host.status.get(id).copied().unwrap_or("pending"), "details": {"uuid": id}})
+    } else {
+        let sent: Value = serde_json::from_slice(&exchange.body).unwrap_or_default();
+        if sent["query"]
+            .as_str()
+            .is_some_and(|query| query.trim_start().starts_with("mutation"))
+        {
+            host.mutations += 1;
+        }
+        let mut data = serde_json::Map::new();
+        for (name, number) in sent["variables"].as_object().into_iter().flatten() {
+            if let Some(alias) = name.strip_suffix("_number") {
+                let mut row = pr(number.as_u64().unwrap(), host.state, true);
+                row["stack"] = json!({"number": 50});
+                data.insert(alias.to_owned(), json!({"pullRequest": row}));
+            }
+        }
+        json!({"data": data})
+    };
+    exchange.reply(200, "", &serde_json::to_vec(&reply).unwrap());
+}
+
+#[test]
+fn a_stack_merge_is_followed_across_a_restart_and_never_submitted_again() {
+    use tcode_core::pull_request::{PullRequestStackOperation, StackOperationKind};
+    use tcode_protocol::{
+        EventEnvelope, HostMessage, PullRequestRejection, PullRequestStackHead, RuntimeNotification,
+        RuntimeToast, ServerEvent,
+    };
+    let dir = TestStore::new("tcode-pr-stack-merge");
+    let fixture = fixture::Fixture::new();
+    let api = client(&dir, &fixture);
+    let host = Arc::new(Mutex::new(StackHost {
+        state: "OPEN",
+        ..StackHost::default()
+    }));
+    let serving = host.clone();
+    let _server = fixture.serve(move |exchange| stack_reply(&serving, exchange));
+    let stack = PullRequestStackState::Native(PullRequestStack {
+        id: "50".into(),
+        number: 50,
+        url: "https://github.com/sample/project/stacks/50".into(),
+        base: "main".into(),
+        layers: [2, 3]
+            .map(|number| tcode_core::pull_request::PullRequestStackLayer {
+                url: format!("https://github.com/sample/project/pull/{number}"),
+                number,
+                head_branch: format!("layer-{number}"),
+                state: PullRequestState::Open,
+            })
+            .to_vec(),
+    });
+    let mut meta = linked("active", 3, false);
+    pull_request::link_pull_request(
+        &mut meta.pull_requests,
+        PullRequestKey::new("github.com", "sample/project", 2),
+        "https://github.com/sample/project/pull/2".into(),
+        PullRequestSource::Stack,
+        1,
+        false,
+    );
+    for link in &mut meta.pull_requests {
+        link.stack = stack.clone();
+    }
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*dir).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        dir.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+    });
+    let target = PullRequestKey::new("github.com", "sample/project", 3);
+    let merge = PullRequestAction::MergeStack {
+        stack: 50,
+        heads: [2, 3]
+            .map(|number| PullRequestStackHead {
+                number,
+                head: format!("{number}").repeat(40),
+            })
+            .to_vec(),
+        method: tcode_core::pull_request::PullRequestMergeMethod::Merge,
+    };
+    let mut next_id = 0;
+    let mut act = |cx: &mut TestAppContext| {
+        next_id += 1;
+        state.dispatch_command(
+            cx,
+            next_id,
+            Command::RunPullRequestAction {
+                session_id: "active".into(),
+                key: target.clone(),
+                action: merge.clone(),
+            },
+        );
+        loop {
+            cx.run_until_parked();
+            if let Some(result) = cx.drain_outgoing().into_iter().find_map(|message| match message {
+                HostMessage::Ack { id, result } if id == next_id => Some(result),
+                _ => None,
+            }) {
+                return result.unwrap();
+            }
+        }
+    };
+    let operation = |state: &TestEntity| {
+        state.read(|state| {
+            state
+                .find_meta("active")
+                .unwrap()
+                .pull_request_operations
+                .first()
+                .map(|operation| operation.kind.clone())
+        })
+    };
+    let ended = |cx: &mut TestAppContext| {
+        cx.drain_outgoing()
+            .into_iter()
+            .filter_map(|message| match message {
+                HostMessage::Event(EventEnvelope {
+                    event:
+                        ServerEvent::Runtime(RuntimeNotification::Toast(RuntimeToast::PullRequestStack {
+                            result,
+                            late,
+                            layers,
+                            ..
+                        })),
+                    ..
+                }) => Some((result, late, layers)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Submitted once, then followed by its operation until GitHub says it merged.
+    host.lock().unwrap().status.insert("op-1".into(), "merged");
+    assert_eq!(
+        act(&mut cx),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Pending {
+            id: "op-1".into(),
+            adopted: false,
+        })
+    );
+    assert!(matches!(
+        operation(&state),
+        Some(StackOperationKind::Merging { ref id, target: 3, ref layers, adopted: false })
+            if id == "op-1" && *layers == [2, 3]
+    ));
+    cx.run_until(|state| {
+        state
+            .find_meta("active")
+            .unwrap()
+            .pull_request_operations
+            .is_empty()
+    });
+    assert_eq!(
+        ended(&mut cx),
+        vec![(PullRequestActionResult::Applied, false, vec![2, 3])]
+    );
+
+    let seed = |state: &TestEntity, cx: &mut TestAppContext, kind| {
+        state.update(cx, |state, cx| {
+            let mut meta = state.find_meta("active").unwrap();
+            meta.pull_request_operations = vec![PullRequestStackOperation {
+                host: "github.com".into(),
+                repository: "sample/project".into(),
+                stack: 50,
+                started_at: now_secs() - 400,
+                kind,
+            }];
+            state.save_pull_request_meta(meta, cx);
+        })
+    };
+    // Until a sync reads what became of an unconfirmed merge, the stack takes no other write.
+    seed(
+        &state,
+        &mut cx,
+        StackOperationKind::MergeUnconfirmed {
+            id: "op-0".into(),
+            target: 3,
+            layers: vec![2, 3],
+            checked: false,
+        },
+    );
+    assert_eq!(
+        act(&mut cx),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Rejected(
+            PullRequestRejection::OperationRunning
+        ))
+    );
+
+    // A host restarted after the five minutes asks once more, finds it still pending, and
+    // keeps it as unconfirmed instead of submitting it again; the sync that then reads the
+    // target merged ends it, reported as finished late.
+    host.lock().unwrap().state = "MERGED";
+    seed(
+        &state,
+        &mut cx,
+        StackOperationKind::Merging {
+            id: "op-2".into(),
+            target: 3,
+            layers: vec![2, 3],
+            adopted: false,
+        },
+    );
+    state.update(&mut cx, |state, cx| state.resume_stack_operations(cx));
+    cx.run_until(|state| {
+        state
+            .find_meta("active")
+            .unwrap()
+            .pull_request_operations
+            .is_empty()
+    });
+    assert_eq!(
+        ended(&mut cx),
+        vec![
+            (
+                PullRequestActionResult::MergeUnconfirmed { id: "op-2".into() },
+                false,
+                vec![2, 3]
+            ),
+            (PullRequestActionResult::Applied, true, vec![2, 3]),
+        ]
+    );
+    let host = host.lock().unwrap();
+    assert_eq!(host.submissions, 1, "nothing is submitted again");
+    assert_eq!(host.asked.iter().filter(|id| *id == "op-2").count(), 1);
+    assert_eq!(host.mutations, 0, "a stack merge is never one pull request's merge");
+    drop(host);
     state
         .update(&mut cx, |state, _| state.close_store())
         .unwrap();
