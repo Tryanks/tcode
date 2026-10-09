@@ -2078,6 +2078,7 @@ pull_requests:
     copy_id: "Copy operation id"
     disabled_merging: "GitHub is merging this stack."
     disabled_rebasing: "Tcode is rebasing this stack."
+    disabled_queued: "The stack is in the merge queue."
     disabled_not_linked: "Link #%{number} to this thread to merge or rebase its stack from here."
     list_two: "#%{a} and #%{b}"
     list_three: "#%{a}, #%{b} and #%{c}"

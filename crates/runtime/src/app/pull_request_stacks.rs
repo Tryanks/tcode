@@ -168,6 +168,7 @@ impl AppState {
                 .stack_operation_record(&stack)
                 .is_some_and(|operation| match operation.kind {
                     StackOperationKind::MergeUnconfirmed { checked, .. } => !checked,
+                    StackOperationKind::RebaseEnded { .. } => false,
                     _ => true,
                 });
         if busy {
@@ -401,7 +402,7 @@ impl AppState {
             let outcome = run.await;
             host.enqueue(move |state, cx| {
                 state.pull_requests.stack_writes.remove(&stack);
-                state.put_stack_operation(&stack, None, cx);
+                state.end_stack_rebase(&stack, cx);
                 state.sync_stack_layers(&stack, &numbers, cx);
                 state.report_stack(&stack, key.number, numbers, outcome, false, cx);
             });
@@ -427,6 +428,33 @@ impl AppState {
         };
         layer.step = step;
         self.put_stack_operation(stack, Some(operation), cx);
+    }
+
+    /// Keeps the rebase with each layer's final step until the next full sync, which drops it.
+    fn end_stack_rebase(&mut self, stack: &StackKey, cx: &mut HostCx) {
+        let Some(mut operation) = self.stack_operation_record(stack) else {
+            return;
+        };
+        let StackOperationKind::Rebasing { layers } = operation.kind else {
+            return;
+        };
+        operation.kind = StackOperationKind::RebaseEnded { layers };
+        self.put_stack_operation(stack, Some(operation), cx);
+    }
+
+    /// Drops every ended rebase: a full sync reads its layers as they now are.
+    pub(super) fn drop_ended_rebases(&mut self, cx: &mut HostCx) {
+        let ended: HashSet<StackKey> = self
+            .sessions
+            .iter()
+            .filter_map(|meta| self.find_meta(&meta.id))
+            .flat_map(|meta| meta.pull_request_operations)
+            .filter(|operation| matches!(operation.kind, StackOperationKind::RebaseEnded { .. }))
+            .map(|operation| (operation.host, operation.repository, operation.stack))
+            .collect();
+        for stack in ended {
+            self.put_stack_operation(&stack, None, cx);
+        }
     }
 
     /// After a restart: a merge is followed again from where its schedule stands; a rebase
@@ -459,7 +487,8 @@ impl AppState {
                     self.put_stack_operation(&stack, None, cx);
                     self.sync_stack_layers(&stack, &numbers, cx);
                 }
-                StackOperationKind::MergeUnconfirmed { .. } => {}
+                StackOperationKind::MergeUnconfirmed { .. }
+                | StackOperationKind::RebaseEnded { .. } => {}
             }
         }
     }

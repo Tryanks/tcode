@@ -84,14 +84,6 @@ impl StackOffer {
         core_pr::stack_map(&self.links, &self.key).expect("a stack offer has a map")
     }
 
-    pub(super) fn id(&self) -> StackId {
-        (
-            self.key.host.clone(),
-            self.key.repository.clone(),
-            self.map().stack.number,
-        )
-    }
-
     pub(super) fn base(&self) -> String {
         self.map().stack.base.clone()
     }
@@ -101,7 +93,10 @@ impl StackOffer {
             StackOperationKind::Merging { .. } => tr("disabled_merging"),
             StackOperationKind::MergeUnconfirmed { checked: false, .. } => tr("waiting_state"),
             StackOperationKind::Rebasing { .. } => tr("disabled_rebasing"),
-            StackOperationKind::MergeUnconfirmed { .. } => return None,
+            StackOperationKind::MergeUnconfirmed { .. }
+            | StackOperationKind::RebaseEnded { .. } => {
+                return None;
+            }
         })
     }
 
@@ -148,6 +143,9 @@ impl StackOffer {
         if let Some(reason) = self.running() {
             return Avail::Disabled(reason);
         }
+        if action.is_some_and(|action| action.queued) {
+            return Avail::Disabled(tr("disabled_queued"));
+        }
         if !self.linked {
             return Avail::Disabled(tr_with(
                 "disabled_not_linked",
@@ -167,19 +165,11 @@ impl StackOffer {
         }
     }
 
-    /// The running merge whose scope holds the selected layer, or a running rebase.
+    /// The stack's operation, while it is moving the selected layer.
     pub(super) fn operation_here(&self) -> Option<&PullRequestStackOperation> {
-        let operation = self.operation.as_ref()?;
-        match &operation.kind {
-            StackOperationKind::Merging { layers, .. }
-            | StackOperationKind::MergeUnconfirmed {
-                layers,
-                checked: false,
-                ..
-            } if layers.contains(&self.key.number) => Some(operation),
-            StackOperationKind::Rebasing { .. } => Some(operation),
-            _ => None,
-        }
+        self.operation
+            .as_ref()
+            .filter(|operation| operation.covers(self.key.number))
     }
 }
 
@@ -340,7 +330,7 @@ pub(super) fn merge_primary_accessible(number: u64) -> String {
 
 /// The operation's chip: the header's primary slot, the map and the linked rows' caption. A
 /// merge's chip opens a popover with its scope and GitHub's operation id; a rebase's opens its
-/// progress.
+/// progress where this device may act on the stack, and is its tooltip alone elsewhere.
 pub(super) fn operation_chip(
     target: Option<Target>,
     operation: &PullRequestStackOperation,
@@ -364,36 +354,46 @@ pub(super) fn operation_chip(
             .bg(color.opacity(0.1))
             .text_color(color)
             .text_size(px(if compact { 13. } else { 12. }))
-            .cursor_pointer()
             .child(match operation.kind {
                 StackOperationKind::Rebasing { .. } => Spinner::new().xsmall().into_any_element(),
                 _ => Icon::new(icon).size(px(14.)).into_any_element(),
             })
             .child(label.clone())
     };
-    if let (StackOperationKind::Rebasing { .. }, Some(target)) = (&operation.kind, &target) {
-        let target = target.clone();
-        return chip()
-            .tooltip({
-                let tooltip = tooltip.clone();
-                move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)
-            })
-            .on_click(move |_, window, cx| open_progress(target.clone(), window, cx))
-            .into_any_element();
+    let (StackOperationKind::Merging {
+        id,
+        target: merged,
+        layers,
+        ..
     }
-    let operation = operation.clone();
+    | StackOperationKind::MergeUnconfirmed {
+        id,
+        target: merged,
+        layers,
+        ..
+    }) = &operation.kind
+    else {
+        let chip = chip().tooltip({
+            let tooltip = tooltip.clone();
+            move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)
+        });
+        return match target {
+            Some(target) => chip
+                .cursor_pointer()
+                .on_click(move |_, window, cx| open_progress(target.clone(), window, cx))
+                .into_any_element(),
+            None => chip.into_any_element(),
+        };
+    };
+    let id = id.clone();
     let url = core_pr::stack_map(
         links,
-        &PullRequestKey::new(
-            &operation.host,
-            &operation.repository,
-            chip_target(&operation),
-        ),
+        &PullRequestKey::new(&operation.host, &operation.repository, *merged),
     )
     .map(|map| map.stack.url.clone());
-    let titles: Vec<(u64, String)> = chip_layers(&operation)
-        .into_iter()
-        .map(|number| {
+    let titles: Vec<(u64, String)> = layers
+        .iter()
+        .map(|&number| {
             let title = links
                 .iter()
                 .find(|link| {
@@ -420,10 +420,10 @@ pub(super) fn operation_chip(
         .compact()
         .aria_label(format!(
             "{label}, {}",
-            tr_with("operation_id", &[("id", operation_id(&operation))])
+            tr_with("operation_id", &[("id", id.clone())])
         ))
         .tooltip(tooltip.clone())
-        .child(chip()),
+        .child(chip().cursor_pointer()),
     );
     let popover = if compact {
         popover.bottom_sheet(tr("popover_title"))
@@ -432,7 +432,6 @@ pub(super) fn operation_chip(
     };
     popover
         .content(move |_, _, cx| {
-            let id = operation_id(&operation);
             let muted = cx.theme().muted_foreground;
             let mono = cx.theme().mono_font_family.clone();
             v_flex()
@@ -496,34 +495,6 @@ pub(super) fn operation_chip(
         .into_any_element()
 }
 
-fn operation_id(operation: &PullRequestStackOperation) -> String {
-    match &operation.kind {
-        StackOperationKind::Merging { id, .. }
-        | StackOperationKind::MergeUnconfirmed { id, .. } => id.clone(),
-        StackOperationKind::Rebasing { .. } => String::new(),
-    }
-}
-
-fn chip_target(operation: &PullRequestStackOperation) -> u64 {
-    match &operation.kind {
-        StackOperationKind::Merging { target, .. }
-        | StackOperationKind::MergeUnconfirmed { target, .. } => *target,
-        StackOperationKind::Rebasing { layers } => {
-            layers.first().map(|layer| layer.number).unwrap_or_default()
-        }
-    }
-}
-
-fn chip_layers(operation: &PullRequestStackOperation) -> Vec<u64> {
-    match &operation.kind {
-        StackOperationKind::Merging { layers, .. }
-        | StackOperationKind::MergeUnconfirmed { layers, .. } => layers.clone(),
-        StackOperationKind::Rebasing { layers } => {
-            layers.iter().map(|layer| layer.number).collect()
-        }
-    }
-}
-
 /// The chip's glyph, colour, label and long form.
 pub(super) fn chip_words(
     operation: &PullRequestStackOperation,
@@ -574,6 +545,27 @@ pub(super) fn chip_words(
             );
             (IconName::RefreshCw, cx.theme().info, label.clone(), label)
         }
+        StackOperationKind::RebaseEnded { layers } => {
+            let (icon, color, label) = match layers
+                .iter()
+                .find(|layer| matches!(layer.step, StackRebaseStep::Failed { .. }))
+            {
+                Some(failed) => (
+                    IconName::CircleX,
+                    cx.theme().danger,
+                    tr_with(
+                        "result_rebase_stopped",
+                        &[("number", failed.number.to_string())],
+                    ),
+                ),
+                None => (
+                    IconName::CircleCheck,
+                    cx.theme().success,
+                    tr_with("result_rebased", &[("stack", operation.stack.to_string())]),
+                ),
+            };
+            (icon, color, label.clone(), label)
+        }
     }
 }
 
@@ -604,18 +596,19 @@ pub(super) fn map_selector(
     let status = offer
         .operation
         .as_ref()
-        .map(|operation| match operation.kind {
+        .and_then(|operation| match operation.kind {
             StackOperationKind::Merging { .. } => {
-                (IconName::Hourglass, cx.theme().warning, "trigger_merging")
+                Some((IconName::Hourglass, cx.theme().warning, "trigger_merging"))
             }
-            StackOperationKind::MergeUnconfirmed { .. } => (
+            StackOperationKind::MergeUnconfirmed { .. } => Some((
                 IconName::CircleQuestionMark,
                 cx.theme().warning,
                 "trigger_unconfirmed",
-            ),
+            )),
             StackOperationKind::Rebasing { .. } => {
-                (IconName::RefreshCw, cx.theme().info, "trigger_rebasing")
+                Some((IconName::RefreshCw, cx.theme().info, "trigger_rebasing"))
             }
+            StackOperationKind::RebaseEnded { .. } => None,
         });
     if let Some((_, _, suffix)) = status {
         accessible.push_str(&tr(suffix));
@@ -1388,9 +1381,6 @@ pub fn present_result(
     cx: &mut App,
 ) {
     let id = (target.host.clone(), target.repository.clone(), stack);
-    store.update(cx, |store, cx| {
-        store.set_stack_result(id.clone(), result.clone(), cx)
-    });
     let rebase = matches!(
         result,
         PullRequestActionResult::Rebased { .. } | PullRequestActionResult::RebaseStopped { .. }
@@ -1631,26 +1621,6 @@ fn scope_box(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
         .bg(cx.theme().muted.opacity(0.5))
         .children(rows)
         .into_any_element()
-}
-
-/// The stack as the thread stores it now, to tell a confirmation that it moved under it.
-fn stored_change(
-    store: &WorkspaceStore,
-    target: &Target,
-    fresh: &PullRequestStackActionState,
-    scope: &[u64],
-) -> Option<String> {
-    let links = store.pull_requests(&target.session);
-    let map = core_pr::stack_map(links, &target.offer.key)?;
-    let stored: Vec<_> = map.rows.iter().map(|row| row.layer.number).collect();
-    let read: Vec<_> = fresh.layers.iter().map(|layer| layer.number).collect();
-    if map.stack.number != fresh.stack || stored != read {
-        return Some(tr("changed_layers"));
-    }
-    map.rows
-        .iter()
-        .find(|row| scope.contains(&row.layer.number) && row.layer.state != PullRequestState::Open)
-        .map(|row| tr_with("changed_state", &[("number", row.layer.number.to_string())]))
 }
 
 /// The Merge stack confirmation: the scope GitHub holds now, each layer at the head that will be
@@ -2158,10 +2128,7 @@ impl Render for MergeStackDialog {
                     ));
                 }
                 body = body.child(v_flex().gap_1().children(notes));
-                let changed = self
-                    .notice
-                    .clone()
-                    .or_else(|| stored_change(target.store.read(cx), target, state, &numbers));
+                let changed = self.notice.clone();
                 if let Some(changed) = &changed {
                     body = body.child(
                         warning_wash(cx)
@@ -2281,8 +2248,8 @@ struct RebaseStackDialog {
     sending: bool,
     started: bool,
     notice: Option<String>,
-    /// The rows last seen while the host ran it, kept for its end.
-    last: Vec<core_pr::StackRebaseLayer>,
+    /// The host's record of the rebase as last read.
+    last: Option<StackOperationKind>,
     _observe: gpui::Subscription,
 }
 
@@ -2390,15 +2357,6 @@ impl RebaseStackDialog {
                 this.sending = false;
                 if result == PullRequestActionResult::RebaseStarted {
                     this.started = true;
-                    let id = (
-                        target.offer.key.host.clone(),
-                        target.offer.key.repository.clone(),
-                        stack,
-                    );
-                    // The end this view shows is the one the host reports from now on.
-                    target.store.update(cx, |store, cx| {
-                        store.set_stack_result(id, PullRequestActionResult::RebaseStarted, cx)
-                    });
                 } else {
                     let answer = Answer {
                         stack: (
@@ -2572,11 +2530,7 @@ impl RebaseStackDialog {
                             })),
                         );
                 }
-                let numbers: Vec<_> = layers.iter().map(|layer| layer.number).collect();
-                let changed = self
-                    .notice
-                    .clone()
-                    .or_else(|| stored_change(target.store.read(cx), target, state, &numbers));
+                let changed = self.notice.clone();
                 if let Some(changed) = &changed {
                     body = body.child(
                         warning_wash(cx)
@@ -2644,10 +2598,10 @@ impl Render for RebaseStackDialog {
     }
 }
 
-/// The rows of a rebase as the host runs it, or as its reported end left them.
+/// The rows of a rebase as the host runs it, or as the host keeps its end until the next sync.
 fn progress_view(
     target: &Target,
-    last: &mut Vec<core_pr::StackRebaseLayer>,
+    last: &mut Option<StackOperationKind>,
     cx: &mut App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
@@ -2662,71 +2616,23 @@ fn progress_view(
             .map_or(&[][..], |meta| meta.pull_request_operations.as_slice()),
     );
     let base = offer.as_ref().map(StackOffer::base).unwrap_or_default();
-    let stack_id = offer.as_ref().map(StackOffer::id);
-    let running = offer
-        .as_ref()
-        .and_then(|offer| offer.operation.clone())
-        .and_then(|operation| match operation.kind {
-            StackOperationKind::Rebasing { layers } => Some((layers, operation.started_at)),
-            _ => None,
-        });
-    let ended = stack_id
-        .as_ref()
-        .and_then(|id| store.stack_result(id))
-        .filter(|result| {
-            matches!(
-                result,
-                PullRequestActionResult::Rebased { .. }
-                    | PullRequestActionResult::RebaseStopped { .. }
-            )
-        })
-        .cloned();
     let mut started_at = None;
-    if let Some((layers, started)) = running {
-        *last = layers;
-        started_at = Some(started);
-    } else if let Some(ended) = &ended {
-        for layer in last.iter_mut() {
-            layer.step = match ended {
-                PullRequestActionResult::RebaseStopped {
-                    pushed,
-                    failed,
-                    reason,
-                    untouched,
-                } => {
-                    if *failed == layer.number {
-                        StackRebaseStep::Failed {
-                            reason: reason.clone(),
-                        }
-                    } else if untouched.contains(&layer.number) {
-                        StackRebaseStep::NotStarted
-                    } else if pushed.contains(&layer.number) {
-                        match &layer.step {
-                            step @ StackRebaseStep::Pushed { .. } => step.clone(),
-                            _ => StackRebaseStep::Pushed {
-                                from: String::new(),
-                                to: String::new(),
-                            },
-                        }
-                    } else {
-                        StackRebaseStep::AlreadyCurrent
-                    }
-                }
-                PullRequestActionResult::Rebased { pushed, .. }
-                    if pushed.contains(&layer.number) =>
-                {
-                    match &layer.step {
-                        step @ StackRebaseStep::Pushed { .. } => step.clone(),
-                        _ => StackRebaseStep::Pushed {
-                            from: String::new(),
-                            to: String::new(),
-                        },
-                    }
-                }
-                _ => StackRebaseStep::AlreadyCurrent,
-            };
+    if let Some(operation) = offer.and_then(|offer| offer.operation) {
+        if let StackOperationKind::Rebasing { .. } = operation.kind {
+            started_at = Some(operation.started_at);
+        }
+        if let StackOperationKind::Rebasing { .. } | StackOperationKind::RebaseEnded { .. } =
+            operation.kind
+        {
+            *last = Some(operation.kind);
         }
     }
+    // Once the sync drops the record, the view keeps the rows it last read.
+    let (last, ended): (&[core_pr::StackRebaseLayer], bool) = match last.as_ref() {
+        Some(StackOperationKind::Rebasing { layers }) => (layers, false),
+        Some(StackOperationKind::RebaseEnded { layers }) => (layers, true),
+        _ => (&[], false),
+    };
     let rows: Vec<_> = last
         .iter()
         .enumerate()
@@ -2759,11 +2665,7 @@ fn progress_view(
                         .size(px(14.))
                         .text_color(theme.success)
                         .into_any_element(),
-                    if from.is_empty() {
-                        tr("step_pushing").replace('…', "")
-                    } else {
-                        tr_with("step_pushed", &[("from", short(from)), ("to", short(to))])
-                    },
+                    tr_with("step_pushed", &[("from", short(from)), ("to", short(to))]),
                 ),
                 StackRebaseStep::AlreadyCurrent => (
                     Icon::new(IconName::Check)
@@ -2843,26 +2745,29 @@ fn progress_view(
             &[("ago", super::detail::ago(started)), ("machine", machine)],
         )));
     }
-    let mut finished = false;
-    if let Some(PullRequestActionResult::RebaseStopped {
-        pushed,
-        failed,
-        reason,
-        untouched,
-    }) = ended.as_ref().filter(|_| started_at.is_none())
-    {
-        finished = true;
-        let mut rest = vec![*failed];
-        rest.extend(untouched.iter().copied());
+    let stopped = last.iter().find_map(|layer| match &layer.step {
+        StackRebaseStep::Failed { reason } => Some((layer.number, reason)),
+        _ => None,
+    });
+    if let Some((failed, reason)) = stopped.filter(|_| ended) {
+        let numbers = |wanted: fn(&StackRebaseStep) -> bool| -> Vec<u64> {
+            last.iter()
+                .filter(|layer| wanted(&layer.step))
+                .map(|layer| layer.number)
+                .collect()
+        };
+        let pushed = numbers(|step| matches!(step, StackRebaseStep::Pushed { .. }));
+        let mut rest = vec![failed];
+        rest.extend(numbers(|step| matches!(step, StackRebaseStep::NotStarted)));
         let state = if pushed.is_empty() {
             tr_with("recovery_none", &[("rest", list(&rest))])
         } else {
             tr_with(
                 "recovery_state",
-                &[("pushed", list(pushed)), ("rest", list(&rest))],
+                &[("pushed", list(&pushed)), ("rest", list(&rest))],
             )
         };
-        let layer = last.iter().position(|layer| layer.number == *failed);
+        let layer = last.iter().position(|layer| layer.number == failed);
         let branch = layer
             .map(|index| last[index].branch.clone())
             .unwrap_or_default();
@@ -2941,15 +2846,13 @@ fn progress_view(
                     ),
                 ),
         );
-    } else if ended.is_some() && started_at.is_none() {
-        finished = true;
     }
     body.child(
         h_flex().justify_end().child(
             Button::new("pr-stack-progress-close")
                 .outline()
                 .small()
-                .label(tr(if finished { "done" } else { "hide" }))
+                .label(tr(if ended { "done" } else { "hide" }))
                 .on_click(|_, window, cx| window.close_dialog(cx)),
         ),
     )
@@ -2972,7 +2875,7 @@ pub(super) fn open_rebase_dialog(target: Target, window: &mut Window, cx: &mut A
             sending: false,
             started: false,
             notice: None,
-            last: Vec::new(),
+            last: None,
             _observe: cx.observe(&store, |_, _, cx| cx.notify()),
         };
         dialog.load(cx);
@@ -3015,7 +2918,7 @@ fn open_progress(target: Target, window: &mut Window, cx: &mut App) {
         sending: false,
         started: true,
         notice: None,
-        last: Vec::new(),
+        last: None,
         _observe: cx.observe(&store, |_, _, cx| cx.notify()),
     });
     window.open_dialog(cx, move |base, window, cx| {

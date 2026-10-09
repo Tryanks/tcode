@@ -1729,22 +1729,8 @@ fn stack_reply(host: &Mutex<StackHost>, exchange: fixture::Exchange) {
     exchange.reply(200, "", &serde_json::to_vec(&reply).unwrap());
 }
 
-#[test]
-fn a_stack_merge_is_followed_across_a_restart_and_never_submitted_again() {
-    use tcode_core::pull_request::{PullRequestStackOperation, StackOperationKind};
-    use tcode_protocol::{
-        EventEnvelope, HostMessage, PullRequestRejection, PullRequestStackHead,
-        RuntimeNotification, RuntimeToast, ServerEvent,
-    };
-    let dir = TestStore::new("tcode-pr-stack-merge");
-    let fixture = fixture::Fixture::new();
-    let api = client(&dir, &fixture);
-    let host = Arc::new(Mutex::new(StackHost {
-        state: "OPEN",
-        ..StackHost::default()
-    }));
-    let serving = host.clone();
-    let _server = fixture.serve(move |exchange| stack_reply(&serving, exchange));
+/// A thread linking #3 and the layer below it, #2, of stack #50 into `main`.
+fn stack_thread() -> SessionMeta {
     let stack = PullRequestStackState::Native(PullRequestStack {
         id: "50".into(),
         number: 50,
@@ -1771,6 +1757,26 @@ fn a_stack_merge_is_followed_across_a_restart_and_never_submitted_again() {
     for link in &mut meta.pull_requests {
         link.stack = stack.clone();
     }
+    meta
+}
+
+#[test]
+fn a_stack_merge_is_followed_across_a_restart_and_never_submitted_again() {
+    use tcode_core::pull_request::{PullRequestStackOperation, StackOperationKind};
+    use tcode_protocol::{
+        EventEnvelope, HostMessage, PullRequestRejection, PullRequestStackHead,
+        RuntimeNotification, RuntimeToast, ServerEvent,
+    };
+    let dir = TestStore::new("tcode-pr-stack-merge");
+    let fixture = fixture::Fixture::new();
+    let api = client(&dir, &fixture);
+    let host = Arc::new(Mutex::new(StackHost {
+        state: "OPEN",
+        ..StackHost::default()
+    }));
+    let serving = host.clone();
+    let _server = fixture.serve(move |exchange| stack_reply(&serving, exchange));
+    let meta = stack_thread();
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*dir).clone()));
     state.update(&mut cx, |state, _| {
@@ -1929,6 +1935,128 @@ fn a_stack_merge_is_followed_across_a_restart_and_never_submitted_again() {
         "a stack merge is never one pull request's merge"
     );
     drop(host);
+    state
+        .update(&mut cx, |state, _| state.close_store())
+        .unwrap();
+}
+
+#[test]
+fn an_ended_rebase_is_kept_for_every_device_until_the_next_full_sync_and_blocks_no_write() {
+    use tcode_core::pull_request::{
+        PullRequestStackOperation, StackOperationKind, StackRebaseFailure, StackRebaseLayer,
+        StackRebaseStep,
+    };
+    use tcode_protocol::PullRequestStackHead;
+    let dir = TestStore::new("tcode-pr-stack-rebase-ended");
+    let fixture = fixture::Fixture::new();
+    let api = client(&dir, &fixture);
+    let host = Arc::new(Mutex::new(StackHost {
+        state: "OPEN",
+        ..StackHost::default()
+    }));
+    let serving = host.clone();
+    let _server = fixture.serve(move |exchange| stack_reply(&serving, exchange));
+    let mut meta = stack_thread();
+    let ended = StackOperationKind::RebaseEnded {
+        layers: vec![
+            StackRebaseLayer {
+                number: 2,
+                branch: "layer-2".into(),
+                step: StackRebaseStep::Pushed {
+                    from: "2".repeat(40),
+                    to: "4".repeat(40),
+                },
+            },
+            StackRebaseLayer {
+                number: 3,
+                branch: "layer-3".into(),
+                step: StackRebaseStep::Failed {
+                    reason: StackRebaseFailure::Conflict,
+                },
+            },
+        ],
+    };
+    meta.pull_request_operations = vec![PullRequestStackOperation {
+        host: "github.com".into(),
+        repository: "sample/project".into(),
+        stack: 50,
+        started_at: now_secs(),
+        kind: ended.clone(),
+    }];
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*dir).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        dir.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+    });
+    let operation = |state: &TestEntity| {
+        state.read(|state| {
+            state
+                .find_meta("active")
+                .unwrap()
+                .pull_request_operations
+                .first()
+                .map(|operation| operation.kind.clone())
+        })
+    };
+
+    // The reads its end asks for refresh the layers and keep how it ended.
+    state.update(&mut cx, |state, cx| {
+        state.request_pull_request_sync(PullRequestKey::new("github.com", "sample/project", 3), cx)
+    });
+    cx.run_until(|state| {
+        !state.pull_requests.syncing
+            && !state.pull_requests.sync_scheduled
+            && state.pull_requests.requested.is_empty()
+    });
+    assert_eq!(operation(&state), Some(ended.clone()));
+
+    // A stopped rebase is no running write: the stack takes the next one.
+    host.lock().unwrap().status.insert("op-1".into(), "merged");
+    let merge = Command::RunPullRequestAction {
+        session_id: "active".into(),
+        key: PullRequestKey::new("github.com", "sample/project", 3),
+        action: PullRequestAction::MergeStack {
+            stack: 50,
+            heads: [2, 3]
+                .map(|number| PullRequestStackHead {
+                    number,
+                    head: format!("{number}").repeat(40),
+                })
+                .to_vec(),
+            method: tcode_core::pull_request::PullRequestMergeMethod::Merge,
+        },
+    };
+    assert_eq!(
+        acked(&state, &mut cx, 1, merge).unwrap(),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Pending {
+            id: "op-1".into(),
+            adopted: false,
+        })
+    );
+    cx.run_until(|state| {
+        state
+            .find_meta("active")
+            .unwrap()
+            .pull_request_operations
+            .is_empty()
+    });
+
+    // The next full sync drops it.
+    state.update(&mut cx, |state, cx| {
+        let mut meta = state.find_meta("active").unwrap();
+        meta.pull_request_operations = vec![PullRequestStackOperation {
+            host: "github.com".into(),
+            repository: "sample/project".into(),
+            stack: 50,
+            started_at: now_secs(),
+            kind: ended,
+        }];
+        state.save_pull_request_meta(meta, cx);
+    });
+    sweep(&state, &mut cx);
+    assert_eq!(operation(&state), None);
     state
         .update(&mut cx, |state, _| state.close_store())
         .unwrap();

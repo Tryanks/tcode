@@ -2071,6 +2071,7 @@ pull_requests:
     copy_id: "复制操作 ID"
     disabled_merging: "GitHub 正在合并此堆叠。"
     disabled_rebasing: "Tcode 正在变基此堆叠。"
+    disabled_queued: "此堆叠已在合并队列中。"
     disabled_not_linked: "将 #%{number} 关联到此对话后，才能在这里合并或变基它的堆叠。"
     list_two: "#%{a} 和 #%{b}"
     list_three: "#%{a}、#%{b} 和 #%{c}"

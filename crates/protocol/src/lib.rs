@@ -136,7 +136,8 @@ pub use wire::{
 // answering Pending, MergeUnconfirmed, RebaseStarted, Rebased or RebaseStopped,
 // or the stack rejections; InStack is removed; Query::PullRequest reads
 // StackState; thread metadata carries pull_request_operations, the stack writes
-// running or unconfirmed; the PullRequestStack toast reports how one ended.
+// running or unconfirmed and a rebase's end until the next full sync; the
+// PullRequestStack toast reports how one ended.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

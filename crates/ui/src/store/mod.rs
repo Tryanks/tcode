@@ -232,9 +232,6 @@ pub struct WorkspaceStore {
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
     /// The pull request each thread has open, in this run only.
     open_pull_requests: HashMap<String, tcode_core::pull_request::PullRequestKey>,
-    /// How each native stack's last write ended, as the host reported it, by host, repository
-    /// and stack number: the rebase view shows it once the operation is gone.
-    stack_results: HashMap<(String, String, u64), tcode_protocol::PullRequestActionResult>,
     /// A project-draft fallback is in flight, so the reconcile step does not
     /// ask for one more draft per index event while it resolves.
     draft_fallback_pending: bool,
@@ -433,7 +430,6 @@ impl WorkspaceStore {
             fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
             open_pull_requests: HashMap::new(),
-            stack_results: HashMap::new(),
             draft_fallback_pending: false,
         };
         let mut store = store;
@@ -2019,23 +2015,6 @@ impl WorkspaceStore {
                 tcode_core::pull_request::shown(self.pull_requests(session_id), key)
             })
             .collect();
-    }
-
-    pub fn stack_result(
-        &self,
-        stack: &(String, String, u64),
-    ) -> Option<&tcode_protocol::PullRequestActionResult> {
-        self.stack_results.get(stack)
-    }
-
-    pub fn set_stack_result(
-        &mut self,
-        stack: (String, String, u64),
-        result: tcode_protocol::PullRequestActionResult,
-        cx: &mut Context<Self>,
-    ) {
-        self.stack_results.insert(stack, result);
-        cx.notify();
     }
 
     /// Whether this device folded the stack map's note about GitHub stacks away.

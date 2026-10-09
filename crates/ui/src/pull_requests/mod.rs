@@ -977,18 +977,7 @@ impl PullRequestsPanel {
                 .and_then(|id| store.thread_meta(id))
                 .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
             let running = pull_request::stack_operation(operations, links, &key)
-                .filter(|operation| match &operation.kind {
-                    pull_request::StackOperationKind::Merging { layers, .. }
-                    | pull_request::StackOperationKind::MergeUnconfirmed {
-                        layers,
-                        checked: false,
-                        ..
-                    } => layers.contains(&key.number),
-                    pull_request::StackOperationKind::Rebasing { layers } => {
-                        layers.iter().any(|layer| layer.number == key.number)
-                    }
-                    _ => false,
-                })
+                .filter(|operation| operation.covers(key.number))
                 .map(|operation| stack::chip_words(operation, cx));
             (stack::row_blocker(links, &key), running)
         };

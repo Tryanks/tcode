@@ -438,6 +438,25 @@ impl PullRequestStackOperation {
     pub fn is_for(&self, host: &str, repository: &str, stack: u64) -> bool {
         self.host == host && self.repository == repository && self.stack == stack
     }
+
+    /// Whether the operation is moving layer `number` now, so that layer waits for it: a merge
+    /// whose scope holds it, until a sync read what became of an unconfirmed one, or a rebase
+    /// still running over it.
+    pub fn covers(&self, number: u64) -> bool {
+        match &self.kind {
+            StackOperationKind::Merging { layers, .. }
+            | StackOperationKind::MergeUnconfirmed {
+                layers,
+                checked: false,
+                ..
+            } => layers.contains(&number),
+            StackOperationKind::Rebasing { layers } => {
+                layers.iter().any(|layer| layer.number == number)
+            }
+            StackOperationKind::MergeUnconfirmed { checked: true, .. }
+            | StackOperationKind::RebaseEnded { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +479,11 @@ pub enum StackOperationKind {
         checked: bool,
     },
     Rebasing {
+        layers: Vec<StackRebaseLayer>,
+    },
+    /// A rebase that ended, each layer at its final step, kept until the next full sync so
+    /// every device can still read how it ended and what to do about a stop.
+    RebaseEnded {
         layers: Vec<StackRebaseLayer>,
     },
 }
@@ -1156,5 +1180,59 @@ mod tests {
         ] {
             assert!(!is_pull_request_url(ordinary));
         }
+    }
+
+    #[test]
+    fn a_layer_waits_only_for_the_write_moving_it_now() {
+        let operation = |kind| PullRequestStackOperation {
+            host: "github.com".into(),
+            repository: "sample/project".into(),
+            stack: 50,
+            started_at: 1,
+            kind,
+        };
+        let rebase = |step: StackRebaseStep| {
+            vec![StackRebaseLayer {
+                number: 2,
+                branch: "layer-2".into(),
+                step,
+            }]
+        };
+        let unconfirmed = |checked| StackOperationKind::MergeUnconfirmed {
+            id: "op".into(),
+            target: 3,
+            layers: vec![2, 3],
+            checked,
+        };
+        let merging = operation(StackOperationKind::Merging {
+            id: "op".into(),
+            target: 3,
+            layers: vec![2, 3],
+            adopted: false,
+        });
+        assert!(
+            merging.covers(3) && !merging.covers(4),
+            "the layers above stay free"
+        );
+        assert!(operation(unconfirmed(false)).covers(2));
+        assert!(
+            !operation(unconfirmed(true)).covers(2),
+            "a sync read the target still open"
+        );
+        assert!(
+            operation(StackOperationKind::Rebasing {
+                layers: rebase(StackRebaseStep::Rebasing)
+            })
+            .covers(2)
+        );
+        assert!(
+            !operation(StackOperationKind::RebaseEnded {
+                layers: rebase(StackRebaseStep::Failed {
+                    reason: StackRebaseFailure::Conflict
+                })
+            })
+            .covers(2),
+            "a stopped rebase is read, not waited for"
+        );
     }
 }

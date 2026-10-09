@@ -893,6 +893,9 @@ impl AppState {
         }
         self.pull_requests.syncing = true;
         self.reconcile_unconfirmed_merges(None, cx);
+        if !requested_only {
+            self.drop_ended_rebases(cx);
+        }
         let sweep_generation = self.pull_requests.generation;
         let now = now_secs();
         let mut groups: HashMap<PullRequestKey, SyncGroup> = HashMap::new();
