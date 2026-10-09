@@ -50,6 +50,8 @@ pub(super) enum Lifecycle {
     DisableAutoMerge,
     AskConflicts,
     AskChecks,
+    MergeStack,
+    RebaseStack,
 }
 
 /// A lifecycle item of a pull request's menu or primary action.
@@ -76,9 +78,10 @@ pub(super) enum Primary {
     FixChecks,
     AutoMergeOn(PullRequestMergeMethod),
     Queued(Option<u32>),
-    MergeOnGitHub {
-        index: u32,
-    },
+    /// The stack's merge through this layer, disabled while a layer below blocks it.
+    MergeStack,
+    /// The stack's running or unconfirmed write, in place of a merge.
+    StackOperation,
     UpdateBranch,
     EnableAutoMerge,
     Merge {
@@ -102,6 +105,8 @@ pub(super) struct Offer {
     pub(super) action: Option<PullRequestActionState>,
     /// The method a merge would use.
     pub(super) method: Option<PullRequestMergeMethod>,
+    /// The native stack it is a layer of.
+    pub(super) stack: Option<super::stack::StackOffer>,
 }
 
 impl Offer {
@@ -109,6 +114,7 @@ impl Offer {
     pub(super) fn new(
         key: &PullRequestKey,
         links: &[ThreadPullRequestLink],
+        operations: &[tcode_core::pull_request::PullRequestStackOperation],
         action: Option<PullRequestActionState>,
         chosen: Option<PullRequestMergeMethod>,
         project_default: Option<PullRequestMergeMethod>,
@@ -161,6 +167,7 @@ impl Offer {
             route: tcode_core::pull_request::stack_route(links, key),
             action,
             method,
+            stack: super::stack::StackOffer::new(key, links, operations),
         })
     }
 
@@ -187,8 +194,18 @@ impl Offer {
             return Some(Primary::Queued(action.queue_position));
         }
         match self.route {
-            PullRequestStackRoute::Layer { index, .. } => {
-                return Some(Primary::MergeOnGitHub { index });
+            PullRequestStackRoute::Layer { .. } => {
+                let stack = self.stack.as_ref()?;
+                if stack.operation_here().is_some() {
+                    return Some(Primary::StackOperation);
+                }
+                return match stack.merge(Some(action)) {
+                    super::stack::Avail::Enabled => Some(Primary::MergeStack),
+                    super::stack::Avail::Disabled(_) if !stack.map().blockers().is_empty() => {
+                        Some(Primary::MergeStack)
+                    }
+                    _ => None,
+                };
             }
             PullRequestStackRoute::Unknown => return None,
             PullRequestStackRoute::Single => {}
@@ -230,16 +247,26 @@ impl Offer {
         let open = self.state == PullRequestState::Open;
         let number = self.key.number.to_string();
         let mut menu = menu.separator();
+        if let (PullRequestStackRoute::Layer { .. }, Some(stack)) = (self.route, &self.stack) {
+            menu = self.stack_group(stack, menu);
+        }
+        // A layer the stack's write is moving waits for it to end.
+        let free = self
+            .stack
+            .as_ref()
+            .is_none_or(|stack| stack.operation_here().is_none());
         if open && may(|action| action.can_update) {
             if !self.draft {
-                menu = menu.menu(
+                menu = menu.menu_with_enable(
                     crate::tr!("pull_requests.actions.draft").into_owned(),
                     self.item(Lifecycle::Draft),
+                    free,
                 );
             } else if primary != Some(Primary::Ready) {
-                menu = menu.menu(
+                menu = menu.menu_with_enable(
                     crate::tr!("pull_requests.actions.ready").into_owned(),
                     self.item(Lifecycle::Ready),
+                    free,
                 );
             }
         }
@@ -302,12 +329,7 @@ impl Offer {
                         }
                     }
                 }
-                PullRequestStackRoute::Layer { index, .. } => {
-                    menu = menu.label(stack_reason(&number, index)).menu(
-                        crate::tr!("pull_requests.actions.merge_on_github").into_owned(),
-                        Box::new(OpenUrl(self.url.clone())),
-                    );
-                }
+                PullRequestStackRoute::Layer { .. } => {}
                 PullRequestStackRoute::Unknown => {
                     menu = menu
                         .menu_with_enable(
@@ -324,9 +346,10 @@ impl Offer {
         }
         menu = menu.separator();
         match self.state {
-            PullRequestState::Open if may(|action| action.can_update) => menu.menu(
+            PullRequestState::Open if may(|action| action.can_update) => menu.menu_with_enable(
                 crate::tr!("pull_requests.actions.close_menu").into_owned(),
                 self.item(Lifecycle::Close),
+                free,
             ),
             PullRequestState::Closed if may(|action| action.can_update) => menu.menu(
                 crate::tr!("pull_requests.actions.reopen").into_owned(),
@@ -341,8 +364,57 @@ impl Offer {
     }
 }
 
+impl Offer {
+    /// A native stack's group: Merge stack and Rebase stack as the stack allows them, then the
+    /// method the stack merge uses.
+    fn stack_group(&self, stack: &super::stack::StackOffer, mut menu: PopupMenu) -> PopupMenu {
+        use super::stack::Avail;
+        let action = self.action.as_ref();
+        let items = [
+            (
+                super::stack::merge_count_label(stack),
+                stack.merge(action),
+                Lifecycle::MergeStack,
+            ),
+            (
+                super::stack::rebase_menu_label(),
+                stack.rebase(action),
+                Lifecycle::RebaseStack,
+            ),
+        ];
+        for (label, avail, kind) in items {
+            match avail {
+                Avail::Hidden => {}
+                Avail::Enabled => menu = menu.menu(label, self.item(kind)),
+                Avail::Disabled(reason) => {
+                    menu = menu
+                        .menu_with_enable(label, self.item(kind), false)
+                        .label(reason)
+                }
+            }
+        }
+        if let Some(action) = action
+            && action.merge_methods.len() >= 2
+            && stack.merge(Some(action)) != Avail::Hidden
+        {
+            menu = menu.label(crate::tr!("pull_requests.actions.merge_method").into_owned());
+            for method in &action.merge_methods {
+                menu = menu.menu_with_check(
+                    method_label(*method),
+                    self.method == Some(*method),
+                    Box::new(ChooseMergeMethod {
+                        key: self.key.clone(),
+                        method: *method,
+                    }),
+                );
+            }
+        }
+        menu
+    }
+}
+
 /// The client's choice, then the project's default, then the first the repository enables.
-fn merge_method(
+pub(super) fn merge_method(
     enabled: &[PullRequestMergeMethod],
     chosen: Option<PullRequestMergeMethod>,
     project_default: Option<PullRequestMergeMethod>,
@@ -363,21 +435,12 @@ pub(super) fn method_label(method: PullRequestMergeMethod) -> String {
     .into_owned()
 }
 
-fn segment_label(method: PullRequestMergeMethod) -> String {
+pub(super) fn segment_label(method: PullRequestMergeMethod) -> String {
     crate::tr!(match method {
         PullRequestMergeMethod::Merge => "pull_requests.merge.segment_merge",
         PullRequestMergeMethod::Squash => "pull_requests.merge.segment_squash",
         PullRequestMergeMethod::Rebase => "pull_requests.merge.segment_rebase",
     })
-    .into_owned()
-}
-
-pub(super) fn stack_reason(number: &str, index: u32) -> String {
-    crate::tr!(
-        "pull_requests.actions.stack_reason",
-        number = number.to_owned(),
-        index = index.to_string()
-    )
     .into_owned()
 }
 
@@ -426,7 +489,10 @@ impl Target {
                     .get(&project)
                     .copied()
             });
-        let offer = Offer::new(key, links, action, chosen, project_default)?;
+        let operations = workspace
+            .thread_meta(session)
+            .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
+        let offer = Offer::new(key, links, operations, action, chosen, project_default)?;
         let snapshot = links
             .iter()
             .find(|link| link.key == *key)
@@ -528,6 +594,8 @@ impl Target {
             Lifecycle::Merge => open_merge_dialog(self, false, window, cx),
             Lifecycle::EnableAutoMerge => open_merge_dialog(self, true, window, cx),
             Lifecycle::AskConflicts | Lifecycle::AskChecks => self.ask(kind, window, cx),
+            Lifecycle::MergeStack => super::stack::open_merge_dialog(self, window, cx),
+            Lifecycle::RebaseStack => super::stack::open_rebase_dialog(self, window, cx),
         }
     }
 
@@ -844,7 +912,13 @@ impl Target {
                 };
                 open_on_github(Notification::warning(message).title(title))
             }
-            PullRequestActionResult::Partial { .. } => return None,
+            // A stack write's answers are the stack's own words.
+            PullRequestActionResult::Partial { .. }
+            | PullRequestActionResult::Pending { .. }
+            | PullRequestActionResult::MergeUnconfirmed { .. }
+            | PullRequestActionResult::RebaseStarted
+            | PullRequestActionResult::Rebased { .. }
+            | PullRequestActionResult::RebaseStopped { .. } => return None,
         };
         let settled = matches!(
             result,
@@ -1474,18 +1548,40 @@ pub(super) fn primary_element(
             },
             None,
         ),
-        Primary::MergeOnGitHub { index } => {
+        Primary::MergeStack => {
+            let Some(stack) = target.offer.stack.as_ref() else {
+                return div().into_any_element();
+            };
+            let (enabled, tooltip) = match stack.merge(target.offer.action.as_ref()) {
+                super::stack::Avail::Disabled(reason) => (false, reason),
+                _ => (true, super::stack::merge_tooltip(stack)),
+            };
             let button = Button::new("pr-primary-action")
-                .outline()
-                .icon(IconName::ExternalLink)
-                .label(crate::tr!("pull_requests.actions.merge_on_github"))
-                .tooltip(stack_reason(&number, index))
-                .on_click(move |_, _, cx| cx.open_url(&url));
+                .primary()
+                .icon(IconName::GitMerge)
+                .label(super::stack::merge_primary_label())
+                .aria_label(super::stack::merge_primary_accessible(target.offer.key.number))
+                .tooltip(tooltip)
+                .loading(busy)
+                .disabled(busy || !enabled)
+                .on_click(run(Lifecycle::MergeStack));
             if compact {
                 button.w_full().into_any_element()
             } else {
                 button.small().into_any_element()
             }
+        }
+        Primary::StackOperation => {
+            let Some(operation) = target
+                .offer
+                .stack
+                .as_ref()
+                .and_then(|stack| stack.operation.as_ref())
+            else {
+                return div().into_any_element();
+            };
+            let links = target.store.read(cx).pull_requests(&target.session).to_vec();
+            super::stack::operation_chip(Some(target.clone()), operation, &links, compact, cx)
         }
         Primary::UpdateBranch => button(
             IconName::ArrowUpDown,

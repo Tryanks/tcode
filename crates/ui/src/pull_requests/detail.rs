@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::pull_request::{
-    ChecksState, Mergeability, PullRequestKey, PullRequestSource, PullRequestStackState,
+    ChecksState, Mergeability, PullRequestKey, PullRequestSource,
     PullRequestState, ReviewDecision, ThreadPullRequestLink,
 };
 use tcode_protocol::{
@@ -29,7 +29,6 @@ use crate::{
     store::{TopicKind, WorkspaceStore, observe_store_topics},
     theme::ActiveTheme as _,
     widgets::{
-        Popover,
         button::{Button, ButtonVariants as _},
         input::Input,
         menu::DropdownMenu as _,
@@ -270,21 +269,34 @@ impl PullRequestView {
 
     fn stack(&self, cx: &App) -> Option<tcode_core::pull_request::PullRequestStack> {
         let (session, key) = self.current.as_ref()?;
-        self.store
-            .read(cx)
-            .pull_requests(session)
-            .iter()
-            .filter(|link| link.visible())
-            .find_map(|link| match &link.stack {
-                PullRequestStackState::Native(stack)
-                    if link.key.host == key.host
-                        && link.key.repository == key.repository
-                        && stack.layers.iter().any(|layer| layer.number == key.number) =>
-                {
-                    Some(stack.clone())
-                }
-                _ => None,
-            })
+        tcode_core::pull_request::native_stack(self.store.read(cx).pull_requests(session), key)
+            .cloned()
+    }
+
+    fn stack_offer(&self, cx: &App) -> Option<super::stack::StackOffer> {
+        let (session, key) = self.current.as_ref()?;
+        let store = self.store.read(cx);
+        super::stack::StackOffer::new(
+            key,
+            store.pull_requests(session),
+            store
+                .thread_meta(session)
+                .map_or(&[][..], |meta| meta.pull_request_operations.as_slice()),
+        )
+    }
+
+    pub(super) fn store(&self) -> &Entity<WorkspaceStore> {
+        &self.store
+    }
+
+    /// Opens another layer of the stack in the thread's page, as a row of its map does.
+    pub(super) fn select_layer(&mut self, key: PullRequestKey, cx: &mut Context<Self>) {
+        if let Some((session, _)) = self.current.clone() {
+            self.store.update(cx, |store, cx| {
+                store.set_open_pull_request(&session, Some(key.clone()), cx)
+            });
+            self.show(session, key, cx);
+        }
     }
 
     pub(super) fn url(&self, cx: &App) -> Option<String> {
@@ -901,9 +913,22 @@ impl PullRequestView {
                 ));
             }
         }
-        if let Some(stack) = &stack {
+        if let Some(offer) = self.stack_offer(cx) {
             has_chip = true;
-            chips = chips.child(self.layer_selector(stack, &key, cx));
+            let target = (!self.read_only(cx))
+                .then(|| self.lifecycle_target(cx))
+                .flatten();
+            let action = self
+                .page()
+                .and_then(|page| page.action_state.data.clone());
+            chips = chips.child(super::stack::map_selector(
+                cx.entity(),
+                offer,
+                target,
+                action,
+                compact,
+                cx,
+            ));
         }
         if visible
             && link.as_ref().is_some_and(|link| link.watch.is_some())
@@ -1259,179 +1284,6 @@ impl PullRequestView {
                 }
             },
         );
-    }
-
-    fn layer_selector(
-        &self,
-        stack: &tcode_core::pull_request::PullRequestStack,
-        key: &PullRequestKey,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let compact = self.compact(cx);
-        let index = stack
-            .layers
-            .iter()
-            .position(|layer| layer.number == key.number)
-            .map_or(0, |index| index + 1);
-        let count = stack.layers.len();
-        let muted = cx.theme().muted_foreground;
-        let trigger = Button::new("pr-layer-select")
-            .ghost()
-            .outline()
-            .compact()
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .text_size(px(13.))
-                    .child(Icon::new(IconName::Layers).size(px(14.)))
-                    .child(
-                        crate::tr!(
-                            "pull_requests.layer_position",
-                            index = index.to_string(),
-                            count = count.to_string()
-                        )
-                        .into_owned(),
-                    )
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
-            );
-        let links = self
-            .current
-            .as_ref()
-            .map(|(session, _)| self.store.read(cx).pull_requests(session).to_vec())
-            .unwrap_or_default();
-        let stack = stack.clone();
-        let current = key.clone();
-        let view = cx.entity();
-        let popover = Popover::new("pr-layer-popover").trigger(trigger);
-        let popover = if compact {
-            popover.bottom_sheet(crate::tr!("pull_requests.detail.stack_title").into_owned())
-        } else {
-            popover
-        };
-        popover
-            .content(move |_, _, cx| {
-                let popover = cx.entity();
-                let rows = stack.layers.iter().rev().map(|layer| {
-                    let layer_key =
-                        PullRequestKey::new(&current.host, &current.repository, layer.number);
-                    let link = links.iter().find(|link| link.key == layer_key);
-                    let linked = link.is_some_and(|link| link.visible());
-                    let (glyph, color, _) = appearance(row_state(link, Some(layer.state)), cx);
-                    let selected = layer_key == current;
-                    let title = link
-                        .and_then(|link| link.snapshot.as_ref())
-                        .filter(|_| linked)
-                        .map(|snapshot| snapshot.title.clone());
-                    let condition = match link.map(|link| link.source) {
-                        Some(PullRequestSource::Dismissed) => {
-                            Some(crate::tr!("pull_requests.source_dismissed"))
-                        }
-                        None => Some(crate::tr!("pull_requests.detail.layer_not_linked")),
-                        _ => None,
-                    };
-                    let view = view.clone();
-                    let popover = popover.clone();
-                    let label = format!("#{} {}", layer.number, title.clone().unwrap_or_default());
-                    material::accessible_clickable(
-                        h_flex(),
-                        ("pr-layer", layer.number as usize),
-                        gpui::Role::MenuItem,
-                        label,
-                        cx,
-                    )
-                    .aria_selected(selected)
-                    .w_full()
-                    .h(px(if compact { 44. } else { 32. }))
-                    .px_2()
-                    .gap_2()
-                    .items_center()
-                    .rounded(cx.theme().tokens.radius.sm)
-                    .cursor_pointer()
-                    .hover(|row| row.bg(cx.theme().list_hover))
-                    .when(selected, |row| row.bg(cx.theme().list_active))
-                    .child(Icon::new(glyph).size(px(14.)).text_color(if linked {
-                        color
-                    } else {
-                        cx.theme().muted_foreground
-                    }))
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(12.))
-                            .child(format!("#{}", layer.number)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.))
-                            .when(title.is_none(), |text| {
-                                text.font_family(cx.theme().mono_font_family.clone())
-                                    .text_color(cx.theme().muted_foreground)
-                            })
-                            .child(title.unwrap_or_else(|| layer.head_branch.clone())),
-                    )
-                    .children(condition.map(|condition| {
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(condition)
-                    }))
-                    .when(selected, |row| {
-                        row.child(Icon::new(IconName::Check).size(px(12.)))
-                    })
-                    .on_click(move |_, window, cx| {
-                        view.update(cx, |view, cx| {
-                            if let Some((session, _)) = view.current.clone() {
-                                view.store.update(cx, |store, cx| {
-                                    store.set_open_pull_request(
-                                        &session,
-                                        Some(layer_key.clone()),
-                                        cx,
-                                    )
-                                });
-                                view.show(session, layer_key.clone(), cx);
-                            }
-                        });
-                        popover.update(cx, |state, cx| state.dismiss(window, cx));
-                    })
-                });
-                v_flex()
-                    .id("pr-layer-list")
-                    .role(gpui::Role::Menu)
-                    .w(px(340.))
-                    .max_h(px(360.))
-                    .p_1()
-                    .gap_0p5()
-                    .overflow_y_scroll()
-                    .child(
-                        h_flex()
-                            .px_2()
-                            .py_1()
-                            .gap_1()
-                            .items_center()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(Icon::new(IconName::Layers).size(px(12.)))
-                            .child(
-                                crate::tr!(
-                                    "pull_requests.stack_caption",
-                                    count = stack.layers.len().to_string(),
-                                    base = stack.base.clone()
-                                )
-                                .into_owned(),
-                            ),
-                    )
-                    .children(rows)
-            })
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .shadow_xl()
-            .rounded(material::radius_overlay(cx))
-            .into_any_element()
     }
 
     /// The menu of the row this pull request was opened from.

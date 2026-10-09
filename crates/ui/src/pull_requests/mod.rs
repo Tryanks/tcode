@@ -37,8 +37,10 @@ mod files;
 mod lifecycle;
 mod meta;
 mod review;
+mod stack;
 
 pub use detail::PullRequestView;
+pub use stack::present_result as present_stack_result;
 
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace=tcode_pull_requests,no_json)]
@@ -671,7 +673,17 @@ impl PullRequestsPanel {
             return None;
         }
         let session = store.active_session_id()?;
-        lifecycle::Offer::new(key, store.pull_requests(&session), None, None, None)
+        let operations = store
+            .thread_meta(&session)
+            .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
+        lifecycle::Offer::new(
+            key,
+            store.pull_requests(&session),
+            operations,
+            None,
+            None,
+            None,
+        )
     }
     fn run_lifecycle(
         &mut self,
@@ -957,6 +969,48 @@ impl PullRequestsPanel {
                 );
             }
         }
+        // The stack's view of the row: a layer below that blocks merging it, and the stack's
+        // write running over it.
+        let (blocker, running) = {
+            let store = self.store.read(cx);
+            let session = store.active_session_id();
+            let links = session
+                .as_deref()
+                .map_or(&[][..], |id| store.pull_requests(id));
+            let operations = session
+                .as_deref()
+                .and_then(|id| store.thread_meta(id))
+                .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
+            let running = pull_request::stack_operation(operations, links, &key)
+                .filter(|operation| match &operation.kind {
+                    pull_request::StackOperationKind::Merging { layers, .. }
+                    | pull_request::StackOperationKind::MergeUnconfirmed {
+                        layers,
+                        checked: false,
+                        ..
+                    } => layers.contains(&key.number),
+                    pull_request::StackOperationKind::Rebasing { layers } => {
+                        layers.iter().any(|layer| layer.number == key.number)
+                    }
+                    _ => false,
+                })
+                .map(|operation| stack::chip_words(operation, cx));
+            (stack::row_blocker(links, &key), running)
+        };
+        if let Some(blocker) = blocker {
+            signals = signals.child(
+                div()
+                    .id("pr-signal-blocked")
+                    .child(
+                        Icon::new(IconName::Lock)
+                            .size(px(14.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .tooltip(move |window, cx| {
+                        crate::widgets::tooltip::Tooltip::new(blocker.clone()).build(window, cx)
+                    }),
+            );
+        }
         let row_id = SharedString::from(format!(
             "pr-row-{}-{}-{}",
             key.host, key.repository, key.number
@@ -1081,7 +1135,19 @@ impl PullRequestsPanel {
                 .flex_none()
                 .min_w(px(if compact { 44. } else { 36. }))
                 .min_h(px(if compact { 44. } else { 24. }))
-                .when(!compact, |slot| {
+                .when_some(running.clone().filter(|_| !compact), |slot, (icon, color, _, tooltip)| {
+                    slot.child(
+                        div()
+                            .id("pr-signal-operation")
+                            .group_hover(row_id.clone(), |signal| signal.invisible())
+                            .child(Icon::new(icon).size(px(14.)).text_color(color))
+                            .tooltip(move |window, cx| {
+                                crate::widgets::tooltip::Tooltip::new(tooltip.clone())
+                                    .build(window, cx)
+                            }),
+                    )
+                })
+                .when(!compact && running.is_none(), |slot| {
                     slot.child(
                         div()
                             .text_size(px(11.))
@@ -1209,6 +1275,11 @@ impl Render for PullRequestsPanel {
             .as_deref()
             .map(|id| store.pull_requests(id).to_vec())
             .unwrap_or_default();
+        let operations = session
+            .as_deref()
+            .and_then(|id| store.thread_meta(id))
+            .map(|meta| meta.pull_request_operations.clone())
+            .unwrap_or_default();
         let read_only = store
             .session_status()
             .is_none_or(|status| status.conversation_read_only);
@@ -1279,32 +1350,13 @@ impl Render for PullRequestsPanel {
         }
         for group in pull_request::groups(&links) {
             if let Some(stack) = group.stack {
-                rows = rows.child(
-                    h_flex()
-                        .id(SharedString::from(format!("pr-stack-{}", stack.id)))
-                        .h(px(28.))
-                        .px_3()
-                        .gap_2()
-                        .items_center()
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
-                        .tooltip(|window, cx| {
-                            crate::widgets::tooltip::Tooltip::new(
-                                crate::tr!("pull_requests.stack_tooltip").into_owned(),
-                            )
-                            .build(window, cx)
-                        })
-                        .child(Icon::new(IconName::Layers).xsmall())
-                        .child(
-                            crate::tr!(
-                                "pull_requests.stack_caption",
-                                count = stack.layers.len().to_string(),
-                                base = stack.base.clone()
-                            )
-                            .into_owned(),
-                        ),
-                );
                 let anchor = group.links[0];
+                let operation = tcode_core::pull_request::stack_operation(
+                    &operations,
+                    &links,
+                    &anchor.key,
+                );
+                rows = rows.child(stack::caption(stack, operation, &links, compact, cx));
                 for (index, layer) in stack.layers.iter().enumerate() {
                     let key =
                         PullRequestKey::new(&anchor.key.host, &anchor.key.repository, layer.number);
