@@ -253,6 +253,8 @@ impl AppState {
                 | Command::MarkSessionRead { .. }
                 | Command::ForkThread { .. }
                 | Command::WatchPullRequest { .. }
+                | Command::RunPullRequestAction { .. }
+                | Command::EditPullRequestReviewDraft { .. }
         ) {
             return if self.sessions.iter().any(|meta| meta.id == session_id)
                 || self.resident(session_id).is_some()

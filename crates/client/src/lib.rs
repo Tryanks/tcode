@@ -1376,6 +1376,39 @@ mod tests {
         assert!(link.inner.pending.lock().unwrap().is_empty());
     }
 
+    /// A pull request write resent after its answer was lost could post twice, so a lost
+    /// connection fails it, and reconnecting sends nothing again.
+    #[test]
+    fn a_pull_request_action_in_flight_fails_on_disconnect_and_is_not_resent() {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let mut action = std::pin::pin!(link.command(Command::RunPullRequestAction {
+            session_id: "one".into(),
+            key: serde_json::from_value(
+                serde_json::json!({"host": "github.com", "repository": "octo/repo", "number": 7}),
+            )
+            .unwrap(),
+            action: tcode_protocol::PullRequestAction::Comment {
+                body: "Once".into(),
+            },
+        }));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(action.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(request(&outgoing).key, None);
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
+        match action.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Err(error)) => assert_eq!(error.code, "disconnected"),
+            other => panic!("the action must fail on disconnect, got {other:?}"),
+        }
+        link.set_connection_state(ConnectionState::Syncing { path: None });
+        assert!(outgoing.try_recv().is_err(), "nothing was resent");
+        assert!(link.pending_commands().is_empty());
+    }
+
     #[test]
     fn full_transport_queue_rejects_requests_without_leaving_a_waiter() {
         let (outgoing, _receiver) = outgoing::channel();
