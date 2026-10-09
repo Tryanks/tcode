@@ -177,7 +177,7 @@ impl ProviderModelPicker {
                 .outline()
                 .small()
                 .icon(IconName::Plus)
-                .label(crate::tr!(*label_key).into_owned()),
+                .label(crate::tr!(*label_key)),
             TriggerKind::Selection => {
                 let (provider, model, profile_id) = self
                     .selected
