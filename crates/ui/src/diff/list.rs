@@ -16,8 +16,8 @@ use crate::workspace_walk::relativize_to_workspace;
 use agent::FileChangeKind;
 use gpui::{
     Action, AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
-    ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Window, div, list,
+    ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Window, canvas, div, list,
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
@@ -153,6 +153,8 @@ pub(crate) struct DiffList {
     pub(crate) unified_list: ListState,
     pub(crate) split_list: ListState,
     pub(crate) selection: Option<LineSelection>,
+    /// The width the list shows of its rows, as last laid out; a file header spans it.
+    viewport_width: Rc<std::cell::Cell<Pixels>>,
 }
 
 impl DiffList {
@@ -171,6 +173,7 @@ impl DiffList {
             unified_content_width,
             split_content_width,
             selection: None,
+            viewport_width: Rc::default(),
         }
     }
 
@@ -348,6 +351,8 @@ pub(crate) trait DiffListHost: Sized + 'static {
             .map(|file| file.path.clone())
             .unwrap_or_default();
         div()
+            .min_w_0()
+            .truncate()
             .text_size(px(13.))
             .line_height(px(18.))
             .font_medium()
@@ -431,6 +436,7 @@ pub(crate) fn render_list<H: DiffListHost>(
     } else {
         (diff.unified_list.clone(), diff.unified_content_width)
     };
+    let viewport_width = diff.viewport_width.clone();
     let entity = cx.entity();
     let mut rows = list(list_state.clone(), move |index, _, cx| {
         entity.update(cx, |host, cx| render_item(host, index, split, wrap, cx))
@@ -461,6 +467,19 @@ pub(crate) fn render_list<H: DiffListHost>(
             crate::wheel_easing::Handle::List(list_state),
             rows,
         ))
+        // Draws again once the viewport's width changes, for the headers that span it.
+        .child(
+            canvas(
+                move |bounds, window, _| {
+                    if viewport_width.replace(bounds.size.width) != bounds.size.width {
+                        window.request_animation_frame();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
         .into_any_element()
 }
 
@@ -573,10 +592,21 @@ fn render_file_header<H: DiffListHost>(
         FileChangeKind::Rename => Some((crate::tr!("diff.renamed"), cx.theme().info_foreground)),
         FileChangeKind::Modify => None,
     };
+    let viewport_width = host
+        .diff_list()
+        .map_or(px(0.), |list| list.viewport_width.get());
     let menu = host.file_menu(file_index, cx);
     h_flex()
         .id(("diff-file-header", file_index))
-        .min_w_full()
+        // A header spans what the list shows, not its lines' width, so its counts stay in view
+        // however far a long line reaches.
+        .map(|header| {
+            if viewport_width > px(0.) {
+                header.w(viewport_width)
+            } else {
+                header.min_w_full()
+            }
+        })
         .h(px(34.))
         .px_3()
         .gap_2()
@@ -603,6 +633,7 @@ fn render_file_header<H: DiffListHost>(
         .when_some(kind_label, |this, (label, foreground)| {
             this.child(
                 div()
+                    .flex_none()
                     .text_size(px(11.))
                     .line_height(px(18.))
                     .text_color(foreground)
