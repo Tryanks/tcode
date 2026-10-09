@@ -11,9 +11,9 @@ use gpui_base::{Avatar, AvatarFallback, AvatarImage, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::{pull_request::PullRequestState, session::ReviewSide};
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult, PullRequestComment, PullRequestReaction,
-    PullRequestReactionContent, PullRequestRead, PullRequestReadResponse, PullRequestReviewState,
-    PullRequestReviewThread,
+    PullRequestAction, PullRequestActionResult, PullRequestCapabilities, PullRequestComment,
+    PullRequestReaction, PullRequestReactionContent, PullRequestRead, PullRequestReadResponse,
+    PullRequestReviewState, PullRequestReviewThread,
 };
 
 use super::compose::{EditorSpec, Sheet, Slot, Write};
@@ -583,7 +583,7 @@ impl PullRequestView {
                     thread: place.thread.clone(),
                 },
             ));
-            if comment.viewer_can_react {
+            if self.can_react(comment) {
                 writes.push((
                     "pull_requests.reactions.add_menu",
                     CommentMenu::React {
@@ -594,7 +594,7 @@ impl PullRequestView {
         }
         // With no reactions yet, the add chip lives in the head row.
         let add_reaction =
-            (writable && comment.viewer_can_react && self.shown_reactions(comment).is_empty())
+            (writable && self.can_react(comment) && self.shown_reactions(comment).is_empty())
                 .then(|| self.reaction_popover(comment, true, cx));
         h_flex()
             .group(SharedString::from(format!(
@@ -819,7 +819,7 @@ impl PullRequestView {
         if shown.is_empty() {
             return None;
         }
-        let interactive = self.writable(cx) && comment.viewer_can_react;
+        let interactive = self.writable(cx) && self.can_react(comment);
         let add = interactive.then(|| self.reaction_popover(comment, false, cx));
         Some(
             h_flex()
@@ -1211,7 +1211,7 @@ impl PullRequestView {
             )
             .child(head);
         if collapsed {
-            if !inline && thread.viewer_can_resolve && self.writable(cx) {
+            if !inline && self.can_resolve(thread) && self.writable(cx) {
                 let place = thread.path.clone();
                 card = card.child(
                     h_flex()
@@ -1339,13 +1339,34 @@ impl PullRequestView {
             .into_any_element()
     }
 
+    /// What the host offers at all, as the conversation carries it.
+    pub(super) fn capabilities(&self) -> PullRequestCapabilities {
+        self.page()
+            .and_then(|page| page.conversation.data.as_ref())
+            .map_or(PullRequestCapabilities::ALL, |conversation| {
+                conversation.capabilities
+            })
+    }
+
+    fn can_reply(&self, thread: &PullRequestReviewThread) -> bool {
+        self.capabilities().reply && thread.viewer_can_reply
+    }
+
+    fn can_resolve(&self, thread: &PullRequestReviewThread) -> bool {
+        self.capabilities().resolve && thread.viewer_can_resolve
+    }
+
+    fn can_react(&self, comment: &PullRequestComment) -> bool {
+        self.capabilities().reactions && comment.viewer_can_react
+    }
+
     /// Reply and Resolve under a whole thread, as the host says this account may.
     fn thread_footer(
         &self,
         thread: &PullRequestReviewThread,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.writable(cx) || !(thread.viewer_can_reply || thread.viewer_can_resolve) {
+        if !self.writable(cx) || !(self.can_reply(thread) || self.can_resolve(thread)) {
             return None;
         }
         let compact = self.compact(cx);
@@ -1372,7 +1393,7 @@ impl PullRequestView {
             cancel: true,
         };
         let reply_slot = slot.clone();
-        let reply: Option<AnyElement> = thread.viewer_can_reply.then(|| {
+        let reply: Option<AnyElement> = self.can_reply(thread).then(|| {
             if compact {
                 self.editor_sheet(
                     slot.clone(),
@@ -1430,8 +1451,8 @@ impl PullRequestView {
                 }
             }
         });
-        let resolve = thread
-            .viewer_can_resolve
+        let resolve = self
+            .can_resolve(thread)
             .then(|| self.resolve_button(thread, &place, cx));
         Some(
             h_flex()
@@ -1442,7 +1463,7 @@ impl PullRequestView {
                 .items_center()
                 .text_size(px(12.))
                 .children(reply.map(|reply| div().flex_1().min_w_0().child(reply)))
-                .when(!thread.viewer_can_reply, |footer| {
+                .when(!self.can_reply(thread), |footer| {
                     footer.child(div().flex_1())
                 })
                 .children(resolve)

@@ -15,7 +15,8 @@ use tcode_core::{
     session::ReviewSide,
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult, PullRequestRejection, PullRequestReviewVerdict,
+    PullRequestAction, PullRequestActionResult, PullRequestCapabilities, PullRequestRejection,
+    PullRequestReviewVerdict,
 };
 
 use super::compose::{EditorSpec, LineAnchor, Sheet, Slot, Write};
@@ -969,43 +970,38 @@ impl PullRequestView {
                 }
             }
         };
-        let segments = [
-            (
-                PullRequestReviewVerdict::Comment,
-                "comment",
-                "pull_requests.review.verdict_comment",
-            ),
-            (
-                PullRequestReviewVerdict::Approve,
-                "approve",
-                "pull_requests.review.verdict_approve",
-            ),
-            (
-                PullRequestReviewVerdict::RequestChanges,
-                "request-changes",
-                "pull_requests.review.verdict_request_changes",
-            ),
-        ]
-        .into_iter()
-        .map(|(segment, id, label)| {
-            let view = view.clone();
-            material::segment(
-                SharedString::from(format!("pr-verdict-{id}")),
-                crate::tr!(label).into_owned(),
-                verdict == segment,
-                cx,
-            )
-            .disabled(!verdicts.contains(&segment))
-            .on_change(move |_, _, _, cx| {
-                view.update(cx, |view, cx| {
-                    if let Some(writes) = view.writes_mut() {
-                        writes.review.verdict = Some(segment);
+        let segments = offered_verdicts(this.capabilities())
+            .map(|segment| {
+                let (id, label) = match segment {
+                    PullRequestReviewVerdict::Comment => {
+                        ("comment", "pull_requests.review.verdict_comment")
                     }
-                    cx.notify();
+                    PullRequestReviewVerdict::Approve => {
+                        ("approve", "pull_requests.review.verdict_approve")
+                    }
+                    PullRequestReviewVerdict::RequestChanges => (
+                        "request-changes",
+                        "pull_requests.review.verdict_request_changes",
+                    ),
+                };
+                let view = view.clone();
+                material::segment(
+                    SharedString::from(format!("pr-verdict-{id}")),
+                    crate::tr!(label).into_owned(),
+                    verdict == segment,
+                    cx,
+                )
+                .disabled(!verdicts.contains(&segment))
+                .on_change(move |_, _, _, cx| {
+                    view.update(cx, |view, cx| {
+                        if let Some(writes) = view.writes_mut() {
+                            writes.review.verdict = Some(segment);
+                        }
+                        cx.notify();
+                    })
                 })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>();
         let notice = |title: Option<String>, body: String, actions: Vec<AnyElement>, cx: &App| {
             v_flex()
                 .gap_1()
@@ -1232,5 +1228,44 @@ impl PullRequestView {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+/// The verdicts the host offers, in the picker's order. One the account may not give is drawn
+/// disabled; one the host lacks is not drawn, so it never reads as a permission denied.
+fn offered_verdicts(
+    capabilities: PullRequestCapabilities,
+) -> impl Iterator<Item = PullRequestReviewVerdict> {
+    [
+        PullRequestReviewVerdict::Comment,
+        PullRequestReviewVerdict::Approve,
+        PullRequestReviewVerdict::RequestChanges,
+    ]
+    .into_iter()
+    .filter(move |verdict| {
+        *verdict != PullRequestReviewVerdict::RequestChanges || capabilities.request_changes
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_verdict_the_host_lacks_is_not_offered() {
+        use PullRequestReviewVerdict::*;
+        assert_eq!(
+            offered_verdicts(PullRequestCapabilities::ALL).collect::<Vec<_>>(),
+            [Comment, Approve, RequestChanges]
+        );
+        assert_eq!(
+            offered_verdicts(PullRequestCapabilities {
+                request_changes: false,
+                ..PullRequestCapabilities::ALL
+            })
+            .collect::<Vec<_>>(),
+            [Comment, Approve],
+            "absent rather than drawn disabled, as a verdict the account may not give is"
+        );
     }
 }

@@ -178,7 +178,7 @@ impl Offer {
             return Some(Primary::ResolveConflicts);
         }
         if self.draft {
-            return action.can_update.then_some(Primary::Ready);
+            return (action.can_update && action.capabilities.draft).then_some(Primary::Ready);
         }
         if self.checks_failing {
             return Some(Primary::FixChecks);
@@ -206,13 +206,20 @@ impl Offer {
             PullRequestStackRoute::Unknown => return None,
             PullRequestStackRoute::Single => {}
         }
-        if action.merge_state == PullRequestMergeState::Behind && action.can_update_branch {
+        if action.merge_state == PullRequestMergeState::Behind
+            && action.can_update_branch
+            && action.capabilities.update_branch
+        {
             return Some(Primary::UpdateBranch);
         }
         if !action.can_merge {
             return None;
         }
-        if self.checks_pending && action.auto_merge_allowed && !action.merge_queue {
+        if self.checks_pending
+            && action.auto_merge_allowed
+            && action.capabilities.auto_merge
+            && !action.merge_queue
+        {
             return Some(Primary::EnableAutoMerge);
         }
         let mergeable = action.merge_queue
@@ -256,7 +263,7 @@ impl Offer {
         if let (PullRequestStackRoute::Layer { .. }, Some(stack)) = (self.route, &self.stack) {
             menu = self.stack_group(stack, menu);
         }
-        if open && may(|action| action.can_update) {
+        if open && may(|action| action.can_update && action.capabilities.draft) {
             if !self.draft {
                 menu = write(menu, "pull_requests.actions.draft", Lifecycle::Draft);
             } else if primary != Some(Primary::Ready) {
@@ -269,6 +276,7 @@ impl Offer {
             && let Some(action) = action
             && action.behind_by.is_some_and(|behind| behind > 0)
             && action.can_update_branch
+            && action.capabilities.update_branch
         {
             menu = write(
                 menu,
@@ -310,6 +318,7 @@ impl Offer {
                                 Lifecycle::DisableAutoMerge,
                             );
                         } else if action.auto_merge_allowed
+                            && action.capabilities.auto_merge
                             && !action.merge_queue
                             && primary != Some(Primary::EnableAutoMerge)
                         {
@@ -356,10 +365,14 @@ impl Offer {
             PullRequestState::Open if may(|action| action.can_update) => {
                 write(menu, "pull_requests.actions.close_menu", Lifecycle::Close)
             }
-            PullRequestState::Closed if may(|action| action.can_update) => {
+            PullRequestState::Closed
+                if may(|action| action.can_update && action.capabilities.reopen) =>
+            {
                 write(menu, "pull_requests.actions.reopen", Lifecycle::Reopen)
             }
-            PullRequestState::Merged if may(|action| action.can_merge) => {
+            PullRequestState::Merged
+                if may(|action| action.can_merge && action.capabilities.revert) =>
+            {
                 write(menu, "pull_requests.actions.revert_menu", Lifecycle::Revert)
             }
             _ => menu,
