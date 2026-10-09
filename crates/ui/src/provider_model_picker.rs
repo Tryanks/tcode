@@ -15,8 +15,8 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
 
@@ -40,7 +40,8 @@ pub(crate) struct ModelSelected(pub ModelOption);
 
 #[derive(Clone)]
 enum TriggerKind {
-    Add(SharedString),
+    /// Translation key, resolved at render so a language switch reaches it.
+    Add(&'static str),
     Selection,
 }
 
@@ -63,7 +64,7 @@ impl ProviderModelPicker {
         store: Entity<WorkspaceStore>,
         popover_id: &'static str,
         trigger_id: &'static str,
-        label: impl Into<SharedString>,
+        label_key: &'static str,
         cx: &mut Context<Self>,
     ) -> Self {
         let store_subscription =
@@ -72,7 +73,7 @@ impl ProviderModelPicker {
             store,
             popover_id,
             trigger_id,
-            trigger_kind: TriggerKind::Add(label.into()),
+            trigger_kind: TriggerKind::Add(label_key),
             selected_profile: Settings::builtin_profile_id(ProviderKind::Codex).to_string(),
             selected: None,
             excluded: Vec::new(),
@@ -172,11 +173,11 @@ impl ProviderModelPicker {
 
     fn trigger(&self, cx: &Context<Self>) -> Button {
         match &self.trigger_kind {
-            TriggerKind::Add(label) => Button::new(self.trigger_id)
+            TriggerKind::Add(label_key) => Button::new(self.trigger_id)
                 .outline()
                 .small()
                 .icon(IconName::Plus)
-                .label(label.clone()),
+                .label(crate::tr!(*label_key)),
             TriggerKind::Selection => {
                 let (provider, model, profile_id) = self
                     .selected
