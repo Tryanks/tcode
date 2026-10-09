@@ -772,19 +772,25 @@ impl RemotePanel {
                 .text_size(px(13.))
                 .min_w_0()
                 .text_color(cx.theme().danger_foreground)
+                .debug_selector(|| "hosts-pair-error".into())
                 .child(error)
                 .into_any_element(),
         )
     }
 
-    /// The machine's IP address, asked for under the failure of an attempt
-    /// that found no path to it. `retry` adds the button that sends it,
-    /// where no Connect button is pinned to the page.
+    /// The machine's IP address, asked for once an attempt found no path to
+    /// it; the prompt stands in for that failure. `retry` adds the button
+    /// that sends it, where no Connect button is pinned to the page.
     fn address_prompt(&self, retry: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.form.needs_address(cx) {
             return None;
         }
         let invalid = self.form.typed_address(cx).is_err();
+        let error = if invalid {
+            Some(crate::tr!("hosts.pair.bad_address").into_owned())
+        } else {
+            self.form.address_error(cx).map(str::to_owned)
+        };
         let busy = self.form.busy;
         Some(
             v_flex()
@@ -810,15 +816,14 @@ impl RemotePanel {
                         .large()
                         .rounded(crate::material::radius_input(cx)),
                 )
-                .when(invalid, |column| {
-                    column.child(
-                        div()
-                            .text_size(px(13.))
-                            .min_w_0()
-                            .text_color(cx.theme().danger_foreground)
-                            .child(crate::tr!("hosts.pair.bad_address")),
-                    )
-                })
+                .children(error.map(|error| {
+                    div()
+                        .text_size(px(13.))
+                        .min_w_0()
+                        .text_color(cx.theme().danger_foreground)
+                        .debug_selector(|| "hosts-pair-address-error".into())
+                        .child(error)
+                }))
                 .when(retry, |column| {
                     column.child(
                         Button::new("hosts-pair-retry")
@@ -1297,11 +1302,15 @@ mod tests {
             ) -> tcode_client::host::HostFuture<'_, Result<PairedHost, String>> {
                 self.attempts.borrow_mut().push((invite.clone(), address));
                 Box::pin(async move {
-                    match address {
-                        None => {
-                            Err("could not connect to the machine: connection timed out".into())
-                        }
-                        Some(_) => Ok(invite.paired("Studio".into())),
+                    let reached: Option<IpAddr> = "192.168.1.20".parse().ok();
+                    if address == reached {
+                        Ok(invite.paired("Studio".into()))
+                    } else {
+                        Err(
+                            "could not connect to the machine: No addressing information \
+                             available"
+                                .into(),
+                        )
                     }
                 })
             }
@@ -1356,18 +1365,32 @@ mod tests {
             cx.debug_bounds("hosts-pair-address").is_some(),
             "no path: the page asks for the address"
         );
-        cx.update(|window, cx| {
-            panel.update(cx, |panel, cx| {
-                panel
-                    .form
-                    .address
-                    .update(cx, |state, cx| state.set_value("192.168.1.20", window, cx));
-                panel.submit(window, cx);
+        assert!(
+            cx.debug_bounds("hosts-pair-error").is_none()
+                && cx.debug_bounds("hosts-pair-address-error").is_none(),
+            "the prompt stands in for the transport's cause"
+        );
+        let retry = |address: &'static str, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel
+                        .form
+                        .address
+                        .update(cx, |state, cx| state.set_value(address, window, cx));
+                    panel.submit(window, cx);
+                });
             });
-        });
-        draw(cx);
+            draw(cx);
+        };
+        retry("192.168.1.99", cx);
+        assert!(
+            cx.debug_bounds("hosts-pair-address-error").is_some(),
+            "a typed address that found no path says so in the prompt"
+        );
+        assert!(cx.debug_bounds("hosts-pair-error").is_none());
+        retry("192.168.1.20", cx);
         assert_eq!(
-            phone.attempts.borrow()[1],
+            phone.attempts.borrow()[2],
             (invite.clone(), Some("192.168.1.20".parse().unwrap())),
             "the same invitation, with the typed address"
         );

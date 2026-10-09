@@ -27,6 +27,13 @@ pub struct PairForm {
     /// The link whose last attempt opened no path to the machine. Its
     /// secret was never sent, so it may be tried again at a typed address.
     unreachable: Option<String>,
+    /// The typed address of the attempt in flight or the last one.
+    attempted_address: Option<IpAddr>,
+    /// Why the typed address did not reach the machine either. A first
+    /// attempt that found no path reports nothing here or in [`Self::error`]:
+    /// the address prompt is the whole report, and the transport's cause
+    /// would only repeat it.
+    address_error: Option<String>,
 }
 
 impl PairForm {
@@ -45,6 +52,8 @@ impl PairForm {
             generation: 0,
             attempted: None,
             unreachable: None,
+            attempted_address: None,
+            address_error: None,
         }
     }
 
@@ -78,6 +87,14 @@ impl PairForm {
             .is_some_and(|link| link == self.invitation.read(cx).value().trim())
     }
 
+    /// Why the typed address did not reach the machine, while the prompt
+    /// for it is shown.
+    pub fn address_error(&self, cx: &App) -> Option<&str> {
+        self.address_error
+            .as_deref()
+            .filter(|_| self.needs_address(cx))
+    }
+
     /// The address to dial besides what the link names: `Ok(None)` when none
     /// is asked for or the field is empty, `Err` when it is not an IPv4 or
     /// IPv6 address.
@@ -100,6 +117,7 @@ impl PairForm {
         self.busy = false;
         self.attempted = None;
         self.unreachable = None;
+        self.address_error = None;
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
@@ -115,8 +133,10 @@ impl PairForm {
         let request = parse_pair_url(&value)?;
         let address = self.typed_address(cx).ok()?;
         self.attempted = Some(value.trim().to_owned());
+        self.attempted_address = address;
         self.busy = true;
         self.error = None;
+        self.address_error = None;
         Some((request, address, self.generation))
     }
 
@@ -137,10 +157,14 @@ impl PairForm {
                 self.unreachable = None;
                 Some(host)
             }
+            Err(error) if no_path(&error) => {
+                self.unreachable = self.attempted.clone();
+                self.address_error = self.attempted_address.map(|address| {
+                    crate::tr!("hosts.pair.address_unreachable", address = address).into_owned()
+                });
+                None
+            }
             Err(error) => {
-                if no_path(&error) {
-                    self.unreachable = self.attempted.clone();
-                }
                 self.error = Some(pair_error(&error));
                 None
             }
@@ -164,6 +188,7 @@ impl PairForm {
         self.error = None;
         self.attempted = None;
         self.unreachable = None;
+        self.address_error = None;
         self.address
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.invitation.update(cx, |state, cx| {
@@ -189,7 +214,9 @@ fn no_path(error: &str) -> bool {
 
 /// Interpret the transport's pairing failures here, where the recovery
 /// advice can be localized. The wording is `PairError`'s `Display` in
-/// `crates/traverse/src/client.rs`; anything else is shown as it is.
+/// `crates/traverse/src/client.rs`; anything else is shown as it is. A
+/// failure that found no path never gets here: the address prompt reports
+/// it.
 pub fn pair_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     match lower.trim() {
@@ -199,10 +226,6 @@ pub fn pair_error(error: &str) -> String {
         "pairing_disabled" => crate::tr!("hosts.pair.disabled").into_owned(),
         _ if lower.starts_with("invalid pairing response") => {
             crate::tr!("hosts.pair.unconfirmed").into_owned()
-        }
-        _ if lower.starts_with(UNREACHABLE) => {
-            let reason = error[UNREACHABLE.len()..].trim_start_matches(':').trim();
-            crate::tr!("hosts.pair.network_error", reason = reason).into_owned()
         }
         _ => crate::tr!("hosts.pair.failed", reason = error).into_owned(),
     }
@@ -230,18 +253,6 @@ mod tests {
                 "wrong recovery advice for {error}",
             );
         }
-        assert_eq!(
-            pair_error(
-                "could not connect to the machine: No addressing information available: \
-                 Address lookup failed"
-            ),
-            crate::tr!(
-                "hosts.pair.network_error",
-                reason = "No addressing information available: Address lookup failed"
-            )
-            .into_owned(),
-            "an unreachable machine keeps the transport's cause"
-        );
         assert_eq!(
             pair_error("the machine could not record the pairing; try again"),
             crate::tr!(
@@ -298,6 +309,8 @@ mod tests {
                 Err("could not connect to the machine: connection timed out".into()),
             );
             assert!(holder.0.needs_address(cx));
+            assert_eq!(holder.0.error, None, "the prompt is the whole report");
+            assert_eq!(holder.0.address_error(cx), None);
             assert!(!holder.0.should_submit(cx), "a retry waits for the address");
         });
         for (typed, expected) in [
@@ -323,6 +336,18 @@ mod tests {
             let (request, address, generation) = holder.0.begin_pair(cx).expect("a retry");
             assert_eq!(request, invite(), "the same invitation");
             assert_eq!(address, Some("fd00::2".parse().unwrap()));
+            holder.0.finish_pair(
+                generation,
+                Err("could not connect to the machine: connection timed out".into()),
+            );
+            assert_eq!(holder.0.error, None);
+            assert_eq!(
+                holder.0.address_error(cx),
+                Some(crate::tr!("hosts.pair.address_unreachable", address = "fd00::2").as_ref()),
+                "a typed address that found no path says so in the prompt"
+            );
+            let (request, _, generation) = holder.0.begin_pair(cx).expect("a retry");
+            assert_eq!(holder.0.address_error(cx), None, "cleared while in flight");
             assert!(
                 holder
                     .0
