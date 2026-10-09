@@ -23,6 +23,8 @@ gpui_component_assets::icon_assets!(
     ]
 );
 
+gpui_component_assets::icon_assets!(ThreadArrangeAssets, [Pin, PinOff, GripVertical]);
+
 pub const DM_SANS: &[u8] = include_bytes!("../../../assets/fonts/DMSans[wght].ttf");
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const LILEX_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
@@ -180,6 +182,9 @@ impl AssetSource for Assets {
         if let Some(bytes) = PullRequestAssets.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(bytes) = ThreadArrangeAssets.load(path)? {
+            return Ok(Some(bytes));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             ComponentAssets.load(path)
@@ -203,6 +208,7 @@ impl AssetSource for Assets {
             paths.push(DM_SANS_PATH.into());
         }
         paths.extend(PullRequestAssets.list(path)?);
+        paths.extend(ThreadArrangeAssets.list(path)?);
         for (name, _) in EXTRA_ICONS {
             if name.starts_with(path) {
                 paths.push((*name).into());

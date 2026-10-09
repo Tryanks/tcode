@@ -1,4 +1,5 @@
 use super::*;
+use tcode_core::thread_sort::ThreadSection;
 
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
 #[derive(Default)]
@@ -1045,6 +1046,9 @@ impl AppState {
         meta.settled_override = Some(SettledOverride::Settled);
         meta.unsettled_at = None;
         self.end_pull_request_watches(&mut meta);
+        meta.pinned_at = None;
+        meta.pin_order = None;
+        meta.active_order = None;
         self.detach_provider_to_idle(id, cx);
         if let Some(session) = self.resident_mut(id) {
             session
@@ -1068,6 +1072,73 @@ impl AppState {
         meta.settled_at = None;
         meta.unsettled_at = Some(now_secs());
         meta.updated_at = now_secs();
+        if let Some(session) = self.resident_mut(id) {
+            session.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
+    }
+
+    /// Pinning promotes a settled thread to Active without stamping
+    /// `unsettled_at`. A thread already pinned keeps its time and key, so a
+    /// raced duplicate never moves a thread the user placed.
+    pub fn pin_session(&mut self, id: &str, order_key: Option<String>, cx: &mut HostCx) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
+            return;
+        };
+        let promotes = meta.is_settled();
+        if meta.pinned_at.is_some() && !promotes {
+            return;
+        }
+        if meta.pinned_at.is_none() {
+            meta.pinned_at = Some(now_secs());
+            meta.pin_order = order_key;
+        }
+        if promotes {
+            meta.settled_override = Some(SettledOverride::Active);
+            meta.settled_at = None;
+        }
+        if let Some(session) = self.resident_mut(id) {
+            session.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
+    }
+
+    /// Unpinning clears the key too: pinning again is a fresh slot unless
+    /// the client supplies the old one. The thread stays in Active.
+    pub fn unpin_session(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
+            return;
+        };
+        if meta.pinned_at.is_none() {
+            return;
+        }
+        meta.pinned_at = None;
+        meta.pin_order = None;
+        if let Some(session) = self.resident_mut(id) {
+            session.meta = meta.clone();
+        }
+        self.persist_meta(&meta, cx);
+    }
+
+    pub fn reorder_session(
+        &mut self,
+        id: &str,
+        section: ThreadSection,
+        order_key: String,
+        cx: &mut HostCx,
+    ) {
+        let Some(mut meta) = self.find_meta(id).filter(|meta| meta.archived_at.is_none()) else {
+            return;
+        };
+        let slot = match section {
+            ThreadSection::Pinned => &mut meta.pin_order,
+            ThreadSection::Active => &mut meta.active_order,
+            ThreadSection::Settled => return,
+        };
+        if slot.as_deref() == Some(order_key.as_str()) {
+            return;
+        }
+        *slot = Some(order_key);
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }

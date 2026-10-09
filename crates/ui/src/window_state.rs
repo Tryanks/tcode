@@ -29,6 +29,8 @@ pub enum Destination {
     /// *that a detail is open* is navigation and belongs here.
     SettingsSection,
     SettingsThreadRules,
+    /// The phone's page for pinning, settling and reordering threads by handle.
+    ArrangeThreads,
 }
 
 /// The shell's client-local checkpoint, independent of the host's settings.
@@ -76,6 +78,7 @@ impl NavigationSnapshot {
                 Destination::Settings
                     | Destination::SettingsSection
                     | Destination::SettingsThreadRules
+                    | Destination::ArrangeThreads
                     | Destination::Pair
                     // A cold start reads the pull request afresh from its thread.
                     | Destination::PullRequest
@@ -119,7 +122,11 @@ impl Destination {
         match self {
             Self::Hosts | Self::Pair => Route::Hosts,
             Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => Route::Settings,
-            Self::Threads | Self::Thread | Self::Panel | Self::PullRequest => Route::Chat,
+            Self::Threads
+            | Self::Thread
+            | Self::Panel
+            | Self::PullRequest
+            | Self::ArrangeThreads => Route::Chat,
         }
     }
 
@@ -131,7 +138,7 @@ impl Destination {
     pub fn back_label(self) -> SharedString {
         crate::tr!(match self {
             Self::Hosts | Self::Pair => "hosts.title",
-            Self::Threads => "mobile.threads",
+            Self::Threads | Self::ArrangeThreads => "mobile.threads",
             Self::Thread => "mobile.thread",
             Self::Panel => "chat.panels",
             Self::PullRequest => "pull_requests.title",

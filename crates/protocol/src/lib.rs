@@ -109,6 +109,8 @@ pub use wire::{
 // text, conversation, review thread replies, viewed files and media;
 // SetPullRequestFilesViewed marks or unmarks files as viewed;
 // RefreshPullRequest drops the host's reads of one and syncs it.
+// Unreleased: thread metadata carries pinned_at, pin_order and active_order;
+// adds the PinSession, UnpinSession, ReorderPinned and ReorderActive commands.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

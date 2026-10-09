@@ -259,6 +259,10 @@ impl AppState {
                 | Command::CancelAgent { session_id }
                 | Command::UnsettleSession { session_id }
                 | Command::SetAutoSettle { session_id, .. }
+                | Command::PinSession { session_id, .. }
+                | Command::UnpinSession { session_id }
+                | Command::ReorderPinned { session_id, .. }
+                | Command::ReorderActive { session_id, .. }
                 | Command::RewindTurn { session_id, .. }
                 | Command::AddReviewComment { session_id, .. }
                 | Command::RemoveReviewComment { session_id, .. }

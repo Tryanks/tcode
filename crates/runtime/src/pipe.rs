@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
+use tcode_core::thread_sort::ThreadSection;
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, Principal, ProtocolError,
     Query, QueryResponse, decode_client_line,
@@ -704,6 +705,19 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             enabled,
         } => app.set_auto_settle(&session_id, enabled, cx),
         Command::UnsettleSession { session_id } => app.unsettle_session(&session_id, cx),
+        Command::PinSession {
+            session_id,
+            order_key,
+        } => app.pin_session(&session_id, order_key, cx),
+        Command::UnpinSession { session_id } => app.unpin_session(&session_id, cx),
+        Command::ReorderPinned {
+            session_id,
+            order_key,
+        } => app.reorder_session(&session_id, ThreadSection::Pinned, order_key, cx),
+        Command::ReorderActive {
+            session_id,
+            order_key,
+        } => app.reorder_session(&session_id, ThreadSection::Active, order_key, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
