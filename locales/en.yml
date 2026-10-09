@@ -1123,6 +1123,9 @@ time:
   minutes_ago: "%{count}m ago"
   hours_ago: "%{count}h ago"
   days_ago: "%{count}d ago"
+  in_minutes: "in %{count}m"
+  in_hours: "in %{count}h"
+  in_days: "in %{count}d"
   duration_minutes: "%{minutes}m %{seconds}s"
   duration_seconds: "%{seconds}s"
   duration_hours: "%{hours}h %{minutes}m %{seconds}s"
@@ -1556,7 +1559,7 @@ source_control:
   remove_title: "Remove %{host}?"
   remove_desc: "Its saved token is deleted. Pull requests linked from it stop updating until you add it again."
   remove_agent_credits: "Remove agent credits when merging"
-  remove_agent_credits_description: "Removes recognised agent Co-authored-by and generated-by lines from merge and squash commit messages. People stay credited. Merge queues and stacks use GitHub's own message."
+  remove_agent_credits_description: "Removes recognised agent Co-authored-by and generated-by lines from merge and squash commit messages. People stay credited. Merge queues and stacks use GitHub's own message, and Forgejo and Gitea always use the server's."
 
 pull_requests:
   title: "Pull requests"
@@ -1611,7 +1614,7 @@ pull_requests:
   empty_title: "No linked pull requests"
   empty_desc: "Pull requests this thread creates or works on appear here. You can also link one yourself."
   notice_no_credential: "Connect %{host} in Settings → Source Control to see pull request status."
-  notice_rate_limited: "%{host_name} rate limit reached. Status resumes %{ago}."
+  notice_rate_limited: "%{host_name} rate limit reached. Status resumes %{when}."
   notice_soon: "soon"
   open_settings: "Open settings"
   link_menu: "Link pull request…"
@@ -1671,7 +1674,7 @@ pull_requests:
     retry: "Retry"
     unavailable_title: "Pull request #%{number} isn't available"
     unavailable_desc: "It may have been deleted, or the connected account can't see it."
-    no_credential_title: "Connect GitHub to read this pull request"
+    no_credential_title: "Connect %{host_name} to read this pull request"
   files:
     count: "%{count} files"
     count_one: "1 file"

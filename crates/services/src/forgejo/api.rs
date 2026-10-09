@@ -555,10 +555,7 @@ impl Api {
                 .timeout(remaining)
                 .set("User-Agent", "tcode")
                 .set("Accept-Encoding", "identity");
-            if let Some(token) = token
-                .as_ref()
-                .filter(|_| target.host_str() == url.host_str())
-            {
+            if let Some(token) = token.as_ref().filter(|_| same_origin(&target, url)) {
                 request = request.set("Authorization", &format!("token {token}"));
             }
             if let Some(validator) = validator {
@@ -627,6 +624,14 @@ impl Api {
     }
 }
 
+/// Whether two URLs are one origin: scheme, host and port. A token goes nowhere else, so a
+/// redirect to another port of the same host never carries it.
+fn same_origin(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
 /// The page size asked for; a server may answer fewer.
 pub(super) const PAGE_LIMIT: usize = 50;
 
@@ -643,7 +648,30 @@ fn nonempty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Api, Server};
+    use super::{Api, Server, same_origin};
+
+    /// An upload's redirect keeps the token only on the server's own origin.
+    #[test]
+    fn a_redirect_off_the_servers_origin_drops_the_token() {
+        let url = |value: &str| url::Url::parse(value).unwrap();
+        let upload = url("https://git.acme.test/attachments/1");
+        assert!(same_origin(
+            &upload,
+            &url("https://git.acme.test:443/attachments/2")
+        ));
+        assert!(!same_origin(
+            &upload,
+            &url("https://git.acme.test:8443/attachments/1")
+        ));
+        assert!(!same_origin(
+            &upload,
+            &url("http://git.acme.test/attachments/1")
+        ));
+        assert!(!same_origin(
+            &upload,
+            &url("https://storage.acme.test/attachments/1")
+        ));
+    }
     use tcode_core::settings::CredentialSource;
 
     /// `GITEA_TOKEN` goes only to the server `GITEA_INSTANCE_URL` names, and tea's token for one

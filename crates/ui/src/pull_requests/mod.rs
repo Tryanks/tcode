@@ -382,6 +382,16 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
         None => "pull_requests.source_not_linked",
     }
 }
+/// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed.
+pub(super) fn resumes(retry_at: u64) -> String {
+    let now = tcode_core::project::now_secs();
+    if retry_at <= now {
+        crate::tr!("pull_requests.notice_soon").into_owned()
+    } else {
+        crate::time::humanize_in(retry_at - now)
+    }
+}
+
 fn sync_error(link: &ThreadPullRequestLink, host_name: &str) -> String {
     match link.sync_error.as_ref() {
         Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled) => {
@@ -394,8 +404,7 @@ fn sync_error(link: &ThreadPullRequestLink, host_name: &str) -> String {
         Some(PullRequestSyncError::RateLimited { retry_at }) => crate::tr!(
             "pull_requests.notice_rate_limited",
             host_name = host_name,
-            ago =
-                crate::time::humanize_ago(retry_at.saturating_sub(tcode_core::project::now_secs()))
+            when = resumes(*retry_at)
         )
         .into_owned(),
         Some(PullRequestSyncError::NotFound) => crate::tr!(

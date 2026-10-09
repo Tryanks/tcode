@@ -203,13 +203,14 @@ impl SourceControlPanel {
                                 .flex_1()
                                 .min_w_0()
                                 .flex_wrap()
-                                .gap_x(px(6.))
                                 .px_1()
                                 .rounded_sm()
                                 .bg(theme.secondary)
                                 .font_family(theme.mono_font_family.clone())
+                                // Each word keeps the space after it, so the gaps are the
+                                // font's own and a line breaks only after one.
                                 .children(
-                                    command.split(' ').map(|word| {
+                                    command.split_inclusive(' ').map(|word| {
                                         div().whitespace_nowrap().child(word.to_owned())
                                     }),
                                 ),

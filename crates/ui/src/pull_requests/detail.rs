@@ -1696,14 +1696,12 @@ impl PullRequestView {
                 crate::tr!(
                     "pull_requests.notice_rate_limited",
                     host_name = self.host_name(cx),
-                    ago = self
+                    when = self
                         .link(cx)
                         .and_then(|link| match link.sync_error {
                             Some(tcode_core::pull_request::PullRequestSyncError::RateLimited {
                                 retry_at,
-                            }) => Some(crate::time::humanize_ago(
-                                retry_at.saturating_sub(tcode_core::project::now_secs())
-                            )),
+                            }) => Some(super::resumes(retry_at)),
                             _ => None,
                         })
                         .unwrap_or_else(|| crate::tr!("pull_requests.notice_soon").into_owned())
@@ -1793,7 +1791,11 @@ impl PullRequestView {
         match error.code.as_str() {
             "pull_request_no_credential" | "pull_request_host_disabled" => material::empty_state(
                 Icon::new(IconName::Lock),
-                crate::tr!("pull_requests.detail.no_credential_title").into_owned(),
+                crate::tr!(
+                    "pull_requests.detail.no_credential_title",
+                    host_name = self.host_name(cx)
+                )
+                .into_owned(),
                 String::new(),
                 cx,
             )

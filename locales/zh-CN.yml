@@ -1116,6 +1116,9 @@ time:
   minutes_ago: "%{count} 分钟前"
   hours_ago: "%{count} 小时前"
   days_ago: "%{count} 天前"
+  in_minutes: "%{count} 分钟后"
+  in_hours: "%{count} 小时后"
+  in_days: "%{count} 天后"
   duration_minutes: "%{minutes} 分 %{seconds} 秒"
   duration_seconds: "%{seconds} 秒"
   duration_hours: "%{hours} 小时 %{minutes} 分 %{seconds} 秒"
@@ -1549,7 +1552,7 @@ source_control:
   remove_title: "移除 %{host}？"
   remove_desc: "它保存的令牌将被删除。来自该主机的已关联拉取请求将停止更新，直到你重新添加。"
   remove_agent_credits: "合并时移除智能体署名"
-  remove_agent_credits_description: "从合并提交和压缩合并的提交信息中移除可识别的智能体 Co-authored-by 和 generated-by 行，人员署名保留。合并队列和堆叠使用 GitHub 自己的提交信息。"
+  remove_agent_credits_description: "从合并提交和压缩合并的提交信息中移除可识别的智能体 Co-authored-by 和 generated-by 行，人员署名保留。合并队列和堆叠使用 GitHub 自己的提交信息，Forgejo 和 Gitea 始终使用服务器自己的提交信息。"
 
 pull_requests:
   title: "拉取请求"
@@ -1604,7 +1607,7 @@ pull_requests:
   empty_title: "没有关联的拉取请求"
   empty_desc: "此对话创建或处理的拉取请求会显示在这里，你也可以自行关联。"
   notice_no_credential: "在“设置 → 源代码管理”中连接 %{host} 以查看拉取请求状态。"
-  notice_rate_limited: "已达到 %{host_name} 速率限制，状态将在%{ago}恢复更新。"
+  notice_rate_limited: "已达到 %{host_name} 速率限制，%{when}恢复更新状态。"
   notice_soon: "稍后"
   open_settings: "打开设置"
   link_menu: "关联拉取请求…"
@@ -1664,7 +1667,7 @@ pull_requests:
     retry: "重试"
     unavailable_title: "拉取请求 #%{number} 不可用"
     unavailable_desc: "它可能已被删除，或当前连接的账号无权查看。"
-    no_credential_title: "连接 GitHub 以查看此拉取请求"
+    no_credential_title: "连接 %{host_name} 以查看此拉取请求"
   files:
     count: "%{count} 个文件"
     count_one: "1 个文件"

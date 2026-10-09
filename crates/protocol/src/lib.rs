@@ -151,8 +151,9 @@ pub use wire::{
 // and the action state carry the host's capabilities.
 // Unreleased: Settings.github becomes Settings.source_control, whose hosts carry
 // a kind (github, forgejo, gitea) and whose status is per host with its kind,
-// origin, credential source, resolution order and problem; SettingsPatch's
-// GitHubHost becomes SourceControlHost and RemoveSourceControlHost is added;
+// whether only settings name it (added), credential source, resolution order
+// and problem; SettingsPatch's GitHubHost becomes SourceControlHost and
+// RemoveSourceControlHost is added;
 // SetGitHubToken and RefreshGitHubCredentials become SetHostToken and
 // RefreshHostCredentials; capabilities carry host_viewed_marks and
 // merge_message; the rejection Unsupported is added.

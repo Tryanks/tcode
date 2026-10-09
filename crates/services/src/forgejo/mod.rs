@@ -531,7 +531,7 @@ impl Forgejo {
         let merge_state = if pr["draft"].as_bool() == Some(true) {
             PullRequestMergeState::Draft
         } else {
-            match self.verdicts.read(key, &pr) {
+            match self.verdicts.read(key, &pr, Instant::now()) {
                 tcode_core::pull_request::Mergeability::Conflicting => PullRequestMergeState::Dirty,
                 tcode_core::pull_request::Mergeability::Unknown => PullRequestMergeState::Unknown,
                 tcode_core::pull_request::Mergeability::Clean
@@ -834,10 +834,13 @@ impl Forge for Forgejo {
         let head = text(&pr["head"], "sha").unwrap_or_default();
         let checks = reads::checks_state(&pull.checks(&head)?);
         Ok(Summary {
-            snapshot: reads::snapshot(&pr, checks, self.verdicts.read(key, &pr), Self::now())
-                .ok_or_else(|| {
-                    error(ForgeErrorKind::Uncertain, "Forgejo pull request unreadable")
-                })?,
+            snapshot: reads::snapshot(
+                &pr,
+                checks,
+                self.verdicts.read(key, &pr, Instant::now()),
+                Self::now(),
+            )
+            .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Forgejo pull request unreadable"))?,
             stack_number: None,
         })
     }
@@ -1044,7 +1047,7 @@ impl Forge for Forgejo {
             head_sha: head,
             base_branch: text(&pr["base"], "ref").unwrap_or_default(),
             checks,
-            mergeability: self.verdicts.read(key, &pr),
+            mergeability: self.verdicts.read(key, &pr, Instant::now()),
             viewer: pull.viewer()?,
             author: text(&pr["user"], "login"),
         })

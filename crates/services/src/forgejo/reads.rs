@@ -189,37 +189,71 @@ pub(super) fn mergeability(pr: &Value) -> Mergeability {
     }
 }
 
-/// The last head and `mergeable` read of each pull request. A server still checking a new head
-/// answers false as a conflict does, so a false is a conflict only when an earlier read at the
-/// same head said so too.
+/// How long a false must hold at one head before it is a conflict: two consumers reading
+/// back to back while the server checks a push would otherwise both see the check.
+const CONFLICT_CONFIRMATION: std::time::Duration = std::time::Duration::from_secs(30);
+/// Pull requests whose last read is older than this are forgotten.
+const VERDICT_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+const VERDICTS: usize = 512;
+
+/// A pull request's head at its last read, when its false at that head was first read, and
+/// when it was last read.
+struct Verdict {
+    head: String,
+    false_since: Option<std::time::Instant>,
+    read_at: std::time::Instant,
+}
+
+/// What each pull request's `mergeable` said, by head. A server still checking a new head
+/// answers false as a conflict does, so a false is a conflict only once it has held at the
+/// same head for [`CONFLICT_CONFIRMATION`].
 #[derive(Default)]
-pub(super) struct Verdicts(
-    std::sync::Mutex<std::collections::HashMap<PullRequestKey, (String, bool)>>,
-);
+pub(super) struct Verdicts(std::sync::Mutex<std::collections::HashMap<PullRequestKey, Verdict>>);
 
 impl Verdicts {
-    pub(super) fn read(&self, key: &PullRequestKey, pr: &Value) -> Mergeability {
+    pub(super) fn read(
+        &self,
+        key: &PullRequestKey,
+        pr: &Value,
+        now: std::time::Instant,
+    ) -> Mergeability {
         let read = mergeability(pr);
         let Some(head) = text(&pr["head"], "sha") else {
             return read;
         };
         let mut verdicts = self.0.lock().unwrap();
-        let confirmed = verdicts.get(key) == Some(&(head.clone(), false));
-        match read {
-            Mergeability::Clean => {
-                verdicts.insert(key.clone(), (head, true));
-                read
-            }
-            Mergeability::Conflicting => {
-                verdicts.insert(key.clone(), (head, false));
-                if confirmed {
-                    read
-                } else {
-                    Mergeability::Unknown
-                }
-            }
-            Mergeability::Unknown => read,
+        verdicts.retain(|_, verdict| now.saturating_duration_since(verdict.read_at) < VERDICT_AGE);
+        if verdicts.len() >= VERDICTS
+            && !verdicts.contains_key(key)
+            && let Some(oldest) = verdicts
+                .iter()
+                .min_by_key(|(_, verdict)| verdict.read_at)
+                .map(|(key, _)| key.clone())
+        {
+            verdicts.remove(&oldest);
         }
+        let earlier = verdicts
+            .get(key)
+            .filter(|verdict| verdict.head == head)
+            .and_then(|verdict| verdict.false_since);
+        let (false_since, answer) = match read {
+            Mergeability::Conflicting => {
+                let since = earlier.unwrap_or(now);
+                let held = now.saturating_duration_since(since) >= CONFLICT_CONFIRMATION;
+                (Some(since), if held { read } else { Mergeability::Unknown })
+            }
+            Mergeability::Clean => (None, read),
+            Mergeability::Unknown => (earlier, read),
+        };
+        verdicts.insert(
+            key.clone(),
+            Verdict {
+                head,
+                false_since,
+                read_at: now,
+            },
+        );
+        answer
     }
 }
 
@@ -570,28 +604,38 @@ mod tests {
         );
     }
 
-    /// A false read just after a push is the server still checking; the same false at the same
-    /// head again is a conflict, and a new head starts over.
+    /// A false read just after a push is the server still checking: it is a conflict only once
+    /// it has held at the same head for 30 seconds, so two back-to-back reads never confirm
+    /// one; a new head or a clean read starts over.
     #[test]
-    fn a_conflict_is_one_seen_twice_at_one_head() {
+    fn a_conflict_is_a_false_that_holds_at_one_head() {
         let key = PullRequestKey::new("gitea.test", "a/b", 1);
         let read = |head: &str, mergeable: bool| json!({"mergeable": mergeable, "draft": false, "head": {"sha": head}});
+        let start = std::time::Instant::now();
+        let at = |seconds: u64| start + std::time::Duration::from_secs(seconds);
         let verdicts = Verdicts::default();
         assert_eq!(
-            verdicts.read(&key, &read("h1", false)),
+            verdicts.read(&key, &read("h1", false), at(0)),
             Mergeability::Unknown
         );
         assert_eq!(
-            verdicts.read(&key, &read("h1", false)),
+            verdicts.read(&key, &read("h1", false), at(1)),
+            Mergeability::Unknown
+        );
+        assert_eq!(
+            verdicts.read(&key, &read("h1", false), at(30)),
             Mergeability::Conflicting
         );
         assert_eq!(
-            verdicts.read(&key, &read("h2", false)),
+            verdicts.read(&key, &read("h2", false), at(31)),
             Mergeability::Unknown
         );
-        assert_eq!(verdicts.read(&key, &read("h2", true)), Mergeability::Clean);
         assert_eq!(
-            verdicts.read(&key, &read("h2", false)),
+            verdicts.read(&key, &read("h2", true), at(40)),
+            Mergeability::Clean
+        );
+        assert_eq!(
+            verdicts.read(&key, &read("h2", false), at(80)),
             Mergeability::Unknown
         );
     }
