@@ -186,16 +186,18 @@ impl SourceControlPanel {
                             .size(px(12.))
                             .text_color(theme.warning),
                     )
-                    .child(text.into_owned()),
+                    .child(div().flex_1().min_w_0().child(text.into_owned())),
             )
             .when_some(command, |notice, command| {
                 let copied = command.clone();
                 notice.child(
                     h_flex()
+                        .w_full()
                         .gap_2()
                         .items_center()
                         .child(
                             div()
+                                .min_w_0()
                                 .px_1()
                                 .rounded_sm()
                                 .bg(theme.secondary)
@@ -400,17 +402,18 @@ impl SourceControlPanel {
         let store = self.store.clone();
         let clear_store = self.store.clone();
         let compact = self.window_state.read(cx).compact;
-        let mut editor = h_flex()
-            .w_full()
-            .flex_wrap()
+        let field = div()
+            .min_w(px(120.))
+            .map(|field| {
+                if compact {
+                    field.w_full()
+                } else {
+                    field.flex_1()
+                }
+            })
+            .child(Input::new(&token).small());
+        let mut buttons = h_flex()
             .gap_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(120.))
-                    .when(compact, |field| field.w_full())
-                    .child(Input::new(&token).small()),
-            )
             .child(
                 Button::new(SharedString::from(format!(
                     "source-control-token-set-{host}"
@@ -448,7 +451,7 @@ impl SourceControlPanel {
         if added {
             let remove_host = host.to_owned();
             let store = self.store.clone();
-            editor = editor.child(
+            buttons = buttons.child(
                 Button::new(SharedString::from(format!("source-control-remove-{host}")))
                     .ghost()
                     .compact()
@@ -459,6 +462,15 @@ impl SourceControlPanel {
                     }),
             );
         }
+        // A phone gives the field the row and puts the buttons under it, at the end.
+        let editor = if compact {
+            v_flex()
+                .gap_2()
+                .child(field)
+                .child(h_flex().w_full().justify_end().child(buttons))
+        } else {
+            h_flex().w_full().gap_2().child(field).child(buttons)
+        };
         row.child(editor).into_any_element()
     }
 }
