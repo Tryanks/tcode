@@ -17,7 +17,7 @@ The plan behind this model is [#376](https://github.com/Tryanks/tcode/issues/376
 | Device | A desktop, phone or tablet running the Tcode app that opens a machine. A device also has its own key, kept in `device.json` in its data directory. The machine keeps an allow list of device ids; every connection is authenticated by that key, so a device that is not on the list is refused before any application data flows. |
 | Invitation | A `tcode://pair?…` link, shown as a QR code and copyable as text. It carries the machine id, a random 16-byte secret, the Traverse instances the machine publishes to, its current relay and its UDP port — never an IP address or the machine's name; the format is [The invitation link](pair-link.md). Scanning or pasting the link is the whole pairing: an invitation lasts five minutes, admits one device, is replaced by the next one and is invalidated after five wrong secrets. The machine enforces all of this; Traverse never sees an invitation. |
 | Space | A named set of projects on one machine, with a reusable pairing link. A device paired through that link becomes a member and sees only the space's projects and threads. The owner manages the projects and members. |
-| Traverse | The relay and lookup service a machine publishes to so devices off its network can find and reach it. **Official** (the default) uses the relays and lookup service listed in the manifest bundled with Tcode; **Self-hosted** uses your own `tcode-traverse` instance; **Off** uses no service at all. Traverse sees only encrypted traffic; the machine authenticates devices itself. |
+| Traverse | The relay and lookup services a machine publishes to so devices off its network can find and reach it. A machine keeps a list of sources, each switched on or off: **Official** (always first, on by default) uses the relays and lookup service listed in the manifest bundled with Tcode; each **Self-hosted** source is your own `tcode-traverse` instance. With every source off the machine uses no service at all. Traverse sees only encrypted traffic; the machine authenticates devices itself. |
 | Direct / Relay | How one live connection is carried. Direct means the two ends exchange UDP packets with each other; Relay means the packets go through a Traverse relay because no direct path was found. The connection banner and the machine's device list show which one is in use, and it can change while connected. |
 
 Pair each device separately. Project files, provider processes and terminal
@@ -94,9 +94,13 @@ the migration.
 1. Open the desktop app on the machine where your projects and agent CLIs live.
    Configure the providers and add your projects there.
 2. Open **Settings → Remote**. Set **Machine name** (shown to devices) and
-   choose a **Traverse** mode: **Official Traverse**, **Self-hosted Traverse**
-   with the base URL of your instance, or **Off**. A change applies when the
-   field is left, restarting the endpoint if hosting is already on.
+   choose the **Traverse** sources: switch **Official Traverse** on or off,
+   and add a **Self-hosted Traverse** by its base URL with **Add self-hosted
+   Traverse**; each added instance has its own switch and can be edited or
+   removed. Turning every source off leaves only the LAN and an address typed on
+   the device. A switch, addition or removal applies at once and an
+   edited URL when its field is left, restarting the endpoint if hosting is
+   already on.
 3. Turn on **Let other devices connect to this machine**. The desktop binds its
    Traverse endpoint to UDP port `47420` on all IPv4 and IPv6 interfaces (IPv4
    only where IPv6 is unavailable), so the invitation's port, firewall rules
@@ -165,8 +169,10 @@ devices only; it does not serve the browser app.
    `Browser: http://127.0.0.1:47420/`, the browser page (see
    [From a browser](#from-a-browser)).
 
-   `--traverse official` (the default), `--traverse off`, or
-   `--traverse https://traverse.example` selects the Traverse mode; see
+   `--traverse official` (the default) or `--traverse https://traverse.example`
+   names a Traverse source; repeat the option to publish to several
+   (`--traverse official --traverse https://a.example --traverse
+   https://b.example`), or give `--traverse off` alone for none; see
    [Traverse](#traverse). `--browser-listen ADDR:PORT` binds the browser page
    elsewhere (`--listen` is accepted as an alias); `serve` refuses a bind
    beyond loopback until a password exists and exits before starting anything
@@ -457,13 +463,19 @@ device list follows them.
 
 ## Traverse
 
-A machine has one Traverse setting: **Official**, **Self-hosted** (a base
-URL) or **Off**. On the desktop it is in **Settings → Remote →
-Traverse**; headless uses `serve --traverse official|off|<url>`. Devices need
-no Traverse setting: the invitation lists the machine's Traverse instances
-(no entry for the official service only, `off` for none; see
-[The invitation link](pair-link.md)), and each saved machine keeps its
-own list, so one phone can use an official-Traverse machine and a self-hosted one
+A machine has a list of Traverse sources, each on or off: **Official**,
+always first and only ever switched off, and any number of **Self-hosted**
+instances by base URL. On the desktop it is in **Settings → Remote →
+Traverse**; headless repeats `serve --traverse official|<url>`, or takes
+`--traverse off` alone. The machine's relay list is the union of every
+enabled source's relays — iroh picks its home relay among all of them by
+latency — and it publishes its lookup record to every enabled source's pkarr
+URLs. Each source's manifest is loaded and refreshed on its own: one that
+cannot be fetched is left out until it arrives, without holding back the
+others. Devices need no Traverse setting: the invitation lists every enabled
+source (no entry when only the official service is on, `off` with none
+enabled; see [The invitation link](pair-link.md)), and each saved machine
+keeps its own list, so one phone can use an official-Traverse machine and a self-hosted one
 at the same time. A device's own endpoint uses the relays and lookups of the
 instances its saved machines publish to, and of a machine it is pairing with:
 a device whose machines are all Off has no relay and contacts no service, and
@@ -479,11 +491,11 @@ pkarr URLs. Lookup is pkarr over HTTPS only; there is no DNS lookup. A
 refreshed manifest is applied to the running endpoint: relays that
 disappeared are removed, new ones added, lookup services rebuilt.
 
-| Mode | Machine | Devices | The service sees |
+| Source | Machine | Devices | The service sees |
 | --- | --- | --- | --- |
 | **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's pkarr relay (`https://dns.iroh.link/pkarr`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device with a machine on the official service uses the same relay list for its own home relay and the same lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
-| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch; if the instance is unreachable it starts anyway with no relay and no lookup — the LAN still works, the invitation names no relay — and applies the manifest to the running endpoint once a background refresh (every five minutes) fetches it. It never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Until that manifest loads the device has no relay and no resolver for that instance, only the saved addresses and the LAN lookup. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
-| **Off** | No relay and no lookup service: the endpoint publishes nothing beyond its LAN advertisement and dials nothing but direct addresses. The invitation names no relay (`Relay: none (LAN only)`). | The device finds the machine through the LAN lookup, or at the IP address typed when nothing found it, and dials the addresses it learned on later connections. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
+| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch; if the instance is unreachable it starts anyway without that instance's relays and lookup — the LAN and the other enabled sources still work, and with no other source the invitation names no relay — and applies the manifest to the running endpoint once a background refresh (every five minutes) fetches it. It never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Until that manifest loads the device has no relay and no resolver for that instance, only the saved addresses and the LAN lookup. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
+| **All off** | No relay and no lookup service: the endpoint publishes nothing beyond its LAN advertisement and dials nothing but direct addresses. The invitation names no relay (`Relay: none (LAN only)`). | The device finds the machine through the LAN lookup, or at the IP address typed when nothing found it, and dials the addresses it learned on later connections. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
 
 A device that connected successfully saves how it reached the machine —
 the direct addresses that worked, newest first, up to 16, and the relay —
@@ -523,8 +535,10 @@ behind your own proxy), the pkarr store limits, metrics, the optional region
 lock and a Docker build are in the
 [server README](../crates/traverse-server/README.md).
 
-Point a machine at it with **Self-hosted Traverse** and the base URL on the
-desktop, or `tcode-headless serve --traverse https://traverse.example.org`.
+Point a machine at it with **Add self-hosted Traverse** and the base URL on
+the desktop, or `tcode-headless serve --traverse https://traverse.example.org`.
+The official source stays on unless you switch it off (headless: list
+`--traverse official` too to keep it), so a machine can publish to both.
 Nothing is configured on devices; they take the URL from the invitation.
 
 ## Remote Preview routing
@@ -891,7 +905,7 @@ back — without reconnecting. The path shown in the banner and the machine's
 device list follows that change.
 
 On the same network the device also looks the machine up itself, whatever the
-Traverse mode, so a paired machine is found again after a new DHCP lease,
+Traverse setting, so a paired machine is found again after a new DHCP lease,
 after both moved to another network, or after a restart, on a LAN with no
 internet and no Traverse. There is still no list of nearby machines: the
 device only ever resolves the ids it is already paired with, and only the
@@ -904,7 +918,7 @@ nothing else:
 - A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) that runs at
   the same time for about 2.5 seconds and adds every address it finds for
   the machine as it resolves. A machine advertises one instance of that
-  type while it hosts — desktop and headless alike, in every Traverse mode
+  type while it hosts — desktop and headless alike, whatever its Traverse sources
   — with its bound UDP port and a TXT record `v=1`, `id=<machine id>`,
   `name=<machine name>`; loopback is never advertised, and the record
   follows the machine's interfaces as they change. The device keeps only the

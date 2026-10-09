@@ -17,12 +17,11 @@ use iroh::{
     endpoint::{Connection, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, encode_secret, pair_url};
+use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, TRAVERSE_OFFICIAL, encode_secret, pair_url};
 use tcode_protocol::{
     DeviceAccess, HostedDevice, HostingAction, HostingState, PathInfo, Principal, ProtocolError,
     SpaceAction, SpaceInfo,
 };
-use url::Url;
 
 use crate::{
     identity::{DeviceGrant, DeviceRecord, HostIdentity, SpaceRecord, now_unix},
@@ -38,36 +37,14 @@ pub const INVITATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// 128 bits of entropy.
 pub const MAX_PAIRING_FAILURES: u8 = 5;
 
-/// Which Traverse instance this machine publishes to. Official and custom
-/// are the same mechanism with a different [`ManifestSource`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraverseMode {
-    /// The official service: the bundled manifest, refreshed from the
-    /// repository.
-    Official,
-    /// A self-hosted instance described by its manifest; see
-    /// [`crate::manifest`] for how the manifest is obtained.
-    Custom(Url),
-    /// No relay and no wide-area lookup: the addresses in hand and the LAN
-    /// lookup only.
-    Off,
-}
-
-impl TraverseMode {
-    /// What invitations list for this mode; see [`PairInvite::traverse`].
-    pub fn invite_traverse(&self) -> Vec<String> {
-        match self {
-            Self::Official => Vec::new(),
-            Self::Custom(url) => vec![url.to_string()],
-            Self::Off => vec![TRAVERSE_OFF.to_owned()],
-        }
-    }
-}
-
 pub struct HostConfig {
     pub host_name: String,
     pub data_dir: PathBuf,
-    pub traverse: TraverseMode,
+    /// Every Traverse instance this machine publishes to: the union of their
+    /// relays, and every one's lookup. Empty is none: no relay and no
+    /// wide-area lookup: devices reach the machine on the LAN (DNS-SD) or at
+    /// an address the user types.
+    pub traverse: Vec<ManifestSource>,
     /// Whether this host may pair devices at all. The user's persisted
     /// pairing switch applies on top of it.
     pub pairing_enabled: bool,
@@ -136,8 +113,12 @@ struct Shared {
     state: Mutex<State>,
     /// The relay map the endpoint was bound with. iroh shares it with the
     /// endpoint, so it always reads as what the endpoint dials; empty until
-    /// a self-hosted instance answers, and always for Off.
+    /// a source's manifest arrives, and always with no source.
     relays: RelayMap,
+    /// The manifest in effect for each source, in configured order; `None`
+    /// until it first loads. Held across a whole apply so two sources'
+    /// refreshes cannot interleave their changes to the endpoint.
+    manifests: tokio::sync::Mutex<Vec<Option<Arc<Manifest>>>>,
     /// Told the invitation in effect after every change; see
     /// [`TraverseHost::invitation_events`].
     listeners: Mutex<Vec<async_channel::Sender<Option<Invitation>>>>,
@@ -152,10 +133,10 @@ struct Shared {
 pub struct TraverseHost {
     shared: Arc<Shared>,
     router: Router,
-    /// The manifest refresh loop, ended with the host.
-    refresh: Option<tokio::task::AbortHandle>,
+    /// The manifest refresh loops, one per source, ended with the host.
+    refresh: Vec<tokio::task::AbortHandle>,
     #[cfg(test)]
-    loader: Option<ManifestLoader>,
+    loaders: Vec<ManifestLoader>,
     /// This machine's DNS-SD record, withdrawn with the host.
     advertisement: Option<lan::Advertisement>,
 }
@@ -165,45 +146,46 @@ impl TraverseHost {
     pub fn start(mux: HostMux, config: HostConfig) -> io::Result<TraverseHost> {
         let identity = HostIdentity::load_or_create(&config.data_dir, &config.host_name)?;
         let secret_key = identity.secret_key().clone();
-        let traverse = config.traverse.invite_traverse();
+        let traverse = invite_traverse(&config.traverse);
         block_on(async move {
-            let loader = match &config.traverse {
-                TraverseMode::Official => Some(ManifestLoader::new(
-                    ManifestSource::Official,
-                    &config.data_dir,
-                )),
-                TraverseMode::Custom(base) => Some(ManifestLoader::new(
-                    ManifestSource::Custom(base.clone()),
-                    &config.data_dir,
-                )),
-                TraverseMode::Off => None,
-            };
-            // The copy in hand starts the endpoint; only a self-hosted
-            // instance with nothing cached waits for one fetch, and when
-            // that fails the machine starts with no relay and no lookup
-            // rather than not at all: the LAN still works, and the refresh
-            // loop applies the manifest once the instance answers. The
-            // official manifest is never substituted.
-            let manifest = match &loader {
-                Some(loader) => match loader.startup().await {
+            let loaders: Vec<ManifestLoader> = config
+                .traverse
+                .iter()
+                .map(|source| ManifestLoader::new(source.clone(), &config.data_dir))
+                .collect();
+            // The copies in hand start the endpoint; only a self-hosted
+            // instance with nothing cached waits for one fetch, all of them
+            // at once. A source that fails is left out rather than holding
+            // the machine back: the other sources and the LAN still work,
+            // and its refresh loop applies the manifest once the instance
+            // answers. The official manifest is never substituted.
+            let startups: Vec<_> = loaders
+                .iter()
+                .map(|loader| {
+                    let loader = loader.clone();
+                    tokio::spawn(async move { loader.startup().await })
+                })
+                .collect();
+            let mut manifests = Vec::with_capacity(startups.len());
+            for (startup, loader) in startups.into_iter().zip(&loaders) {
+                manifests.push(match startup.await.map_err(io::Error::other)? {
                     Ok(manifest) => Some(manifest),
                     Err(error) => {
                         log::warn!(
-                            "starting without a Traverse manifest: {error}; retrying in the background"
+                            "starting without the Traverse manifest from {}: {error}; retrying in the background",
+                            loader.source().url()
                         );
                         None
                     }
-                },
-                None => None,
-            };
-            let relays = manifest
-                .as_ref()
-                .map_or_else(RelayMap::empty, |manifest| manifest.relay_map());
+                });
+            }
+            let relays = union_relays(&manifests);
             // An empty custom map keeps the relay transport, so relays can
             // be inserted live; `Disabled` would have none to insert into.
-            let relay_mode = match loader {
-                Some(_) => RelayMode::Custom(relays.clone()),
-                None => RelayMode::Disabled,
+            let relay_mode = if loaders.is_empty() {
+                RelayMode::Disabled
+            } else {
+                RelayMode::Custom(relays.clone())
             };
             let build = |ipv6: bool| -> io::Result<iroh::endpoint::Builder> {
                 let mut builder =
@@ -234,9 +216,12 @@ impl TraverseHost {
                 }
                 Err(error) => return Err(io::Error::other(error)),
             };
-            if let Some(manifest) = &manifest {
-                live::install_lookups(&endpoint, [manifest.as_ref()], true, None);
-            }
+            live::install_lookups(
+                &endpoint,
+                manifests.iter().flatten().map(AsRef::as_ref),
+                true,
+                None,
+            );
             let advertisement = advertise(&endpoint, &identity.host_name);
             let shared = Arc::new(Shared {
                 endpoint: endpoint.clone(),
@@ -247,6 +232,7 @@ impl TraverseHost {
                     live: HashMap::new(),
                 }),
                 relays,
+                manifests: tokio::sync::Mutex::new(manifests),
                 listeners: Mutex::new(Vec::new()),
                 expiry: Mutex::new(None),
                 traverse,
@@ -255,17 +241,21 @@ impl TraverseHost {
             // A fetched manifest is applied to the running endpoint, whether
             // it refreshes the one in hand or is the first to arrive. The
             // loop holds no reference that would keep a stopped host alive.
-            let refresh = loader.as_ref().map(|loader| {
-                let shared = Arc::downgrade(&shared);
-                loader.spawn_refresh(move |manifest| {
-                    let shared = shared.upgrade();
-                    async move {
-                        if let Some(shared) = shared {
-                            shared.apply_manifest(manifest).await;
+            let refresh = loaders
+                .iter()
+                .enumerate()
+                .map(|(index, loader)| {
+                    let shared = Arc::downgrade(&shared);
+                    loader.spawn_refresh(move |manifest| {
+                        let shared = shared.upgrade();
+                        async move {
+                            if let Some(shared) = shared {
+                                shared.apply_manifest(index, manifest).await;
+                            }
                         }
-                    }
+                    })
                 })
-            });
+                .collect();
             let router = Router::builder(endpoint)
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
                 .accept(wire::ALPN_MAIN, MainHandler(shared.clone()))
@@ -275,7 +265,7 @@ impl TraverseHost {
                 router,
                 refresh,
                 #[cfg(test)]
-                loader,
+                loaders,
                 advertisement,
             })
         })
@@ -431,7 +421,7 @@ impl TraverseHost {
 
     pub fn shutdown(self) {
         drop(self.advertisement);
-        if let Some(refresh) = self.refresh {
+        for refresh in self.refresh {
             refresh.abort();
         }
         if let Some(expiry) = self.shared.expiry.lock().unwrap().take() {
@@ -471,14 +461,57 @@ fn advertise(endpoint: &Endpoint, host_name: &str) -> Option<lan::Advertisement>
     }
 }
 
+/// What invitations list for the Traverse instances this machine publishes
+/// to, in configured order; see [`PairInvite::traverse`]. The official
+/// instance alone is the empty list, which the link leaves out.
+fn invite_traverse(sources: &[ManifestSource]) -> Vec<String> {
+    match sources {
+        [] => vec![TRAVERSE_OFF.to_owned()],
+        [ManifestSource::Official] => Vec::new(),
+        sources => sources
+            .iter()
+            .map(|source| match source {
+                ManifestSource::Official => TRAVERSE_OFFICIAL.to_owned(),
+                ManifestSource::Custom(base) => base.to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// Every source's relays in one map. A relay two sources list keeps the
+/// first source's configuration.
+fn union_relays(manifests: &[Option<Arc<Manifest>>]) -> RelayMap {
+    let union = RelayMap::empty();
+    for map in manifests
+        .iter()
+        .flatten()
+        .map(|manifest| manifest.relay_map())
+    {
+        for config in map.relays::<Vec<Arc<_>>>() {
+            if !union.contains(&config.url) {
+                union.insert(config.url.clone(), config);
+            }
+        }
+    }
+    union
+}
+
 impl Shared {
-    /// Move the endpoint from the manifest in effect to `manifest`: relays
-    /// through `insert_relay`/`remove_relay`, publishers and resolvers
-    /// rebuilt on the endpoint's lookup services.
-    async fn apply_manifest(&self, manifest: Arc<Manifest>) {
-        log::info!("applying the Traverse manifest");
-        live::sync_relays(&self.endpoint, &self.relays, &manifest.relay_map()).await;
-        live::install_lookups(&self.endpoint, [manifest.as_ref()], true, None);
+    /// Put `manifest` in effect for the source at `index`, leaving the
+    /// others' as they are: the endpoint moves to the union of every
+    /// source's relays through `insert_relay`/`remove_relay`, and its
+    /// publishers and resolvers are rebuilt for every source.
+    async fn apply_manifest(&self, index: usize, manifest: Arc<Manifest>) {
+        log::info!("applying a Traverse manifest");
+        let mut manifests = self.manifests.lock().await;
+        manifests[index] = Some(manifest);
+        live::sync_relays(&self.endpoint, &self.relays, &union_relays(&manifests)).await;
+        live::install_lookups(
+            &self.endpoint,
+            manifests.iter().flatten().map(AsRef::as_ref),
+            true,
+            None,
+        );
     }
 
     fn mint(self: &Arc<Self>) -> Invitation {
@@ -1554,6 +1587,8 @@ fn timed_out(what: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use url::Url;
+
     use super::*;
 
     #[test]
@@ -1621,7 +1656,9 @@ mod tests {
             HostConfig {
                 host_name: "Late".into(),
                 data_dir: dir.clone(),
-                traverse: TraverseMode::Custom(Url::from_file_path(&manifest_path).unwrap()),
+                traverse: vec![ManifestSource::Custom(
+                    Url::from_file_path(&manifest_path).unwrap(),
+                )],
                 pairing_enabled: true,
                 bind_port: None,
             },
@@ -1640,16 +1677,18 @@ mod tests {
             r#"{"version":1,"relays":[{"url":"https://relay.self-hosted.test/"}],"pkarr":["https://relay.self-hosted.test/pkarr"]}"#,
         )
         .unwrap();
-        let loader = host.loader.clone().unwrap();
+        let loader = host.loaders[0].clone();
         // The failed startup fetch paces the next attempt; the loop would wait
         // it out. The loop is stopped before the stamp is reset: its first
         // pass runs as soon as the runtime schedules it, and once unpaced it
         // would fetch the written manifest itself, leaving this refresh with
         // nothing to return.
-        host.refresh.take().unwrap().abort();
+        for refresh in host.refresh.drain(..) {
+            refresh.abort();
+        }
         loader.state().last_attempt_ms = None;
         let manifest = block_on(loader.refresh()).expect("the manifest arrived");
-        block_on(host.shared.apply_manifest(manifest));
+        block_on(host.shared.apply_manifest(0, manifest));
         assert_eq!(
             host.shared.relays.urls::<Vec<_>>(),
             [iroh::RelayUrl::from(
@@ -1661,6 +1700,91 @@ mod tests {
             2,
             "a pkarr publisher and resolver"
         );
+        host.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Several enabled sources: the endpoint dials the union of their relays
+    /// and publishes to and resolves through every one's pkarr URLs. A
+    /// source that does not answer at start is left out without holding
+    /// the others back, and its manifest joins them when it arrives.
+    #[test]
+    fn several_sources_serve_the_union_of_their_relays_and_every_lookup() {
+        let dir = std::env::temp_dir().join(format!(
+            "tcode-host-sources-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = |name: &str| {
+            format!(
+                r#"{{"version":1,"relays":[{{"url":"https://{name}.test/"}},{{"url":"https://shared.test/"}}],"pkarr":["https://{name}.test/pkarr"]}}"#
+            )
+        };
+        let paths = ["a", "b", "late"].map(|name| dir.join(format!("{name}.json")));
+        std::fs::write(&paths[0], manifest("a")).unwrap();
+        std::fs::write(&paths[1], manifest("b")).unwrap();
+        let relay_urls = |host: &TraverseHost| {
+            let mut urls: Vec<String> = host
+                .shared
+                .relays
+                .urls::<Vec<_>>()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            urls.sort();
+            urls
+        };
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let mut host = TraverseHost::start(
+            HostMux::new(to_host, from_host),
+            HostConfig {
+                host_name: "Sources".into(),
+                data_dir: dir.clone(),
+                traverse: paths
+                    .iter()
+                    .map(|path| ManifestSource::Custom(Url::from_file_path(path).unwrap()))
+                    .collect(),
+                pairing_enabled: true,
+                bind_port: None,
+            },
+        )
+        .expect("the machine starts without one source's manifest");
+        let endpoint = host.shared.endpoint.clone();
+        assert_eq!(
+            relay_urls(&host),
+            ["https://a.test/", "https://b.test/", "https://shared.test/"]
+        );
+        assert_eq!(
+            endpoint.address_lookup().unwrap().len(),
+            4,
+            "a pkarr publisher and resolver for each answering source"
+        );
+
+        std::fs::write(&paths[2], manifest("late")).unwrap();
+        let loader = host.loaders[2].clone();
+        // As with a single source: the loops stop before the failed
+        // attempt's pacing is reset, so this refresh is the one that fetches.
+        for refresh in host.refresh.drain(..) {
+            refresh.abort();
+        }
+        loader.state().last_attempt_ms = None;
+        let late = block_on(loader.refresh()).expect("the manifest arrived");
+        block_on(host.shared.apply_manifest(2, late));
+        assert_eq!(
+            relay_urls(&host),
+            [
+                "https://a.test/",
+                "https://b.test/",
+                "https://late.test/",
+                "https://shared.test/"
+            ]
+        );
+        assert_eq!(endpoint.address_lookup().unwrap().len(), 6);
         host.shutdown();
         let _ = std::fs::remove_dir_all(dir);
     }

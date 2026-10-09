@@ -11,7 +11,7 @@ use futures_lite::StreamExt as _;
 use iroh::address_lookup::AddressLookup as _;
 use tcode_client::{ConnectionState, host::Transport, pairing::PairedHost};
 use tcode_traverse::{
-    DeviceIdentity, HostConfig, HostMux, TraverseHost, TraverseMode,
+    DeviceIdentity, HostConfig, HostMux, TraverseHost,
     lan::{self, Browse, LanLookup, LanOptions},
 };
 
@@ -45,7 +45,7 @@ fn start_host(dir: &TestDir, bind_port: Option<u16>) -> TraverseHost {
         HostConfig {
             host_name: "LAN Host".into(),
             data_dir: dir.0.clone(),
-            traverse: TraverseMode::Off,
+            traverse: Vec::new(),
             pairing_enabled: true,
             bind_port,
         },

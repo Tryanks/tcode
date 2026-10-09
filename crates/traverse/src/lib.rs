@@ -33,9 +33,7 @@ mod tunnel;
 pub mod wire;
 
 pub use client::{AttachmentTunnels, PairError, connect, pair, pair_blocking};
-pub use host::{
-    DeviceInfo, EndpointAddrSnapshot, HostConfig, Invitation, TraverseHost, TraverseMode,
-};
+pub use host::{DeviceInfo, EndpointAddrSnapshot, HostConfig, Invitation, TraverseHost};
 pub use identity::DeviceIdentity;
 pub use mux::{Connection, HostMux};
 #[cfg(feature = "native")]

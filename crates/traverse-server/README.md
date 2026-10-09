@@ -135,10 +135,13 @@ counters (a second copy labelled `component="qad"` for the QUIC socket) and
 
 ## Pointing a Tcode machine at it
 
-Desktop: **Settings → Remote → Traverse → Self-hosted Traverse**, then
-the base URL, `https://traverse.example.org`. Headless:
-`tcode-headless serve --traverse https://traverse.example.org`. Devices take
-the URL from the machine's invitation, so nothing is configured on a phone.
+Desktop: **Settings → Remote → Traverse → Add self-hosted Traverse**, then
+the base URL, `https://traverse.example.org`; switch **Official Traverse**
+off to publish to your instance alone. Headless:
+`tcode-headless serve --traverse https://traverse.example.org`, adding
+`--traverse official` (or further `--traverse <url>`) to publish to several
+instances at once. Devices take the URL from the machine's invitation, so
+nothing is configured on a phone.
 The base URL may be `http` for development; the relay and pkarr URLs in the
 manifest must be `https`. A `--dev` instance is for the tests in this crate,
 not for a machine.

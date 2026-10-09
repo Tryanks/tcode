@@ -15,7 +15,7 @@ use tcode_client::{
     pairing::PairedHost,
 };
 use tcode_traverse::{
-    DeviceIdentity, HostConfig, HostMux, TraverseHost, TraverseMode,
+    DeviceIdentity, HostConfig, HostMux, TraverseHost,
     wire::{self, ClientLine, DeviceClaim, HostLine},
 };
 
@@ -56,7 +56,7 @@ impl Machine {
             HostConfig {
                 host_name: "Tunnel Host".into(),
                 data_dir: dir.0.clone(),
-                traverse: TraverseMode::Off,
+                traverse: Vec::new(),
                 pairing_enabled: true,
                 bind_port: None,
             },
