@@ -8,6 +8,36 @@ use tcode_services::{github::Credentials, settings::SettingsStore};
 
 use crate::app::test_support::github_fixture as fixture;
 
+/// Sends one command and runs the host until it answers it.
+fn acked(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    id: u64,
+    command: Command,
+) -> Result<CommandResponse, tcode_protocol::ProtocolError> {
+    state.dispatch_command(cx, id, command);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        cx.run_until_parked();
+        if let Some(result) = cx
+            .drain_outgoing()
+            .into_iter()
+            .find_map(|message| match message {
+                tcode_protocol::HostMessage::Ack { id: acked, result } if acked == id => {
+                    Some(result)
+                }
+                _ => None,
+            })
+        {
+            return result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the command was answered"
+        );
+    }
+}
+
 struct HostReply {
     state: &'static str,
     stack: bool,
@@ -1154,27 +1184,7 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_moved_head_keeps_it_until_
     let mut next_id = 0;
     let mut command = |state: &TestEntity, cx: &mut TestAppContext, command: Command| {
         next_id += 1;
-        state.dispatch_command(cx, next_id, command);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            cx.run_until_parked();
-            if let Some(result) =
-                cx.drain_outgoing()
-                    .into_iter()
-                    .find_map(|message| match message {
-                        tcode_protocol::HostMessage::Ack { id, result } if id == next_id => {
-                            Some(result)
-                        }
-                        _ => None,
-                    })
-            {
-                return result;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the command was answered"
-            );
-        }
+        acked(state, cx, next_id, command)
     };
     let edit = |edit| Command::EditPullRequestReviewDraft {
         session_id: "active".into(),
@@ -1515,7 +1525,11 @@ fn a_stack_layer_is_never_merged_alone_and_a_revert_is_linked_as_created() {
             .unwrap_or_default()
             .to_owned();
         seen.lock().unwrap().push(operation.clone());
+        let rest = exchange
+            .request
+            .starts_with("GET /repos/sample/project/pulls/1 ");
         let reply = match operation.as_str() {
+            _ if rest => json!({"base": {"sha": HEAD}, "head": {"sha": HEAD}, "node_id": "PR_1"}),
             "PullRequestActionState" => json!({"data": {"repository": {
                 "viewerPermission": "WRITE", "mergeCommitAllowed": true,
                 "pullRequest": {"id": "PR_1", "headRefOid": HEAD, "mergeStateStatus": "CLEAN"},
@@ -1542,35 +1556,12 @@ fn a_stack_layer_is_never_merged_alone_and_a_revert_is_linked_as_created() {
     let mut next_id = 0;
     let mut act = |state: &TestEntity, cx: &mut TestAppContext, action: PullRequestAction| {
         next_id += 1;
-        state.dispatch_command(
-            cx,
-            next_id,
-            Command::RunPullRequestAction {
-                session_id: "active".into(),
-                key: key.clone(),
-                action,
-            },
-        );
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            cx.run_until_parked();
-            if let Some(result) =
-                cx.drain_outgoing()
-                    .into_iter()
-                    .find_map(|message| match message {
-                        tcode_protocol::HostMessage::Ack { id, result } if id == next_id => {
-                            Some(result)
-                        }
-                        _ => None,
-                    })
-            {
-                return result.unwrap();
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the action was answered"
-            );
-        }
+        let command = Command::RunPullRequestAction {
+            session_id: "active".into(),
+            key: key.clone(),
+            action,
+        };
+        acked(state, cx, next_id, command).unwrap()
     };
     let merge = || PullRequestAction::Merge {
         head: HEAD.into(),

@@ -28,7 +28,7 @@ use tcode_protocol::{
     PullRequestViewedState,
 };
 
-const READ_TTL: Duration = Duration::from_secs(60);
+pub(super) const READ_TTL: Duration = Duration::from_secs(60);
 /// A merged pull request changes no more, short of an edited comment.
 const MERGED_TTL: Duration = Duration::from_secs(600);
 const VIEWED_TTL: Duration = Duration::from_secs(15);

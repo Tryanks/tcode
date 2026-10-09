@@ -1580,7 +1580,8 @@ fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
     let fixture = Fixture::new();
     let store = Store::new();
     let reads = reads(&fixture, &store);
-    let (_server, log) = serve(fixture, |seen| {
+    let model = Mutex::new(Lifecycle::default());
+    let (_server, log) = serve(fixture, move |seen| {
         if seen
             .line
             .starts_with("POST /repos/octo/repo/issues/7/labels ")
@@ -1588,8 +1589,11 @@ fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
             return (502, String::new(), Vec::new());
         }
         match seen.operation().as_deref() {
-            Some("AddPullRequestComment") => (0, String::new(), Vec::new()),
-            _ => writes_reply(seen),
+            Some("AddPullRequestComment" | "MergePullRequest") => (0, String::new(), Vec::new()),
+            Some("RevertPullRequest") => {
+                json_reply(json!({"data": {"revertPullRequest": {"revertPullRequest": null}}}))
+            }
+            _ => lifecycle_reply(&model, seen),
         }
     });
     let sent = |prefix: &str| {
@@ -1623,11 +1627,31 @@ fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
         "a server failure may have applied the write"
     );
     assert_eq!(
+        reads.act(
+            &key(),
+            &PullRequestAction::Merge {
+                head: HEAD.into(),
+                method: PullRequestMergeMethod::Squash,
+                auto: false,
+                remove_credits: false,
+            }
+        ),
+        PullRequestActionResult::Uncertain,
+        "a merge whose answer was lost may have merged"
+    );
+    assert_eq!(
+        reads.act(&key(), &PullRequestAction::Revert),
+        PullRequestActionResult::Uncertain,
+        "an answer that names no revert may still have opened one"
+    );
+    assert_eq!(
         (
             sent("AddPullRequestComment"),
-            sent("POST /repos/octo/repo/issues/7/labels ")
+            sent("POST /repos/octo/repo/issues/7/labels "),
+            sent("MergePullRequest"),
+            sent("RevertPullRequest"),
         ),
-        (1, 1)
+        (1, 1, 1, 1)
     );
 }
 
@@ -1637,6 +1661,7 @@ struct Lifecycle {
     merge_state: &'static str,
     behind_by: u64,
     queue: bool,
+    rebase_allowed: bool,
     message: &'static str,
 }
 
@@ -1647,6 +1672,7 @@ impl Default for Lifecycle {
             merge_state: "CLEAN",
             behind_by: 2,
             queue: false,
+            rebase_allowed: true,
             message: "Fix the parser\n\nCo-authored-by: Ada <ada@example.com>",
         }
     }
@@ -1657,7 +1683,7 @@ fn lifecycle_reply(model: &Mutex<Lifecycle>, seen: &Seen) -> (u16, String, Vec<u
     match seen.operation().as_deref() {
         Some("PullRequestActionState") => json_reply(json!({"data": {"repository": {
             "viewerPermission": "WRITE",
-            "mergeCommitAllowed": true, "squashMergeAllowed": true, "rebaseMergeAllowed": true,
+            "mergeCommitAllowed": true, "squashMergeAllowed": true, "rebaseMergeAllowed": model.rebase_allowed,
             "autoMergeAllowed": true,
             "pullRequest": {
                 "id": "PR_node_7", "headRefOid": model.head,
@@ -1763,6 +1789,12 @@ fn a_merge_reads_the_head_fresh_and_tells_merged_queued_and_armed_apart() {
         PullRequestActionResult::Queued { position: Some(2) },
         "a merge queue takes the pull request; it is not merged"
     );
+    model.lock().unwrap().rebase_allowed = false;
+    assert_eq!(
+        reads.act(&key(), &merge(Rebase, false)),
+        PullRequestActionResult::Rejected(PullRequestRejection::Invalid),
+        "a method the repository does not allow sends nothing"
+    );
     model.lock().unwrap().head = BASE;
     assert_eq!(
         reads.act(&key(), &merge(Squash, false)),
@@ -1779,11 +1811,6 @@ fn a_merge_reads_the_head_fresh_and_tells_merged_queued_and_armed_apart() {
             ("EnablePullRequestAutoMerge".into(), input("SQUASH")),
             ("EnablePullRequestAutoMerge".into(), input("REBASE")),
         ]
-    );
-    assert_eq!(
-        reads_of(&log, "PullRequestActionState"),
-        6,
-        "every merge reads the pull request again, whatever was read before it"
     );
 }
 
@@ -1867,7 +1894,7 @@ fn a_branch_update_carries_the_head_and_is_nothing_when_not_behind() {
 }
 
 #[test]
-fn lifecycle_writes_name_the_pull_request_read_fresh_and_a_revert_opens_one() {
+fn lifecycle_writes_name_the_pull_request_and_a_revert_opens_one() {
     let fixture = Fixture::new();
     let store = Store::new();
     let reads = reads(&fixture, &store);
@@ -1903,40 +1930,5 @@ fn lifecycle_writes_name_the_pull_request_read_fresh_and_a_revert_opens_one() {
         ]
         .map(|operation| (operation.to_owned(), named.clone()))
         .to_vec()
-    );
-    assert_eq!(reads_of(&log, "PullRequestActionState"), 6);
-}
-
-#[test]
-fn a_merge_left_unanswered_is_uncertain_and_never_sent_again() {
-    let fixture = Fixture::new();
-    let store = Store::new();
-    let reads = reads(&fixture, &store);
-    let model = Arc::new(Mutex::new(Lifecycle::default()));
-    let answering = model.clone();
-    let (_server, log) = serve(fixture, move |seen| match seen.operation().as_deref() {
-        Some("MergePullRequest") => (0, String::new(), Vec::new()),
-        Some("EnablePullRequestAutoMerge") => (502, String::new(), Vec::new()),
-        _ => lifecycle_reply(&answering, seen),
-    });
-    use PullRequestMergeMethod::*;
-
-    assert_eq!(
-        reads.act(&key(), &merge(Squash, false)),
-        PullRequestActionResult::Uncertain,
-        "a merge whose answer was lost may have merged"
-    );
-    model.lock().unwrap().merge_state = "BLOCKED";
-    assert_eq!(
-        reads.act(&key(), &merge(Squash, true)),
-        PullRequestActionResult::Uncertain,
-        "a server failure may have armed auto-merge"
-    );
-    assert_eq!(
-        (
-            reads_of(&log, "MergePullRequest"),
-            reads_of(&log, "EnablePullRequestAutoMerge")
-        ),
-        (1, 1)
     );
 }

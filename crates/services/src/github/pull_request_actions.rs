@@ -6,15 +6,12 @@ use super::{
     graphql::Document,
     merge_message::remove_agent_credits,
     pull_request_reads::{
-        MAX_PAGES, PullRequestReads, Reader, is_revision, percent_encode, reaction_name,
+        MAX_PAGES, PullRequestReads, READ_TTL, Reader, is_revision, percent_encode, reaction_name,
     },
     pull_request_watch,
 };
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    time::{Duration, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, time::UNIX_EPOCH};
 use tcode_core::{
     pull_request::{PullRequestKey, PullRequestMergeMethod, PullRequestReviewDraftComment},
     pull_request_watch::CheckStatus,
@@ -26,10 +23,6 @@ use tcode_protocol::{
     PullRequestRejection as Rejection, PullRequestReviewVerdict, PullRequestReviewer,
     PullRequestReviewerKind,
 };
-
-/// Merge state and checks move on their own, so a shown action state is read again sooner than
-/// the conversation.
-const ACTION_STATE_TTL: Duration = Duration::from_secs(30);
 
 /// What `gh pr merge` and `gh pr update-branch` read before they act, with the account's rights,
 /// the repository's merge settings and the head's checks.
@@ -267,7 +260,7 @@ impl Reader<'_> {
         answered(self.mutation(operation, query, variables))
     }
 
-    /// Read now, not from the cache: a lifecycle write acts on the pull request as it stands.
+    /// Read now, not from the cache: a merge or a branch update acts on the head as it stands.
     fn action_state(&self) -> Result<(String, PullRequestActionState), GitHubError> {
         let response = self.query(
             "PullRequestActionState",
@@ -453,7 +446,7 @@ impl PullRequestReads {
         let reader = self.reader(key)?;
         self.action_states.read(
             reader.read_key("action state"),
-            || Ok((reader.action_state()?.1, ACTION_STATE_TTL)),
+            || Ok((reader.action_state()?.1, READ_TTL)),
             |state| 256 + state.failing_checks.iter().map(String::len).sum::<usize>(),
         )
     }
@@ -689,7 +682,7 @@ impl PullRequestReads {
                     PullRequestAction::Reopen => ("ReopenPullRequest", "reopenPullRequest"),
                     _ => ("DisablePullRequestAutoMerge", "disablePullRequestAutoMerge"),
                 };
-                let (id, _) = reader.action_state().map_err(rejection)?;
+                let id = self.node_id(&reader).map_err(rejection)?;
                 reader.mutate(
                     operation,
                     &format!(
@@ -699,7 +692,7 @@ impl PullRequestReads {
                 )
             }
             PullRequestAction::Revert => {
-                let (id, _) = reader.action_state().map_err(rejection)?;
+                let id = self.node_id(&reader).map_err(rejection)?;
                 match reader.mutation(
                     "RevertPullRequest",
                     "mutation RevertPullRequest($pullRequestId: ID!) { revertPullRequest(input: { pullRequestId: $pullRequestId }) { revertPullRequest { number url } } }",
