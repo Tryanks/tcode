@@ -23,18 +23,7 @@ pub use read_cache::Fresh;
 
 pub fn normalize_host(host: &str) -> Result<String, CredentialError> {
     let host = host.trim().to_ascii_lowercase();
-    if host.is_empty()
-        || host.len() > 253
-        || host.split('.').any(|label| {
-            label.is_empty()
-                || label.len() > 63
-                || label.starts_with('-')
-                || label.ends_with('-')
-                || !label
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        })
-    {
+    if !tcode_core::pull_request::dns_name(&host) {
         return Err(CredentialError::InvalidHost);
     }
     Ok(host)

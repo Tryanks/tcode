@@ -27,7 +27,6 @@ mod image_viewer;
 mod local_permissions;
 pub mod markdown;
 // Shared material helpers are also used by the phone shell.
-mod github_settings;
 #[cfg(target_os = "macos")]
 mod macos_backdrop;
 pub mod material;
@@ -58,6 +57,7 @@ mod shell;
 mod shortcut;
 pub mod sidebar;
 pub mod sizing;
+mod source_control_settings;
 pub mod store;
 mod terminal_drawer;
 mod terminal_key_bar;

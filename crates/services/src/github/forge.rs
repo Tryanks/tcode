@@ -22,12 +22,12 @@ use tcode_core::{
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{GitHubCredentialStatus, GitHubHostSettings},
+    settings::{HostSettings, HostStatus},
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult as Outcome, PullRequestFiles, PullRequestMedia,
-    PullRequestRead, PullRequestReadResponse, PullRequestRejection as Rejection,
-    PullRequestReviewVerdict, PullRequestStackHead,
+    PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
+    PullRequestFiles, PullRequestMedia, PullRequestRead, PullRequestReadResponse,
+    PullRequestRejection as Rejection, PullRequestReviewVerdict, PullRequestStackHead,
 };
 
 pub struct GitHub {
@@ -79,15 +79,15 @@ impl Forge for GitHub {
         &GITHUB
     }
 
-    fn normalize_host(&self, host: &str) -> Option<String> {
-        super::normalize_host(host).ok()
+    fn capabilities(&self, _: &PullRequestKey) -> PullRequestCapabilities {
+        PullRequestCapabilities::ALL
     }
 
-    fn configure(&self, hosts: BTreeMap<String, GitHubHostSettings>) {
+    fn configure(&self, hosts: BTreeMap<String, HostSettings>) {
         self.api.credentials().configure(hosts);
     }
 
-    fn credential_status(&self) -> BTreeMap<String, GitHubCredentialStatus> {
+    fn credential_status(&self) -> BTreeMap<String, HostStatus> {
         self.api.credentials().discover()
     }
 

@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_core::pull_request::{
-    self as core_pr, PullRequestKey, PullRequestMergeMethod, PullRequestStackOperation,
+    self as core_pr, GITHUB, PullRequestKey, PullRequestMergeMethod, PullRequestStackOperation,
     PullRequestState, StackBlocker, StackLayerCondition, StackLayerRole, StackMap,
     StackOperationKind, StackRebaseFailure, StackRebaseGitStep, StackRebaseStep,
     ThreadPullRequestLink,
@@ -483,7 +483,10 @@ pub(super) fn operation_chip(
                         .ghost()
                         .xsmall()
                         .icon(IconName::ExternalLink)
-                        .label(crate::tr!("pull_requests.open_on_github"))
+                        .label(crate::tr!(
+                            "pull_requests.open_on_host",
+                            host_name = tcode_core::pull_request::GITHUB.name
+                        ))
                         .on_click(move |_, _, cx| cx.open_url(&url))
                 }))
         })
@@ -1097,7 +1100,10 @@ pub(super) fn answer_toast(
             Button::new("pr-stack-result-open")
                 .ghost()
                 .xsmall()
-                .label(crate::tr!("pull_requests.open_on_github"))
+                .label(crate::tr!(
+                    "pull_requests.open_on_host",
+                    host_name = tcode_core::pull_request::GITHUB.name
+                ))
                 .on_click(move |_, _, cx| cx.open_url(&url))
         }),
         None => note,
@@ -1226,7 +1232,7 @@ pub(super) fn answer_toast(
             not(
                 tr_with(
                     "result_not_rebased",
-                    &[("reason", rejection_reason(rejection))],
+                    &[("reason", rejection_reason(rejection, GITHUB.name))],
                 ),
                 tr("nothing_changed"),
             )
@@ -1307,14 +1313,18 @@ pub(super) fn answer_toast(
                     };
                     not(tr("result_refused"), body)
                 }
-                rejection => titled(tr("result_refused"), rejection_reason(rejection)),
+                rejection => titled(
+                    tr("result_refused"),
+                    rejection_reason(rejection, GITHUB.name),
+                ),
             }
         }
         PullRequestActionResult::Uncertain => open(
             Notification::warning(
                 crate::tr!(
                     "pull_requests.result.uncertain_body",
-                    message = crate::tr!("pull_requests.result.connection_lost").into_owned()
+                    message = crate::tr!("pull_requests.result.connection_lost").into_owned(),
+                    host_name = GITHUB.name
                 )
                 .into_owned(),
             )

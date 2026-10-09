@@ -1049,7 +1049,7 @@ mod tests {
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let mut pump = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
         for command in [
-            Command::SetGitHubToken {
+            Command::SetHostToken {
                 host: "github.com".into(),
                 token: Some("fixture-private-token".into()),
             },
@@ -1097,7 +1097,7 @@ mod tests {
             reason: None,
         });
         assert!(
-            link.dispatch(Command::SetGitHubToken {
+            link.dispatch(Command::SetHostToken {
                 host: "github.com".into(),
                 token: Some("fixture-private-token".into())
             })

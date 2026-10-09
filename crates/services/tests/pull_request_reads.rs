@@ -710,7 +710,11 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
     let credentials = store.credentials(&[]);
     store
         .store
-        .set_github_token("github.com", Some("first-account"))
+        .set_token(
+            tcode_core::pull_request::HostKind::Github,
+            "github.com",
+            Some("first-account"),
+        )
         .unwrap();
     let reads = PullRequestReads::new(GitHubApi::new(credentials.clone(), fixture.builder()));
     let fail = Arc::new(Mutex::new(false));
@@ -784,7 +788,11 @@ fn reads_are_shared_in_flight_and_within_their_ttl_but_never_a_failure_or_across
     let first = reads.conversation(&key()).unwrap().value.account.clone();
     store
         .store
-        .set_github_token("github.com", Some("second-account"))
+        .set_token(
+            tcode_core::pull_request::HostKind::Github,
+            "github.com",
+            Some("second-account"),
+        )
         .unwrap();
     let second = reads.conversation(&key()).unwrap().value.account.clone();
     assert_eq!(

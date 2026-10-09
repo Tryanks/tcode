@@ -55,7 +55,8 @@ pub(super) enum StoreWrite {
         key: String,
         value: Option<String>,
     },
-    SetGitHubToken {
+    SetHostToken {
+        kind: tcode_core::pull_request::HostKind,
         host: String,
         token: Option<String>,
         completion: smol::channel::Sender<Result<(), String>>,
@@ -193,7 +194,7 @@ impl StoreWrite {
                 |error| RuntimeError::PersistSession { error },
                 Some(completion),
             ),
-            StoreWrite::SetGitHubToken { completion, .. } => (
+            StoreWrite::SetHostToken { completion, .. } => (
                 |error| RuntimeError::PersistSettings { error },
                 Some(completion),
             ),
@@ -402,14 +403,15 @@ impl StoreWriter {
                 .set_profile_secret(&profile_id, &key, value.as_deref())
                 .err()
                 .map(settings_failure),
-            StoreWrite::SetGitHubToken {
+            StoreWrite::SetHostToken {
+                kind,
                 host,
                 token,
                 completion,
             } => {
                 let result = self
                     .settings_store
-                    .set_github_token(&host, token.as_deref())
+                    .set_token(kind, &host, token.as_deref())
                     .map_err(|error| error.to_string());
                 let _ = completion.try_send(result);
                 None

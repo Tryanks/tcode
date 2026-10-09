@@ -6,16 +6,23 @@ use std::path::PathBuf;
 
 #[cfg(test)]
 use agent::ProviderKind;
-use tcode_core::settings::Settings;
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ThemeMode};
+use tcode_core::{pull_request::HostKind, settings::Settings};
 
 type Secrets = BTreeMap<String, BTreeMap<String, String>>;
 
-/// GitHub tokens by host. Profile ids are built-in ids or slugs of ASCII
-/// alphanumerics and hyphens, so this key never names a profile, and a build
-/// that predates it keeps the entry as an unknown profile's secrets.
-const GITHUB_SECRETS: &str = "@github";
+/// Saved host tokens by kind, then by host. Profile ids are built-in ids or
+/// slugs of ASCII alphanumerics and hyphens, so these keys never name a
+/// profile, and a build that predates one keeps the entry as an unknown
+/// profile's secrets.
+fn token_secrets(kind: HostKind) -> &'static str {
+    match kind {
+        HostKind::Github => "@github",
+        // One API and one token per server, whichever of the two it runs.
+        HostKind::Forgejo | HostKind::Gitea => "@forgejo",
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
@@ -47,6 +54,11 @@ impl SettingsStore {
         }
     }
 
+    /// A file of the host's own beside settings.json.
+    pub(crate) fn data_file(&self, name: &str) -> PathBuf {
+        self.path.with_file_name(name)
+    }
+
     /// Fails on an unreadable file so a write never replaces secrets it could not read.
     fn read_secrets(&self) -> std::io::Result<Secrets> {
         match fs::read(&self.secrets_path) {
@@ -60,7 +72,9 @@ impl SettingsStore {
     /// Every stored provider secret, keyed by profile id then variable name.
     pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
         let mut all = self.read_secrets().unwrap_or_default();
-        all.remove(GITHUB_SECRETS);
+        for kind in HostKind::ALL {
+            all.remove(token_secrets(kind));
+        }
         all
     }
 
@@ -70,17 +84,25 @@ impl SettingsStore {
         self.load_secrets().remove(profile_id).unwrap_or_default()
     }
 
-    pub(crate) fn github_token(&self, host: &str) -> Option<String> {
+    pub(crate) fn token(&self, kind: HostKind, host: &str) -> Option<String> {
         self.read_secrets()
             .ok()?
-            .remove(GITHUB_SECRETS)?
+            .remove(token_secrets(kind))?
             .remove(host)
     }
 
-    pub fn set_github_token(&self, host: &str, token: Option<&str>) -> std::io::Result<()> {
-        let host = crate::github::normalize_host(host).map_err(std::io::Error::other)?;
+    pub fn set_token(
+        &self,
+        kind: HostKind,
+        host: &str,
+        token: Option<&str>,
+    ) -> std::io::Result<()> {
+        let host = kind
+            .authority(host)
+            .map_err(|refusal| std::io::Error::other(format!("{refusal:?}")))?;
         let mut all = self.read_secrets()?;
-        let tokens = all.entry(GITHUB_SECRETS.to_owned()).or_default();
+        let secrets = token_secrets(kind);
+        let tokens = all.entry(secrets.to_owned()).or_default();
         match token.map(str::trim).filter(|token| !token.is_empty()) {
             Some(token) => {
                 tokens.insert(host, token.to_owned());
@@ -90,7 +112,7 @@ impl SettingsStore {
             }
         }
         if tokens.is_empty() {
-            all.remove(GITHUB_SECRETS);
+            all.remove(secrets);
         }
         self.write_secrets(&all)
     }
@@ -210,6 +232,34 @@ mod tests {
                 .unwrap()
                 .contains("remote_port")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Hosts saved before they had kinds are GitHub hosts, with their switch and account.
+    #[test]
+    fn github_hosts_from_before_kinds_load_as_github_source_control_hosts() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-hosts-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.clone());
+        fs::write(
+            &store.path,
+            r#"{"github":{"hosts":{"github.com":{"enabled":false,"account":"octocat"},"github.example.com":{}}}}"#,
+        )
+        .unwrap();
+
+        let loaded = store.load();
+        let hosts = &loaded.source_control.hosts;
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts["github.com"].kind, HostKind::Github);
+        assert!(!hosts["github.com"].enabled);
+        assert_eq!(hosts["github.com"].account.as_deref(), Some("octocat"));
+        assert_eq!(hosts["github.example.com"].kind, HostKind::Github);
+        assert!(hosts["github.example.com"].enabled);
+        store.save(&loaded).unwrap();
+        let saved = fs::read_to_string(&store.path).unwrap();
+        assert!(!saved.contains("\"github\":"), "{saved}");
+        assert_eq!(store.load().source_control.hosts, *hosts);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -248,7 +248,6 @@ mod events;
 mod git;
 mod history;
 use history::{Hydration, Joined, SessionLog};
-mod github;
 mod lifecycle;
 mod options;
 mod orchestrate;
@@ -261,6 +260,7 @@ mod send;
 mod sessions;
 mod settlement;
 mod snapshots;
+mod source_control;
 mod store_write;
 mod subagents;
 mod terminals;
@@ -334,7 +334,7 @@ pub struct AppState {
     settings_store: SettingsStore,
     forge: Arc<dyn tcode_services::forge::Forge>,
     releases: Arc<ReleaseFeed>,
-    github_generation: u64,
+    host_generation: u64,
     pull_requests: pull_requests::PullRequestRuntime,
     pull_request_watches: pull_request_watch::WatchRuntime,
     store_writes: smol::channel::Sender<StoreWrite>,
@@ -487,7 +487,7 @@ impl AppState {
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
-        forge.configure(settings.github.hosts.clone());
+        forge.configure(settings.source_control.hosts.clone());
         let releases = Arc::new(ReleaseFeed::new(settings_store.clone()));
         let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
@@ -531,7 +531,7 @@ impl AppState {
             settings_store,
             forge: forge.clone(),
             releases,
-            github_generation: 0,
+            host_generation: 0,
             pull_requests: pull_requests::PullRequestRuntime::new(forge.clone()),
             pull_request_watches: pull_request_watch::WatchRuntime::new(forge),
             store_writes,
@@ -681,7 +681,7 @@ impl AppState {
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
         let mut settings = settings.clone();
-        settings.github.status.clear();
+        settings.source_control.status.clear();
         match serde_json::to_vec_pretty(&settings) {
             Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
             Err(err) => self.report_error(

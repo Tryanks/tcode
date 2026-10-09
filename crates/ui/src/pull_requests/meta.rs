@@ -436,6 +436,7 @@ impl PullRequestView {
     fn picker_body(view: &Entity<Self>, cx: &mut App) -> AnyElement {
         let this = view.read(cx);
         let compact = this.compact(cx);
+        let host_name = this.host_name(cx);
         let Some(picker) = this.picker() else {
             return div().into_any_element();
         };
@@ -563,10 +564,13 @@ impl PullRequestView {
                         .px_2()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(crate::tr!(match kind {
-                            PickerKind::Labels => "pull_requests.meta.labels_truncated",
-                            PickerKind::Reviewers => "pull_requests.meta.reviewers_truncated",
-                        })),
+                        .child(crate::tr!(
+                            match kind {
+                                PickerKind::Labels => "pull_requests.meta.labels_truncated",
+                                PickerKind::Reviewers => "pull_requests.meta.reviewers_truncated",
+                            },
+                            host_name = host_name.clone()
+                        )),
                 )
             })
             .child(

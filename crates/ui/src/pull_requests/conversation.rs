@@ -418,6 +418,7 @@ impl PullRequestView {
                 ))
             })
         };
+        let store = self.store.clone();
         let pending = Rc::new(
             move |url: &str,
                   title: &str,
@@ -425,7 +426,8 @@ impl PullRequestView {
                   cx: &mut App|
                   -> Option<AnyElement> {
                 let state = pull_request_media_state(&session, &key, &account, url, window, cx);
-                media_stand_in(state, url, title, cx)
+                let host_name = super::host_name(store.read(cx), &key.host);
+                media_stand_in(state, url, title, &host_name, cx)
             },
         );
         Some(ImageResolver { source, pending })
@@ -633,7 +635,8 @@ impl PullRequestView {
             })
             .child(div().flex_1())
             .children(add_reaction)
-            .child(
+            .child({
+                let host_name = self.host_name(cx);
                 Button::new(SharedString::from(format!(
                     "pr-comment-menu-{}",
                     comment.id
@@ -657,7 +660,8 @@ impl PullRequestView {
                                 Box::new(CopyText(url.clone())),
                             )
                             .menu(
-                                crate::tr!("pull_requests.open_on_github").into_owned(),
+                                crate::tr!("pull_requests.open_on_host", host_name = &host_name)
+                                    .into_owned(),
                                 Box::new(OpenUrl(url.clone())),
                             ),
                         None => menu,
@@ -666,8 +670,8 @@ impl PullRequestView {
                         crate::tr!("pull_requests.conversation.copy_text").into_owned(),
                         Box::new(CopyText(body.clone())),
                     )
-                }),
-            )
+                })
+            })
             .into_any_element()
     }
 
@@ -1588,6 +1592,7 @@ impl PullRequestView {
         let row = match item {
             Item::Notice => {
                 let url = self.url(cx);
+                let host_name = self.host_name(cx);
                 h_flex()
                     .my_2()
                     .gap_2()
@@ -1600,7 +1605,10 @@ impl PullRequestView {
                         Button::new("pr-capped-open")
                             .ghost()
                             .xsmall()
-                            .label(crate::tr!("pull_requests.open_on_github"))
+                            .label(crate::tr!(
+                                "pull_requests.open_on_host",
+                                host_name = &host_name
+                            ))
                             .on_click(move |_, _, cx| cx.open_url(&url))
                     }))
                     .into_any_element()
@@ -1782,17 +1790,23 @@ impl PullRequestView {
 }
 
 /// What stands in for host media until it can be drawn.
-fn media_stand_in(state: MediaState, url: &str, title: &str, cx: &App) -> Option<AnyElement> {
+fn media_stand_in(
+    state: MediaState,
+    url: &str,
+    title: &str,
+    host_name: &str,
+    cx: &App,
+) -> Option<AnyElement> {
     // Alt text may run over lines; these rows truncate on one.
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = title.as_str();
     let muted = cx.theme().muted_foreground;
-    let open = |label: &'static str, url: String| {
+    let open = |label: SharedString, url: String| {
         Button::new(SharedString::from(format!("pr-media-open-{url}")))
             .ghost()
             .xsmall()
             .icon(IconName::ExternalLink)
-            .label(crate::tr!(label))
+            .label(label)
             .on_click(move |_, _, cx| cx.open_url(&url))
     };
     let unavailable = |text: String, cx: &App| {
@@ -1818,7 +1832,12 @@ fn media_stand_in(state: MediaState, url: &str, title: &str, cx: &App) -> Option
                         format!("{text} · {title}")
                     }),
             )
-            .child(open("pull_requests.open_on_github", url.to_owned()))
+            .child(open(
+                crate::tr!("pull_requests.open_on_host", host_name = host_name)
+                    .into_owned()
+                    .into(),
+                url.to_owned(),
+            ))
             .into_any_element()
     };
     match state {

@@ -742,11 +742,11 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
     );
     let settings_store = SettingsStore::new(store.root().clone());
     let mut settings = settings_store.load();
-    settings.github.hosts.insert(
+    settings.source_control.hosts.insert(
         "github.com".into(),
-        tcode_core::settings::GitHubHostSettings {
+        tcode_core::settings::HostSettings {
             enabled: false,
-            ..Default::default()
+            ..tcode_core::settings::HostSettings::new(pull_request::HostKind::Github)
         },
     );
     settings_store.save(&settings).unwrap();
@@ -895,7 +895,10 @@ fn registered_tools_prefix_each_turn_except_a_native_command() {
         if instructed {
             assert_eq!(
                 text,
-                format!("{}{typed}", pull_request::linking_instructions())
+                format!(
+                    "{}{typed}",
+                    pull_request::linking_instructions(&pull_request::hosts_in([]))
+                )
             );
         } else {
             assert_eq!(text, typed_wire, "a native command stays at byte zero");
@@ -956,6 +959,60 @@ fn the_agent_tools_are_disclosed_before_the_first_turn() {
             "{provider:?}: shown exactly when its provider would receive the tools"
         );
     }
+}
+
+/// The tools a thread was registered with keep the hosts they named, so what the agent sees
+/// matches what it has when a host is added mid-thread; a later thread names the new host.
+#[test]
+fn a_threads_tools_keep_the_hosts_they_were_registered_with() {
+    let store = TestStore::new("tcode-pr-tools-hosts");
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut host = mcp_host::Host::bind().unwrap();
+    let server = pull_request_mcp::start(&mut host);
+    state.update(&mut cx, |state, cx| {
+        state.pump_pull_request_requests(Some(server), cx)
+    });
+    let listed = |state: &mut AppState, id: &str| {
+        state
+            .session_status_snapshot(id)
+            .unwrap()
+            .pull_request_tools
+            .unwrap()
+            .tools
+            .into_iter()
+            .find(|(name, _)| name == "list_thread_pull_requests")
+            .unwrap()
+            .1
+    };
+    state.update(&mut cx, |state, _| {
+        let meta = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/tmp/synthetic-checkout"),
+            None,
+        );
+        let before = meta.id.clone();
+        state.pull_request_registration_for(&meta).unwrap();
+        state.sessions.push(meta.clone());
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+        state.settings.source_control.hosts.insert(
+            "codeberg.org".into(),
+            tcode_core::settings::HostSettings::new(pull_request::HostKind::Forgejo),
+        );
+        state.name_pull_request_hosts();
+        assert!(listed(state, &before).contains("without asking GitHub."));
+        let meta = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/tmp/synthetic-checkout"),
+            None,
+        );
+        let after = meta.id.clone();
+        state.pull_request_registration_for(&meta).unwrap();
+        state.sessions.push(meta.clone());
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+        let text = listed(state, &after);
+        assert!(text.contains("without asking GitHub or Forgejo."), "{text}");
+    });
 }
 
 #[test]

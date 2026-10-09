@@ -84,6 +84,7 @@ fn read_error(error: ForgeError) -> ProtocolError {
 }
 fn resolve_reference(
     forge: &dyn Forge,
+    hosts: &str,
     cwd: &Path,
     reference: &str,
 ) -> Result<(PullRequestKey, String), ProtocolError> {
@@ -104,10 +105,7 @@ fn resolve_reference(
     }
     let no_repository = || ProtocolError {
         code: "pull_request_no_repository".into(),
-        message: format!(
-            "This project has no {} repository. Use a full PR URL.",
-            pull_request::host_names()
-        ),
+        message: format!("This project has no {hosts} repository. Use a full PR URL."),
     };
     let key = forge
         .checkout_repository(cwd)
@@ -125,6 +123,8 @@ impl AppState {
         let Some(server) = server else { return };
         self.mcp.pull_request_url = Some(server.url);
         self.mcp.pull_request_tokens = Some(server.tokens);
+        self.mcp.pull_request_hosts = Some(server.hosts);
+        self.name_pull_request_hosts();
         let host = cx.clone();
         cx.spawn_detached(async move {
             while let Ok(request) = server.requests.recv().await {
@@ -136,11 +136,17 @@ impl AppState {
         &mut self,
         meta: &SessionMeta,
     ) -> Option<agent::McpRegistration> {
-        if let Some(registration) = self.mcp.pull_request_registrations.get(&meta.id) {
+        if let Some((registration, _)) = self.mcp.pull_request_registrations.get(&meta.id) {
             return Some(registration.clone());
         }
         let url = self.mcp.pull_request_url.clone()?;
         let bearer_token = self.mcp.pull_request_tokens.as_ref()?.register(&meta.id);
+        let names = self
+            .mcp
+            .pull_request_hosts
+            .as_ref()
+            .map(|names| names.get())
+            .unwrap_or_default();
         let registration = agent::McpRegistration {
             name: "tcode_pull_requests".into(),
             url,
@@ -148,7 +154,7 @@ impl AppState {
         };
         self.mcp
             .pull_request_registrations
-            .insert(meta.id.clone(), registration.clone());
+            .insert(meta.id.clone(), (registration.clone(), names));
         Some(registration)
     }
     /// Whether a provider of this kind receives the pull request tools when it starts.
@@ -156,11 +162,34 @@ impl AppState {
         provider.caps().mcp_servers && self.mcp.pull_request_url.is_some()
     }
     /// Turns carry the linking block while the tools are registered, the same gate as launch.
-    pub(super) fn pull_request_instructions(&self, session_id: &str) -> bool {
-        self.mcp.pull_request_registrations.contains_key(session_id)
+    pub(super) fn pull_request_instructions(&self, session_id: &str) -> Option<String> {
+        self.mcp
+            .pull_request_registrations
+            .contains_key(session_id)
+            .then(|| pull_request::linking_instructions(&self.pull_request_hosts()))
+    }
+    /// The host names the thread's pull request tools are described with: its registration's,
+    /// else the ones a registration made now would have.
+    pub(super) fn pull_request_tool_hosts(&self, session_id: &str) -> String {
+        self.mcp
+            .pull_request_registrations
+            .get(session_id)
+            .map(|(_, names)| names.clone())
+            .unwrap_or_else(|| pull_request::host_names(&self.pull_request_hosts()))
+    }
+    /// The hosts whose terms Tcode's text to the model names: GitHub's, and every configured
+    /// host's kind.
+    pub(super) fn pull_request_hosts(&self) -> Vec<&'static pull_request::HostTerms> {
+        pull_request::hosts_in(
+            self.settings
+                .source_control
+                .hosts
+                .values()
+                .map(|choice| choice.kind),
+        )
     }
     pub(super) fn revoke_pull_request_registration(&mut self, session_id: &str) {
-        if let Some(registration) = self.mcp.pull_request_registrations.remove(session_id)
+        if let Some((registration, _)) = self.mcp.pull_request_registrations.remove(session_id)
             && let Some(tokens) = &self.mcp.pull_request_tokens
         {
             tokens.revoke(&registration.bearer_token);
@@ -244,6 +273,7 @@ impl AppState {
         };
         let cwd = self.pull_request_project_cwd(&meta);
         let forge = self.pull_requests.forge.clone();
+        let hosts = pull_request::host_names(&self.pull_request_hosts());
         let host = cx.clone();
         cx.spawn_detached(async move {
             let target = host
@@ -260,7 +290,7 @@ impl AppState {
                         .host
                         .or_else(|| forge.checkout_repository(&cwd).map(|r| r.host))
                         .ok_or_else(|| "Pass host or a full PR URL.".to_owned())?;
-                    let invalid = || format!("Invalid {} repository.", pull_request::host_names());
+                    let invalid = || format!("Invalid {hosts} repository.");
                     let key = forge
                         .repository(&name, &host)
                         .ok_or_else(invalid)?
@@ -697,11 +727,12 @@ impl AppState {
             .map(|meta| self.pull_request_project_cwd(meta));
         let id = session_id.to_owned();
         let forge = self.pull_requests.forge.clone();
+        let hosts = pull_request::host_names(&self.pull_request_hosts());
         let host = cx.clone();
         cx.spawn_background(async move {
             let cwd = cwd.ok_or_else(|| failure("Unknown thread."))?;
             let target = host
-                .unblock(move || resolve_reference(forge.as_ref(), &cwd, &reference))
+                .unblock(move || resolve_reference(forge.as_ref(), &hosts, &cwd, &reference))
                 .await?;
             let key = target.0.clone();
             let already_linked = host
