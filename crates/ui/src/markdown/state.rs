@@ -35,7 +35,16 @@ pub(super) struct PendingLinkMenu {
 pub(super) enum PendingContextTarget {
     Link(PendingLinkMenu),
     CodeBlock(String),
-    Image { url: SharedUri, title: String },
+    Image {
+        url: SharedUri,
+        title: String,
+    },
+    Math {
+        path: String,
+        latex: String,
+        /// `None` when the formula does not lay out, so only its source exists.
+        show_source: Option<bool>,
+    },
 }
 
 pub type ImageSourceFn = Rc<dyn Fn(&str) -> Option<ImageSource>>;

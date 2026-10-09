@@ -1163,8 +1163,9 @@ fn render_code_block(
         .unwrap_or(code_text)
         .to_string();
     let context_view = view.clone();
+    let is_math = super::math::is_math(code.lang.as_deref());
     // One button per fence, on the item that paints its first line.
-    let copy = (first && !super::math::is_math(code.lang.as_deref())).then(|| {
+    let copy = (first && !is_math).then(|| {
         let copied = view.read(cx).copied.is(&options.path);
         let compact = crate::window_seam::window_is_compact(window, cx);
         let (view, path, code) = (view.clone(), options.path.clone(), whole_code.clone());
@@ -1198,13 +1199,16 @@ fn render_code_block(
     let content = div()
         .id(span_id(&options.path, &span))
         .when(last && !options.is_last, |block| block.pb(rems(1.)))
-        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-            context_view.update(cx, |state, cx| {
-                state.set_pending_context(
-                    Some(PendingContextTarget::CodeBlock(whole_code.clone())),
-                    cx,
-                )
-            });
+        // A formula's source view takes the formula's menu from its block.
+        .when(!is_math, |block| {
+            block.on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                context_view.update(cx, |state, cx| {
+                    state.set_pending_context(
+                        Some(PendingContextTarget::CodeBlock(whole_code.clone())),
+                        cx,
+                    )
+                });
+            })
         })
         .child(
             div()
@@ -1217,7 +1221,7 @@ fn render_code_block(
                 .children(copy),
         )
         .into_any_element();
-    if super::math::is_math(code.lang.as_deref()) {
+    if is_math {
         super::math::block(
             code_text,
             &code.formula,
