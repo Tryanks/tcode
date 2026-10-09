@@ -18,8 +18,8 @@ use std::{
 };
 use tcode_core::{pull_request::PullRequestKey, session::ReviewSide};
 use tcode_protocol::{
-    PullRequestActor, PullRequestComment, PullRequestConversation, PullRequestFile,
-    PullRequestFileText, PullRequestFiles, PullRequestLabel, PullRequestLabelCandidate,
+    PullRequestActor, PullRequestCapabilities, PullRequestComment, PullRequestConversation,
+    PullRequestFile, PullRequestFileText, PullRequestLabel, PullRequestLabelCandidate,
     PullRequestLabelCandidates, PullRequestMedia, PullRequestPatch, PullRequestPermissions,
     PullRequestReaction, PullRequestReactionContent, PullRequestReviewAnchor,
     PullRequestReviewState, PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
@@ -57,12 +57,26 @@ pub(super) struct Revisions {
     node_id: String,
 }
 
+/// The changed files between two commits: the whole diff, or a page of GitHub's files listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Files {
+    pub base: String,
+    pub head: String,
+    pub files: Vec<PullRequestFile>,
+    /// GitHub refused or cut the whole diff and pages its changed files instead.
+    pub next_page: Option<u32>,
+    /// Every changed file has been listed once the pages before this one were read too.
+    pub complete: bool,
+    /// GitHub's count of changed files, which a listing may fall short of.
+    pub changed_files: u64,
+}
+
 /// The one owner of what the host has read of pull requests; the writes in
 /// [`super::pull_request_actions`] drop what they change through it.
 pub struct PullRequestReads {
     pub(super) api: Arc<GitHubApi>,
     pub(super) revisions: ReadCache<Revisions>,
-    files: ReadCache<PullRequestFiles>,
+    files: ReadCache<Files>,
     texts: ReadCache<PullRequestFileText>,
     pub(super) conversations: ReadCache<PullRequestConversation>,
     pub(super) replies: ReadCache<PullRequestThreadReplies>,
@@ -174,7 +188,7 @@ impl Reader<'_> {
 
     /// GitHub refuses a whole diff past its own limits, and this read cuts one past 8 MiB; both
     /// read the files a page at a time instead. A failing page reports the original refusal.
-    fn whole_diff(&self, revisions: &Revisions) -> Result<PullRequestFiles, GitHubError> {
+    fn whole_diff(&self, revisions: &Revisions) -> Result<Files, GitHubError> {
         let path = self.rest_path(&format!("pulls/{}", self.key.number));
         let answer = self.api.rest(
             &self.key.host,
@@ -185,7 +199,7 @@ impl Reader<'_> {
             &self.long_read("PullRequestDiff", DIFF_BYTES),
         );
         match answer {
-            Ok(response) if !response.truncated => Ok(PullRequestFiles {
+            Ok(response) if !response.truncated => Ok(Files {
                 base: revisions.base.clone(),
                 head: revisions.head.clone(),
                 files: diff_files(&String::from_utf8_lossy(&response.body))
@@ -202,11 +216,7 @@ impl Reader<'_> {
         }
     }
 
-    fn files_page(
-        &self,
-        revisions: &Revisions,
-        page: u32,
-    ) -> Result<PullRequestFiles, GitHubError> {
+    fn files_page(&self, revisions: &Revisions, page: u32) -> Result<Files, GitHubError> {
         let path = self.rest_path(&format!(
             "pulls/{}/files?per_page={FILES_PER_PAGE}&page={page}",
             self.key.number
@@ -221,7 +231,7 @@ impl Reader<'_> {
             .json()?;
         let next_page = (rows.len() >= FILES_PER_PAGE).then_some(page + 1);
         let listed = (page as u64 - 1) * FILES_PER_PAGE as u64 + rows.len() as u64;
-        Ok(PullRequestFiles {
+        Ok(Files {
             base: revisions.base.clone(),
             head: revisions.head.clone(),
             files: rows.iter().filter_map(listed_file).collect(),
@@ -345,8 +355,10 @@ impl Reader<'_> {
         };
         let labels = nodes(&pr["labels"])
             .filter_map(|label| {
+                let name = text(label, "name")?;
                 Some(PullRequestLabel {
-                    name: text(label, "name")?,
+                    id: name.clone(),
+                    name,
                     color: text(label, "color"),
                     description: text(label, "description"),
                 })
@@ -362,6 +374,7 @@ impl Reader<'_> {
                 permissions,
                 labels,
                 reviewers: reviewer_states(pr),
+                capabilities: PullRequestCapabilities::ALL,
             },
             if merged { MERGED_TTL } else { READ_TTL },
         ))
@@ -453,6 +466,7 @@ impl Reader<'_> {
             .filter_map(|label| {
                 let name = text(label, "name")?;
                 Some(PullRequestLabelCandidate {
+                    id: name.clone(),
                     applied: applied.contains(&name),
                     color: text(label, "color"),
                     description: text(label, "description"),
@@ -466,6 +480,7 @@ impl Reader<'_> {
             .iter()
             .filter(|name| listed.iter().all(|label| &label.name != *name))
             .map(|name| PullRequestLabelCandidate {
+                id: name.clone(),
                 name: name.clone(),
                 color: None,
                 description: None,
@@ -501,14 +516,8 @@ impl Reader<'_> {
                 node
             };
             let reviewer = match (text(raw, "slug"), text(raw, "login")) {
-                (Some(slug), _) => PullRequestReviewer {
-                    login: slug,
-                    kind: PullRequestReviewerKind::Team,
-                },
-                (None, Some(login)) => PullRequestReviewer {
-                    login,
-                    kind: PullRequestReviewerKind::User,
-                },
+                (Some(slug), _) => reviewer(slug, PullRequestReviewerKind::Team),
+                (None, Some(login)) => reviewer(login, PullRequestReviewerKind::User),
                 (None, None) => continue,
             };
             if (!requested && Some(&reviewer.login) == author.as_ref())
@@ -571,7 +580,7 @@ impl PullRequestReads {
         &self,
         key: &PullRequestKey,
         page: Option<u32>,
-    ) -> Result<Fresh<PullRequestFiles>, GitHubError> {
+    ) -> Result<Fresh<Files>, GitHubError> {
         if page == Some(0) {
             return Err(GitHubError::InvalidInput);
         }
@@ -870,6 +879,15 @@ fn conversation_bytes(conversation: &PullRequestConversation) -> usize {
     conversation_comments(conversation).map(comment_bytes).sum()
 }
 
+/// GitHub names a reviewer by login, and a team by its slug, in reads and writes alike.
+fn reviewer(login: String, kind: PullRequestReviewerKind) -> PullRequestReviewer {
+    PullRequestReviewer {
+        id: login.clone(),
+        login,
+        kind,
+    }
+}
+
 pub(super) fn is_revision(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
         && value
@@ -1062,14 +1080,8 @@ fn reviewer_states(pr: &Value) -> Vec<PullRequestReviewerState> {
     for node in nodes(&pr["reviewRequests"]) {
         let raw = &node["requestedReviewer"];
         let reviewer = match (text(raw, "slug"), text(raw, "login")) {
-            (Some(slug), _) => PullRequestReviewer {
-                login: slug,
-                kind: PullRequestReviewerKind::Team,
-            },
-            (None, Some(login)) => PullRequestReviewer {
-                login,
-                kind: PullRequestReviewerKind::User,
-            },
+            (Some(slug), _) => reviewer(slug, PullRequestReviewerKind::Team),
+            (None, Some(login)) => reviewer(login, PullRequestReviewerKind::User),
             (None, None) => continue,
         };
         reviewers.push(PullRequestReviewerState {
@@ -1088,10 +1100,7 @@ fn reviewer_states(pr: &Value) -> Vec<PullRequestReviewerState> {
         let Some(login) = text(&node["author"], "login") else {
             continue;
         };
-        let reviewer = PullRequestReviewer {
-            login,
-            kind: PullRequestReviewerKind::User,
-        };
+        let reviewer = reviewer(login, PullRequestReviewerKind::User);
         if reviewers.iter().any(|known| known.reviewer == reviewer) {
             continue;
         }

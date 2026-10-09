@@ -1,7 +1,7 @@
-//! The host's writes to a native stack: an asynchronous merge it follows until GitHub answers or
-//! five minutes pass, and a rebase it runs layer by layer. Either one is the stack's operation,
-//! recorded with every thread that shows the stack so each client, and a restarted host, knows
-//! it; one runs per stack at a time.
+//! The host's writes to a native stack: an asynchronous merge it follows until the pull request
+//! host answers or five minutes pass, and a rebase it runs layer by layer. Either one is the
+//! stack's operation, recorded with every thread that shows the stack so each client, and a
+//! restarted host, knows it; one runs per stack at a time.
 
 use super::pull_requests::failure;
 use super::*;
@@ -13,12 +13,28 @@ use tcode_protocol::{
     CommandResponse, ProtocolError, PullRequestAction, PullRequestActionResult as Outcome,
     PullRequestRejection, PullRequestStackHead, RuntimeToast,
 };
-use tcode_services::github::stack_actions::{
-    MergeStatus, MergeSubmission, merge_outcome, poll_schedule,
-};
+use tcode_services::forge::{MergeSubmission, StackRebase};
 
 /// An unconfirmed merge is kept this long when no sync reads what became of it.
 const UNCONFIRMED_KEPT_SECS: u64 = 24 * 60 * 60;
+
+/// How long the host follows a pending merge after submitting it.
+const MERGE_DEADLINE_SECS: u64 = 300;
+
+/// The seconds after submission at which a pending merge is asked about again: 1, 2, 4, 8 and
+/// then 10 seconds apart, up to five minutes.
+fn poll_schedule() -> Vec<u64> {
+    let mut at = Vec::new();
+    let mut elapsed = 0;
+    for attempt in 0.. {
+        elapsed += (1u64 << attempt.min(4)).min(10);
+        if elapsed > MERGE_DEADLINE_SECS {
+            break;
+        }
+        at.push(elapsed);
+    }
+    at
+}
 
 /// A native stack, by host, repository and number.
 pub(super) type StackKey = (String, String, u64);
@@ -194,10 +210,10 @@ impl AppState {
         method: tcode_core::pull_request::PullRequestMergeMethod,
         cx: &mut HostCx,
     ) -> HostTask<Result<CommandResponse, ProtocolError>> {
-        let reads = self.pull_requests.reads.clone();
+        let forge = self.pull_requests.forge.clone();
         let submitting = key.clone();
         let number = stack.2;
-        let task = cx.unblock(move || reads.merge_stack(&submitting, number, &heads, method));
+        let task = cx.unblock(move || forge.merge_stack(&submitting, number, &heads, method));
         let host = cx.clone();
         cx.spawn_background(async move {
             let submission = task.await;
@@ -240,7 +256,7 @@ impl AppState {
         })
     }
 
-    /// Asks GitHub what became of the operation on the poll schedule from its submission, and
+    /// Asks the host what became of the operation on the poll schedule from its submission, and
     /// once more when a restarted host finds its schedule already past. Still pending at the
     /// deadline, it is recorded as unconfirmed and never submitted again.
     fn follow_stack_merge(&mut self, operation: PullRequestStackOperation, cx: &mut HostCx) {
@@ -254,7 +270,7 @@ impl AppState {
             operation.repository.clone(),
             operation.stack,
         );
-        let reads = self.pull_requests.reads.clone();
+        let forge = self.pull_requests.forge.clone();
         let host = cx.clone();
         let task = cx.spawn_background(async move {
             let elapsed = now_secs().saturating_sub(started_at);
@@ -269,11 +285,11 @@ impl AppState {
             for offset in due {
                 let wait = (started_at + offset).saturating_sub(now_secs());
                 smol::Timer::after(Duration::from_secs(wait)).await;
-                let (reads, key, id) = (reads.clone(), key.clone(), id.clone());
-                match host.unblock(move || reads.merge_status(&key, &id)).await {
-                    Ok(MergeStatus::Pending { .. }) => {}
-                    Ok(status) => {
-                        ended = Some(status);
+                let (forge, key, id) = (forge.clone(), key.clone(), id.clone());
+                match host.unblock(move || forge.merge_status(&key, &id)).await {
+                    Ok(None) => {}
+                    Ok(Some(outcome)) => {
+                        ended = Some(outcome);
                         break;
                     }
                     // An unanswered ask is no answer; the next one may be.
@@ -289,7 +305,7 @@ impl AppState {
         &mut self,
         stack: &StackKey,
         id: &str,
-        ended: Option<MergeStatus>,
+        ended: Option<Outcome>,
         cx: &mut HostCx,
     ) {
         let Some(mut operation) = self.stack_operation_record(stack) else {
@@ -308,7 +324,7 @@ impl AppState {
             return;
         }
         let (target, layers) = (*target, layers.clone());
-        let result = match ended.as_ref().and_then(merge_outcome) {
+        let result = match ended {
             Some(result) => {
                 self.put_stack_operation(stack, None, cx);
                 result
@@ -335,10 +351,10 @@ impl AppState {
         heads: Vec<PullRequestStackHead>,
         cx: &mut HostCx,
     ) -> HostTask<Result<CommandResponse, ProtocolError>> {
-        let reads = self.pull_requests.reads.clone();
+        let forge = self.pull_requests.forge.clone();
         let planning = key.clone();
         let number = stack.2;
-        let task = cx.unblock(move || reads.plan_stack_rebase(&planning, number, &heads));
+        let task = cx.unblock(move || forge.plan_stack_rebase(&planning, number, &heads));
         let host = cx.clone();
         cx.spawn_background(async move {
             let plan = match task.await {
@@ -363,15 +379,15 @@ impl AppState {
         &mut self,
         stack: StackKey,
         key: PullRequestKey,
-        plan: tcode_services::github::stack_actions::RebasePlan,
+        plan: StackRebase,
         cx: &mut HostCx,
     ) {
         let layers: Vec<_> = plan
             .layers
             .iter()
-            .map(|layer| StackRebaseLayer {
-                number: layer.number,
-                branch: layer.branch.clone(),
+            .map(|(number, branch)| StackRebaseLayer {
+                number: *number,
+                branch: branch.clone(),
                 step: StackRebaseStep::Waiting,
             })
             .collect();
@@ -495,7 +511,7 @@ impl AppState {
 
     /// What a sync read of `key` says of an unconfirmed merge it is the target of: merged or
     /// closed ends it, and still open lets the stack's writes go again, a later attempt
-    /// following GitHub's operation should it still run. Past a day it is dropped unread.
+    /// following the host's operation should it still run. Past a day it is dropped unread.
     pub(super) fn reconcile_unconfirmed_merges(
         &mut self,
         key: Option<(&PullRequestKey, PullRequestState)>,

@@ -372,51 +372,55 @@ impl PullRequestView {
     pub(super) fn read_files(&mut self, cx: &mut Context<Self>) {
         let Some(page) = self.page_mut() else { return };
         page.files.loading = true;
-        self.read(PullRequestRead::Files { page: None }, cx, |page, result| {
-            page.files.loading = false;
-            page.refreshing = false;
-            match result {
-                Ok((PullRequestReadResponse::Files(files), expires_at)) => {
-                    page.files.expires_at = expires_at;
-                    page.files.error = None;
-                    page.files.loaded_at = now();
-                    // A re-read answers page 1 only: the pages read after it, the scroll and the
-                    // completeness stay while the revisions and page 1 are what they were.
-                    let restart = std::mem::take(&mut page.restart_files);
-                    let continued = page.files.data.as_ref().is_some_and(|held| {
-                        !restart
-                            && held.files.len() > files.files.len()
-                            && (&held.head, &held.base) == (&files.head, &files.base)
-                            && held.files[..files.files.len()] == files.files[..]
-                    });
-                    if !continued && page.files.data.as_ref() != Some(&files) {
-                        let head_moved = page
-                            .files
-                            .data
-                            .as_ref()
-                            .is_some_and(|held| held.head != files.head);
-                        if head_moved {
-                            page.files_view = FilesView::default();
-                        } else {
-                            page.files_view.list = None;
-                            page.files_view.rendered = None;
-                            page.files_view.page_error = None;
+        self.read(
+            PullRequestRead::Files { cursor: None },
+            cx,
+            |page, result| {
+                page.files.loading = false;
+                page.refreshing = false;
+                match result {
+                    Ok((PullRequestReadResponse::Files(files), expires_at)) => {
+                        page.files.expires_at = expires_at;
+                        page.files.error = None;
+                        page.files.loaded_at = now();
+                        // A re-read answers page 1 only: the pages read after it, the scroll and the
+                        // completeness stay while the revisions and page 1 are what they were.
+                        let restart = std::mem::take(&mut page.restart_files);
+                        let continued = page.files.data.as_ref().is_some_and(|held| {
+                            !restart
+                                && held.files.len() > files.files.len()
+                                && (&held.head, &held.base) == (&files.head, &files.base)
+                                && held.files[..files.files.len()] == files.files[..]
+                        });
+                        if !continued && page.files.data.as_ref() != Some(&files) {
+                            let head_moved = page
+                                .files
+                                .data
+                                .as_ref()
+                                .is_some_and(|held| held.head != files.head);
+                            if head_moved {
+                                page.files_view = FilesView::default();
+                            } else {
+                                page.files_view.list = None;
+                                page.files_view.rendered = None;
+                                page.files_view.page_error = None;
+                            }
+                            page.files.data = Some(files);
                         }
-                        page.files.data = Some(files);
                     }
+                    Ok(_) => {}
+                    Err(error) => page.files.error = Some(error),
                 }
-                Ok(_) => {}
-                Err(error) => page.files.error = Some(error),
-            }
-        });
+            },
+        );
     }
 
-    pub(super) fn read_next_page(&mut self, next: u32, cx: &mut Context<Self>) {
+    pub(super) fn read_next_page(&mut self, next: String, cx: &mut Context<Self>) {
         let Some(page) = self.page_mut() else { return };
         page.files_view.page_loading = true;
         page.files_view.page_error = None;
         self.read(
-            PullRequestRead::Files { page: Some(next) },
+            PullRequestRead::Files { cursor: Some(next) },
             cx,
             move |page, result| {
                 page.files_view.page_loading = false;
@@ -431,7 +435,7 @@ impl PullRequestView {
                             return;
                         }
                         files.files.extend(more.files);
-                        files.next_page = more.next_page;
+                        files.next_cursor = more.next_cursor;
                         files.complete = more.complete;
                     }
                     Ok(_) => {}
@@ -1069,7 +1073,9 @@ impl PullRequestView {
             head = snapshot.head_branch.clone()
         )
         .into_owned();
-        let updates = (state.can_update_branch && !self.read_only(cx)).then(|| key.clone());
+        let updates =
+            (state.can_update_branch && state.capabilities.update_branch && !self.read_only(cx))
+                .then(|| key.clone());
         let busy = offer.busy;
         let chip = Button::new("pr-behind")
             .ghost()
@@ -1900,13 +1906,13 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
     use tcode_protocol::{
-        ClientPayload, HostMessage, PullRequestComment, PullRequestPatch, Query, QueryResponse,
-        decode_client_line, encode_line,
+        ClientPayload, HostMessage, PullRequestCapabilities, PullRequestComment, PullRequestPatch,
+        Query, QueryResponse, decode_client_line, encode_line,
     };
 
     const HEAD: &str = "2222222222222222222222222222222222222222";
 
-    fn files(range: std::ops::Range<usize>, next_page: Option<u32>) -> PullRequestFiles {
+    fn files(range: std::ops::Range<usize>, next_cursor: Option<&str>) -> PullRequestFiles {
         PullRequestFiles {
             base: "1111111111111111111111111111111111111111".into(),
             head: HEAD.into(),
@@ -1920,8 +1926,8 @@ mod tests {
                     patch: PullRequestPatch::Hunks("@@ -1 +1,2 @@\n a\n+b\n".into()),
                 })
                 .collect(),
-            next_page,
-            complete: next_page.is_none(),
+            next_cursor: next_cursor.map(str::to_owned),
+            complete: next_cursor.is_none(),
             changed_files: 150,
         }
     }
@@ -2008,10 +2014,10 @@ mod tests {
         for (id, read) in reads(&requests) {
             match read {
                 // Page 1 lands as its expiry passes, so the view reads it again at once.
-                PullRequestRead::Files { page: None } => answer(
+                PullRequestRead::Files { cursor: None } => answer(
                     &incoming,
                     id,
-                    PullRequestReadResponse::Files(files(0..100, Some(2))),
+                    PullRequestReadResponse::Files(files(0..100, Some("2"))),
                     now(),
                 ),
                 PullRequestRead::Conversation => answer(
@@ -2037,6 +2043,7 @@ mod tests {
                         permissions: Default::default(),
                         labels: Vec::new(),
                         reviewers: Vec::new(),
+                        capabilities: PullRequestCapabilities::ALL,
                     })),
                     later,
                 ),
@@ -2054,7 +2061,7 @@ mod tests {
         }
         settle(cx);
         for (id, read) in reads(&requests) {
-            assert_eq!(read, PullRequestRead::Files { page: None });
+            assert_eq!(read, PullRequestRead::Files { cursor: None });
             reread = Some(id);
         }
         let reread = reread.expect("an expired page 1 is read again");
@@ -2075,7 +2082,9 @@ mod tests {
         let page_two = reads(&requests);
         assert_eq!(
             page_two.iter().map(|(_, read)| read).collect::<Vec<_>>(),
-            [&PullRequestRead::Files { page: Some(2) }],
+            [&PullRequestRead::Files {
+                cursor: Some("2".into())
+            }],
             "nearing the end of page 1 reads page 2"
         );
         answer(
@@ -2090,7 +2099,7 @@ mod tests {
         answer(
             &incoming,
             reread,
-            PullRequestReadResponse::Files(files(0..100, Some(2))),
+            PullRequestReadResponse::Files(files(0..100, Some("2"))),
             later,
         );
         settle(cx);
@@ -2098,7 +2107,7 @@ mod tests {
             let page = view.page().unwrap();
             let held = page.files.data.as_ref().unwrap();
             assert_eq!(
-                (held.files.len(), held.next_page, held.complete),
+                (held.files.len(), held.next_cursor.as_deref(), held.complete),
                 (150, None, true),
                 "the re-read of page 1 keeps the pages read after it"
             );

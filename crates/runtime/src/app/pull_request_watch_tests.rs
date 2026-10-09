@@ -4,7 +4,10 @@ use serde_json::{Value, json};
 use std::sync::{Mutex, mpsc};
 use tcode_core::pull_request::PullRequestSnapshot;
 use tcode_protocol::{Command, EventEnvelope, HostMessage, RuntimeNotification, ServerEvent};
-use tcode_services::{github::Credentials, settings::SettingsStore};
+use tcode_services::{
+    github::{Credentials, GitHub, GitHubApi},
+    settings::SettingsStore,
+};
 
 use crate::app::test_support::github_fixture as fixture;
 
@@ -220,13 +223,13 @@ impl Harness {
 
     fn open(dir: TestStore, store: SessionStore, host: Arc<Mutex<Host>>) -> Self {
         let fixture = fixture::Fixture::new();
-        let api = GitHubApi::new(
+        let api = GitHub::new(GitHubApi::new(
             Credentials::new(
                 SettingsStore::new(store.root().to_path_buf()),
                 [("GH_TOKEN".into(), "fixture".into())],
             ),
             fixture.builder(),
-        );
+        ));
         let serving = host.clone();
         let server = fixture.serve(move |exchange| reply(&serving, exchange));
         let scripted = scripted_provider(ProviderKind::Codex);

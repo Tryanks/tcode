@@ -927,9 +927,7 @@ impl AppState {
         }
         let github_changed = self.settings.github.hosts != settings.github.hosts;
         self.settings = settings;
-        self.github
-            .credentials()
-            .configure(self.settings.github.hosts.clone());
+        self.forge.configure(self.settings.github.hosts.clone());
         if github_changed {
             self.refresh_github_credentials(cx);
         }
