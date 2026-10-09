@@ -5,9 +5,10 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ListAlignment,
-    ListState, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::pull_request::{
@@ -30,11 +31,17 @@ use crate::{
     widgets::{
         Popover,
         button::{Button, ButtonVariants as _},
+        input::Input,
         menu::DropdownMenu as _,
         tooltip::Tooltip,
     },
     window_state::WindowState,
 };
+
+/// The phone ⋯ menu's title edit.
+#[derive(gpui::Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = tcode_pull_requests, no_json)]
+struct EditTitle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tab {
@@ -148,6 +155,7 @@ pub(super) struct PullRequestPage {
     pub(super) refreshing: bool,
     /// A manual refresh reads Files again from page 1, whatever was paged in.
     pub(super) restart_files: bool,
+    pub(super) writes: super::compose::Writes,
 }
 
 pub struct PullRequestView {
@@ -429,7 +437,10 @@ impl PullRequestView {
                         page.viewed_flush = None;
                         page.conversation_view.replies.clear();
                     }
-                    page.conversation.data = Some(conversation);
+                    page.conversation.data = Some(*conversation);
+                    // The read is GitHub's answer to whatever this client wrote before it.
+                    page.writes.waiting = false;
+                    page.writes.reactions.clear();
                 }
                 Ok(_) => {}
                 Err(error) => page.conversation.error = Some(error),
@@ -516,7 +527,7 @@ impl PullRequestView {
 
     /// A manual refresh: the host drops what it holds about the pull request and the visible
     /// view reads again from the start.
-    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((session, key)) = self.current.clone() else {
             return;
         };
@@ -806,18 +817,7 @@ impl PullRequestView {
                             .pt(px(2.))
                             .child(Icon::new(glyph).size(px(16.)).text_color(color)),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(if compact { 17. } else { 15. }))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .line_clamp(2)
-                            .when(snapshot.is_none(), |title| {
-                                title.font_family(cx.theme().mono_font_family.clone())
-                            })
-                            .child(title),
-                    ),
+                    .child(self.title_line(title, snapshot.is_some(), cx)),
             )
             .child(line_two)
             .when(has_chip, |header| {
@@ -841,6 +841,221 @@ impl PullRequestView {
                     .child(crate::tr!(condition))
             }))
             .into_any_element()
+    }
+
+    /// The title, its edit affordance (`pr-title-edit`) and the title editor.
+    fn title_line(&self, title: String, known: bool, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.compact(cx);
+        let size = if compact { 17. } else { 15. };
+        let editable = known
+            && !self.read_only(cx)
+            && self
+                .page()
+                .and_then(|page| page.conversation.data.as_ref())
+                .is_some_and(|conversation| conversation.permissions.update);
+        let editing = self.writes().and_then(|writes| writes.title.as_ref());
+        if let Some((input, _)) = editing.filter(|_| !compact) {
+            let saving = self.busy("title");
+            let blank = input.read(cx).value().trim().is_empty();
+            return h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .on_action(
+                    cx.listener(|this, _: &gpui_base::actions::Cancel, _, cx| {
+                        this.cancel_title(cx)
+                    }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(size))
+                        .child(Input::new(input).disabled(saving)),
+                )
+                .child(
+                    Button::new("pr-title-cancel")
+                        .ghost()
+                        .xsmall()
+                        .disabled(saving)
+                        .label(crate::tr!("pull_requests.compose.cancel"))
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_title(cx))),
+                )
+                .child(
+                    Button::new("pr-title-save")
+                        .primary()
+                        .xsmall()
+                        .loading(saving)
+                        .disabled(blank)
+                        .label(crate::tr!("pull_requests.compose.save"))
+                        .on_click(cx.listener(|this, _, window, cx| this.save_title(window, cx))),
+                )
+                .into_any_element();
+        }
+        let text = div()
+            .flex_1()
+            .min_w_0()
+            .text_size(px(size))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .line_clamp(2)
+            .when(!known, |title| {
+                title.font_family(cx.theme().mono_font_family.clone())
+            })
+            .child(title.clone());
+        if !editable {
+            return text.into_any_element();
+        }
+        let start = Button::new("pr-title-edit")
+            .ghost()
+            .xsmall()
+            .compact()
+            .icon(IconName::Pencil)
+            .tooltip(crate::tr!("pull_requests.compose.edit_title"))
+            .on_click(cx.listener(move |this, _, window, cx| this.start_title(window, cx)));
+        let affordance = if compact {
+            self.title_sheet(start, cx)
+        } else {
+            div()
+                .flex_none()
+                .invisible()
+                .group_hover("pr-header-title", |style| style.visible())
+                .child(start)
+                .into_any_element()
+        };
+        h_flex()
+            .group("pr-header-title")
+            .flex_1()
+            .min_w_0()
+            .gap_1()
+            .items_start()
+            .child(text)
+            .child(affordance)
+            .into_any_element()
+    }
+
+    /// The phone's title editor: a sheet around the edit affordance.
+    fn title_sheet(&self, trigger: Button, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity();
+        crate::widgets::Popover::new("pr-title-sheet")
+            .bottom_sheet(crate::tr!("pull_requests.compose.edit_title").into_owned())
+            .open(self.sheet_open(&super::compose::Sheet::Title))
+            .on_open_change({
+                let view = view.clone();
+                move |open, _, cx| {
+                    if !*open {
+                        view.update(cx, |view, cx| view.cancel_title(cx));
+                    }
+                }
+            })
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                let this = view.read(cx);
+                let Some((input, _)) = this.writes().and_then(|writes| writes.title.as_ref())
+                else {
+                    return div().into_any_element();
+                };
+                let saving = this.busy("title");
+                let blank = input.read(cx).value().trim().is_empty();
+                let save_view = view.clone();
+                v_flex()
+                    .w_full()
+                    .p_3()
+                    .gap_3()
+                    .child(Input::new(input).disabled(saving))
+                    .child(
+                        h_flex().justify_end().child(
+                            Button::new("pr-title-sheet-save")
+                                .primary()
+                                .small()
+                                .loading(saving)
+                                .disabled(blank)
+                                .label(crate::tr!("pull_requests.compose.save"))
+                                .on_click(move |_, window, cx| {
+                                    save_view.update(cx, |view, cx| view.save_title(window, cx))
+                                }),
+                        ),
+                    )
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    fn start_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self
+            .link(cx)
+            .and_then(|link| link.snapshot)
+            .map(|snapshot| snapshot.title)
+            .unwrap_or_default();
+        let input = cx.new(|cx| {
+            let mut input = crate::widgets::input::InputState::new(window, cx);
+            input.set_value(title, window, cx);
+            input
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &crate::widgets::input::InputEvent, window, cx| match event {
+                crate::widgets::input::InputEvent::PressEnter { .. } => this.save_title(window, cx),
+                crate::widgets::input::InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        );
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        let compact = self.compact(cx);
+        if let Some(writes) = self.writes_mut() {
+            writes.title = Some((input, subscription));
+            if compact {
+                writes.sheet = Some(super::compose::Sheet::Title);
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_title(&mut self, cx: &mut Context<Self>) {
+        if self.busy("title") {
+            return;
+        }
+        if let Some(writes) = self.writes_mut() {
+            writes.title = None;
+            if writes.sheet == Some(super::compose::Sheet::Title) {
+                writes.sheet = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sends the title alone; the description is left out, so GitHub keeps it.
+    fn save_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self
+            .writes()
+            .and_then(|writes| writes.title.as_ref())
+            .map(|(input, _)| input.read(cx).value().trim().to_owned())
+            .filter(|title| !title.is_empty())
+        else {
+            return;
+        };
+        if self.busy("title") {
+            return;
+        }
+        self.send_write(
+            tcode_protocol::PullRequestAction::Edit {
+                title: Some(title),
+                body: None,
+            },
+            super::compose::Write::Edit,
+            "title".into(),
+            window,
+            cx,
+            |this, result, _, cx| {
+                if *result == tcode_protocol::PullRequestActionResult::Applied {
+                    this.cancel_title(cx);
+                }
+            },
+        );
     }
 
     fn layer_selector(
@@ -1141,6 +1356,11 @@ impl PullRequestView {
             .menu(cx)
             .zip(self.current.as_ref().map(|(_, key)| key.clone()))
         {
+            let edit_title = !self.read_only(cx)
+                && self
+                    .page()
+                    .and_then(|page| page.conversation.data.as_ref())
+                    .is_some_and(|conversation| conversation.permissions.update);
             actions.push(
                 material::toolbar_icon_button(
                     "pr-detail-menu",
@@ -1149,7 +1369,17 @@ impl PullRequestView {
                         .into_owned(),
                     true,
                 )
-                .dropdown_menu(move |menu_state, window, cx| (menu)(menu_state, window, cx))
+                .dropdown_menu(move |menu_state, window, cx| {
+                    let menu_state = (menu)(menu_state, window, cx);
+                    if edit_title {
+                        menu_state.separator().menu(
+                            crate::tr!("pull_requests.compose.edit_title").into_owned(),
+                            Box::new(EditTitle),
+                        )
+                    } else {
+                        menu_state
+                    }
+                })
                 .into_any_element(),
             );
         }
@@ -1524,7 +1754,9 @@ impl Render for PullRequestView {
             .min_w_0()
             .on_action(cx.listener(Self::change_link))
             .on_action(cx.listener(Self::change_watch))
-            .on_action(cx.listener(Self::copy_selected_lines))
+            .on_action(cx.listener(Self::on_selection_menu))
+            .on_action(cx.listener(Self::on_comment_menu))
+            .on_action(cx.listener(|this, _: &EditTitle, window, cx| this.start_title(window, cx)))
             .when(!compact, |view| view.child(self.sub_bar(cx)))
             .child(self.header(window, cx))
             .children(self.notices(cx))
@@ -1537,7 +1769,7 @@ impl Render for PullRequestView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+    use gpui::{TestAppContext, VisualTestContext};
     use tcode_protocol::{
         ClientPayload, HostMessage, PullRequestComment, PullRequestPatch, Query, QueryResponse,
         decode_client_line, encode_line,
@@ -1656,7 +1888,7 @@ mod tests {
                 PullRequestRead::Conversation => answer(
                     &incoming,
                     id,
-                    PullRequestReadResponse::Conversation(PullRequestConversation {
+                    PullRequestReadResponse::Conversation(Box::new(PullRequestConversation {
                         description: PullRequestComment {
                             id: "PR_7".into(),
                             author: None,
@@ -1666,12 +1898,17 @@ mod tests {
                             url: None,
                             review_state: None,
                             reactions: Vec::new(),
+                            viewer_can_update: false,
+                            viewer_can_react: false,
                         },
                         comments: Vec::new(),
                         threads: Vec::new(),
                         complete: true,
                         account: "account".into(),
-                    }),
+                        permissions: Default::default(),
+                        labels: Vec::new(),
+                        reviewers: Vec::new(),
+                    })),
                     later,
                 ),
                 PullRequestRead::ViewedFiles => answer(

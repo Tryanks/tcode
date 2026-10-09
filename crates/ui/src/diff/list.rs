@@ -379,11 +379,36 @@ pub(crate) trait DiffListHost: Sized + 'static {
     fn placeholder(&self, _file: usize, _cx: &mut Context<Self>) -> AnyElement {
         div().into_any_element()
     }
-    /// Whether the selection menu offers a review comment for the agent, and if so whether it
-    /// is enabled.
-    fn review_comment_menu(&self) -> Option<bool> {
+    /// Whether the selection menu offers a comment on the selected lines, enabled or not, and
+    /// under what label.
+    fn review_comment_menu(&self, _cx: &App) -> Option<(bool, gpui::SharedString)> {
         None
     }
+}
+
+/// The row under the last selected line that starts a comment on the selection; the Diff tab's
+/// comment for the agent and Files' review comment are both started from it.
+pub(crate) fn selection_row(
+    id: &'static str,
+    label: gpui::SharedString,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    h_flex()
+        .min_w_full()
+        .px_3()
+        .py_1()
+        .bg(cx.theme().muted)
+        .rounded(material::radius_card(cx))
+        .font_family(cx.theme().font_family.clone())
+        .child(
+            Button::new(id)
+                .ghost()
+                .small()
+                .label(label)
+                .on_click(on_click),
+        )
+        .into_any_element()
 }
 
 /// The scrolling list of files, horizontally scrollable when lines do not wrap.
@@ -831,7 +856,7 @@ fn render_code_row<H: DiffListHost>(
         .diff_list()
         .and_then(|list| list.selection.as_ref())
         .is_some_and(|selection| selection.file == file.path);
-    let review_comment = host.review_comment_menu();
+    let review_comment = host.review_comment_menu(cx);
     cell.child(code)
         .context_menu(move |menu, _, _| {
             let menu = menu
@@ -844,11 +869,11 @@ fn render_code_row<H: DiffListHost>(
                     Box::new(DiffSelectionMenu::CopyLines),
                     selected_here,
                 );
-            let Some(enabled) = review_comment else {
+            let Some((enabled, label)) = review_comment.clone() else {
                 return menu;
             };
             menu.separator().menu_with_enable(
-                crate::tr!("diff.add_comment").into_owned(),
+                label,
                 Box::new(DiffSelectionMenu::AddComment),
                 selected_here && enabled,
             )

@@ -54,6 +54,8 @@ enum FilesOption {
     Invisibles,
     CollapseAll,
     ExpandAll,
+    /// The phone's way to the Review sheet.
+    Review,
 }
 
 /// How a file's viewed mark reads to the account.
@@ -471,6 +473,7 @@ impl PullRequestView {
             FilesOption::Invisibles => self.show_invisibles = !self.show_invisibles,
             FilesOption::CollapseAll => self.set_all_collapsed(true, cx),
             FilesOption::ExpandAll => self.set_all_collapsed(false, cx),
+            FilesOption::Review => self.open_sheet(Some(super::compose::Sheet::Review), cx),
         }
         if let Some(list) = self.page().and_then(|page| page.files_view.list.as_ref()) {
             list.remeasure();
@@ -482,13 +485,14 @@ impl PullRequestView {
         self.apply_option(*option, cx);
     }
 
-    pub(super) fn copy_selected_lines(
+    pub(super) fn on_selection_menu(
         &mut self,
         action: &DiffSelectionMenu,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if *action != DiffSelectionMenu::CopyLines {
+        if *action == DiffSelectionMenu::AddComment {
+            self.start_line_comment(window, cx);
             return;
         }
         let text = self
@@ -556,15 +560,17 @@ impl PullRequestView {
             .filter(|thread| !inline.contains(&thread.id))
             .cloned()
             .collect();
-        if threads.is_empty() {
+        let pending = self.off_diff_pending(cx);
+        if threads.is_empty() && pending.is_empty() {
             return None;
         }
+        let page = self.page()?;
         let more = page
             .files
             .data
             .as_ref()
             .is_some_and(|files| files.next_page.is_some());
-        let count = threads.len();
+        let count = threads.len() + pending.len();
         let label = if more {
             crate::tr!(
                 "pull_requests.files.off_diff_loaded",
@@ -618,6 +624,7 @@ impl PullRequestView {
                             .max_h(px(240.))
                             .overflow_y_scroll()
                             .pb_1()
+                            .children(pending)
                             .children(threads.into_iter().map(|thread| {
                                 let line = thread
                                     .anchor
@@ -873,8 +880,10 @@ impl PullRequestView {
                 toolbar.child(self.file_jump(count_label, cx))
             })
             .children(viewed_counter)
+            .children(self.review_entry(cx))
             .child(div().flex_1());
         if compact {
+            let can_start_review = self.can_review(cx) && self.draft(cx).is_none();
             toolbar = toolbar.child(
                 material::toolbar_icon_button(
                     "pr-files-options",
@@ -883,6 +892,14 @@ impl PullRequestView {
                     true,
                 )
                 .dropdown_menu(move |mut menu, _, _| {
+                    if can_start_review {
+                        menu = menu
+                            .menu(
+                                crate::tr!("pull_requests.review.entry_menu").into_owned(),
+                                Box::new(FilesOption::Review),
+                            )
+                            .separator();
+                    }
                     for (option, _, _, on, label) in &options {
                         menu = menu.menu_with_check(label.clone(), *on, Box::new(*option));
                     }
@@ -1302,11 +1319,14 @@ impl PullRequestView {
                     .child(body),
             )
             .children(footer);
+        self.ensure_summary(window, cx);
+        let review_bar = self.review_bar(cx);
         v_flex()
             .size_full()
             .min_h_0()
             .on_action(cx.listener(Self::on_option))
             .child(self.toolbar(wide, cx))
+            .children(review_bar)
             .child(
                 h_flex()
                     .flex_1()
@@ -1572,10 +1592,16 @@ impl DiffListHost for PullRequestView {
             })
             .cloned()
             .collect();
-        threads
+        let mut extras: Vec<AnyElement> = threads
             .iter()
             .map(|thread| self.thread_card(thread, true, cx))
-            .collect()
+            .collect();
+        extras.extend(self.review_row_extras(&path, old, new, cx));
+        extras
+    }
+
+    fn review_comment_menu(&self, cx: &App) -> Option<(bool, SharedString)> {
+        self.line_comment_menu(cx)
     }
 
     fn placeholder(&self, file: usize, cx: &mut Context<Self>) -> AnyElement {
