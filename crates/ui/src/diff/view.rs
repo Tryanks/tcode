@@ -1330,9 +1330,13 @@ impl DiffPanel {
             }
             return self.render_empty(cx);
         };
-        let split = self.workspace_store.read(cx).diff_split();
-        let wrap = self.workspace_store.read(cx).diff_word_wrap();
-        let viewport = render_list(self, "diff-body", split, wrap, cx);
+        let viewport = if cache.list.files.is_empty() {
+            self.render_empty(cx)
+        } else {
+            let split = self.workspace_store.read(cx).diff_split();
+            let wrap = self.workspace_store.read(cx).diff_word_wrap();
+            render_list(self, "diff-body", split, wrap, cx)
+        };
         // A compact page holds its content clear of the window edges; the code
         // itself still scrolls sideways *inside* that inset rather than running
         // off the page.
@@ -1469,6 +1473,7 @@ impl DiffPanel {
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
+            .debug_selector(|| "diff-empty".into())
             .flex_1()
             .min_h_0()
             .items_center()
