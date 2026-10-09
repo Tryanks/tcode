@@ -76,7 +76,11 @@ inspected or verified, and any material gaps.
 
 Each opened thread returns a `thread_id`. Reuse it with `send`; use `status` or
 `result` when needed, `approve` only within the user's authorization, and
-`cancel` deliberately. Override fast mode only when the user explicitly
+`cancel` deliberately. `dispatch`, `send`, `cancel` and `settle` take a list:
+open every child that can start now in one `dispatch` call, and act on every
+child that is ready in one `send`, `cancel` or `settle` call instead of one
+call per child. Each entry answers for itself, so check every entry of the
+response, not only the first. Override fast mode only when the user explicitly
 requests it. A completion callback carries the child's status and report. Ask
 children to use `report_result` for a self-contained result, then evaluate that
 result under the acceptance responsibility above. Continue useful lead work
