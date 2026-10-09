@@ -52,8 +52,7 @@ pub const GITHUB: HostTerms = HostTerms {
     name: "GitHub",
     clis: "gh, gh stack",
     stacks: Some(("GitHub native stacks", STACKS_DOCS_URL)),
-    // Upstream's pattern, which names GitLab's CLI as well; it moves to GitLab's terms with it.
-    merge_commands: &[("gh", "pr"), ("glab", "mr")],
+    merge_commands: &[("gh", "pr")],
     pull_request_url: |value| {
         let value = value.split(['?', '#']).next().unwrap_or_default();
         let Some(rest) = value
@@ -118,8 +117,47 @@ fn forgejo_pull_request_url(value: &str) -> bool {
     })
 }
 
+pub const GITLAB: HostTerms = HostTerms {
+    name: "GitLab",
+    clis: "glab",
+    stacks: None,
+    merge_commands: &[("glab", "mr")],
+    pull_request_url: gitlab_pull_request_url,
+    named_by_host: false,
+    mark: "icons/gitlab.svg",
+    conflicts_page: None,
+    checks_page: Some("/pipelines"),
+};
+
+/// `https://host[:port]/group[/subgroup…]/project[/-]/merge_requests/N`, on any host.
+fn gitlab_pull_request_url(value: &str) -> bool {
+    let value = value.split(['?', '#']).next().unwrap_or_default();
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let parts: Vec<_> = rest.split('/').collect();
+    parts.iter().enumerate().any(|(index, part)| {
+        let project = if index >= 1 && parts[index - 1] == "-" {
+            index - 1
+        } else {
+            index
+        };
+        *part == "merge_requests"
+            && project >= 3
+            && !parts[0].is_empty()
+            && parts[1..project].iter().all(|part| !part.is_empty())
+            && parts
+                .get(index + 1)
+                .and_then(|number| number.parse::<u64>().ok())
+                .is_some_and(|number| number > 0)
+    })
+}
+
 /// Every host Tcode reads pull requests from.
-pub const HOSTS: &[&HostTerms] = &[&GITHUB, &FORGEJO, &GITEA];
+pub const HOSTS: &[&HostTerms] = &[&GITHUB, &FORGEJO, &GITEA, &GITLAB];
 
 /// The software a source-control host runs, which decides how Tcode talks to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -128,6 +166,7 @@ pub enum HostKind {
     Github,
     Forgejo,
     Gitea,
+    Gitlab,
 }
 
 /// Why an authority cannot be a host of a kind.
@@ -137,16 +176,19 @@ pub enum HostRefusal {
     Invalid,
     /// A port or a path on a kind whose hosts are named by host name alone.
     PortOrPath,
+    /// A path on a kind whose hosts take a port but no path.
+    Path,
 }
 
 impl HostKind {
-    pub const ALL: [Self; 3] = [Self::Github, Self::Forgejo, Self::Gitea];
+    pub const ALL: [Self; 4] = [Self::Github, Self::Forgejo, Self::Gitea, Self::Gitlab];
 
     pub fn terms(self) -> &'static HostTerms {
         match self {
             Self::Github => &GITHUB,
             Self::Forgejo => &FORGEJO,
             Self::Gitea => &GITEA,
+            Self::Gitlab => &GITLAB,
         }
     }
 
@@ -156,6 +198,7 @@ impl HostKind {
             Self::Github => "github.com",
             Self::Forgejo => "codeberg.org",
             Self::Gitea => "gitea.com",
+            Self::Gitlab => "gitlab.com",
         }
     }
 
@@ -171,6 +214,7 @@ impl HostKind {
                             Self::Github => "github",
                             Self::Forgejo => "forgejo",
                             Self::Gitea => "gitea",
+                            Self::Gitlab => "gitlab",
                         }
                 })
         })
@@ -190,11 +234,12 @@ impl HostKind {
                 "Use a {} host name in lowercase, with its port and path if the server has them, without a URL scheme.",
                 self.terms().name
             ),
+            Self::Gitlab => "Use a GitLab host name in lowercase, with its port if the server has one, without a URL scheme or path.".into(),
         }
     }
 
-    /// An authority as settings keep it: lowercase, without a scheme or trailing slashes. Only
-    /// Forgejo and Gitea servers take a port and a mount path.
+    /// An authority as settings keep it: lowercase, without a scheme or trailing slashes.
+    /// Forgejo and Gitea servers take a port and a mount path, GitLab servers a port alone.
     pub fn authority(self, raw: &str) -> Result<String, HostRefusal> {
         let value = raw.trim().to_ascii_lowercase();
         let value = value
@@ -218,6 +263,9 @@ impl HostKind {
         }
         if self == Self::Github {
             return Err(HostRefusal::PortOrPath);
+        }
+        if self == Self::Gitlab && !path.is_empty() {
+            return Err(HostRefusal::Path);
         }
         if port.is_some_and(|port| port.parse::<u16>().map_or(true, |port| port == 0))
             || (!path.is_empty()
@@ -1410,6 +1458,13 @@ mod tests {
             linking_instructions(&all).contains("This applies to gh, gh stack, tea, other CLIs")
         );
         assert!(merges_or_closes("tea pr merge 3"));
+        assert!(merges_or_closes("glab mr close 3"));
+        let gitlab = hosts_in([HostKind::Gitlab]);
+        assert_eq!(host_names(&gitlab), "GitHub or GitLab");
+        assert!(
+            linking_instructions(&gitlab)
+                .contains("This applies to gh, gh stack, glab, other CLIs")
+        );
         assert!(
             strip_linking_instructions(&format!("{}typed", linking_instructions(&all)))
                 == Some("typed")
@@ -1429,6 +1484,19 @@ mod tests {
             Err(HostRefusal::PortOrPath)
         );
         assert_eq!(HostKind::Gitea.authority("  "), Err(HostRefusal::Blank));
+        assert_eq!(
+            HostKind::Gitlab.authority("https://Code.Acme.test:8443/"),
+            Ok("code.acme.test:8443".to_owned())
+        );
+        assert_eq!(
+            HostKind::Gitlab.authority("code.acme.test/gitlab"),
+            Err(HostRefusal::Path)
+        );
+        assert_eq!(HostKind::detect("gitlab.com"), Some(HostKind::Gitlab));
+        assert_eq!(
+            HostKind::detect("gitlab.acme.test:8443"),
+            Some(HostKind::Gitlab)
+        );
         for invalid in ["a b", "git.acme.test:0", "git.acme.test/../x", "-x.test"] {
             assert_eq!(
                 HostKind::Gitea.authority(invalid),
@@ -1548,9 +1616,13 @@ mod tests {
         assert!(is_pull_request_url(
             "https://git.acme.test:3000/forge/sample/project/pulls/4/files"
         ));
+        assert!(is_pull_request_url(
+            "https://code.acme.test:8443/group/sub/project/-/merge_requests/4/diffs"
+        ));
         for ordinary in [
             "https://github.com/sample/project/issues/123",
             "https://github.com/sample/project/pull/0",
+            "https://gitlab.com/project/-/merge_requests/4",
             "https://example.test",
             "#123",
         ] {

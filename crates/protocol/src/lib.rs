@@ -157,6 +157,8 @@ pub use wire::{
 // SetGitHubToken and RefreshGitHubCredentials become SetHostToken and
 // RefreshHostCredentials; capabilities carry host_viewed_marks and
 // merge_message; the rejection Unsupported is added.
+// Unreleased: a source-control host's kind may be gitlab; capabilities carry
+// update_merge, without which a branch update is a rebase.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]
