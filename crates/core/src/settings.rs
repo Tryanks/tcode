@@ -777,6 +777,11 @@ pub enum SettingsPatch {
         project_id: String,
         value: Option<ProjectSettlementSettings>,
     },
+    ProjectMergeMethod {
+        project_id: String,
+        method: crate::pull_request::PullRequestMergeMethod,
+    },
+    RemoveAgentCreditsOnMerge(bool),
     OrchestrateDecisionModels(Vec<OrchestrateChildModel>),
     OrchestrateChildModels(Vec<OrchestrateChildModel>),
     OrchestrateChildApproval(ChildApprovalMode),
@@ -917,6 +922,13 @@ pub struct Settings {
     pub auto_settle_on_merge: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub project_settlement_overrides: BTreeMap<String, ProjectSettlementSettings>,
+    /// The merge method a project's pull requests are merged with unless another is chosen,
+    /// set from the merge confirmation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub project_merge_methods: BTreeMap<String, crate::pull_request::PullRequestMergeMethod>,
+    /// Whether a merge leaves agents' credit lines out of GitHub's merge message by default.
+    #[serde(default)]
+    pub remove_agent_credits_on_merge: bool,
     /// Built-in orchestration identities and child-model routing table.
     #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
     pub orchestrate: OrchestrateSettings,
@@ -1042,6 +1054,8 @@ impl Default for Settings {
             auto_settle_after_days: default_auto_settle_after_days(),
             auto_settle_on_merge: true,
             project_settlement_overrides: BTreeMap::new(),
+            project_merge_methods: BTreeMap::new(),
+            remove_agent_credits_on_merge: false,
             orchestrate: OrchestrateSettings::default(),
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
@@ -1126,6 +1140,12 @@ impl Settings {
                 } else {
                     self.project_settlement_overrides.remove(&project_id);
                 }
+            }
+            SettingsPatch::ProjectMergeMethod { project_id, method } => {
+                self.project_merge_methods.insert(project_id, method);
+            }
+            SettingsPatch::RemoveAgentCreditsOnMerge(value) => {
+                self.remove_agent_credits_on_merge = value;
             }
             SettingsPatch::OrchestrateDecisionModels(value) => {
                 self.orchestrate.decision_models = value;

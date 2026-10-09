@@ -334,6 +334,16 @@ impl WorkspaceStore {
     pub fn set_auto_settle_after_days(&mut self, days: Option<f64>) {
         self.patch_settings(SettingsPatch::AutoSettleAfterDays(days));
     }
+    pub fn set_project_merge_method(
+        &mut self,
+        project_id: String,
+        method: tcode_core::pull_request::PullRequestMergeMethod,
+    ) {
+        self.patch_settings(SettingsPatch::ProjectMergeMethod { project_id, method });
+    }
+    pub fn set_remove_agent_credits_on_merge(&mut self, enabled: bool) {
+        self.patch_settings(SettingsPatch::RemoveAgentCreditsOnMerge(enabled));
+    }
     pub fn set_auto_settle_on_merge(&mut self, enabled: bool) {
         self.patch_settings(SettingsPatch::AutoSettleOnMerge(enabled));
     }
