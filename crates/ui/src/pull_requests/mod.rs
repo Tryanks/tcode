@@ -498,13 +498,26 @@ fn change_link<T: 'static>(
     .detach();
 }
 
-/// The row's menu: Open on GitHub, Copy link, the watch, what can become of the pull request,
+/// The pull request host at `host` as a person reads it, by the kind settings give the server.
+pub(crate) fn host_name(store: &WorkspaceStore, host: &str) -> String {
+    store
+        .settings()
+        .source_control
+        .kind(host)
+        .or_else(|| tcode_core::pull_request::HostKind::detect(host))
+        .unwrap_or(tcode_core::pull_request::HostKind::Github)
+        .terms()
+        .display_name(host)
+}
+
+/// The row's menu: Open on the host, Copy link, the watch, what can become of the pull request,
 /// and the link condition.
 type RowMenu = std::rc::Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 
 fn row_menu(
     key: PullRequestKey,
     url: String,
+    host_name: String,
     link: Option<&ThreadPullRequestLink>,
     watchable: bool,
     offer: impl Fn(&App) -> Option<lifecycle::Offer> + 'static,
@@ -527,7 +540,7 @@ fn row_menu(
     std::rc::Rc::new(
         move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
             menu.menu(
-                crate::tr!("pull_requests.open_on_github").into_owned(),
+                crate::tr!("pull_requests.open_on_host", host_name = &host_name).into_owned(),
                 Box::new(OpenUrl(url.clone())),
             )
             .menu(
@@ -825,7 +838,14 @@ impl PullRequestsPanel {
                 .into_any_element()
         };
         let detail = detail.join(" · ");
-        let menu = row_menu(key.clone(), url.clone(), link, watchable, self.offer(&key));
+        let menu = row_menu(
+            key.clone(),
+            url.clone(),
+            host_name(self.store.read(cx), &key.host),
+            link,
+            watchable,
+            self.offer(&key),
+        );
         let mut signals = h_flex().gap_1().flex_none().items_center();
         // The eye leads while the pull request is open or not yet read; the host ends the watch
         // once it merges or closes.

@@ -332,7 +332,7 @@ pub struct SettingsPage {
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
     /// Each enabled profile's native plugin catalog.
     plugins_panel: Entity<PluginsSettingsPanel>,
-    github_panel: Entity<crate::github_settings::GitHubSettingsPanel>,
+    source_control_panel: Entity<crate::source_control_settings::SourceControlPanel>,
     /// Hosting this machine. Absent where the client cannot listen at all.
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     #[cfg(not(target_family = "wasm"))]
@@ -571,8 +571,13 @@ impl SettingsPage {
             cx.new(|cx| crate::local_permissions::LocalPermissions::new(store, window, cx))
         });
         let auto_settle_input = cx.new(|cx| InputState::new(window, cx).step(1.).min(1.).max(90.));
-        let github_panel = cx
-            .new(|cx| crate::github_settings::GitHubSettingsPanel::new(store.clone(), window, cx));
+        let source_control_panel = cx.new(|cx| {
+            crate::source_control_settings::SourceControlPanel::new(
+                store.clone(),
+                window_state.clone(),
+                cx,
+            )
+        });
         let mut page = Self {
             store,
             window_state,
@@ -581,7 +586,7 @@ impl SettingsPage {
             acp_panel,
             orchestrate_panel,
             plugins_panel,
-            github_panel,
+            source_control_panel,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             hosting_panel,
             title_model_picker,
@@ -1311,9 +1316,11 @@ impl SettingsPage {
             self.plugins_panel.update(cx, |panel, _| panel.hide());
         }
         if self.section == Section::SourceControl {
-            self.github_panel.update(cx, |panel, cx| panel.show(cx));
+            self.source_control_panel
+                .update(cx, |panel, cx| panel.show(cx));
         } else {
-            self.github_panel.update(cx, |panel, _| panel.hide());
+            self.source_control_panel
+                .update(cx, |panel, _| panel.hide());
         }
         let column = match self.section {
             Section::General => self.render_general(cx),
@@ -2760,7 +2767,7 @@ impl SettingsPage {
         );
         v_flex()
             .gap(px(24.))
-            .child(self.github_panel.clone())
+            .child(self.source_control_panel.clone())
             .child(self.grouped_plain(vec![row], cx))
     }
 

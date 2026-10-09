@@ -1017,6 +1017,7 @@ impl PullRequestView {
                 })
                 .into_any_element()
         };
+        let host_name = view.read(cx).host_name(cx);
         let stale_notice = stale.map(|(old, new)| {
             let move_view = view.clone();
             let mut actions = vec![
@@ -1035,7 +1036,10 @@ impl PullRequestView {
                     Button::new("pr-review-open")
                         .ghost()
                         .xsmall()
-                        .label(crate::tr!("pull_requests.open_on_github"))
+                        .label(crate::tr!(
+                            "pull_requests.open_on_host",
+                            host_name = &host_name
+                        ))
                         .on_click(move |_, _, cx| cx.open_url(&url))
                         .into_any_element(),
                 );

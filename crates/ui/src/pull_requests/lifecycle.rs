@@ -473,6 +473,8 @@ pub(super) struct Target {
     pub(super) window_state: Entity<WindowState>,
     pub(super) session: String,
     pub(super) offer: Offer,
+    /// The pull request's host as a person reads it.
+    host_name: String,
     pub(super) title: String,
     pub(super) head_branch: String,
     pub(super) base_branch: String,
@@ -528,6 +530,7 @@ impl Target {
             .find(|link| link.key == *key)
             .and_then(|link| link.snapshot.clone());
         Some(Self {
+            host_name: super::host_name(workspace, &key.host),
             store: store.clone(),
             window_state: window_state.clone(),
             session: session.to_owned(),
@@ -794,14 +797,18 @@ impl Target {
         let (head, base) = (self.head_branch.clone(), self.base_branch.clone());
         let merging = matches!(kind, Lifecycle::Merge | Lifecycle::EnableAutoMerge);
         let updating = matches!(kind, Lifecycle::UpdateBranch | Lifecycle::UpdateRebase);
-        let open_on_github = |note: Notification| {
+        let open_on_host = |note: Notification| {
             let url = self.offer.url.clone();
+            let host_name = self.host_name.clone();
             note.action(move |_, _, _| {
                 let url = url.clone();
                 Button::new("pr-result-open")
                     .ghost()
                     .xsmall()
-                    .label(crate::tr!("pull_requests.open_on_github"))
+                    .label(crate::tr!(
+                        "pull_requests.open_on_host",
+                        host_name = &host_name
+                    ))
                     .on_click(move |_, _, cx| cx.open_url(&url))
             })
         };
@@ -855,6 +862,7 @@ impl Target {
             )),
             PullRequestActionResult::Opened { number: new, url } => {
                 let url = url.clone();
+                let host_name = self.host_name.clone();
                 Notification::success(
                     crate::tr!(
                         "pull_requests.result.reverted",
@@ -868,7 +876,10 @@ impl Target {
                     Button::new("pr-result-open")
                         .ghost()
                         .xsmall()
-                        .label(crate::tr!("pull_requests.open_on_github"))
+                        .label(crate::tr!(
+                            "pull_requests.open_on_host",
+                            host_name = &host_name
+                        ))
                         .on_click(move |_, _, cx| cx.open_url(&url))
                 })
             }
@@ -953,7 +964,7 @@ impl Target {
                     )
                     .into_owned()
                 };
-                open_on_github(Notification::warning(message).title(title))
+                open_on_host(Notification::warning(message).title(title))
             }
             // A stack write's answers are the stack's own words.
             PullRequestActionResult::Partial { .. }

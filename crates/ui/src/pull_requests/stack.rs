@@ -483,7 +483,10 @@ pub(super) fn operation_chip(
                         .ghost()
                         .xsmall()
                         .icon(IconName::ExternalLink)
-                        .label(crate::tr!("pull_requests.open_on_github"))
+                        .label(crate::tr!(
+                            "pull_requests.open_on_host",
+                            host_name = tcode_core::pull_request::GITHUB.name
+                        ))
                         .on_click(move |_, _, cx| cx.open_url(&url))
                 }))
         })
@@ -1097,7 +1100,10 @@ pub(super) fn answer_toast(
             Button::new("pr-stack-result-open")
                 .ghost()
                 .xsmall()
-                .label(crate::tr!("pull_requests.open_on_github"))
+                .label(crate::tr!(
+                    "pull_requests.open_on_host",
+                    host_name = tcode_core::pull_request::GITHUB.name
+                ))
                 .on_click(move |_, _, cx| cx.open_url(&url))
         }),
         None => note,

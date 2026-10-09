@@ -846,23 +846,33 @@ impl WorkspaceStore {
     pub fn reload_provider(&mut self) {
         self.dispatch(Command::ReloadProvider);
     }
-    pub fn refresh_github_credentials(&mut self) {
-        self.dispatch(Command::RefreshGitHubCredentials);
+    pub fn refresh_host_credentials(&mut self) {
+        self.dispatch(Command::RefreshHostCredentials);
     }
-    pub fn set_github_token(&mut self, host: String, token: Option<String>) {
-        self.dispatch(Command::SetGitHubToken { host, token });
+    pub fn set_host_token(&mut self, host: String, token: Option<String>) {
+        self.dispatch(Command::SetHostToken { host, token });
     }
-    pub fn patch_github_host(
+    pub fn patch_source_control_host(
         &mut self,
         host: String,
+        kind: tcode_core::pull_request::HostKind,
         enabled: Option<bool>,
         account: Option<Option<String>>,
     ) {
-        self.patch_settings(SettingsPatch::GitHubHost {
+        self.patch_settings(SettingsPatch::SourceControlHost {
             host,
+            kind,
             enabled,
             account,
         });
+    }
+    /// Removes a host the user added, with its saved token.
+    pub fn remove_source_control_host(&mut self, host: String) {
+        self.dispatch(Command::SetHostToken {
+            host: host.clone(),
+            token: None,
+        });
+        self.patch_settings(SettingsPatch::RemoveSourceControlHost { host });
     }
 
     pub fn set_profile_secret(&mut self, profile_id: String, name: String, value: Option<String>) {

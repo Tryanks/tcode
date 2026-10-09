@@ -804,25 +804,35 @@ impl PullRequestView {
                 || page
                     .and_then(|page| page.viewed.data.as_ref())
                     .is_some_and(|viewed| !viewed.complete);
+            let host_marks = self.capabilities().host_viewed_marks;
             let tooltip = if unknown {
                 crate::tr!("pull_requests.files.viewed_unknown")
-            } else {
+            } else if host_marks {
                 crate::tr!("pull_requests.files.viewed_owner_anonymous")
+            } else {
+                crate::tr!(
+                    "pull_requests.files.viewed_owner_tcode_tooltip",
+                    host_name = self.host_name(cx)
+                )
             }
             .into_owned();
+            let mut counter = crate::tr!(
+                "pull_requests.files.viewed_count",
+                viewed = viewed.to_string(),
+                total = total.to_string()
+            )
+            .into_owned();
+            // The host keeps no marks Tcode can read, so the ones shown are Tcode's own.
+            if !host_marks {
+                counter.push_str(" · ");
+                counter.push_str(&crate::tr!("pull_requests.files.viewed_owner_tcode"));
+            }
             div()
                 .id("pr-viewed-counter")
                 .flex_none()
                 .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
-                .child(
-                    crate::tr!(
-                        "pull_requests.files.viewed_count",
-                        viewed = viewed.to_string(),
-                        total = total.to_string()
-                    )
-                    .into_owned(),
-                )
+                .child(counter)
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         });
         let split = self.store.read(cx).diff_split();
@@ -1384,11 +1394,15 @@ impl PullRequestView {
             .child(Icon::new(icon).size(px(14.)))
             .child(div().flex_1().min_w_0().child(text))
             .children(url.map(|url| {
+                let host_name = self.host_name(cx);
                 Button::new(SharedString::from(format!("pr-file-open-{file}")))
                     .ghost()
                     .xsmall()
                     .icon(IconName::ExternalLink)
-                    .label(crate::tr!("pull_requests.open_on_github"))
+                    .label(crate::tr!(
+                        "pull_requests.open_on_host",
+                        host_name = &host_name
+                    ))
                     .on_click(move |_, _, cx| cx.open_url(&url))
             }))
             .into_any_element()
@@ -1552,6 +1566,7 @@ impl DiffListHost for PullRequestView {
             .map(|file| file.path.clone())
             .unwrap_or_default();
         let url = self.file_url(&path, cx);
+        let host_name = self.host_name(cx);
         Rc::new(move |menu, _, _| {
             menu.menu(
                 crate::tr!("pull_requests.files.copy_path").into_owned(),
@@ -1559,7 +1574,7 @@ impl DiffListHost for PullRequestView {
             )
             .when_some(url.clone(), |menu, url| {
                 menu.menu(
-                    crate::tr!("pull_requests.open_on_github").into_owned(),
+                    crate::tr!("pull_requests.open_on_host", host_name = &host_name).into_owned(),
                     Box::new(OpenUrl(url)),
                 )
             })

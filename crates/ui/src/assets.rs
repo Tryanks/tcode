@@ -91,6 +91,11 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/users.svg",
         include_bytes!("../../../assets/icons/users.svg"),
     ),
+    // Forgejo's mark, which Gitea hosts share: gpui-kit-assets ships no forge mark but GitHub's.
+    (
+        "icons/forgejo.svg",
+        include_bytes!("../../../assets/icons/forgejo.svg"),
+    ),
     (
         "icons/ruler.svg",
         include_bytes!("../../../assets/icons/ruler.svg"),

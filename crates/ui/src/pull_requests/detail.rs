@@ -204,6 +204,14 @@ pub(super) fn reason(error: &ProtocolError) -> String {
 }
 
 impl PullRequestView {
+    /// The open pull request's host as a person reads it.
+    pub(super) fn host_name(&self, cx: &App) -> String {
+        self.current
+            .as_ref()
+            .map(|(_, key)| super::host_name(self.store.read(cx), &key.host))
+            .unwrap_or_default()
+    }
+
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
@@ -1345,6 +1353,7 @@ impl PullRequestView {
         Some(row_menu(
             key.clone(),
             self.url(cx).unwrap_or_default(),
+            self.host_name(cx),
             link.as_ref(),
             watchable,
             move |_| offer.clone(),
@@ -1390,7 +1399,10 @@ impl PullRequestView {
                         .small()
                         .compact()
                         .icon(IconName::ExternalLink)
-                        .tooltip(crate::tr!("pull_requests.open_on_github"))
+                        .tooltip(crate::tr!(
+                            "pull_requests.open_on_host",
+                            host_name = self.host_name(cx)
+                        ))
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
             })
@@ -1805,7 +1817,10 @@ impl PullRequestView {
                             Button::new("pr-unavailable-open")
                                 .ghost()
                                 .small()
-                                .label(crate::tr!("pull_requests.open_on_github"))
+                                .label(crate::tr!(
+                                    "pull_requests.open_on_host",
+                                    host_name = self.host_name(cx)
+                                ))
                                 .on_click(move |_, _, cx| cx.open_url(&url))
                         })),
                 )
