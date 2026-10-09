@@ -305,7 +305,10 @@ mod tests {
             ("192.168.1.20:47420", None),
             ("192.168.1", None),
             ("studio.local", None),
-            (" 192.168.1.20 ", Some(Some("192.168.1.20".parse().unwrap()))),
+            (
+                " 192.168.1.20 ",
+                Some(Some("192.168.1.20".parse().unwrap())),
+            ),
             ("fd00::2", Some(Some("fd00::2".parse().unwrap()))),
         ] {
             type_into(&form, |form| &form.address, typed, cx);
