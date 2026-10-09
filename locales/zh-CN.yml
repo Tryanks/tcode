@@ -1568,6 +1568,7 @@ pull_requests:
     back: "拉取请求"
     back_tooltip: "返回拉取请求列表"
     refresh: "刷新 · %{ago}更新"
+    refresh_unloaded: "刷新"
     refreshing: "正在刷新拉取请求"
     updated: "%{ago}更新"
     merging_into: "将 %{head} 合并到 %{base}"

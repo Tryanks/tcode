@@ -1105,20 +1105,18 @@ impl PullRequestView {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let loaded = self
-            .page()
-            .map(|page| {
-                [page.files.loaded_at, page.conversation.loaded_at]
-                    .into_iter()
-                    .filter(|at| *at > 0)
-                    .min()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
-        let tooltip = if refreshing {
-            crate::tr!("pull_requests.detail.refreshing").into_owned()
-        } else {
-            crate::tr!("pull_requests.detail.refresh", ago = ago(loaded)).into_owned()
+        let loaded = self.page().and_then(|page| {
+            [page.files.loaded_at, page.conversation.loaded_at]
+                .into_iter()
+                .filter(|at| *at > 0)
+                .min()
+        });
+        let tooltip = match (refreshing, loaded) {
+            (true, _) => crate::tr!("pull_requests.detail.refreshing").into_owned(),
+            (false, Some(loaded)) => {
+                crate::tr!("pull_requests.detail.refresh", ago = ago(loaded)).into_owned()
+            }
+            (false, None) => crate::tr!("pull_requests.detail.refresh_unloaded").into_owned(),
         };
         if refreshing {
             return div()

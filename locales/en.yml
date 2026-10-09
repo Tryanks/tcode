@@ -1575,6 +1575,7 @@ pull_requests:
     back: "Pull requests"
     back_tooltip: "Back to pull requests"
     refresh: "Refresh · updated %{ago}"
+    refresh_unloaded: "Refresh"
     refreshing: "Refreshing pull request"
     updated: "updated %{ago}"
     merging_into: "Merging %{head} into %{base}"
