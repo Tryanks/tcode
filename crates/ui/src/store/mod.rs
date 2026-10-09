@@ -225,6 +225,8 @@ pub struct WorkspaceStore {
     /// One-shot turn navigation requested by a cross-session content search.
     pending_chat_turn: Option<(String, usize)>,
     native_rewind_prefills: HashMap<String, String>,
+    /// Text a pull request action put into a thread's composer for the user to edit and send.
+    composer_appends: HashMap<String, String>,
     fallback_blocks: HashMap<String, FallbackBlock>,
     fallback_reviews: HashMap<String, FallbackReview>,
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
@@ -423,6 +425,7 @@ impl WorkspaceStore {
             active_destination: None,
             pending_chat_turn: None,
             native_rewind_prefills: HashMap::new(),
+            composer_appends: HashMap::new(),
             fallback_blocks: HashMap::new(),
             fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
@@ -3261,6 +3264,25 @@ impl WorkspaceStore {
             &self.settings_replica,
             &self.providers_replica,
         )
+    }
+
+    /// Puts `text` into the thread's composer after whatever is typed there; nothing is sent.
+    pub fn append_to_composer(&mut self, session_id: String, text: String, cx: &mut Context<Self>) {
+        let pending = self.composer_appends.entry(session_id).or_default();
+        if !pending.is_empty() {
+            pending.push_str("\n\n");
+        }
+        pending.push_str(&text);
+        cx.emit(StoreChange {
+            topic: TopicKind::SessionStatus,
+        });
+        cx.notify();
+    }
+
+    /// Consume the active session's text from [`Self::append_to_composer`].
+    pub fn take_composer_append(&mut self) -> Option<String> {
+        let active_id = self.session_status_replica.as_ref()?.session_id.clone();
+        self.composer_appends.remove(&active_id)
     }
 
     /// Consume the active session's prefill delivered by `NativeRewindPrefill`.

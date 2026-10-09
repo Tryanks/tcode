@@ -34,6 +34,7 @@ mod compose;
 mod conversation;
 mod detail;
 mod files;
+mod lifecycle;
 mod meta;
 mod review;
 
@@ -495,7 +496,8 @@ fn change_link<T: 'static>(
     .detach();
 }
 
-/// The row's menu: Open on GitHub, Copy link, the watch, and the link condition.
+/// The row's menu: Open on GitHub, Copy link, the watch, what can become of the pull request,
+/// and the link condition.
 type RowMenu = std::rc::Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 
 fn row_menu(
@@ -503,6 +505,7 @@ fn row_menu(
     url: String,
     link: Option<&ThreadPullRequestLink>,
     watchable: bool,
+    offer: Option<lifecycle::Offer>,
 ) -> RowMenu {
     let visible = link.is_some_and(|link| link.visible());
     let watched = link.is_some_and(|link| link.visible() && link.watch.is_some());
@@ -543,6 +546,7 @@ fn row_menu(
                     }),
                 )
             })
+            .when_some(offer.as_ref(), |menu, offer| offer.menu(menu))
             .separator()
             .menu(
                 crate::tr!(if action.linking {
@@ -656,6 +660,39 @@ impl PullRequestsPanel {
     }
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
         change_link(&self.store, action, window, cx);
+    }
+    /// A list row offers what its link shows; the host reads the rest before it writes.
+    fn offer(&self, key: &PullRequestKey, cx: &App) -> Option<lifecycle::Offer> {
+        let store = self.store.read(cx);
+        if store
+            .session_status()
+            .is_none_or(|status| status.conversation_read_only)
+        {
+            return None;
+        }
+        let session = store.active_session_id()?;
+        lifecycle::Offer::new(key, store.pull_requests(&session), None, None, None)
+    }
+    fn run_lifecycle(
+        &mut self,
+        action: &lifecycle::RunLifecycle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.store.read(cx).active_session_id() else {
+            return;
+        };
+        if let Some(target) = lifecycle::Target::new(
+            &self.store,
+            &self.window_state,
+            &session,
+            &action.key,
+            None,
+            None,
+            cx,
+        ) {
+            target.run(action.kind, window, cx);
+        }
     }
     fn row(&self, row: PullRequestRow<'_>, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let PullRequestRow {
@@ -775,7 +812,13 @@ impl PullRequestsPanel {
                 .into_any_element()
         };
         let detail = detail.join(" · ");
-        let menu = row_menu(key.clone(), url.clone(), link, watchable);
+        let menu = row_menu(
+            key.clone(),
+            url.clone(),
+            link,
+            watchable,
+            self.offer(&key, cx),
+        );
         let mut signals = h_flex().gap_1().flex_none().items_center();
         // The eye leads while the pull request is open or not yet read; the host ends the watch
         // once it merges or closes.
@@ -1330,6 +1373,7 @@ impl Render for PullRequestsPanel {
                 .size_full()
                 .on_action(cx.listener(Self::change_link))
                 .on_action(cx.listener(Self::change_watch))
+                .on_action(cx.listener(Self::run_lifecycle))
                 .child(rows.p_2())
                 .child(empty)
                 .children(agent_tools)
@@ -1377,6 +1421,7 @@ impl Render for PullRequestsPanel {
                 .gap_3()
                 .on_action(cx.listener(Self::change_link))
                 .on_action(cx.listener(Self::change_watch))
+                .on_action(cx.listener(Self::run_lifecycle))
                 .child(rows)
                 .child(summary)
                 .children(agent_tools)
@@ -1390,6 +1435,7 @@ impl Render for PullRequestsPanel {
             .min_w_0()
             .on_action(cx.listener(Self::change_link))
             .on_action(cx.listener(Self::change_watch))
+            .on_action(cx.listener(Self::run_lifecycle))
             .child(
                 div()
                     .id("pr-scroll")

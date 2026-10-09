@@ -1,0 +1,1521 @@
+//! What can become of a pull request: the primary action, the ⋯ menu's lifecycle group, the
+//! confirmations, the merge dialog and the words each answer gets. The host reads the pull
+//! request fresh before every one of these writes and answers it; nothing here retries one.
+
+use std::rc::Rc;
+
+use gpui::{
+    Action, AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+};
+use gpui_base::{h_flex, v_flex};
+use serde::Deserialize;
+use tcode_core::pull_request::{
+    ChecksState, Mergeability, PullRequestKey, PullRequestMergeMethod, PullRequestStackRoute,
+    PullRequestState, ThreadPullRequestLink,
+};
+use tcode_protocol::{
+    Command, PullRequestAction, PullRequestActionResult, PullRequestActionState,
+    PullRequestMergeState, PullRequestRead, PullRequestReadResponse, PullRequestRejection,
+};
+
+use super::compose::{answer_of, rejection_reason};
+use crate::{
+    icon::{Icon, IconName},
+    material,
+    overlay::{DialogButtons, Notification, OverlayExt as _},
+    sizing::Sizable as _,
+    store::WorkspaceStore,
+    theme::ActiveTheme as _,
+    widgets::{
+        button::{Button, ButtonVariant, ButtonVariants as _},
+        checkbox::Checkbox,
+        menu::{OpenUrl, PopupMenu},
+        spinner::Spinner,
+    },
+    window_state::{Destination, WindowState},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(super) enum Lifecycle {
+    Ready,
+    Draft,
+    Close,
+    Reopen,
+    Revert,
+    UpdateBranch,
+    UpdateRebase,
+    Merge,
+    EnableAutoMerge,
+    DisableAutoMerge,
+    AskConflicts,
+    AskChecks,
+}
+
+/// A lifecycle item of a pull request's menu or primary action.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = tcode_pull_requests, no_json)]
+pub(super) struct RunLifecycle {
+    pub(super) key: PullRequestKey,
+    pub(super) kind: Lifecycle,
+}
+
+/// The method this client merges a pull request with, from the menu's checks.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = tcode_pull_requests, no_json)]
+pub(super) struct ChooseMergeMethod {
+    pub(super) key: PullRequestKey,
+    pub(super) method: PullRequestMergeMethod,
+}
+
+/// The one action a pull request's header offers first, or a status in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Primary {
+    ResolveConflicts,
+    Ready,
+    FixChecks,
+    AutoMergeOn(PullRequestMergeMethod),
+    Queued(Option<u32>),
+    MergeOnGitHub {
+        index: u32,
+    },
+    UpdateBranch,
+    EnableAutoMerge,
+    Merge {
+        method: PullRequestMergeMethod,
+        queue: bool,
+    },
+}
+
+/// What a pull request may meet, as the thread's link and the host's action state say.
+#[derive(Clone)]
+pub(super) struct Offer {
+    pub(super) key: PullRequestKey,
+    pub(super) url: String,
+    pub(super) state: PullRequestState,
+    pub(super) draft: bool,
+    pub(super) conflicting: bool,
+    pub(super) checks_failing: bool,
+    pub(super) checks_pending: bool,
+    pub(super) route: PullRequestStackRoute,
+    /// The host's action state; a list row has none until one of its items is chosen.
+    pub(super) action: Option<PullRequestActionState>,
+    /// The method a merge would use.
+    pub(super) method: Option<PullRequestMergeMethod>,
+}
+
+impl Offer {
+    /// `None` until the link or its stack says what state the pull request is in.
+    pub(super) fn new(
+        key: &PullRequestKey,
+        links: &[ThreadPullRequestLink],
+        action: Option<PullRequestActionState>,
+        chosen: Option<PullRequestMergeMethod>,
+        project_default: Option<PullRequestMergeMethod>,
+    ) -> Option<Self> {
+        let link = links.iter().find(|link| link.key == *key && link.visible());
+        let snapshot = link.and_then(|link| link.snapshot.as_ref());
+        let layer = links
+            .iter()
+            .filter(|link| link.visible())
+            .find_map(|link| match &link.stack {
+                tcode_core::pull_request::PullRequestStackState::Native(stack)
+                    if link.key.host == key.host && link.key.repository == key.repository =>
+                {
+                    stack
+                        .layers
+                        .iter()
+                        .find(|layer| layer.number == key.number)
+                        .cloned()
+                }
+                _ => None,
+            });
+        let state = snapshot
+            .map(|snapshot| snapshot.state)
+            .or(layer.as_ref().map(|layer| layer.state))?;
+        let url = link
+            .map(|link| link.url.clone())
+            .filter(|url| !url.is_empty())
+            .or(layer.map(|layer| layer.url))
+            .unwrap_or_default();
+        let method = action
+            .as_ref()
+            .and_then(|action| merge_method(&action.merge_methods, chosen, project_default));
+        Some(Self {
+            key: key.clone(),
+            url,
+            state,
+            draft: snapshot.is_some_and(|snapshot| snapshot.is_draft),
+            conflicting: snapshot.is_some_and(|s| s.mergeability == Mergeability::Conflicting)
+                || action
+                    .as_ref()
+                    .is_some_and(|action| action.merge_state == PullRequestMergeState::Dirty),
+            checks_failing: snapshot.is_some_and(|s| s.checks_state == Some(ChecksState::Failing))
+                || action
+                    .as_ref()
+                    .is_some_and(|action| !action.failing_checks.is_empty()),
+            checks_pending: snapshot.is_some_and(|s| s.checks_state == Some(ChecksState::Pending))
+                || action
+                    .as_ref()
+                    .is_some_and(|action| action.pending_checks > 0),
+            route: tcode_core::pull_request::stack_route(links, key),
+            action,
+            method,
+        })
+    }
+
+    /// The rank: conflicts, then ready for review, then failing checks, then what is already
+    /// under way, then the merge itself. A stack whose state is unknown offers no merge.
+    pub(super) fn primary(&self) -> Option<Primary> {
+        let action = self.action.as_ref()?;
+        if self.state != PullRequestState::Open {
+            return None;
+        }
+        if self.conflicting {
+            return Some(Primary::ResolveConflicts);
+        }
+        if self.draft {
+            return action.can_update.then_some(Primary::Ready);
+        }
+        if self.checks_failing {
+            return Some(Primary::FixChecks);
+        }
+        if let Some(method) = action.auto_merge {
+            return Some(Primary::AutoMergeOn(method));
+        }
+        if action.queued {
+            return Some(Primary::Queued(action.queue_position));
+        }
+        match self.route {
+            PullRequestStackRoute::Layer { index, .. } => {
+                return Some(Primary::MergeOnGitHub { index });
+            }
+            PullRequestStackRoute::Unknown => return None,
+            PullRequestStackRoute::Single => {}
+        }
+        if action.merge_state == PullRequestMergeState::Behind && action.can_update_branch {
+            return Some(Primary::UpdateBranch);
+        }
+        if !action.can_merge {
+            return None;
+        }
+        if self.checks_pending && action.auto_merge_allowed && !action.merge_queue {
+            return Some(Primary::EnableAutoMerge);
+        }
+        let mergeable = action.merge_queue
+            || matches!(
+                action.merge_state,
+                PullRequestMergeState::Clean
+                    | PullRequestMergeState::Unstable
+                    | PullRequestMergeState::HasHooks
+            );
+        Some(Primary::Merge {
+            method: self.method.filter(|_| mergeable)?,
+            queue: action.merge_queue,
+        })
+    }
+
+    fn item(&self, kind: Lifecycle) -> Box<dyn Action> {
+        Box::new(RunLifecycle {
+            key: self.key.clone(),
+            kind,
+        })
+    }
+
+    /// The menu's lifecycle group, added once to the row menu every pull request menu builds.
+    pub(super) fn menu(&self, menu: PopupMenu) -> PopupMenu {
+        let action = self.action.as_ref();
+        let may = |allowed: fn(&PullRequestActionState) -> bool| action.is_none_or(allowed);
+        let primary = self.primary();
+        let open = self.state == PullRequestState::Open;
+        let number = self.key.number.to_string();
+        let mut menu = menu.separator();
+        if open && may(|action| action.can_update) {
+            if !self.draft {
+                menu = menu.menu(
+                    crate::tr!("pull_requests.actions.draft").into_owned(),
+                    self.item(Lifecycle::Draft),
+                );
+            } else if primary != Some(Primary::Ready) {
+                menu = menu.menu(
+                    crate::tr!("pull_requests.actions.ready").into_owned(),
+                    self.item(Lifecycle::Ready),
+                );
+            }
+        }
+        if open && !self.draft && may(|action| action.can_merge) {
+            match self.route {
+                PullRequestStackRoute::Single => {
+                    if let Some(action) = action
+                        && action.behind_by.is_some_and(|behind| behind > 0)
+                        && action.can_update_branch
+                        && !self.conflicting
+                    {
+                        menu = menu
+                            .menu(
+                                crate::tr!("pull_requests.actions.update_branch").into_owned(),
+                                self.item(Lifecycle::UpdateBranch),
+                            )
+                            .menu(
+                                crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
+                                self.item(Lifecycle::UpdateRebase),
+                            );
+                    }
+                    if !matches!(primary, Some(Primary::Merge { .. }))
+                        && action.is_none_or(|action| !action.merge_methods.is_empty())
+                    {
+                        menu = menu.menu(
+                            crate::tr!("pull_requests.actions.merge_now").into_owned(),
+                            self.item(Lifecycle::Merge),
+                        );
+                    }
+                    if let Some(action) = action {
+                        if action.auto_merge.is_some() {
+                            menu = menu.menu(
+                                crate::tr!("pull_requests.actions.disable_auto_merge").into_owned(),
+                                self.item(Lifecycle::DisableAutoMerge),
+                            );
+                        } else if action.auto_merge_allowed
+                            && !action.merge_queue
+                            && primary != Some(Primary::EnableAutoMerge)
+                        {
+                            menu = menu.menu(
+                                crate::tr!("pull_requests.actions.enable_auto_merge_menu")
+                                    .into_owned(),
+                                self.item(Lifecycle::EnableAutoMerge),
+                            );
+                        }
+                        if action.merge_methods.len() >= 2 {
+                            menu = menu.label(
+                                crate::tr!("pull_requests.actions.merge_method").into_owned(),
+                            );
+                            for method in &action.merge_methods {
+                                menu = menu.menu_with_check(
+                                    method_label(*method),
+                                    self.method == Some(*method),
+                                    Box::new(ChooseMergeMethod {
+                                        key: self.key.clone(),
+                                        method: *method,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+                PullRequestStackRoute::Layer { index, .. } => {
+                    menu = menu.label(stack_reason(&number, index)).menu(
+                        crate::tr!("pull_requests.actions.merge_on_github").into_owned(),
+                        Box::new(OpenUrl(self.url.clone())),
+                    );
+                }
+                PullRequestStackRoute::Unknown => {
+                    menu = menu
+                        .menu_with_enable(
+                            crate::tr!("pull_requests.actions.merge_now").into_owned(),
+                            self.item(Lifecycle::Merge),
+                            false,
+                        )
+                        .label(
+                            crate::tr!("pull_requests.actions.stack_checking", number = number)
+                                .into_owned(),
+                        );
+                }
+            }
+        }
+        menu = menu.separator();
+        match self.state {
+            PullRequestState::Open if may(|action| action.can_update) => menu.menu(
+                crate::tr!("pull_requests.actions.close_menu").into_owned(),
+                self.item(Lifecycle::Close),
+            ),
+            PullRequestState::Closed if may(|action| action.can_update) => menu.menu(
+                crate::tr!("pull_requests.actions.reopen").into_owned(),
+                self.item(Lifecycle::Reopen),
+            ),
+            PullRequestState::Merged if may(|action| action.can_merge) => menu.menu(
+                crate::tr!("pull_requests.actions.revert_menu").into_owned(),
+                self.item(Lifecycle::Revert),
+            ),
+            _ => menu,
+        }
+    }
+}
+
+/// The client's choice, then the project's default, then the first the repository enables.
+fn merge_method(
+    enabled: &[PullRequestMergeMethod],
+    chosen: Option<PullRequestMergeMethod>,
+    project_default: Option<PullRequestMergeMethod>,
+) -> Option<PullRequestMergeMethod> {
+    [chosen, project_default]
+        .into_iter()
+        .flatten()
+        .find(|method| enabled.contains(method))
+        .or_else(|| enabled.first().copied())
+}
+
+pub(super) fn method_label(method: PullRequestMergeMethod) -> String {
+    crate::tr!(match method {
+        PullRequestMergeMethod::Merge => "pull_requests.merge.method_merge",
+        PullRequestMergeMethod::Squash => "pull_requests.merge.method_squash",
+        PullRequestMergeMethod::Rebase => "pull_requests.merge.method_rebase",
+    })
+    .into_owned()
+}
+
+fn segment_label(method: PullRequestMergeMethod) -> String {
+    crate::tr!(match method {
+        PullRequestMergeMethod::Merge => "pull_requests.merge.segment_merge",
+        PullRequestMergeMethod::Squash => "pull_requests.merge.segment_squash",
+        PullRequestMergeMethod::Rebase => "pull_requests.merge.segment_rebase",
+    })
+    .into_owned()
+}
+
+pub(super) fn stack_reason(number: &str, index: u32) -> String {
+    crate::tr!(
+        "pull_requests.actions.stack_reason",
+        number = number.to_owned(),
+        index = index.to_string()
+    )
+    .into_owned()
+}
+
+fn short(head: &str) -> String {
+    head.chars().take(7).collect()
+}
+
+type Answered = Rc<dyn Fn(&PullRequestActionResult, &mut Window, &mut App)>;
+
+/// Where a lifecycle action goes and who hears its answer.
+#[derive(Clone)]
+pub(super) struct Target {
+    pub(super) store: Entity<WorkspaceStore>,
+    pub(super) window_state: Entity<WindowState>,
+    pub(super) session: String,
+    pub(super) offer: Offer,
+    pub(super) title: String,
+    pub(super) head_branch: String,
+    pub(super) base_branch: String,
+    /// Told when the write is sent.
+    pub(super) started: Rc<dyn Fn(&mut App)>,
+    /// Told every answer, after its toast.
+    pub(super) done: Answered,
+}
+
+impl Target {
+    /// The pull request as the thread's links show it.
+    pub(super) fn new(
+        store: &Entity<WorkspaceStore>,
+        window_state: &Entity<WindowState>,
+        session: &str,
+        key: &PullRequestKey,
+        action: Option<PullRequestActionState>,
+        chosen: Option<PullRequestMergeMethod>,
+        cx: &App,
+    ) -> Option<Self> {
+        let workspace = store.read(cx);
+        let links = workspace.pull_requests(session);
+        let project_default = workspace
+            .thread_meta(session)
+            .and_then(|meta| meta.project_id.clone())
+            .and_then(|project| {
+                workspace
+                    .settings()
+                    .project_merge_methods
+                    .get(&project)
+                    .copied()
+            });
+        let offer = Offer::new(key, links, action, chosen, project_default)?;
+        let snapshot = links
+            .iter()
+            .find(|link| link.key == *key)
+            .and_then(|link| link.snapshot.clone());
+        Some(Self {
+            store: store.clone(),
+            window_state: window_state.clone(),
+            session: session.to_owned(),
+            offer,
+            title: snapshot
+                .as_ref()
+                .map(|s| s.title.clone())
+                .unwrap_or_default(),
+            head_branch: snapshot
+                .as_ref()
+                .map(|s| s.head_branch.clone())
+                .unwrap_or_default(),
+            base_branch: snapshot.map(|s| s.base_branch).unwrap_or_default(),
+            started: Rc::new(|_| {}),
+            done: Rc::new(|_, _, _| {}),
+        })
+    }
+
+    fn number(&self) -> String {
+        self.offer.key.number.to_string()
+    }
+
+    /// Writes at once, confirms first, opens the merge dialog, or fills the composer.
+    pub(super) fn run(self, kind: Lifecycle, window: &mut Window, cx: &mut App) {
+        let number = self.number();
+        match kind {
+            Lifecycle::Ready => self.send(PullRequestAction::ReadyForReview, kind, window, cx),
+            Lifecycle::Draft => self.send(PullRequestAction::ConvertToDraft, kind, window, cx),
+            Lifecycle::Reopen => self.send(PullRequestAction::Reopen, kind, window, cx),
+            Lifecycle::DisableAutoMerge => {
+                self.send(PullRequestAction::DisableAutoMerge, kind, window, cx)
+            }
+            Lifecycle::UpdateBranch => {
+                let Some(head) = self.offer.action.as_ref().map(|a| a.head.clone()) else {
+                    return;
+                };
+                self.send(
+                    PullRequestAction::UpdateBranch {
+                        head,
+                        rebase: false,
+                    },
+                    kind,
+                    window,
+                    cx,
+                )
+            }
+            Lifecycle::Close => self.confirm(
+                crate::tr!("pull_requests.actions.close_title", number = number.clone()),
+                crate::tr!("pull_requests.actions.close_desc", number = number),
+                crate::tr!("pull_requests.actions.close_confirm"),
+                ButtonVariant::Danger,
+                PullRequestAction::Close,
+                kind,
+                window,
+                cx,
+            ),
+            Lifecycle::Revert => self.confirm(
+                crate::tr!(
+                    "pull_requests.actions.revert_title",
+                    number = number.clone()
+                ),
+                crate::tr!("pull_requests.actions.revert_desc", number = number),
+                crate::tr!("pull_requests.actions.revert_confirm"),
+                ButtonVariant::Primary,
+                PullRequestAction::Revert,
+                kind,
+                window,
+                cx,
+            ),
+            Lifecycle::UpdateRebase => {
+                let Some(head) = self.offer.action.as_ref().map(|a| a.head.clone()) else {
+                    return;
+                };
+                let title = crate::tr!(
+                    "pull_requests.actions.rebase_title",
+                    head = self.head_branch.clone(),
+                    base = self.base_branch.clone()
+                );
+                let description = crate::tr!(
+                    "pull_requests.actions.rebase_desc",
+                    head = self.head_branch.clone()
+                );
+                self.confirm(
+                    title,
+                    description,
+                    crate::tr!("pull_requests.actions.update_rebase"),
+                    ButtonVariant::Primary,
+                    PullRequestAction::UpdateBranch { head, rebase: true },
+                    kind,
+                    window,
+                    cx,
+                )
+            }
+            Lifecycle::Merge => open_merge_dialog(self, false, window, cx),
+            Lifecycle::EnableAutoMerge => open_merge_dialog(self, true, window, cx),
+            Lifecycle::AskConflicts | Lifecycle::AskChecks => self.ask(kind, window, cx),
+        }
+    }
+
+    /// Puts a message for the agent into this thread's composer; the user reads, edits and sends
+    /// it, or not.
+    fn ask(self, kind: Lifecycle, window: &mut Window, cx: &mut App) {
+        let number = self.number();
+        let text = if kind == Lifecycle::AskConflicts {
+            crate::tr!(
+                "pull_requests.actions.ask_conflicts",
+                number = number,
+                head = self.head_branch.clone(),
+                base = self.base_branch.clone()
+            )
+            .into_owned()
+        } else {
+            let failing = self
+                .offer
+                .action
+                .as_ref()
+                .map(|action| action.failing_checks.clone())
+                .unwrap_or_default();
+            if failing.is_empty() {
+                crate::tr!("pull_requests.actions.ask_checks_unnamed", number = number).into_owned()
+            } else {
+                let mut names = failing
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if failing.len() > 5 {
+                    names.push(' ');
+                    names.push_str(&crate::tr!(
+                        "pull_requests.actions.and_more",
+                        count = (failing.len() - 5).to_string()
+                    ));
+                }
+                crate::tr!(
+                    "pull_requests.actions.ask_checks",
+                    number = number,
+                    names = names
+                )
+                .into_owned()
+            }
+        };
+        let session = self.session.clone();
+        self.store
+            .update(cx, |store, cx| store.append_to_composer(session, text, cx));
+        // On a phone the composer is on the thread page under this one.
+        if self.window_state.read(cx).destination() == Destination::PullRequest {
+            self.window_state.update(cx, |state, cx| state.back(cx));
+        }
+        let _ = window;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn confirm(
+        self,
+        title: std::borrow::Cow<'static, str>,
+        description: std::borrow::Cow<'static, str>,
+        confirm: std::borrow::Cow<'static, str>,
+        variant: ButtonVariant,
+        action: PullRequestAction,
+        kind: Lifecycle,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (title, description, confirm) = (
+            title.into_owned(),
+            description.into_owned(),
+            confirm.into_owned(),
+        );
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let target = self.clone();
+            let action = action.clone();
+            alert
+                .bg(cx.theme().popover)
+                .title(title.clone())
+                .description(description.clone())
+                .button_props(
+                    DialogButtons::default()
+                        .ok_variant(variant)
+                        .ok_text(confirm.clone())
+                        .cancel_text(crate::tr!("pull_requests.actions.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, window, cx| {
+                    target.clone().send(action.clone(), kind, window, cx);
+                    true
+                })
+        });
+    }
+
+    /// One write, its toast, then whoever asked.
+    fn send(self, action: PullRequestAction, kind: Lifecycle, window: &mut Window, cx: &mut App) {
+        let task = self.command(action, cx);
+        window
+            .spawn(cx, async move |cx| {
+                let result = task.await;
+                let _ = cx.update(|window, cx| self.answered(kind, &result, window, cx));
+            })
+            .detach();
+    }
+
+    fn command(
+        &self,
+        action: PullRequestAction,
+        cx: &mut App,
+    ) -> gpui::Task<PullRequestActionResult> {
+        (self.started)(cx);
+        let task = self.store.update(cx, |store, cx| {
+            store.command(
+                Command::RunPullRequestAction {
+                    session_id: self.session.clone(),
+                    key: self.offer.key.clone(),
+                    action,
+                },
+                cx,
+            )
+        });
+        cx.spawn(async move |_| match answer_of(task.await) {
+            Ok(result) => result,
+            Err(error) => PullRequestActionResult::Rejected(PullRequestRejection::Refused {
+                messages: vec![super::detail::reason(&error)],
+            }),
+        })
+    }
+
+    fn answered(
+        &self,
+        kind: Lifecycle,
+        result: &PullRequestActionResult,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(note) = self.toast(kind, result) {
+            let key = &self.offer.key;
+            window.push_notification(
+                note.id1::<LifecycleWrite>(SharedString::from(format!(
+                    "{}/{}#{}",
+                    key.host, key.repository, key.number
+                ))),
+                cx,
+            );
+        }
+        (self.done)(result, window, cx);
+    }
+
+    /// The words of an answer; a success goes by itself, anything else stays until it is read.
+    fn toast(&self, kind: Lifecycle, result: &PullRequestActionResult) -> Option<Notification> {
+        let number = self.number();
+        let (head, base) = (self.head_branch.clone(), self.base_branch.clone());
+        let merging = matches!(kind, Lifecycle::Merge | Lifecycle::EnableAutoMerge);
+        let updating = matches!(kind, Lifecycle::UpdateBranch | Lifecycle::UpdateRebase);
+        let open_on_github = |note: Notification| {
+            let url = self.offer.url.clone();
+            note.action(move |_, _, _| {
+                let url = url.clone();
+                Button::new("pr-result-open")
+                    .ghost()
+                    .xsmall()
+                    .label(crate::tr!("pull_requests.open_on_github"))
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            })
+        };
+        let note = match result {
+            PullRequestActionResult::Applied => match kind {
+                Lifecycle::Ready => Notification::success(
+                    crate::tr!("pull_requests.result.ready", number = number).into_owned(),
+                ),
+                Lifecycle::Draft => Notification::success(
+                    crate::tr!("pull_requests.result.draft", number = number).into_owned(),
+                ),
+                Lifecycle::Close => Notification::info(
+                    crate::tr!("pull_requests.result.closed", number = number).into_owned(),
+                ),
+                Lifecycle::Reopen => Notification::success(
+                    crate::tr!("pull_requests.result.reopened", number = number).into_owned(),
+                ),
+                Lifecycle::DisableAutoMerge => Notification::info(
+                    crate::tr!("pull_requests.result.auto_merge_off", number = number).into_owned(),
+                ),
+                Lifecycle::UpdateBranch | Lifecycle::UpdateRebase => Notification::success(
+                    crate::tr!("pull_requests.result.updated_body").into_owned(),
+                )
+                .title(crate::tr!(
+                    "pull_requests.result.updated",
+                    head = head,
+                    base = base
+                )),
+                _ => Notification::success(
+                    crate::tr!("pull_requests.result.merged", number = number).into_owned(),
+                ),
+            },
+            PullRequestActionResult::UpToDate => Notification::info(
+                crate::tr!("pull_requests.result.up_to_date", head = head, base = base)
+                    .into_owned(),
+            ),
+            PullRequestActionResult::Queued { .. } => {
+                Notification::info(crate::tr!("pull_requests.result.queued_body").into_owned())
+                    .title(crate::tr!("pull_requests.result.queued", number = number))
+            }
+            PullRequestActionResult::AutoMergeEnabled { method } => Notification::info(
+                crate::tr!(
+                    "pull_requests.result.auto_merge_on_body",
+                    method = method_label(*method)
+                )
+                .into_owned(),
+            )
+            .title(crate::tr!(
+                "pull_requests.result.auto_merge_on",
+                number = number
+            )),
+            PullRequestActionResult::Opened { number: new, url } => {
+                let url = url.clone();
+                Notification::success(
+                    crate::tr!(
+                        "pull_requests.result.reverted",
+                        new = new.to_string(),
+                        number = number
+                    )
+                    .into_owned(),
+                )
+                .action(move |_, _, _| {
+                    let url = url.clone();
+                    Button::new("pr-result-open")
+                        .ghost()
+                        .xsmall()
+                        .label(crate::tr!("pull_requests.open_on_github"))
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                })
+            }
+            PullRequestActionResult::Rejected(PullRequestRejection::StaleHead { head: actual })
+                if merging =>
+            {
+                Notification::error(
+                    crate::tr!(
+                        "pull_requests.result.stale_body",
+                        expected = self
+                            .offer
+                            .action
+                            .as_ref()
+                            .map(|action| short(&action.head))
+                            .unwrap_or_default(),
+                        actual = short(actual)
+                    )
+                    .into_owned(),
+                )
+                .title(crate::tr!(
+                    "pull_requests.result.not_merged_stale",
+                    number = number
+                ))
+            }
+            PullRequestActionResult::Rejected(rejection) => {
+                let reason = rejection_reason(rejection);
+                if merging {
+                    return Some(Notification::error(reason).title(crate::tr!(
+                        "pull_requests.result.merge_failed",
+                        number = number
+                    )));
+                }
+                Notification::error(if updating {
+                    crate::tr!(
+                        "pull_requests.result.update_failed",
+                        head = head,
+                        reason = reason
+                    )
+                    .into_owned()
+                } else {
+                    crate::tr!(
+                        "pull_requests.result.action_failed",
+                        verb = crate::tr!(match kind {
+                            Lifecycle::Ready => "pull_requests.actions.verb_ready",
+                            Lifecycle::Draft => "pull_requests.actions.verb_draft",
+                            Lifecycle::Close => "pull_requests.actions.verb_close",
+                            Lifecycle::Reopen => "pull_requests.actions.verb_reopen",
+                            Lifecycle::Revert => "pull_requests.actions.verb_revert",
+                            _ => "pull_requests.actions.verb_disable_auto_merge",
+                        })
+                        .into_owned(),
+                        number = number,
+                        reason = reason
+                    )
+                    .into_owned()
+                })
+            }
+            PullRequestActionResult::Uncertain => {
+                let message = crate::tr!(
+                    "pull_requests.result.uncertain_body",
+                    message = crate::tr!("pull_requests.result.connection_lost").into_owned()
+                )
+                .into_owned();
+                let title = if merging {
+                    crate::tr!("pull_requests.result.uncertain_merge", number = number).into_owned()
+                } else {
+                    crate::tr!(
+                        "pull_requests.result.uncertain",
+                        action = crate::tr!(match kind {
+                            Lifecycle::Ready => "pull_requests.result.action_ready",
+                            Lifecycle::Draft => "pull_requests.result.action_draft",
+                            Lifecycle::Close => "pull_requests.result.action_close",
+                            Lifecycle::Reopen => "pull_requests.result.action_reopen",
+                            Lifecycle::Revert => "pull_requests.result.action_revert",
+                            Lifecycle::UpdateBranch | Lifecycle::UpdateRebase => {
+                                "pull_requests.result.action_update"
+                            }
+                            _ => "pull_requests.result.action_auto_merge",
+                        })
+                        .into_owned(),
+                        number = number
+                    )
+                    .into_owned()
+                };
+                open_on_github(Notification::warning(message).title(title))
+            }
+            PullRequestActionResult::Partial { .. } => return None,
+        };
+        let settled = matches!(
+            result,
+            PullRequestActionResult::Applied
+                | PullRequestActionResult::UpToDate
+                | PullRequestActionResult::Queued { .. }
+                | PullRequestActionResult::AutoMergeEnabled { .. }
+                | PullRequestActionResult::Opened { .. }
+        );
+        Some(note.autohide(settled))
+    }
+}
+
+/// One toast slot per pull request: a newer answer replaces the older one.
+struct LifecycleWrite;
+
+/// The merge confirmation: what GitHub holds now, the method, and what the merge would meet.
+struct MergeDialog {
+    target: Target,
+    auto: bool,
+    state: Option<Result<PullRequestActionState, String>>,
+    method: Option<PullRequestMergeMethod>,
+    project: Option<(String, String)>,
+    project_default: Option<PullRequestMergeMethod>,
+    make_default: bool,
+    remove_credits: bool,
+    sending: bool,
+}
+
+impl MergeDialog {
+    /// The merge reads the pull request fresh; the dialog shows what it read.
+    fn load(&mut self, cx: &mut Context<Self>) {
+        self.state = None;
+        let task = self.target.store.update(cx, |store, cx| {
+            store.read_pull_request(
+                self.target.session.clone(),
+                self.target.offer.key.clone(),
+                PullRequestRead::ActionState,
+                cx,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.state = Some(match result {
+                    Ok((PullRequestReadResponse::ActionState(state), _)) => {
+                        this.method = merge_method(
+                            &state.merge_methods,
+                            this.target.offer.method,
+                            this.project_default,
+                        );
+                        Ok(state)
+                    }
+                    Ok(_) => Err(String::new()),
+                    Err(error) => Err(super::detail::reason(&error)),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(Ok(state)), Some(method)) = (&self.state, self.method) else {
+            return;
+        };
+        if self.sending {
+            return;
+        }
+        self.sending = true;
+        cx.notify();
+        if self.make_default
+            && let Some((project, _)) = self.project.clone()
+        {
+            self.target.store.update(cx, |store, _| {
+                store.set_project_merge_method(project, method)
+            });
+        }
+        let action = PullRequestAction::Merge {
+            head: state.head.clone(),
+            method,
+            auto: self.auto,
+            remove_credits: self.credits_shown() && self.remove_credits,
+        };
+        let mut target = self.target.clone();
+        target.offer.action = Some(state.clone());
+        let kind = if self.auto {
+            Lifecycle::EnableAutoMerge
+        } else {
+            Lifecycle::Merge
+        };
+        let task = target.command(action, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.sending = false;
+                window.close_dialog(cx);
+                target.answered(kind, &result, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// GitHub writes a merge queue's message itself, and a rebase keeps each commit's.
+    fn credits_shown(&self) -> bool {
+        matches!(&self.state, Some(Ok(state)) if !state.merge_queue)
+            && self.method != Some(PullRequestMergeMethod::Rebase)
+    }
+
+    fn confirm_label(&self) -> String {
+        let state = self.state.as_ref().and_then(|state| state.as_ref().ok());
+        if self.sending {
+            return crate::tr!(if self.auto {
+                "pull_requests.merge.enabling"
+            } else {
+                "pull_requests.merge.merging"
+            })
+            .into_owned();
+        }
+        if state.is_some_and(|state| state.merge_queue) {
+            return crate::tr!("pull_requests.merge.add_to_queue").into_owned();
+        }
+        if self.auto {
+            return crate::tr!("pull_requests.actions.enable_auto_merge").into_owned();
+        }
+        self.method.map(method_label).unwrap_or_default()
+    }
+
+    fn fact(&self, label: &str, value: impl IntoElement, cx: &App) -> AnyElement {
+        h_flex()
+            .gap_2()
+            .items_start()
+            .child(
+                div()
+                    .w(px(104.))
+                    .flex_none()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(crate::tr!(label).into_owned()),
+            )
+            .child(div().flex_1().min_w_0().text_size(px(13.)).child(value))
+            .into_any_element()
+    }
+}
+
+impl Render for MergeDialog {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let target = &self.target;
+        let key = &target.offer.key;
+        let number = key.number.to_string();
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.theme().muted_foreground;
+        let state = self.state.as_ref().and_then(|state| state.as_ref().ok());
+        let head = state.map(|state| state.head.clone());
+        let facts = v_flex()
+            .gap_1p5()
+            .child(self.fact("pull_requests.merge.host", key.host.clone(), cx))
+            .child(
+                self.fact(
+                    "pull_requests.merge.repository",
+                    div()
+                        .font_family(mono.clone())
+                        .child(key.repository.clone()),
+                    cx,
+                ),
+            )
+            .child(
+                self.fact(
+                    "pull_requests.merge.pull_request",
+                    div()
+                        .truncate()
+                        .child(format!("#{number} {}", target.title)),
+                    cx,
+                ),
+            )
+            .child(
+                self.fact(
+                    "pull_requests.merge.into",
+                    div()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .child(format!("{} ← {}", target.base_branch, target.head_branch)),
+                    cx,
+                ),
+            )
+            .child(
+                self.fact(
+                    "pull_requests.merge.head",
+                    match &head {
+                        Some(head) => div()
+                            .font_family(mono.clone())
+                            .child(short(head))
+                            .into_any_element(),
+                        None => Spinner::new().small().into_any_element(),
+                    },
+                    cx,
+                ),
+            );
+        let view = cx.entity();
+        let method = match (state, self.method) {
+            (Some(state), Some(chosen)) if state.merge_methods.len() >= 2 => {
+                let segments = state.merge_methods.iter().map(|method| {
+                    let method = *method;
+                    let view = view.clone();
+                    material::segment(
+                        SharedString::from(format!("pr-merge-method-{method:?}")),
+                        segment_label(method),
+                        chosen == method,
+                        cx,
+                    )
+                    .on_change(move |_, _, _, cx| {
+                        view.update(cx, |dialog, cx| {
+                            dialog.method = Some(method);
+                            cx.notify();
+                        })
+                    })
+                });
+                material::segmented_track("pr-merge-method", segments, cx).into_any_element()
+            }
+            (Some(_), Some(chosen)) => div()
+                .text_size(px(13.))
+                .child(method_label(chosen))
+                .into_any_element(),
+            (Some(_), None) => div().into_any_element(),
+            (None, _) => Spinner::new().small().into_any_element(),
+        };
+        let default_box = self
+            .method
+            .filter(|method| state.is_some() && Some(*method) != self.project_default)
+            .zip(self.project.clone())
+            .map(|(method, (_, project))| {
+                let view = view.clone();
+                Checkbox::new("pr-merge-default")
+                    .label(
+                        crate::tr!(
+                            "pull_requests.merge.make_default",
+                            method = method_label(method),
+                            project = project
+                        )
+                        .into_owned(),
+                    )
+                    .checked(self.make_default)
+                    .disabled(self.sending)
+                    .on_click(move |checked, _, cx| {
+                        let checked = *checked;
+                        view.update(cx, |dialog, cx| {
+                            dialog.make_default = checked;
+                            cx.notify();
+                        })
+                    })
+            });
+        let credits =
+            self.credits_shown().then(|| {
+                let view = view.clone();
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        Checkbox::new("pr-merge-credits")
+                            .label(crate::tr!("pull_requests.merge.remove_credits").into_owned())
+                            .checked(self.remove_credits)
+                            .disabled(self.sending)
+                            .on_click(move |checked, _, cx| {
+                                let checked = *checked;
+                                view.update(cx, |dialog, cx| {
+                                    dialog.remove_credits = checked;
+                                    cx.notify();
+                                })
+                            }),
+                    )
+                    .child(div().text_size(px(11.)).text_color(muted).child(
+                        crate::tr!("pull_requests.merge.remove_credits_caption").into_owned(),
+                    ))
+            });
+        let note = |icon: IconName, color, text: String| {
+            h_flex()
+                .gap_1p5()
+                .items_start()
+                .text_size(px(12.))
+                .child(
+                    div()
+                        .pt(px(2.))
+                        .child(Icon::new(icon).size(px(12.)).text_color(color)),
+                )
+                .child(div().flex_1().min_w_0().child(text))
+        };
+        let mut notes = Vec::new();
+        if let Some(state) = state {
+            if state.merge_queue {
+                notes.push(note(
+                    IconName::ListOrdered,
+                    cx.theme().info,
+                    crate::tr!("pull_requests.merge.queue_note", number = number.clone())
+                        .into_owned(),
+                ));
+            } else if self.auto
+                && let Some(method) = self.method
+            {
+                notes.push(note(
+                    IconName::GitMerge,
+                    cx.theme().info,
+                    crate::tr!(
+                        "pull_requests.merge.auto_note",
+                        number = number.clone(),
+                        method = method_label(method)
+                    )
+                    .into_owned(),
+                ));
+            }
+            let failing = state.failing_checks.len();
+            if failing > 0 {
+                notes.push(note(
+                    IconName::CircleX,
+                    cx.theme().danger,
+                    if failing == 1 {
+                        crate::tr!("pull_requests.merge.checks_failing_one").into_owned()
+                    } else {
+                        crate::tr!(
+                            "pull_requests.merge.checks_failing",
+                            failed = failing.to_string()
+                        )
+                        .into_owned()
+                    },
+                ));
+            }
+            if state.pending_checks > 0 {
+                notes.push(note(
+                    IconName::CircleDashed,
+                    cx.theme().warning,
+                    if state.pending_checks == 1 {
+                        crate::tr!("pull_requests.merge.checks_running_one").into_owned()
+                    } else {
+                        crate::tr!(
+                            "pull_requests.merge.checks_running",
+                            running = state.pending_checks.to_string()
+                        )
+                        .into_owned()
+                    },
+                ));
+            }
+            if state.merge_state == PullRequestMergeState::Blocked {
+                notes.push(note(
+                    IconName::MessageSquareWarning,
+                    cx.theme().danger,
+                    crate::tr!("pull_requests.actions.blocked").into_owned(),
+                ));
+            }
+            if let Some(behind) = state.behind_by.filter(|behind| *behind > 0) {
+                notes.push(note(
+                    IconName::ArrowUpDown,
+                    muted,
+                    crate::tr!(
+                        "pull_requests.merge.behind",
+                        count = behind.to_string(),
+                        base = target.base_branch.clone()
+                    )
+                    .into_owned(),
+                ));
+            }
+        }
+        let failure = match &self.state {
+            Some(Err(reason)) => Some(
+                v_flex()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().danger)
+                    .child(
+                        crate::tr!("pull_requests.merge.load_failed", number = number).into_owned(),
+                    )
+                    .when(!reason.is_empty(), |failure| failure.child(reason.clone()))
+                    .child(
+                        Button::new("pr-merge-retry")
+                            .outline()
+                            .xsmall()
+                            .label(crate::tr!("pull_requests.detail.retry"))
+                            .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
+                    ),
+            ),
+            _ => None,
+        };
+        let ready = state.is_some() && self.method.is_some();
+        v_flex()
+            .gap_3()
+            .child(facts)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .child(crate::tr!("pull_requests.merge.method").into_owned()),
+                    )
+                    .child(method)
+                    .children(default_box),
+            )
+            .children(credits)
+            .when(!notes.is_empty(), |content| {
+                content.child(v_flex().gap_1().children(notes))
+            })
+            .children(failure)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("pr-merge-cancel")
+                            .outline()
+                            .small()
+                            .disabled(self.sending)
+                            .label(crate::tr!("pull_requests.actions.cancel"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("pr-merge-confirm")
+                            .primary()
+                            .small()
+                            .loading(self.sending)
+                            .disabled(!ready || self.sending)
+                            .label(self.confirm_label())
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
+            )
+    }
+}
+
+fn open_merge_dialog(target: Target, auto: bool, window: &mut Window, cx: &mut App) {
+    let workspace = target.store.read(cx);
+    let settings = workspace.settings();
+    let project = workspace
+        .thread_meta(&target.session)
+        .and_then(|meta| meta.project_id.clone())
+        .and_then(|id| {
+            workspace
+                .projects()
+                .into_iter()
+                .find(|project| project.id == id)
+                .map(|project| (project.id, project.name))
+        });
+    let project_default = project
+        .as_ref()
+        .and_then(|(id, _)| settings.project_merge_methods.get(id).copied());
+    let number = target.number();
+    let compact = target.window_state.read(cx).compact;
+    let dialog = cx.new(|cx| {
+        let mut dialog = MergeDialog {
+            target,
+            auto,
+            state: None,
+            method: None,
+            project,
+            project_default,
+            make_default: false,
+            remove_credits: settings.remove_agent_credits_on_merge,
+            sending: false,
+        };
+        dialog.load(cx);
+        dialog
+    });
+    let title = crate::tr!(
+        if auto {
+            "pull_requests.merge.title_auto"
+        } else {
+            "pull_requests.merge.title"
+        },
+        number = number
+    )
+    .into_owned();
+    window.open_dialog(cx, move |base, window, cx| {
+        let sending = dialog.read(cx).sending;
+        let width = if compact {
+            (window.viewport_size().width - px(2. * material::COMPACT_PAGE_INSET)).min(px(480.))
+        } else {
+            px(480.)
+        };
+        base.title(title.clone())
+            .w(width)
+            .keyboard(!sending)
+            .close_button(!sending)
+            .overlay_closable(!sending)
+            .footer(crate::overlay::DialogActions::new())
+            .content({
+                let dialog = dialog.clone();
+                move |content, _, _| content.child(dialog.clone())
+            })
+    });
+}
+
+/// The header's primary action or status, `None` where the rank offers none.
+pub(super) fn primary_element(
+    target: &Target,
+    primary: Primary,
+    busy: bool,
+    compact: bool,
+    cx: &App,
+) -> AnyElement {
+    let number = target.number();
+    let key = target.offer.key.clone();
+    let url = target.offer.url.clone();
+    let chip = |icon: IconName, color, label: String, tooltip: Option<String>| {
+        let id = SharedString::from(format!("pr-primary-chip-{}", key.number));
+        let chip = h_flex()
+            .id(id)
+            .flex_none()
+            .gap_1()
+            .items_center()
+            .px_2()
+            .py(px(2.))
+            .rounded(material::radius_chip(cx))
+            .bg(gpui::Hsla::opacity(&color, 0.1))
+            .text_color(color)
+            .text_size(px(if compact { 13. } else { 12. }))
+            .child(Icon::new(icon).size(px(14.)))
+            .child(label);
+        match tooltip {
+            Some(tooltip) => chip
+                .tooltip(move |window, cx| {
+                    crate::widgets::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                })
+                .into_any_element(),
+            None => chip.into_any_element(),
+        }
+    };
+    let run = |kind: Lifecycle| {
+        let target = target.clone();
+        move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+            target.clone().run(kind, window, cx)
+        }
+    };
+    let button = |icon: IconName, label: String| {
+        let accessible = crate::tr!(
+            "pull_requests.actions.primary_label",
+            label = label.clone(),
+            number = number.clone()
+        )
+        .into_owned();
+        let button = Button::new("pr-primary-action")
+            .primary()
+            .icon(icon)
+            .label(label)
+            .tooltip(accessible)
+            .loading(busy)
+            .disabled(busy);
+        if compact {
+            button.w_full()
+        } else {
+            button.small()
+        }
+    };
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    match primary {
+        Primary::ResolveConflicts | Primary::FixChecks => {
+            let (icon, label, ask, github) = if primary == Primary::ResolveConflicts {
+                (
+                    IconName::GitMergeConflict,
+                    crate::tr!("pull_requests.actions.resolve_conflicts").into_owned(),
+                    Lifecycle::AskConflicts,
+                    (
+                        "pull_requests.actions.resolve_on_github",
+                        format!("{url}/conflicts"),
+                    ),
+                )
+            } else {
+                (
+                    IconName::CircleX,
+                    crate::tr!("pull_requests.actions.fix_checks").into_owned(),
+                    Lifecycle::AskChecks,
+                    (
+                        "pull_requests.actions.checks_on_github",
+                        format!("{url}/checks"),
+                    ),
+                )
+            };
+            let can_ask = !target
+                .store
+                .read(cx)
+                .session_status()
+                .is_none_or(|status| status.conversation_read_only);
+            use crate::widgets::menu::DropdownMenu as _;
+            button(icon, label)
+                .dropdown_menu(move |menu, _, _| {
+                    menu.menu_with_enable(
+                        crate::tr!(if can_ask {
+                            "pull_requests.actions.ask_agent"
+                        } else {
+                            "pull_requests.actions.thread_unavailable"
+                        })
+                        .into_owned(),
+                        Box::new(RunLifecycle {
+                            key: key.clone(),
+                            kind: ask,
+                        }),
+                        can_ask,
+                    )
+                    .menu(
+                        crate::tr!(github.0).into_owned(),
+                        Box::new(OpenUrl(github.1.clone())),
+                    )
+                })
+                .into_any_element()
+        }
+        Primary::Ready => button(
+            IconName::GitPullRequest,
+            crate::tr!("pull_requests.actions.ready").into_owned(),
+        )
+        .on_click(run(Lifecycle::Ready))
+        .into_any_element(),
+        Primary::AutoMergeOn(method) => chip(
+            IconName::GitMerge,
+            cx.theme().info,
+            crate::tr!(
+                "pull_requests.actions.auto_merge_on",
+                method = method_label(method)
+            )
+            .into_owned(),
+            Some(crate::tr!("pull_requests.actions.auto_merge_tooltip").into_owned()),
+        ),
+        Primary::Queued(position) => chip(
+            IconName::ListOrdered,
+            cx.theme().info,
+            match position {
+                Some(position) => crate::tr!(
+                    "pull_requests.actions.queued_position",
+                    position = position.to_string()
+                )
+                .into_owned(),
+                None => crate::tr!("pull_requests.actions.queued").into_owned(),
+            },
+            None,
+        ),
+        Primary::MergeOnGitHub { index } => {
+            let button = Button::new("pr-primary-action")
+                .outline()
+                .icon(IconName::ExternalLink)
+                .label(crate::tr!("pull_requests.actions.merge_on_github"))
+                .tooltip(stack_reason(&number, index))
+                .on_click(move |_, _, cx| cx.open_url(&url));
+            if compact {
+                button.w_full().into_any_element()
+            } else {
+                button.small().into_any_element()
+            }
+        }
+        Primary::UpdateBranch => button(
+            IconName::ArrowUpDown,
+            crate::tr!("pull_requests.actions.update_branch").into_owned(),
+        )
+        .tooltip(
+            crate::tr!(
+                "pull_requests.actions.update_tooltip",
+                base = target.base_branch.clone(),
+                head = target.head_branch.clone()
+            )
+            .into_owned(),
+        )
+        .on_click(run(Lifecycle::UpdateBranch))
+        .into_any_element(),
+        Primary::EnableAutoMerge => button(
+            IconName::GitMerge,
+            crate::tr!("pull_requests.actions.enable_auto_merge").into_owned(),
+        )
+        .on_click(run(Lifecycle::EnableAutoMerge))
+        .into_any_element(),
+        Primary::Merge { method, queue } => button(
+            IconName::GitMerge,
+            if queue {
+                crate::tr!("pull_requests.merge.merge_when_ready").into_owned()
+            } else {
+                method_label(method)
+            },
+        )
+        .on_click(run(Lifecycle::Merge))
+        .into_any_element(),
+    }
+}

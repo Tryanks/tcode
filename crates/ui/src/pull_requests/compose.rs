@@ -127,6 +127,14 @@ pub(super) fn rejection_reason(rejection: &PullRequestRejection) -> String {
         }
         PullRequestRejection::Refused { .. } => crate::tr!("pull_requests.result.reason_invalid"),
         PullRequestRejection::Failed => crate::tr!("pull_requests.result.reason_failed"),
+        PullRequestRejection::InStack { index, layers } => crate::tr!(
+            "pull_requests.result.reason_stack",
+            index = index.to_string(),
+            count = layers.to_string()
+        ),
+        PullRequestRejection::StackUnknown => {
+            crate::tr!("pull_requests.result.reason_stack_unknown")
+        }
     }
     .into_owned()
 }
@@ -208,6 +216,11 @@ fn toast(write: Write, result: &PullRequestActionResult, number: u64) -> Option<
                 .into_owned(),
             )
         }
+        // Lifecycle answers, which no conversation write gets.
+        PullRequestActionResult::UpToDate
+        | PullRequestActionResult::Queued { .. }
+        | PullRequestActionResult::AutoMergeEnabled { .. }
+        | PullRequestActionResult::Opened { .. } => return None,
         PullRequestActionResult::Uncertain => match write {
             Write::Comment | Write::Edit => Notification::warning(
                 crate::tr!("pull_requests.result.uncertain_comment").into_owned(),
@@ -244,7 +257,7 @@ fn toast(write: Write, result: &PullRequestActionResult, number: u64) -> Option<
 }
 
 /// A command that never reached an answer may still have reached GitHub.
-fn answer_of(
+pub(super) fn answer_of(
     result: Result<CommandResponse, ProtocolError>,
 ) -> Result<PullRequestActionResult, ProtocolError> {
     match result {

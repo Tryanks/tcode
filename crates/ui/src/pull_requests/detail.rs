@@ -156,6 +156,11 @@ pub(super) struct PullRequestPage {
     /// A manual refresh reads Files again from page 1, whatever was paged in.
     pub(super) restart_files: bool,
     pub(super) writes: super::compose::Writes,
+    /// What merging and the other lifecycle actions would meet, read while the pull request is
+    /// open.
+    pub(super) action_state: Read<tcode_protocol::PullRequestActionState>,
+    /// The merge method this client chose for the pull request in its menu.
+    pub(super) merge_method: Option<tcode_core::pull_request::PullRequestMergeMethod>,
 }
 
 pub struct PullRequestView {
@@ -171,6 +176,9 @@ pub struct PullRequestView {
     wake: Option<(u64, Task<()>)>,
     _subscriptions: [Subscription; 2],
 }
+
+/// The busy mark of a lifecycle write in flight.
+const LIFECYCLE: &str = "lifecycle";
 
 pub(super) fn now() -> u64 {
     tcode_core::project::now_secs()
@@ -469,26 +477,141 @@ impl PullRequestView {
         });
     }
 
+    pub(super) fn read_action_state(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.page_mut() else { return };
+        page.action_state.loading = true;
+        self.read(PullRequestRead::ActionState, cx, |page, result| {
+            page.action_state.loading = false;
+            match result {
+                Ok((PullRequestReadResponse::ActionState(state), expires_at)) => {
+                    page.action_state.expires_at = expires_at;
+                    page.action_state.error = None;
+                    page.action_state.loaded_at = now();
+                    page.action_state.data = Some(state);
+                }
+                Ok(_) => {}
+                Err(error) => page.action_state.error = Some(error),
+            }
+        });
+    }
+
+    /// Where a lifecycle action of the pull request on view goes; its answer has the view read
+    /// what it may have changed.
+    pub(super) fn lifecycle_target(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<super::lifecycle::Target> {
+        let (session, key) = self.current.clone()?;
+        let page = self.page();
+        let mut target = super::lifecycle::Target::new(
+            &self.store,
+            &self.window_state,
+            &session,
+            &key,
+            page.and_then(|page| page.action_state.data.clone()),
+            page.and_then(|page| page.merge_method),
+            cx,
+        )?;
+        let view = cx.entity().downgrade();
+        let current = (session, key);
+        let sent = current.clone();
+        target.started = std::rc::Rc::new({
+            let view = view.clone();
+            move |cx| {
+                let _ = view.update(cx, |view, cx| {
+                    if let Some(page) = view.pages.get_mut(&sent) {
+                        page.writes.busy.insert(LIFECYCLE.into());
+                    }
+                    cx.notify();
+                });
+            }
+        });
+        target.done = std::rc::Rc::new(move |result, _, cx| {
+            let _ = view.update(cx, |view, cx| {
+                if let Some(page) = view.pages.get_mut(&current) {
+                    page.writes.busy.remove(LIFECYCLE);
+                    page.action_state.expires_at = 0;
+                    if !matches!(result, tcode_protocol::PullRequestActionResult::Rejected(_)) {
+                        page.conversation.expires_at = 0;
+                        page.files.expires_at = 0;
+                    }
+                    if *result == tcode_protocol::PullRequestActionResult::Uncertain {
+                        page.writes.waiting = true;
+                    }
+                }
+                cx.notify();
+            });
+        });
+        Some(target)
+    }
+
+    fn run_lifecycle(
+        &mut self,
+        action: &super::lifecycle::RunLifecycle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.current.as_ref().map(|(_, key)| key) != Some(&action.key) {
+            cx.propagate();
+            return;
+        }
+        if let Some(target) = self.lifecycle_target(cx) {
+            target.run(action.kind, window, cx);
+        }
+    }
+
+    fn choose_merge_method(
+        &mut self,
+        action: &super::lifecycle::ChooseMergeMethod,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.current.as_ref().map(|(_, key)| key) != Some(&action.key) {
+            return;
+        }
+        if let Some(page) = self.page_mut() {
+            page.merge_method = Some(action.method);
+        }
+        cx.notify();
+    }
+
     /// Starts the reads the visible view needs, and wakes when the soonest of them expires.
     fn ensure_reads(&mut self, cx: &mut Context<Self>) {
         let tab = self.tab(cx);
         let Some(key) = self.current.as_ref().map(|(_, key)| key.clone()) else {
             return;
         };
+        let open = self
+            .link(cx)
+            .and_then(|link| link.snapshot)
+            .is_some_and(|snapshot| snapshot.state == PullRequestState::Open);
         let Some(page) = self.page_mut() else { return };
         let now = now();
+        let action_due = open && page.action_state.due(now);
+        let action_expires = page.action_state.expires_at;
         let (files_due, conversation_due, viewed_due) = (
             page.files.due(now),
             page.conversation.due(now),
             page.viewed.due(now),
         );
+        let (conversation_expires, files_expires, viewed_expires) = (
+            page.conversation.expires_at,
+            page.files.expires_at,
+            page.viewed.expires_at,
+        );
         if conversation_due && page.conversation.data.is_some() {
             // Media that failed is asked again along with the conversation that names it.
             crate::store::retry_failed_pull_request_media(&key, cx);
         }
-        let mut expiries = vec![page.conversation.expires_at];
+        let mut expiries = vec![conversation_expires];
+        if open {
+            expiries.push(action_expires);
+        }
+        if action_due {
+            self.read_action_state(cx);
+        }
         if tab == Tab::Files {
-            expiries.extend([page.files.expires_at, page.viewed.expires_at]);
+            expiries.extend([files_expires, viewed_expires]);
         }
         match tab {
             Tab::Files => {
@@ -539,6 +662,8 @@ impl PullRequestView {
         page.files.error = None;
         page.conversation.error = None;
         page.viewed.error = None;
+        page.action_state.error = None;
+        page.action_state.expires_at = 0;
         page.conversation_view.replies.clear();
         let task = self.store.update(cx, |store, cx| {
             store.command(
@@ -588,6 +713,7 @@ impl PullRequestView {
             page.files.error = None;
             page.conversation.error = None;
             page.viewed.error = None;
+            page.action_state.error = None;
         }
         cx.notify();
     }
@@ -758,6 +884,10 @@ impl PullRequestView {
                 };
                 chips = chips.child(chip(icon, color, crate::tr!(label).into_owned()));
             }
+            if let Some(behind) = self.behind_chip(&key, snapshot, cx) {
+                has_chip = true;
+                chips = chips.child(behind);
+            }
             if snapshot.mergeability == Mergeability::Conflicting {
                 has_chip = true;
                 chips = chips.child(chip(
@@ -841,6 +971,76 @@ impl PullRequestView {
                     .child(crate::tr!(condition))
             }))
             .into_any_element()
+    }
+
+    /// How far the head is behind its base, and the updates the account may make from it. Not on
+    /// a stack layer, whose layers move together, nor while it conflicts.
+    fn behind_chip(
+        &self,
+        key: &PullRequestKey,
+        snapshot: &tcode_core::pull_request::PullRequestSnapshot,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = self.page()?.action_state.data.as_ref()?;
+        let behind = state.behind_by.filter(|behind| *behind > 0)?;
+        let links = self
+            .store
+            .read(cx)
+            .pull_requests(&self.current.as_ref()?.0)
+            .to_vec();
+        if snapshot.mergeability == Mergeability::Conflicting
+            || tcode_core::pull_request::stack_route(&links, key)
+                != tcode_core::pull_request::PullRequestStackRoute::Single
+        {
+            return None;
+        }
+        let base = snapshot.base_branch.clone();
+        let label = if behind == 1 {
+            crate::tr!("pull_requests.actions.behind_one", base = base.clone()).into_owned()
+        } else {
+            crate::tr!(
+                "pull_requests.actions.behind",
+                count = behind.to_string(),
+                base = base.clone()
+            )
+            .into_owned()
+        };
+        let tooltip = crate::tr!(
+            "pull_requests.actions.update_tooltip",
+            base = base,
+            head = snapshot.head_branch.clone()
+        )
+        .into_owned();
+        let updates = (state.can_update_branch && !self.read_only(cx)).then(|| key.clone());
+        let chip = Button::new("pr-behind")
+            .ghost()
+            .compact()
+            .xsmall()
+            .icon(IconName::ArrowUpDown)
+            .label(label);
+        Some(match updates {
+            Some(key) => chip
+                .dropdown_menu(move |menu, _, _| {
+                    let item = |kind| {
+                        Box::new(super::lifecycle::RunLifecycle {
+                            key: key.clone(),
+                            kind,
+                        })
+                    };
+                    menu.label(tooltip.clone())
+                        .menu(
+                            crate::tr!("pull_requests.actions.update_branch").into_owned(),
+                            item(super::lifecycle::Lifecycle::UpdateBranch),
+                        )
+                        .menu(
+                            crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
+                            item(super::lifecycle::Lifecycle::UpdateRebase),
+                        )
+                })
+                .into_any_element(),
+            // News, not an offer, for an account that may not update the branch.
+            None => chip.tooltip(tooltip).into_any_element(),
+        })
     }
 
     /// The title, its edit affordance (`pr-title-edit`) and the title editor.
@@ -1232,7 +1432,10 @@ impl PullRequestView {
     }
 
     /// The menu of the row this pull request was opened from.
-    fn menu(&self, cx: &App) -> Option<super::RowMenu> {
+    fn menu(&self, cx: &mut Context<Self>) -> Option<super::RowMenu> {
+        let offer = (!self.read_only(cx))
+            .then(|| self.lifecycle_target(cx).map(|target| target.offer))
+            .flatten();
         let (session, key) = self.current.as_ref()?;
         let link = self.link(cx);
         let watchable = self
@@ -1247,6 +1450,7 @@ impl PullRequestView {
             self.url(cx).unwrap_or_default(),
             link.as_ref(),
             watchable,
+            offer,
         ))
     }
 
@@ -1280,6 +1484,7 @@ impl PullRequestView {
                     }),
             )
             .child(div().flex_1())
+            .children(self.primary(false, cx))
             .child(self.refresh_button(refreshing, false, cx))
             .when_some(url, |bar, url| {
                 bar.child(
@@ -1312,6 +1517,20 @@ impl PullRequestView {
                 )
             })
             .into_any_element()
+    }
+
+    /// The header's primary action (`pr-primary-action`): one, by the rank, from the host's
+    /// action state.
+    fn primary(&self, compact: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.read_only(cx) {
+            return None;
+        }
+        let target = self.lifecycle_target(cx)?;
+        let primary = target.offer.primary()?;
+        let busy = self.busy(LIFECYCLE);
+        Some(super::lifecycle::primary_element(
+            &target, primary, busy, compact, cx,
+        ))
     }
 
     pub(super) fn refresh_button(
@@ -1757,8 +1976,19 @@ impl Render for PullRequestView {
             .on_action(cx.listener(Self::on_selection_menu))
             .on_action(cx.listener(Self::on_comment_menu))
             .on_action(cx.listener(|this, _: &EditTitle, window, cx| this.start_title(window, cx)))
+            .on_action(cx.listener(Self::run_lifecycle))
+            .on_action(cx.listener(Self::choose_merge_method))
             .when(!compact, |view| view.child(self.sub_bar(cx)))
             .child(self.header(window, cx))
+            .when(compact, |view| {
+                view.children(self.primary(true, cx).map(|primary| {
+                    div()
+                        .flex_none()
+                        .px(px(material::COMPACT_PAGE_INSET))
+                        .pb_2()
+                        .child(primary)
+                }))
+            })
             .children(self.notices(cx))
             .child(self.switch(cx))
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))

@@ -26,6 +26,9 @@ gpui_component_assets::icon_assets!(
         Users,
         Tag,
         CircleDot,
+        ListOrdered,
+        Hourglass,
+        ArrowUpDown,
     ]
 );
 
