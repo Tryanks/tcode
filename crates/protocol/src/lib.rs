@@ -138,6 +138,8 @@ pub use wire::{
 // StackState; thread metadata carries pull_request_operations, the stack writes
 // running or unconfirmed and a rebase's end until the next full sync; the
 // PullRequestStack toast reports how one ended.
+// Unreleased: Settings.traverse and SettingsPatch::Traverse carry a list of
+// sources, each official or a self-hosted URL with its own switch.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

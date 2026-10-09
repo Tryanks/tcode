@@ -1406,7 +1406,7 @@ mod tests {
     fn the_hosts_page_offers_this_machines_invitation(cx: &mut TestAppContext) {
         use gpui::BorrowAppContext as _;
         use tcode_client::HostLink;
-        use tcode_traverse::{HostConfig, HostMux, TraverseHost, TraverseMode};
+        use tcode_traverse::{HostConfig, HostMux, TraverseHost};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let root = std::env::temp_dir().join(format!(
             "tcode-hosts-invitation-{}",
@@ -1468,7 +1468,7 @@ mod tests {
             HostConfig {
                 host_name: "Studio".into(),
                 data_dir: root.clone(),
-                traverse: TraverseMode::Off,
+                traverse: Vec::new(),
                 pairing_enabled: true,
                 bind_port: None,
             },

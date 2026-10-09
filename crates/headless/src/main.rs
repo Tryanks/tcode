@@ -12,8 +12,9 @@ use tcode_services::store::{Migration, MigrationPhase, MigrationProgress, Sessio
 use tcode_traverse::browser::{BrowserConfig, StaticBundle, check_bind, serve, set_password};
 use tcode_traverse::identity::write_private;
 use tcode_traverse::lan::DEFAULT_PORT;
+use tcode_traverse::manifest::ManifestSource;
 use tcode_traverse::native_host::default_device_name;
-use tcode_traverse::{HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
+use tcode_traverse::{HostConfig, HostMux, Invitation, TraverseHost};
 
 #[cfg(feature = "web")]
 const STATIC_BUNDLE: Option<StaticBundle> = Some(&[
@@ -65,18 +66,37 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--port PORT] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse selects the relay and\ndiscovery service: official (default), off (LAN and invite addresses only),\nor the base URL of a self-hosted instance. The machine binds UDP port\n{DEFAULT_PORT} for devices (--port binds another) and advertises it on the\nLAN as _tcode._udp, so paired devices on the same network find it again\nwithout Traverse.\n\npair prints the current invitation link and QR: serve keeps {INVITATION_FILE}\ncurrent, whether the invitation was minted at startup or from a paired\ndevice, and removes it once it is used or expires. Scanning or pasting the\nlink is the whole pairing; an invitation lasts five minutes and admits one\ndevice. A new one comes from the logged-in browser's Settings → Remote or a\nrestart.\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL]... [--port PORT] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse names a relay and\ndiscovery service to publish to: official (the default) or the base URL of a\nself-hosted instance; repeat it to publish to several, or give off alone for\nnone (devices then find it on the LAN, or at an address typed on the device). The machine binds UDP port\n{DEFAULT_PORT} for devices (--port binds another) and advertises it on the\nLAN as _tcode._udp, so paired devices on the same network find it again\nwithout Traverse.\n\npair prints the current invitation link and QR: serve keeps {INVITATION_FILE}\ncurrent, whether the invitation was minted at startup or from a paired\ndevice, and removes it once it is used or expires. Scanning or pasting the\nlink is the whole pairing; an invitation lasts five minutes and admits one\ndevice. A new one comes from the logged-in browser's Settings → Remote or a\nrestart.\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
-fn parse_traverse(value: Option<String>) -> Result<TraverseMode, String> {
-    match value.as_deref() {
-        None | Some("official") => Ok(TraverseMode::Official),
-        Some("off") => Ok(TraverseMode::Off),
-        Some(url) => url::Url::parse(url)
-            .map(TraverseMode::Custom)
-            .map_err(|error| format!("invalid --traverse value {url:?}: {error}")),
+/// Every `--traverse` value in order: `official`, a self-hosted base URL, or
+/// `off` alone for none. Without the option the machine uses the official
+/// service.
+fn parse_traverse(values: Vec<String>) -> Result<Vec<ManifestSource>, String> {
+    if values.is_empty() {
+        return Ok(vec![ManifestSource::Official]);
     }
+    if values.iter().any(|value| value == "off") {
+        return if values.len() == 1 {
+            Ok(Vec::new())
+        } else {
+            Err("--traverse off cannot be combined with another --traverse".into())
+        };
+    }
+    let mut sources = Vec::with_capacity(values.len());
+    for value in values {
+        let source = match value.as_str() {
+            "official" => ManifestSource::Official,
+            url => url::Url::parse(url)
+                .map(ManifestSource::Custom)
+                .map_err(|error| format!("invalid --traverse value {url:?}: {error}"))?,
+        };
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    Ok(sources)
 }
 
 fn serve_command(args: &[String]) -> Result<(), String> {
@@ -87,7 +107,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("invalid --browser-listen address: {error}"))?;
     let name = option_value(args, "--name").unwrap_or_else(default_device_name);
     let data_dir = option_value(args, "--data-dir").map(PathBuf::from);
-    let traverse = parse_traverse(option_value(args, "--traverse"))?;
+    let traverse = parse_traverse(option_values(args, "--traverse"))?;
     let port = match option_value(args, "--port") {
         Some(port) => port
             .parse::<u16>()
@@ -145,7 +165,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     let host =
         spawn_host(store, services).map_err(|error| format!("machine startup failed: {error}"))?;
     let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
-    let relayed = traverse != TraverseMode::Off;
+    let relayed = !traverse.is_empty();
     let traverse_host = Arc::new(
         TraverseHost::start(
             mux.clone(),
@@ -440,9 +460,15 @@ fn print_invite(invite: &PairInvite, remaining_secs: u64, addrs: &[String]) -> R
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {
+    option_values(args, name).into_iter().next()
+}
+
+/// Every value given for a repeatable option, in order.
+fn option_values(args: &[String], name: &str) -> Vec<String> {
     args.windows(2)
-        .find(|pair| pair[0] == name)
+        .filter(|pair| pair[0] == name)
         .map(|pair| pair[1].clone())
+        .collect()
 }
 
 fn reject_unknown_options(args: &[String], options_with_values: &[&str]) -> Result<(), String> {
@@ -503,20 +529,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn traverse_flag_selects_official_off_or_a_self_hosted_instance() {
-        assert_eq!(parse_traverse(None).unwrap(), TraverseMode::Official);
+    fn traverse_flags_list_the_sources_to_publish_to() {
+        let parse = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            parse_traverse(option_values(&args, "--traverse"))
+        };
+        let custom = |url: &str| ManifestSource::Custom(url::Url::parse(url).unwrap());
+        assert_eq!(parse(&[]).unwrap(), [ManifestSource::Official]);
         assert_eq!(
-            parse_traverse(Some("official".into())).unwrap(),
-            TraverseMode::Official
+            parse(&["--name", "Desk", "--traverse", "official"]).unwrap(),
+            [ManifestSource::Official]
+        );
+        assert_eq!(parse(&["--traverse", "off"]).unwrap(), []);
+        assert_eq!(
+            parse(&["--traverse", "https://a.example/"]).unwrap(),
+            [custom("https://a.example/")]
         );
         assert_eq!(
-            parse_traverse(Some("off".into())).unwrap(),
-            TraverseMode::Off
+            parse(&[
+                "--traverse",
+                "official",
+                "--port",
+                "5000",
+                "--traverse",
+                "https://a.example/",
+                "--traverse",
+                "https://b.example/",
+            ])
+            .unwrap(),
+            [
+                ManifestSource::Official,
+                custom("https://a.example/"),
+                custom("https://b.example/")
+            ]
         );
-        assert_eq!(
-            parse_traverse(Some("https://traverse.example/".into())).unwrap(),
-            TraverseMode::Custom(url::Url::parse("https://traverse.example/").unwrap())
-        );
-        assert!(parse_traverse(Some("not a url".into())).is_err());
+        assert!(parse(&["--traverse", "off", "--traverse", "official"]).is_err());
+        assert!(parse(&["--traverse", "not a url"]).is_err());
     }
 }

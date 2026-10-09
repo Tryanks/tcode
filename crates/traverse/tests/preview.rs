@@ -11,7 +11,7 @@ use std::{
 
 use tcode_client::{ConnectionState, host::Transport, host::TunnelOpener, pairing::PairedHost};
 use tcode_traverse::{
-    DeviceIdentity, HostConfig, HostMux, TraverseHost, TraverseMode,
+    DeviceIdentity, HostConfig, HostMux, TraverseHost,
     preview::{NativeProxy, PreviewEndpoint, PreviewRoutes},
 };
 
@@ -55,7 +55,7 @@ impl Machine {
             HostConfig {
                 host_name: "Preview Host".into(),
                 data_dir: host_dir.0.clone(),
-                traverse: TraverseMode::Off,
+                traverse: Vec::new(),
                 pairing_enabled: true,
                 bind_port: None,
             },
