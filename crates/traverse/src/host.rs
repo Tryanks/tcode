@@ -13,14 +13,14 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, EndpointId, RelayMap, RelayMode, TransportAddr,
+    Endpoint, EndpointId, RelayMap, RelayMode, TransportAddr, Watcher as _,
     endpoint::{Connection, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, TRAVERSE_OFFICIAL, encode_secret, pair_url};
 use tcode_protocol::{
     DeviceAccess, HostedDevice, HostingAction, HostingState, PathInfo, Principal, ProtocolError,
-    SpaceAction, SpaceInfo,
+    SpaceAction, SpaceInfo, TraverseRelayStatus, TraverseSourceStatus,
 };
 
 use crate::{
@@ -127,6 +127,16 @@ struct Shared {
     /// What invitations say about this machine's Traverse instances; see
     /// [`PairInvite::traverse`].
     traverse: Vec<String>,
+    /// One per source, in configured order: the manifest each has in hand
+    /// and how its last fetch went.
+    loaders: Vec<ManifestLoader>,
+    /// Whether this machine's record reads back from each pkarr URL.
+    lookup_checks: Arc<live::LookupChecks>,
+    /// Told when a manifest fetch or a lookup check ends; with the
+    /// endpoint's own watchers it prompts a status event.
+    status_changed: Arc<tokio::sync::Notify>,
+    /// See [`TraverseHost::traverse_events`].
+    status_listeners: Mutex<Vec<async_channel::Sender<Vec<TraverseSourceStatus>>>>,
     allow_pairing: bool,
 }
 
@@ -135,8 +145,8 @@ pub struct TraverseHost {
     router: Router,
     /// The manifest refresh loops, one per source, ended with the host.
     refresh: Vec<tokio::task::AbortHandle>,
-    #[cfg(test)]
-    loaders: Vec<ManifestLoader>,
+    /// The loop behind [`TraverseHost::traverse_events`].
+    status: tokio::task::AbortHandle,
     /// This machine's DNS-SD record, withdrawn with the host.
     advertisement: Option<lan::Advertisement>,
 }
@@ -216,10 +226,12 @@ impl TraverseHost {
                 }
                 Err(error) => return Err(io::Error::other(error)),
             };
+            let status_changed = Arc::new(tokio::sync::Notify::new());
+            let lookup_checks = Arc::new(live::LookupChecks::new(status_changed.clone()));
             live::install_lookups(
                 &endpoint,
                 manifests.iter().flatten().map(AsRef::as_ref),
-                true,
+                Some(&lookup_checks),
                 None,
             );
             let advertisement = advertise(&endpoint, &identity.host_name);
@@ -236,12 +248,17 @@ impl TraverseHost {
                 listeners: Mutex::new(Vec::new()),
                 expiry: Mutex::new(None),
                 traverse,
+                loaders,
+                lookup_checks,
+                status_changed,
+                status_listeners: Mutex::new(Vec::new()),
                 allow_pairing: config.pairing_enabled,
             });
             // A fetched manifest is applied to the running endpoint, whether
             // it refreshes the one in hand or is the first to arrive. The
             // loop holds no reference that would keep a stopped host alive.
-            let refresh = loaders
+            let refresh = shared
+                .loaders
                 .iter()
                 .enumerate()
                 .map(|(index, loader)| {
@@ -249,13 +266,18 @@ impl TraverseHost {
                     loader.spawn_refresh(move |manifest| {
                         let shared = shared.upgrade();
                         async move {
-                            if let Some(shared) = shared {
+                            let Some(shared) = shared else {
+                                return;
+                            };
+                            if let Some(manifest) = manifest {
                                 shared.apply_manifest(index, manifest).await;
                             }
+                            shared.status_changed.notify_one();
                         }
                     })
                 })
                 .collect();
+            let status = tokio::spawn(watch_status(Arc::downgrade(&shared))).abort_handle();
             let router = Router::builder(endpoint)
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
                 .accept(wire::ALPN_MAIN, MainHandler(shared.clone()))
@@ -264,8 +286,7 @@ impl TraverseHost {
                 shared,
                 router,
                 refresh,
-                #[cfg(test)]
-                loaders,
+                status,
                 advertisement,
             })
         })
@@ -414,6 +435,20 @@ impl TraverseHost {
             .map(|_| ())
     }
 
+    /// How each Traverse source is doing right now, in configured order.
+    pub fn traverse_status(&self) -> Vec<TraverseSourceStatus> {
+        self.shared.traverse_status()
+    }
+
+    /// The Traverse status after every change, at most once per
+    /// [`STATUS_COALESCE`]. Each call gets its own stream of every later
+    /// change.
+    pub fn traverse_events(&self) -> async_channel::Receiver<Vec<TraverseSourceStatus>> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.shared.status_listeners.lock().unwrap().push(sender);
+        receiver
+    }
+
     /// Answer a hosting query from a client of any transport.
     pub fn hosting(&self, action: HostingAction) -> Result<HostingState, ProtocolError> {
         self.shared.hosting(action)
@@ -424,6 +459,7 @@ impl TraverseHost {
         for refresh in self.refresh {
             refresh.abort();
         }
+        self.status.abort();
         if let Some(expiry) = self.shared.expiry.lock().unwrap().take() {
             expiry.abort();
         }
@@ -468,13 +504,55 @@ fn invite_traverse(sources: &[ManifestSource]) -> Vec<String> {
     match sources {
         [] => vec![TRAVERSE_OFF.to_owned()],
         [ManifestSource::Official] => Vec::new(),
-        sources => sources
-            .iter()
-            .map(|source| match source {
-                ManifestSource::Official => TRAVERSE_OFFICIAL.to_owned(),
-                ManifestSource::Custom(base) => base.to_string(),
-            })
-            .collect(),
+        sources => sources.iter().map(source_name).collect(),
+    }
+}
+
+/// A source as invitations and the hosting status name it.
+fn source_name(source: &ManifestSource) -> String {
+    match source {
+        ManifestSource::Official => TRAVERSE_OFFICIAL.to_owned(),
+        ManifestSource::Custom(base) => base.to_string(),
+    }
+}
+
+/// The shortest gap between two [`TraverseHost::traverse_events`]: a burst
+/// of changes is one event.
+pub const STATUS_COALESCE: Duration = Duration::from_secs(1);
+
+/// Tell the status listeners what changed: woken by a new network report,
+/// a home relay's connection, a manifest fetch or a lookup check, then
+/// coalesced, and only sent when the status differs from the last sent.
+async fn watch_status(shared: std::sync::Weak<Shared>) {
+    let Some((mut report, mut home, changed)) = shared.upgrade().map(|shared| {
+        (
+            shared.endpoint.net_report(),
+            shared.endpoint.home_relay_status(),
+            shared.status_changed.clone(),
+        )
+    }) else {
+        return;
+    };
+    let mut last = None;
+    loop {
+        tokio::select! {
+            updated = report.updated() => if updated.is_err() { return },
+            updated = home.updated() => if updated.is_err() { return },
+            () = changed.notified() => {}
+        }
+        tokio::time::sleep(STATUS_COALESCE).await;
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        let status = shared.traverse_status();
+        if last.as_ref() != Some(&status) {
+            shared
+                .status_listeners
+                .lock()
+                .unwrap()
+                .retain(|listener| listener.try_send(status.clone()).is_ok());
+            last = Some(status);
+        }
     }
 }
 
@@ -509,9 +587,60 @@ impl Shared {
         live::install_lookups(
             &self.endpoint,
             manifests.iter().flatten().map(AsRef::as_ref),
-            true,
+            Some(&self.lookup_checks),
             None,
         );
+    }
+
+    fn traverse_status(&self) -> Vec<TraverseSourceStatus> {
+        let report = self.endpoint.net_report().get();
+        let latency = |url: &iroh::RelayUrl| {
+            report.as_ref().and_then(|report| {
+                report
+                    .relay_latency
+                    .iter()
+                    .filter(|(_, relay, _)| *relay == url)
+                    .map(|(_, _, latency)| latency)
+                    .min()
+            })
+        };
+        let home = self.endpoint.home_relay_status().get();
+        self.loaders
+            .iter()
+            .map(|loader| {
+                let (manifest, status) = loader.status();
+                let relays = manifest
+                    .iter()
+                    .flat_map(|manifest| &manifest.relays)
+                    .map(|relay| {
+                        let url = iroh::RelayUrl::from(relay.url.clone());
+                        let home = home.iter().find(|status| status.url() == &url);
+                        TraverseRelayStatus {
+                            url: relay.url.to_string(),
+                            region: relay.region.clone(),
+                            latency_ms: latency(&url)
+                                .map(|latency| latency.as_millis().min(u32::MAX.into()) as u32),
+                            home: home.is_some(),
+                            error: home
+                                .filter(|status| !status.is_connected())
+                                .and_then(|status| status.last_error())
+                                .map(ToString::to_string),
+                        }
+                    })
+                    .collect();
+                let lookups = manifest
+                    .iter()
+                    .flat_map(|manifest| manifest.pkarr_urls())
+                    .map(|url| self.lookup_checks.status(url))
+                    .collect();
+                TraverseSourceStatus {
+                    source: source_name(loader.source()),
+                    manifest: status,
+                    relays,
+                    lookups,
+                }
+            })
+            .collect()
     }
 
     fn mint(self: &Arc<Self>) -> Invitation {
@@ -915,6 +1044,7 @@ impl Shared {
                 .iter()
                 .map(|device| hosted_device(&state, device))
                 .collect(),
+            traverse: self.traverse_status(),
         })
     }
 
@@ -1589,6 +1719,8 @@ fn timed_out(what: &str) -> io::Error {
 mod tests {
     use url::Url;
 
+    use tcode_protocol::TraverseManifestState;
+
     use super::*;
 
     #[test]
@@ -1667,17 +1799,33 @@ mod tests {
         let endpoint = host.shared.endpoint.clone();
         assert!(host.shared.relays.is_empty(), "no relay to dial yet");
         assert_eq!(endpoint.address_lookup().unwrap().len(), 0, "no lookup yet");
+        let source = Url::from_file_path(&manifest_path).unwrap().to_string();
         assert_eq!(
             host.new_invitation().invite.traverse,
-            [Url::from_file_path(&manifest_path).unwrap().to_string()]
+            std::slice::from_ref(&source)
         );
+        // The hosting status says why the source has nothing to offer yet.
+        let [status] = <[_; 1]>::try_from(host.hosting(HostingAction::State).unwrap().traverse)
+            .expect("one source");
+        assert_eq!(status.source, source);
+        assert_eq!(status.manifest.state, TraverseManifestState::Failed);
+        assert!(
+            status
+                .manifest
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("relays.json")),
+            "{:?}",
+            status.manifest.error
+        );
+        assert!(status.relays.is_empty() && status.lookups.is_empty());
 
         std::fs::write(
             &manifest_path,
-            r#"{"version":1,"relays":[{"url":"https://relay.self-hosted.test/"}],"pkarr":["https://relay.self-hosted.test/pkarr"]}"#,
+            r#"{"version":1,"relays":[{"url":"https://relay.self-hosted.test/","region":"eu"}],"pkarr":["https://relay.self-hosted.test/pkarr"]}"#,
         )
         .unwrap();
-        let loader = host.loaders[0].clone();
+        let loader = host.shared.loaders[0].clone();
         // The failed startup fetch paces the next attempt; the loop would wait
         // it out. The loop is stopped before the stamp is reset: its first
         // pass runs as soon as the runtime schedules it, and once unpaced it
@@ -1699,6 +1847,31 @@ mod tests {
             endpoint.address_lookup().unwrap().len(),
             2,
             "a pkarr publisher and resolver"
+        );
+        let [status] = <[_; 1]>::try_from(host.hosting(HostingAction::State).unwrap().traverse)
+            .expect("one source");
+        assert_eq!(status.source, source);
+        assert_eq!(
+            (status.manifest.state, status.manifest.error),
+            (TraverseManifestState::Live, None),
+            "fetched by this run, and the failure is behind it"
+        );
+        assert!(status.manifest.fetched_unix.is_some());
+        assert_eq!(
+            status
+                .relays
+                .iter()
+                .map(|relay| (relay.url.as_str(), relay.region.as_deref()))
+                .collect::<Vec<_>>(),
+            [("https://relay.self-hosted.test/", Some("eu"))]
+        );
+        assert_eq!(
+            status
+                .lookups
+                .iter()
+                .map(|lookup| lookup.url.as_str())
+                .collect::<Vec<_>>(),
+            ["https://relay.self-hosted.test/pkarr"]
         );
         host.shutdown();
         let _ = std::fs::remove_dir_all(dir);
@@ -1766,7 +1939,7 @@ mod tests {
         );
 
         std::fs::write(&paths[2], manifest("late")).unwrap();
-        let loader = host.loaders[2].clone();
+        let loader = host.shared.loaders[2].clone();
         // As with a single source: the loops stop before the failed
         // attempt's pacing is reset, so this refresh is the one that fetches.
         for refresh in host.refresh.drain(..) {

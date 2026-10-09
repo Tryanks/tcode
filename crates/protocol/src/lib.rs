@@ -45,7 +45,9 @@ pub use query::{
     HostingAction, HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES,
     MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo, PathKind, Query,
     QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, STORED_OUTPUT_COLS,
-    STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo,
+    STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo, TraverseLookupState,
+    TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus,
+    TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -141,6 +143,8 @@ pub use wire::{
 // PullRequestStack toast reports how one ended.
 // Unreleased: Settings.traverse and SettingsPatch::Traverse carry a list of
 // sources, each official or a self-hosted URL with its own switch.
+// Unreleased: HostingState.traverse reports each Traverse source's manifest,
+// relays with their latency and home relay, and pkarr lookup checks.
 // Unreleased: a files read names the page it asks for by an opaque cursor, which
 // PullRequestFiles.next_cursor carries in place of next_page; reviewers carry
 // an opaque id and labels an id that SetLabels names them by; the conversation

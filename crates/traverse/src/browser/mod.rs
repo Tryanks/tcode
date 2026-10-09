@@ -702,6 +702,7 @@ impl Shared {
                     host_name: auth.host_name.clone(),
                     invite: None,
                     devices: Vec::new(),
+                    traverse: Vec::new(),
                 }
             }
         };

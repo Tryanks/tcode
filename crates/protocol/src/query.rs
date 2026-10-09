@@ -380,6 +380,88 @@ pub struct HostingState {
     pub devices: Vec<HostedDevice>,
     #[serde(default)]
     pub spaces: Vec<SpaceInfo>,
+    /// How each Traverse source this machine publishes to is doing, in
+    /// configured order; empty with none.
+    #[serde(default)]
+    pub traverse: Vec<TraverseSourceStatus>,
+}
+
+/// One Traverse source a hosting machine publishes to, as it stands now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraverseSourceStatus {
+    /// `official`, or the self-hosted instance's base URL, as invitations
+    /// name it.
+    pub source: String,
+    pub manifest: TraverseManifestStatus,
+    /// The relays the manifest in effect lists, in its order.
+    pub relays: Vec<TraverseRelayStatus>,
+    /// The pkarr URLs the manifest in effect lists, in its order.
+    pub lookups: Vec<TraverseLookupStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraverseManifestStatus {
+    pub state: TraverseManifestState,
+    /// Unix seconds the copy in effect was fetched; absent for the bundled
+    /// copy and without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_unix: Option<u64>,
+    /// Why the last fetch failed, until one succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraverseManifestState {
+    /// Fetched by this run of the machine.
+    Live,
+    /// Read from the copy an earlier run fetched.
+    Cached,
+    /// The official manifest built into this build.
+    Bundled,
+    /// No manifest: a self-hosted instance that has never answered.
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraverseRelayStatus {
+    pub url: String,
+    /// The region the manifest gives the relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// The lowest round trip the machine's latest network report measured;
+    /// absent until one has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
+    /// The machine's home relay: the one invitations name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub home: bool,
+    /// Why the connection to this home relay last failed, while it is down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraverseLookupStatus {
+    pub url: String,
+    pub state: TraverseLookupState,
+    /// Unix seconds of the last check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_unix: Option<u64>,
+    /// Why the last check failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Whether the machine's own record reads back from a pkarr URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraverseLookupState {
+    /// Not checked yet.
+    Pending,
+    Ok,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
