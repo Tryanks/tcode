@@ -181,11 +181,7 @@ impl AppState {
                     .residents
                     .parked
                     .get_mut(&session_id)
-                    .is_some_and(|parked| {
-                        parked
-                            .dispatch_next_pending(instructions.as_deref())
-                            .is_err()
-                    })
+                    .is_some_and(|parked| parked.dispatch_next_pending(instructions).is_err())
                 {
                     log::warn!(
                         "parked session {session_id}: scheduled dispatch failed (process gone)"
@@ -445,7 +441,7 @@ impl AppState {
         let instructions = self.pull_request_instructions(target_id);
         self.resident_mut(target_id)
             .ok_or(())?
-            .dispatch_next_pending(instructions.as_deref())
+            .dispatch_next_pending(instructions)
     }
 
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
@@ -528,7 +524,7 @@ impl AppState {
             .parked
             .get_mut(session_id)
             .unwrap()
-            .dispatch_next_pending(instructions.as_deref())
+            .dispatch_next_pending(instructions)
         {
             Ok(true) => {}
             Ok(false) => {}

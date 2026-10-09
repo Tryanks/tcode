@@ -1,8 +1,7 @@
 //! The host's writes to a native stack: an asynchronous merge it follows until the pull request
-//! host answers or
-//! five minutes pass, and a rebase it runs layer by layer. Either one is the stack's operation,
-//! recorded with every thread that shows the stack so each client, and a restarted host, knows
-//! it; one runs per stack at a time.
+//! host answers or five minutes pass, and a rebase it runs layer by layer. Either one is the
+//! stack's operation, recorded with every thread that shows the stack so each client, and a
+//! restarted host, knows it; one runs per stack at a time.
 
 use super::pull_requests::failure;
 use super::*;

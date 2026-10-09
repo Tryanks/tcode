@@ -11,8 +11,6 @@ use tcode_services::forge::{Forge, ForgeError, ForgeErrorKind, Summary};
 
 pub(super) struct PullRequestRuntime {
     pub(super) forge: Arc<dyn Forge>,
-    /// The linking instructions in the host's terms.
-    pub(super) instructions: String,
     last_synced: HashMap<PullRequestKey, u64>,
     requested: HashMap<PullRequestKey, u64>,
     generation: u64,
@@ -33,7 +31,6 @@ pub(super) struct PullRequestRuntime {
 impl PullRequestRuntime {
     pub(super) fn new(forge: Arc<dyn Forge>) -> Self {
         Self {
-            instructions: pull_request::linking_instructions(forge.terms()),
             forge,
             last_synced: HashMap::new(),
             requested: HashMap::new(),
@@ -69,9 +66,7 @@ pub(super) fn failure(message: impl Into<String>) -> ProtocolError {
 fn read_error(error: ForgeError) -> ProtocolError {
     let code = match &error.kind {
         ForgeErrorKind::HostDisabled => "pull_request_host_disabled",
-        ForgeErrorKind::NoCredential { .. } | ForgeErrorKind::Unauthorized => {
-            "pull_request_no_credential"
-        }
+        ForgeErrorKind::NoCredential | ForgeErrorKind::Unauthorized => "pull_request_no_credential",
         ForgeErrorKind::RateLimited { .. } | ForgeErrorKind::Paused { .. } => {
             "pull_request_rate_limited"
         }
@@ -111,7 +106,7 @@ fn resolve_reference(
         code: "pull_request_no_repository".into(),
         message: format!(
             "This project has no {} repository. Use a full PR URL.",
-            forge.terms().name
+            pull_request::host_names()
         ),
     };
     let key = forge
@@ -128,7 +123,6 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let Some(server) = server else { return };
-        let _ = server.host_name.set(self.pull_requests.forge.terms().name);
         self.mcp.pull_request_url = Some(server.url);
         self.mcp.pull_request_tokens = Some(server.tokens);
         let host = cx.clone();
@@ -161,13 +155,9 @@ impl AppState {
     pub(super) fn pull_request_tools_offered(&self, provider: ProviderKind) -> bool {
         provider.caps().mcp_servers && self.mcp.pull_request_url.is_some()
     }
-    /// Turns carry the linking block, in the host's terms, while the tools are registered, the
-    /// same gate as launch.
-    pub(super) fn pull_request_instructions(&self, session_id: &str) -> Option<String> {
-        self.mcp
-            .pull_request_registrations
-            .contains_key(session_id)
-            .then(|| self.pull_requests.instructions.clone())
+    /// Turns carry the linking block while the tools are registered, the same gate as launch.
+    pub(super) fn pull_request_instructions(&self, session_id: &str) -> bool {
+        self.mcp.pull_request_registrations.contains_key(session_id)
     }
     pub(super) fn revoke_pull_request_registration(&mut self, session_id: &str) {
         if let Some(registration) = self.mcp.pull_request_registrations.remove(session_id)
@@ -270,7 +260,7 @@ impl AppState {
                         .host
                         .or_else(|| forge.checkout_repository(&cwd).map(|r| r.host))
                         .ok_or_else(|| "Pass host or a full PR URL.".to_owned())?;
-                    let invalid = || format!("Invalid {} repository.", forge.terms().name);
+                    let invalid = || format!("Invalid {} repository.", pull_request::host_names());
                     let key = forge
                         .repository(&name, &host)
                         .ok_or_else(invalid)?
@@ -355,14 +345,7 @@ impl AppState {
                 self.pull_requests.submissions,
             )
         });
-        let task = cx.unblock(move || match read {
-            // A host that reads no media leaves the client to draw it by its URL.
-            PullRequestRead::Media { .. } if !forge.capabilities(&key).media => Ok((
-                PullRequestReadResponse::Media(tcode_protocol::PullRequestMedia::Unsupported),
-                SystemTime::now(),
-            )),
-            read => forge.read(&key, read),
-        });
+        let task = cx.unblock(move || forge.read(&key, read));
         let host = cx.clone();
         cx.spawn_background(async move {
             let answer = task.await;
@@ -613,7 +596,7 @@ impl AppState {
                     end_line,
                     ..
                 } => {
-                    let (reading, key, head, path, side) = (
+                    let (reading, read_key, head, path, side) = (
                         forge.clone(),
                         key.clone(),
                         head.clone(),
@@ -622,7 +605,7 @@ impl AppState {
                     );
                     let lines = (*start_line, *end_line);
                     match host
-                        .unblock(move || reading.commentable(&key, &head, &path, side, lines))
+                        .unblock(move || reading.commentable(&read_key, &head, &path, side, lines))
                         .await
                         .map_err(read_error)?
                     {
@@ -632,7 +615,7 @@ impl AppState {
                                 "pull_request_not_in_diff",
                                 &format!(
                                     "{} only accepts comments on lines in the diff.",
-                                    forge.terms().name
+                                    forge.terms(&key).name
                                 ),
                             ));
                         }
@@ -1025,7 +1008,7 @@ impl AppState {
         if let Err(error) = &result {
             let reason = match &error.kind {
                 ForgeErrorKind::HostDisabled => PullRequestSyncError::HostDisabled,
-                ForgeErrorKind::NoCredential { .. } | ForgeErrorKind::Unauthorized => {
+                ForgeErrorKind::NoCredential | ForgeErrorKind::Unauthorized => {
                     PullRequestSyncError::NoCredential
                 }
                 ForgeErrorKind::RateLimited { retry_at } | ForgeErrorKind::Paused { retry_at } => {
@@ -1267,10 +1250,7 @@ impl AppState {
     ) {
         if let AgentEvent::ItemStarted(item) | AgentEvent::ItemCompleted(item) = event
             && let ItemContent::CommandExecution { command, .. } = &item.content
-            && pull_request::merges_or_closes(
-                command,
-                self.pull_requests.forge.terms().merge_commands,
-            )
+            && pull_request::merges_or_closes(command)
         {
             self.pull_requests.merge_commands.insert(id.to_owned());
         }

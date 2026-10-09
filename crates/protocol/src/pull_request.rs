@@ -62,7 +62,7 @@ pub struct PullRequestFiles {
     pub next_cursor: Option<String>,
     /// Every changed file has been listed once the pages before this one were read too.
     pub complete: bool,
-    /// GitHub's count of changed files, which a listing may fall short of.
+    /// The host's count of changed files, which a listing may fall short of.
     pub changed_files: u64,
 }
 
@@ -236,22 +236,11 @@ pub struct PullRequestCapabilities {
     /// Marking a pull request ready for review and converting it to a draft.
     pub draft: bool,
     pub reopen: bool,
-    /// Check runs or statuses on the head.
-    pub checks: bool,
-    /// The host keeps the account's viewed marks itself; without, Tcode would keep them,
-    /// staled by each file's revision.
-    pub native_viewed_marks: bool,
-    pub native_stacks: bool,
     pub auto_merge: bool,
     /// Bringing the base into the head on the host.
     pub update_branch: bool,
     /// Opening a pull request that reverses a merged one.
     pub revert: bool,
-    /// Images the conversation shows, read through the host.
-    pub media: bool,
-    /// A cheap read of what moved, which the watch reads before the detail and activity;
-    /// without one, both are read whenever the sync snapshot moves.
-    pub fingerprint: bool,
 }
 impl PullRequestCapabilities {
     pub const ALL: Self = Self {
@@ -261,18 +250,13 @@ impl PullRequestCapabilities {
         request_changes: true,
         draft: true,
         reopen: true,
-        checks: true,
-        native_viewed_marks: true,
-        native_stacks: true,
         auto_merge: true,
         update_branch: true,
         revert: true,
-        media: true,
-        fingerprint: true,
     };
 }
 
-/// What the signed-in account may do to the pull request, as GitHub grants it. Per-comment and
+/// What the signed-in account may do to the pull request, as the host grants it. Per-comment and
 /// per-thread rights travel on the comment and thread.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestPermissions {

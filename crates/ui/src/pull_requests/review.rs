@@ -1246,26 +1246,3 @@ fn offered_verdicts(
         *verdict != PullRequestReviewVerdict::RequestChanges || capabilities.request_changes
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_verdict_the_host_lacks_is_not_offered() {
-        use PullRequestReviewVerdict::*;
-        assert_eq!(
-            offered_verdicts(PullRequestCapabilities::ALL).collect::<Vec<_>>(),
-            [Comment, Approve, RequestChanges]
-        );
-        assert_eq!(
-            offered_verdicts(PullRequestCapabilities {
-                request_changes: false,
-                ..PullRequestCapabilities::ALL
-            })
-            .collect::<Vec<_>>(),
-            [Comment, Approve],
-            "absent rather than drawn disabled, as a verdict the account may not give is"
-        );
-    }
-}

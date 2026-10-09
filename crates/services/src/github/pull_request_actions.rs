@@ -19,10 +19,10 @@ use tcode_core::{
     session::ReviewSide,
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState, PullRequestFile,
-    PullRequestFileText, PullRequestMergeState, PullRequestPatch,
-    PullRequestRejection as Rejection, PullRequestReviewVerdict, PullRequestReviewer,
-    PullRequestReviewerKind,
+    PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
+    PullRequestCapabilities, PullRequestFile, PullRequestFileText, PullRequestMergeState,
+    PullRequestPatch, PullRequestRejection as Rejection, PullRequestReviewVerdict,
+    PullRequestReviewer, PullRequestReviewerKind,
 };
 
 /// What `gh pr merge` and `gh pr update-branch` read before they act, with the account's rights,
@@ -49,10 +49,7 @@ fn method_of(name: &str) -> Option<PullRequestMergeMethod> {
 }
 
 /// The pull request's node id and its action state.
-fn action_state(
-    host: &str,
-    response: &Value,
-) -> Result<(String, PullRequestActionState), GitHubError> {
+fn action_state(response: &Value) -> Result<(String, PullRequestActionState), GitHubError> {
     let repository = &response["data"]["repository"];
     let pr = &repository["pullRequest"];
     if pr.is_null() {
@@ -117,7 +114,7 @@ fn action_state(
         can_update: pr["viewerCanUpdate"].as_bool() == Some(true),
         can_update_branch: pr["viewerCanUpdateBranch"].as_bool() == Some(true),
         can_merge: writes,
-        capabilities: super::forge::capabilities(host),
+        capabilities: PullRequestCapabilities::ALL,
     };
     Ok((id.to_owned(), state))
 }
@@ -249,7 +246,7 @@ impl Reader<'_> {
                 json!(format!("refs/pull/{}/head", self.key.number)),
             )],
         )?;
-        action_state(&self.key.host, &response)
+        action_state(&response)
     }
 
     /// GitHub's merge or squash message without agents' credits, when that differs from it.

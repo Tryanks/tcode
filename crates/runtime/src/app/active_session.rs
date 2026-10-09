@@ -560,7 +560,7 @@ impl ActiveSession {
     /// here; see [`AppState::steer`].)
     pub(super) fn dispatch_next_pending(
         &mut self,
-        pull_request_instructions: Option<&str>,
+        pull_request_instructions: bool,
     ) -> Result<bool, ()> {
         if self.turn_in_flight
             || self.delivery_in_flight.is_some()
@@ -581,18 +581,17 @@ impl ActiveSession {
             return Ok(false);
         };
         // A retried delivery already carries the block it was first dispatched with.
-        if let Some(len) = send.context_len
-            && let Some(own) = tcode_core::pull_request::strip_linking_instructions(&send.text)
-            && let block = send.text.len() - own.len()
-            && len >= block
+        let instructions = tcode_core::pull_request::linking_instructions();
+        if let Some(len) = send.context_len.filter(|len| *len >= instructions.len())
+            && let Some(own) = send.text.strip_prefix(instructions)
         {
             send.text = own.to_owned();
-            send.context_len = Some(len - block).filter(|len| *len > 0);
+            send.context_len = Some(len - instructions.len()).filter(|len| *len > 0);
         }
         let mut text = send.wire_text(&self.provider_commands);
         // A native `/command` must stay at byte zero, and the block must not become its arguments.
-        let instructions = pull_request_instructions.filter(|_| !text.starts_with('/'));
-        if let Some(instructions) = instructions {
+        let instructed = pull_request_instructions && !text.starts_with('/');
+        if instructed {
             text.insert_str(0, instructions);
         }
         commands
@@ -604,7 +603,7 @@ impl ActiveSession {
             })
             .map_err(|_| ())?;
         if let Some(queued) = self.queue.iter_mut().find(|queued| queued.id == send.id) {
-            if let Some(instructions) = instructions {
+            if instructed {
                 queued.text = format!("{instructions}{}", send.text);
                 queued.context_len = Some(instructions.len() + send.context_len.unwrap_or(0));
             } else {

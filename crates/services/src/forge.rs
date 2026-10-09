@@ -20,9 +20,9 @@ use tcode_core::{
     settings::{GitHubCredentialStatus, GitHubHostSettings},
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
-    PullRequestRead, PullRequestReadResponse, PullRequestRejection as Rejection,
-    PullRequestReviewVerdict, PullRequestStackHead,
+    PullRequestAction, PullRequestActionResult as Outcome, PullRequestRead,
+    PullRequestReadResponse, PullRequestRejection as Rejection, PullRequestReviewVerdict,
+    PullRequestStackHead,
 };
 
 /// The hosts Tcode reads pull requests from, with credentials from `store` and the launch
@@ -38,9 +38,8 @@ pub fn connect(
 
 /// A pull request host. Each entry answers for the host the key names.
 pub trait Forge: Send + Sync {
-    /// What Tcode's text to the model says about the host.
-    fn terms(&self) -> &'static HostTerms;
-    fn capabilities(&self, key: &PullRequestKey) -> PullRequestCapabilities;
+    /// What Tcode's text says about the host of the pull request.
+    fn terms(&self, key: &PullRequestKey) -> &'static HostTerms;
 
     /// A host name as settings keep it, or `None` for one the host cannot be.
     fn normalize_host(&self, host: &str) -> Option<String>;
@@ -108,25 +107,40 @@ pub trait Forge: Send + Sync {
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), ForgeError>;
 
-    /// Submits the host's asynchronous merge of native stack `stack` up to this layer.
+    /// Submits the host's asynchronous merge of native stack `stack` up to this layer. A host
+    /// without native stacks has none to merge.
     fn merge_stack(
         &self,
-        key: &PullRequestKey,
-        stack: u64,
-        heads: &[PullRequestStackHead],
-        method: PullRequestMergeMethod,
-    ) -> MergeSubmission;
+        _key: &PullRequestKey,
+        _stack: u64,
+        _heads: &[PullRequestStackHead],
+        _method: PullRequestMergeMethod,
+    ) -> MergeSubmission {
+        MergeSubmission::Done(Outcome::Rejected(Rejection::Invalid))
+    }
     /// What became of stack merge `id`: `None` while it is still pending.
-    fn merge_status(&self, key: &PullRequestKey, id: &str) -> Result<Option<Outcome>, ForgeError>;
+    fn merge_status(
+        &self,
+        _key: &PullRequestKey,
+        _id: &str,
+    ) -> Result<Option<Outcome>, ForgeError> {
+        Err(ForgeError {
+            kind: ForgeErrorKind::NotFound,
+            description: "no native stacks on this host".into(),
+        })
+    }
     fn plan_stack_rebase(
         &self,
-        key: &PullRequestKey,
-        stack: u64,
-        heads: &[PullRequestStackHead],
-    ) -> Result<StackRebase, Rejection>;
+        _key: &PullRequestKey,
+        _stack: u64,
+        _heads: &[PullRequestStackHead],
+    ) -> Result<StackRebase, Rejection> {
+        Err(Rejection::Invalid)
+    }
 
-    /// One fingerprint per key, for a host with the fingerprint capability. `Ok(None)` is a
-    /// pull request it gave none for, which takes the reads gated by its sync snapshot.
+    /// One fingerprint per key, in order. `Ok(None)` is a pull request the host gave none for,
+    /// as every one is on a host without fingerprints; it takes the reads gated by its sync
+    /// snapshot.
     fn fingerprints(
         &self,
         keys: &[PullRequestKey],
@@ -156,11 +170,9 @@ pub struct ForgeError {
 pub enum ForgeErrorKind {
     /// Turned off for this host in settings.
     HostDisabled,
-    /// No usable credential for the host; `tool_missing` when the host's CLI that would supply
-    /// one is not installed.
-    NoCredential {
-        tool_missing: bool,
-    },
+    /// No usable credential for the host: none saved or in the environment, and the host's CLI
+    /// that would supply one is missing or signed out.
+    NoCredential,
     /// The host refused the credential.
     Unauthorized,
     /// Refused before any request while an earlier rate limit lasts.
@@ -173,7 +185,6 @@ pub enum ForgeErrorKind {
     NotFound,
     /// The host refused, in its own words.
     Refused {
-        status: u16,
         messages: Vec<String>,
     },
     /// No answer arrived, or none that could be read: a write may have been applied.
@@ -208,9 +219,7 @@ impl ForgeError {
     pub fn rejection(self) -> Rejection {
         match self.kind {
             ForgeErrorKind::HostDisabled => Rejection::HostDisabled,
-            ForgeErrorKind::NoCredential { .. } | ForgeErrorKind::Unauthorized => {
-                Rejection::NoCredential
-            }
+            ForgeErrorKind::NoCredential | ForgeErrorKind::Unauthorized => Rejection::NoCredential,
             ForgeErrorKind::Paused { retry_at } | ForgeErrorKind::RateLimited { retry_at } => {
                 Rejection::RateLimited {
                     retry_at: retry_at
@@ -220,7 +229,7 @@ impl ForgeError {
                 }
             }
             ForgeErrorKind::NotFound => Rejection::NotFound,
-            ForgeErrorKind::Refused { messages, .. } => Rejection::Refused { messages },
+            ForgeErrorKind::Refused { messages } => Rejection::Refused { messages },
             ForgeErrorKind::InvalidInput => Rejection::Invalid,
             _ => Rejection::Failed,
         }

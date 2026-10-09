@@ -902,10 +902,8 @@ impl AppState {
             pull_request_tools: self
                 .pull_request_tools_offered(session.meta.provider)
                 .then(|| tcode_protocol::InjectedPullRequestTools {
-                    tools: pull_request_mcp::tool_descriptions(
-                        self.pull_requests.forge.terms().name,
-                    ),
-                    instructions: self.pull_requests.instructions.clone(),
+                    tools: pull_request_mcp::tool_descriptions().to_vec(),
+                    instructions: tcode_core::pull_request::linking_instructions().to_owned(),
                 }),
         })
     }

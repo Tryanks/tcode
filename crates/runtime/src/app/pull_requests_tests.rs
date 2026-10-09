@@ -895,10 +895,7 @@ fn registered_tools_prefix_each_turn_except_a_native_command() {
         if instructed {
             assert_eq!(
                 text,
-                format!(
-                    "{}{typed}",
-                    pull_request::linking_instructions(&pull_request::GITHUB)
-                )
+                format!("{}{typed}", pull_request::linking_instructions())
             );
         } else {
             assert_eq!(text, typed_wire, "a native command stays at byte zero");

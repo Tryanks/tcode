@@ -18,11 +18,11 @@ use std::{
 };
 use tcode_core::{pull_request::PullRequestKey, session::ReviewSide};
 use tcode_protocol::{
-    PullRequestActor, PullRequestComment, PullRequestConversation, PullRequestFile,
-    PullRequestFileText, PullRequestLabel, PullRequestLabelCandidate, PullRequestLabelCandidates,
-    PullRequestMedia, PullRequestPatch, PullRequestPermissions, PullRequestReaction,
-    PullRequestReactionContent, PullRequestReviewAnchor, PullRequestReviewState,
-    PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestActor, PullRequestCapabilities, PullRequestComment, PullRequestConversation,
+    PullRequestFile, PullRequestFileText, PullRequestLabel, PullRequestLabelCandidate,
+    PullRequestLabelCandidates, PullRequestMedia, PullRequestPatch, PullRequestPermissions,
+    PullRequestReaction, PullRequestReactionContent, PullRequestReviewAnchor,
+    PullRequestReviewState, PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
     PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestReviewerKind,
     PullRequestReviewerState, PullRequestThreadReplies, PullRequestViewedFiles,
     PullRequestViewedState,
@@ -374,7 +374,7 @@ impl Reader<'_> {
                 permissions,
                 labels,
                 reviewers: reviewer_states(pr),
-                capabilities: super::forge::capabilities(&self.key.host),
+                capabilities: PullRequestCapabilities::ALL,
             },
             if merged { MERGED_TTL } else { READ_TTL },
         ))

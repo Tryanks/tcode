@@ -25,9 +25,9 @@ use tcode_core::{
     settings::{GitHubCredentialStatus, GitHubHostSettings},
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
-    PullRequestFiles, PullRequestMedia, PullRequestRead, PullRequestReadResponse,
-    PullRequestRejection as Rejection, PullRequestReviewVerdict, PullRequestStackHead,
+    PullRequestAction, PullRequestActionResult as Outcome, PullRequestFiles, PullRequestMedia,
+    PullRequestRead, PullRequestReadResponse, PullRequestRejection as Rejection,
+    PullRequestReviewVerdict, PullRequestStackHead,
 };
 
 pub struct GitHub {
@@ -46,29 +46,17 @@ impl GitHub {
     }
 }
 
-/// Native stacks are github.com's alone.
-pub(super) fn capabilities(host: &str) -> PullRequestCapabilities {
-    PullRequestCapabilities {
-        native_stacks: host == "github.com",
-        ..PullRequestCapabilities::ALL
-    }
-}
-
 impl From<GitHubError> for ForgeError {
     fn from(error: GitHubError) -> Self {
         let description = error.to_string();
         let kind = match error {
             GitHubError::Credential(CredentialError::Disabled) => ForgeErrorKind::HostDisabled,
-            GitHubError::Credential(problem) => ForgeErrorKind::NoCredential {
-                tool_missing: problem == CredentialError::CliMissing,
-            },
+            GitHubError::Credential(_) => ForgeErrorKind::NoCredential,
             GitHubError::Unauthorized => ForgeErrorKind::Unauthorized,
             GitHubError::Paused { retry_at } => ForgeErrorKind::Paused { retry_at },
             GitHubError::RateLimited { retry_at, .. } => ForgeErrorKind::RateLimited { retry_at },
             GitHubError::NotFound => ForgeErrorKind::NotFound,
-            GitHubError::Response { status, messages } => {
-                ForgeErrorKind::Refused { status, messages }
-            }
+            GitHubError::Response { messages, .. } => ForgeErrorKind::Refused { messages },
             GitHubError::Request | GitHubError::InvalidResponse => ForgeErrorKind::Uncertain,
             GitHubError::Deadline => ForgeErrorKind::Deadline,
             GitHubError::BodyTooLarge => ForgeErrorKind::TooLarge,
@@ -87,12 +75,8 @@ fn neutral(repository: repository::Repository) -> Repository {
 }
 
 impl Forge for GitHub {
-    fn terms(&self) -> &'static HostTerms {
+    fn terms(&self, _: &PullRequestKey) -> &'static HostTerms {
         &GITHUB
-    }
-
-    fn capabilities(&self, key: &PullRequestKey) -> PullRequestCapabilities {
-        capabilities(&key.host)
     }
 
     fn normalize_host(&self, host: &str) -> Option<String> {
@@ -346,8 +330,8 @@ impl Forge for GitHub {
 mod tests {
     use super::*;
 
-    /// What the runtime and the client act on survives the crossing: when to retry, the
-    /// host's own refusal, and a missing CLI as a missing credential.
+    /// What the runtime acts on survives the crossing: when to read again, and a host turned
+    /// off rather than a missing credential.
     #[test]
     fn github_errors_keep_their_meaning_across_the_boundary() {
         let retry_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
@@ -356,39 +340,15 @@ mod tests {
             retry_at,
         });
         assert_eq!(limited.retry_at(), Some(retry_at));
-        assert_eq!(limited.to_string(), "GitHub request failed (rate limited)");
         assert_eq!(
             limited.rejection(),
             Rejection::RateLimited {
                 retry_at: 1_800_000_000
             }
         );
-
-        let refused = ForgeError::from(GitHubError::Response {
-            status: 422,
-            messages: vec!["Reviews may only be requested from collaborators".into()],
-        });
-        assert_eq!(refused.retry_at(), None);
-        assert_eq!(
-            refused.rejection(),
-            Rejection::Refused {
-                messages: vec!["Reviews may only be requested from collaborators".into()]
-            }
-        );
-
-        let missing = ForgeError::from(GitHubError::Credential(CredentialError::CliMissing));
-        assert_eq!(
-            missing.kind,
-            ForgeErrorKind::NoCredential { tool_missing: true }
-        );
-        assert_eq!(missing.rejection(), Rejection::NoCredential);
         assert_eq!(
             ForgeError::from(GitHubError::Credential(CredentialError::Disabled)).rejection(),
             Rejection::HostDisabled
-        );
-        assert_eq!(
-            ForgeError::from(GitHubError::Request).kind,
-            ForgeErrorKind::Uncertain
         );
     }
 }

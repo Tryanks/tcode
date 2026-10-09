@@ -254,25 +254,22 @@ impl AppState {
         let forge = self.pull_request_watches.forge.clone();
         let host = cx.clone();
         cx.spawn_background(async move {
-            // A host without a fingerprint gives none, so each pull request takes the reads gated
-            // by its sync snapshot.
-            let keys: Vec<_> = groups
-                .iter()
-                .map(|group| group.key.1.clone())
-                .filter(|key| forge.capabilities(key).fingerprint)
-                .collect();
-            let mut printed = {
+            let keys: Vec<_> = groups.iter().map(|group| group.key.1.clone()).collect();
+            let mut fingerprints = {
                 let forge = forge.clone();
                 host.unblock(move || forge.fingerprints(&keys)).await
+            };
+            if fingerprints.len() != groups.len() {
+                let error = ForgeError {
+                    kind: ForgeErrorKind::Uncertain,
+                    description: format!(
+                        "{} fingerprints answered for {} pull requests",
+                        fingerprints.len(),
+                        groups.len()
+                    ),
+                };
+                fingerprints = groups.iter().map(|_| Err(error.clone())).collect();
             }
-            .into_iter();
-            let fingerprints: Vec<_> = groups
-                .iter()
-                .map(|group| match forge.capabilities(&group.key.1).fingerprint {
-                    true => printed.next().unwrap_or(Ok(None)),
-                    false => Ok(None),
-                })
-                .collect();
             let mut fingerprinted = Vec::new();
             for (group, fingerprint) in groups.into_iter().zip(fingerprints) {
                 match fingerprint {
