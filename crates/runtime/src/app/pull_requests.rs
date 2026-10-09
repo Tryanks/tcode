@@ -3,15 +3,19 @@ use tcode_core::pull_request::{
     self, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestStackState,
     PullRequestState, PullRequestSyncError,
 };
-use tcode_protocol::{CommandResponse, ProtocolError};
+use tcode_protocol::{
+    CommandResponse, ProtocolError, PullRequestRead, PullRequestReadResponse, QueryResponse,
+};
 use tcode_services::github::{
-    GitHubApi, GitHubError,
+    CredentialError, GitHubApi, GitHubError,
+    pull_request_reads::PullRequestReads,
     pull_requests::{PullRequests, Summary},
     repository::{self, Repository},
 };
 
 pub(super) struct PullRequestRuntime {
     service: Arc<PullRequests>,
+    reads: Arc<PullRequestReads>,
     last_synced: HashMap<PullRequestKey, u64>,
     requested: HashMap<PullRequestKey, u64>,
     generation: u64,
@@ -27,7 +31,8 @@ pub(super) struct PullRequestRuntime {
 impl PullRequestRuntime {
     pub(super) fn new(api: Arc<GitHubApi>) -> Self {
         Self {
-            service: PullRequests::new(api),
+            service: PullRequests::new(api.clone()),
+            reads: PullRequestReads::new(api),
             last_synced: HashMap::new(),
             requested: HashMap::new(),
             generation: 0,
@@ -53,6 +58,25 @@ fn failure(message: impl Into<String>) -> ProtocolError {
     ProtocolError {
         code: "pull_request_failed".into(),
         message: message.into(),
+    }
+}
+/// Codes a client localizes; the message is the transport's display, which carries no request
+/// values.
+fn read_error(error: GitHubError) -> ProtocolError {
+    let code = match &error {
+        GitHubError::Credential(CredentialError::Disabled) => "pull_request_host_disabled",
+        GitHubError::Credential(_) | GitHubError::Unauthorized => "pull_request_no_credential",
+        GitHubError::RateLimited { .. } | GitHubError::Paused { .. } => "pull_request_rate_limited",
+        GitHubError::NotFound => "pull_request_not_found",
+        GitHubError::BodyTooLarge => "pull_request_too_large",
+        GitHubError::InvalidInput => "pull_request_invalid_read",
+        GitHubError::UnsupportedMedia => "pull_request_unsupported_media",
+        GitHubError::Deadline => "pull_request_deadline",
+        _ => "pull_request_failed",
+    };
+    ProtocolError {
+        code: code.into(),
+        message: error.to_string(),
     }
 }
 fn resolve_reference(
@@ -268,6 +292,121 @@ impl AppState {
                 let _ = request.reply.try_send(result);
             });
         });
+    }
+    /// Reads answer only for a pull request the thread shows, linked or a layer of a linked
+    /// stack, so a client reads nothing through a thread it can see that the thread does not
+    /// show.
+    fn linked_pull_request(
+        &self,
+        session_id: &str,
+        key: &PullRequestKey,
+    ) -> Result<(), ProtocolError> {
+        self.find_meta(session_id)
+            .filter(|meta| pull_request::shown(&meta.pull_requests, key))
+            .map(|_| ())
+            .ok_or_else(|| ProtocolError {
+                code: "pull_request_not_linked".into(),
+                message: "The pull request is not linked to this thread.".into(),
+            })
+    }
+    pub(crate) fn read_pull_request(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        read: PullRequestRead,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
+        if let Err(error) = self.linked_pull_request(session_id, &key) {
+            return cx.spawn_background(async move { Err(error) });
+        }
+        let reads = self.pull_requests.reads.clone();
+        let task = cx.unblock(move || {
+            use tcode_services::github::Fresh;
+            fn reply<V: Clone>(
+                fresh: Fresh<V>,
+                wrap: impl FnOnce(V) -> PullRequestReadResponse,
+            ) -> (PullRequestReadResponse, SystemTime) {
+                (wrap((*fresh.value).clone()), fresh.expires_at)
+            }
+            Ok::<_, GitHubError>(match read {
+                PullRequestRead::Files { page } => {
+                    reply(reads.files(&key, page)?, PullRequestReadResponse::Files)
+                }
+                PullRequestRead::FileText { revision, path } => reply(
+                    reads.file_text(&key, &revision, &path)?,
+                    PullRequestReadResponse::FileText,
+                ),
+                PullRequestRead::Conversation => reply(
+                    reads.conversation(&key)?,
+                    PullRequestReadResponse::Conversation,
+                ),
+                PullRequestRead::ThreadReplies { thread_id, after } => reply(
+                    reads.thread_replies(&key, &thread_id, &after)?,
+                    PullRequestReadResponse::ThreadReplies,
+                ),
+                PullRequestRead::ViewedFiles => reply(
+                    reads.viewed_files(&key)?,
+                    PullRequestReadResponse::ViewedFiles,
+                ),
+                PullRequestRead::Media { url, validator } => {
+                    let media = reads.media(&key, &url, validator.as_deref())?;
+                    let expires_at = match &media {
+                        tcode_protocol::PullRequestMedia::Image { expires_at, .. }
+                        | tcode_protocol::PullRequestMedia::NotModified { expires_at } => {
+                            UNIX_EPOCH + Duration::from_secs(*expires_at)
+                        }
+                        tcode_protocol::PullRequestMedia::External { .. }
+                        | tcode_protocol::PullRequestMedia::Unsupported => SystemTime::now(),
+                    };
+                    (PullRequestReadResponse::Media(media), expires_at)
+                }
+            })
+        });
+        cx.spawn_background(async move {
+            task.await
+                .map(|(response, expires_at)| QueryResponse::PullRequest {
+                    response: Box::new(response),
+                    expires_at: expires_at
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                })
+                .map_err(|error| {
+                    log::debug!("pull request read failed: {error}");
+                    read_error(error)
+                })
+        })
+    }
+    /// A manual refresh: the host's answers about the pull request go, and the sync reads it.
+    pub fn refresh_pull_request(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        cx: &mut HostCx,
+    ) -> Result<(), ProtocolError> {
+        self.linked_pull_request(session_id, &key)?;
+        self.pull_requests.reads.invalidate(&key);
+        self.request_pull_request_sync(key, cx);
+        Ok(())
+    }
+    pub fn set_pull_request_files_viewed(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        paths: Vec<String>,
+        viewed: bool,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<CommandResponse, ProtocolError>> {
+        if let Err(error) = self.linked_pull_request(session_id, &key) {
+            return cx.spawn_background(async move { Err(error) });
+        }
+        let reads = self.pull_requests.reads.clone();
+        let task = cx.unblock(move || reads.set_viewed(&key, &paths, viewed));
+        cx.spawn_background(async move {
+            task.await
+                .map(|()| CommandResponse::Unit)
+                .map_err(read_error)
+        })
     }
     fn pull_request_project_cwd(&self, meta: &SessionMeta) -> PathBuf {
         self.projects
@@ -662,6 +801,9 @@ impl AppState {
                 .is_none_or(|s| !s.same_observation(&summary.snapshot))
                 || link.stack != stack;
             let mut changed = observation_changed;
+            if observation_changed {
+                self.pull_requests.reads.invalidate(&key);
+            }
             if !meta.is_settled()
                 && let PullRequestStackState::Native(topology) = &stack
             {

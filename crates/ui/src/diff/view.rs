@@ -12,25 +12,26 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
-use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
-use agent::{FileChange, FileChangeKind};
+use agent::FileChange;
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Entity, HighlightStyle,
-    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, Role,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, div, list,
+    InteractiveElement as _, IntoElement, ListOffset, ParentElement as _, Render, Role,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{InteractiveElementExt as _, PopoverState, StyledExt as _, h_flex, v_flex};
+use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
+use super::list::{
+    DiffList, DiffListHost, DiffSelectionMenu, FileMenu, LineSelection, file_header_index,
+    render_list, render_notice,
+};
 use super::model::{
-    DiffColors, ExpandDir, FileDiffInput, PairedRow, RenderedFile, VisibleItem, VisibleSplitItem,
-    build_file, diff_content_widths, expand, reconstruct_from_text, visible_split, visible_unified,
+    DiffColors, ExpandDir, FileDiffInput, RenderedFile, build_file, reconstruct_from_text,
 };
 use super::parse::RowKind;
 use crate::agents_panel::{Agents, AgentsPanel};
@@ -56,14 +57,6 @@ enum DiffViewOption {
     Wrap,
     Whitespace,
     Invisibles,
-}
-
-/// A code row's context-menu action on the review selection.
-#[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_diff, no_json)]
-enum DiffSelectionMenu {
-    CopyLines,
-    AddComment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -137,73 +130,7 @@ struct DiffCache {
     dark: bool,
     ignore_ws: bool,
     show_invisibles: bool,
-    files: Vec<RenderedFile>,
-    unified_visible: Vec<Vec<VisibleItem>>,
-    split_visible: Vec<Vec<VisibleSplitItem>>,
-    unified_items: Vec<DiffListItem>,
-    split_items: Vec<DiffListItem>,
-    unified_content_width: f32,
-    split_content_width: f32,
-    unified_list: ListState,
-    split_list: ListState,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum DiffListItem {
-    Header(usize),
-    UnifiedRow { file: usize, row: usize },
-    SplitRow { file: usize, row: usize },
-}
-
-fn build_list_items(files: &[RenderedFile]) -> BuiltListItems {
-    let unified_visible = files.iter().map(visible_unified).collect::<Vec<_>>();
-    let split_visible = files.iter().map(visible_split).collect::<Vec<_>>();
-    let unified_capacity = files.len() + unified_visible.iter().map(Vec::len).sum::<usize>();
-    let split_capacity = files.len() + split_visible.iter().map(Vec::len).sum::<usize>();
-    let mut unified = Vec::with_capacity(unified_capacity);
-    let mut split = Vec::with_capacity(split_capacity);
-    for (file_index, _) in files.iter().enumerate() {
-        unified.push(DiffListItem::Header(file_index));
-        split.push(DiffListItem::Header(file_index));
-        unified.extend((0..unified_visible[file_index].len()).map(|row| {
-            DiffListItem::UnifiedRow {
-                file: file_index,
-                row,
-            }
-        }));
-        split.extend(
-            (0..split_visible[file_index].len()).map(|row| DiffListItem::SplitRow {
-                file: file_index,
-                row,
-            }),
-        );
-    }
-    BuiltListItems {
-        unified_visible,
-        split_visible,
-        unified,
-        split,
-    }
-}
-
-struct BuiltListItems {
-    unified_visible: Vec<Vec<VisibleItem>>,
-    split_visible: Vec<Vec<VisibleSplitItem>>,
-    unified: Vec<DiffListItem>,
-    split: Vec<DiffListItem>,
-}
-
-fn file_header_index(
-    files: &[RenderedFile],
-    items: &[DiffListItem],
-    path: &str,
-    cwd: &Path,
-) -> Option<usize> {
-    let display_path = relativize_to_workspace(path, cwd);
-    let file_index = files.iter().position(|file| file.path == display_path)?;
-    items
-        .iter()
-        .position(|item| matches!(item, DiffListItem::Header(index) if *index == file_index))
+    list: DiffList,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,18 +164,6 @@ struct GitPreviewOptions {
     ignore_ws: bool,
 }
 
-#[derive(Clone)]
-struct CommentSelection {
-    file: String,
-    row_start: usize,
-    row_end: usize,
-    line_start: u32,
-    line_end: u32,
-    side: ReviewSide,
-    start_index: usize,
-    end_index: usize,
-}
-
 pub struct DiffPanel {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -264,7 +179,6 @@ pub struct DiffPanel {
     git_preview: Option<GitPreview>,
     loading_key: Option<(String, DiffScope, Option<String>, u64, bool)>,
     render_loading_key: Option<RenderKey>,
-    selection: Option<CommentSelection>,
     comment_input: Option<Entity<InputState>>,
     observed_review_comments: Vec<ReviewComment>,
     _subscriptions: Vec<Subscription>,
@@ -307,7 +221,6 @@ impl DiffPanel {
             git_preview: None,
             loading_key: None,
             render_loading_key: None,
-            selection: None,
             comment_input: None,
             observed_review_comments: Vec::new(),
             _subscriptions: subscriptions,
@@ -329,8 +242,7 @@ impl DiffPanel {
 
     fn remeasure_lists(&self) {
         if let Some(cache) = &self.cache {
-            cache.unified_list.remeasure();
-            cache.split_list.remeasure();
+            cache.list.remeasure();
         }
     }
 
@@ -364,18 +276,18 @@ impl DiffPanel {
         else {
             return;
         };
+        let list = &cache.list;
         if let Some(index) =
-            file_header_index(&cache.files, &cache.unified_items, &request.path, &cwd)
+            file_header_index(&list.files, &list.unified_items, &request.path, &cwd)
         {
-            cache.unified_list.scroll_to(ListOffset {
+            list.unified_list.scroll_to(ListOffset {
                 item_ix: index,
                 offset_in_item: px(0.),
             });
         }
-        if let Some(index) =
-            file_header_index(&cache.files, &cache.split_items, &request.path, &cwd)
+        if let Some(index) = file_header_index(&list.files, &list.split_items, &request.path, &cwd)
         {
-            cache.split_list.scroll_to(ListOffset {
+            list.split_list.scroll_to(ListOffset {
                 item_ix: index,
                 offset_in_item: px(0.),
             });
@@ -484,18 +396,10 @@ impl DiffPanel {
                     fallback_texts[index] = Some(text);
                 }
             }
-            let (
-                files,
-                unified_visible,
-                split_visible,
-                unified_items,
-                split_items,
-                unified_content_width,
-                split_content_width,
-            ) = cx
+            let files = cx
                 .background_executor()
                 .spawn(async move {
-                    let files = changes
+                    changes
                         .iter()
                         .enumerate()
                         .map(|(index, change)| {
@@ -515,26 +419,11 @@ impl DiffPanel {
                                 },
                             )
                         })
-                        .collect::<Vec<_>>();
-                    let items = build_list_items(&files);
-                    let (unified_content_width, split_content_width) = diff_content_widths(&files);
-                    (
-                        files,
-                        items.unified_visible,
-                        items.split_visible,
-                        items.unified,
-                        items.split,
-                        unified_content_width,
-                        split_content_width,
-                    )
+                        .collect::<Vec<_>>()
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 if panel.render_loading_key.as_ref() == Some(&key) {
-                    let unified_list =
-                        ListState::new(unified_items.len(), ListAlignment::Top, px(180.));
-                    let split_list =
-                        ListState::new(split_items.len(), ListAlignment::Top, px(180.));
                     panel.cache = Some(DiffCache {
                         session: key.session.clone(),
                         scope: key.scope,
@@ -542,15 +431,7 @@ impl DiffPanel {
                         dark: key.dark,
                         ignore_ws: key.ignore_ws,
                         show_invisibles: key.show_invisibles,
-                        files,
-                        unified_visible,
-                        split_visible,
-                        unified_items,
-                        split_items,
-                        unified_content_width,
-                        split_content_width,
-                        unified_list,
-                        split_list,
+                        list: DiffList::new(files, Vec::new()),
                     });
                     panel.render_loading_key = None;
                     panel.apply_pending_file_focus(&key.session, key.scope, cx);
@@ -679,7 +560,9 @@ impl DiffPanel {
             return false;
         }
         self.apply_pending_file_focus(&session, scope, cx);
-        self.cache.as_ref().is_some_and(|c| !c.files.is_empty())
+        self.cache
+            .as_ref()
+            .is_some_and(|c| !c.list.files.is_empty())
     }
 
     fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -953,38 +836,21 @@ impl DiffPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(selection) = self.selection.clone() else {
+        let Some(list) = self.cache.as_ref().map(|cache| &cache.list) else {
             return;
         };
+        if list.selection.is_none() {
+            return;
+        }
         match action {
             DiffSelectionMenu::CopyLines => {
-                let text = self.selected_lines(&selection, cx);
+                let text = list.selected_lines();
                 if !text.is_empty() {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
             }
             DiffSelectionMenu::AddComment => self.start_comment(window, cx),
         }
-    }
-
-    /// The selected rows' text, without diff markers, in file order.
-    fn selected_lines(&self, selection: &CommentSelection, _: &App) -> String {
-        let Some(file) = self
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.files.iter().find(|file| file.path == selection.file))
-        else {
-            return String::new();
-        };
-        let start = selection.row_start.min(selection.row_end);
-        let end = selection.row_start.max(selection.row_end);
-        file.all_rows
-            .iter()
-            .skip(start)
-            .take(end + 1 - start)
-            .map(|row| row.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     fn start_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1114,7 +980,6 @@ impl DiffPanel {
                                 panel.update(cx, |this, cx| {
                                     this.scopes.insert(session.clone(), scope);
                                     this.cache = None;
-                                    this.selection = None;
                                     this.workspace_store.update(cx, |store, cx| {
                                         store.discard_diff_focus(cx);
                                     });
@@ -1371,86 +1236,14 @@ impl DiffPanel {
         toolbar.into_any_element()
     }
 
-    fn expand_gap(
-        &mut self,
-        file_index: usize,
-        new_lines: Range<u32>,
-        direction: ExpandDir,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(cache) = self.cache.as_mut() else {
-            return;
-        };
-        let unified_top = cache.unified_list.logical_scroll_top();
-        let split_top = cache.split_list.logical_scroll_top();
-        let Some(file) = cache.files.get_mut(file_index) else {
-            return;
-        };
-        expand(file, new_lines, direction, 20);
-
-        let items = build_list_items(&cache.files);
-        let (unified_content_width, split_content_width) = diff_content_widths(&cache.files);
-        let unified_len = items.unified.len();
-        let split_len = items.split.len();
-        let unified_list = ListState::new(unified_len, ListAlignment::Top, px(180.));
-        let split_list = ListState::new(split_len, ListAlignment::Top, px(180.));
-        if unified_len > 0 {
-            unified_list.scroll_to(ListOffset {
-                item_ix: unified_top.item_ix.min(unified_len - 1),
-                offset_in_item: unified_top.offset_in_item,
-            });
-        }
-        if split_len > 0 {
-            split_list.scroll_to(ListOffset {
-                item_ix: split_top.item_ix.min(split_len - 1),
-                offset_in_item: split_top.offset_in_item,
-            });
-        }
-
-        cache.unified_visible = items.unified_visible;
-        cache.split_visible = items.split_visible;
-        cache.unified_items = items.unified;
-        cache.split_items = items.split;
-        cache.unified_content_width = unified_content_width;
-        cache.split_content_width = split_content_width;
-        cache.unified_list = unified_list;
-        cache.split_list = split_list;
-        self.selection = None;
-        self.comment_input = None;
-        cx.notify();
-    }
-
-    fn select_line(&mut self, file: String, row: usize, line: u32, side: ReviewSide, drag: bool) {
-        if drag
-            && let Some(selection) = self.selection.as_mut()
-            && selection.file == file
-            && selection.side == side
-        {
-            selection.row_end = row;
-            selection.line_end = line;
-            selection.end_index = row;
-        } else {
-            self.selection = Some(CommentSelection {
-                file,
-                row_start: row,
-                row_end: row,
-                line_start: line,
-                line_end: line,
-                side,
-                start_index: row,
-                end_index: row,
-            });
-            self.comment_input = None;
-        }
-        self.remeasure_lists();
-    }
-
-    fn review_excerpt(&self, selection: &CommentSelection) -> String {
-        let Some(file) = self
-            .cache
-            .as_ref()
-            .and_then(|cache| cache.files.iter().find(|file| file.path == selection.file))
-        else {
+    fn review_excerpt(&self, selection: &LineSelection) -> String {
+        let Some(file) = self.cache.as_ref().and_then(|cache| {
+            cache
+                .list
+                .files
+                .iter()
+                .find(|file| file.path == selection.file)
+        }) else {
             return String::new();
         };
         let start = selection.row_start.min(selection.row_end);
@@ -1487,7 +1280,11 @@ impl DiffPanel {
     }
 
     fn submit_comment(&mut self, cx: &mut Context<Self>) {
-        let Some(selection) = self.selection.clone() else {
+        let Some(selection) = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.list.selection.clone())
+        else {
             return;
         };
         let Some(input) = self.comment_input.as_ref() else {
@@ -1518,7 +1315,9 @@ impl DiffPanel {
         self.workspace_store.update(cx, |store, _cx| {
             store.add_review_comment(comment);
         });
-        self.selection = None;
+        if let Some(cache) = self.cache.as_mut() {
+            cache.list.selection = None;
+        }
         self.comment_input = None;
         self.remeasure_lists();
         cx.notify();
@@ -1533,47 +1332,7 @@ impl DiffPanel {
         };
         let split = self.workspace_store.read(cx).diff_split();
         let wrap = self.workspace_store.read(cx).diff_word_wrap();
-        let list_state = if split {
-            cache.split_list.clone()
-        } else {
-            cache.unified_list.clone()
-        };
-        let content_width = if split {
-            cache.split_content_width
-        } else {
-            cache.unified_content_width
-        };
-        let panel = cx.entity();
-        let mut rows = list(list_state.clone(), move |index, _, cx| {
-            panel.update(cx, |this, cx| this.render_list_item(index, split, cx))
-        })
-        .flex_1()
-        .min_h_0()
-        .h_full()
-        .text_size(px(13.))
-        .font_family(cx.theme().mono_font_family.clone());
-        if wrap {
-            rows = rows.w_full();
-        } else {
-            rows = rows.min_w(px(content_width));
-        }
-
-        // Do not let this horizontal overflow container translate ordinary
-        // vertical wheel input into horizontal movement. The event can then
-        // bubble to the List's vertical scroll handler; explicit horizontal
-        // wheel/trackpad deltas (or Shift-wheel) still scroll this viewport.
-        let viewport = div()
-            .id("diff-body")
-            .debug_selector(|| "diff-body".into())
-            .flex_1()
-            .min_h_0()
-            .overflow_x_scroll()
-            .lock_scroll_axis()
-            .child(crate::scroll::page_viewport(
-                "diff-body-bounce",
-                crate::wheel_easing::Handle::List(list_state),
-                rows,
-            ));
+        let viewport = render_list(self, "diff-body", split, wrap, cx);
         // A compact page holds its content clear of the window edges; the code
         // itself still scrolls sideways *inside* that inset rather than running
         // off the page.
@@ -1591,268 +1350,15 @@ impl DiffPanel {
             .filter(|preview| preview.session == cache.session && preview.scope == cache.scope)
         {
             if preview.result.truncated {
-                content = content
-                    .child(self.render_notice(crate::tr!("diff.truncated").into_owned(), cx));
+                content =
+                    content.child(render_notice(crate::tr!("diff.truncated").into_owned(), cx));
             }
             if let Some(error) = &preview.result.error {
-                content = content.child(self.render_notice(error.clone(), cx));
+                content = content.child(render_notice(error.clone(), cx));
             }
         }
 
         content.into_any_element()
-    }
-
-    fn render_list_item(&self, index: usize, split: bool, cx: &mut Context<Self>) -> AnyElement {
-        let wrap = self.workspace_store.read(cx).diff_word_wrap();
-        let Some(cache) = self.cache.as_ref() else {
-            return div().into_any_element();
-        };
-        let item = if split {
-            cache.split_items.get(index)
-        } else {
-            cache.unified_items.get(index)
-        };
-        let Some(item) = item.copied() else {
-            return div().into_any_element();
-        };
-        match item {
-            DiffListItem::Header(file_index) => {
-                self.render_file_header(&cache.files[file_index], cx)
-            }
-            DiffListItem::UnifiedRow {
-                file: file_index,
-                row,
-            } => {
-                let file = &cache.files[file_index];
-                let (rendered, comment_row) = match &cache.unified_visible[file_index][row] {
-                    VisibleItem::Gap {
-                        count,
-                        new_lines,
-                        expandable,
-                    } => (
-                        self.render_gap(file_index, *count, new_lines.clone(), *expandable, cx),
-                        None,
-                    ),
-                    VisibleItem::Row(row_index) => {
-                        let row = &file.all_rows[*row_index];
-                        (
-                            self.render_code_row(file, *row_index, row.kind, None, wrap, cx),
-                            Some((row.old, row.new)),
-                        )
-                    }
-                };
-                v_flex()
-                    .min_w_full()
-                    .child(rendered)
-                    .children(
-                        comment_row.into_iter().flat_map(|(old, new)| {
-                            self.render_comment_ui(&file.path, old, new, cx)
-                        }),
-                    )
-                    .into_any_element()
-            }
-            DiffListItem::SplitRow { file, row } => {
-                let file_index = file;
-                let file = &cache.files[file_index];
-                let (rendered, comment_rows) = match &cache.split_visible[file_index][row] {
-                    VisibleSplitItem::Gap {
-                        count,
-                        new_lines,
-                        expandable,
-                    } => (
-                        self.render_gap(file_index, *count, new_lines.clone(), *expandable, cx),
-                        Vec::new(),
-                    ),
-                    VisibleSplitItem::Pair(pair_index) => {
-                        let pair = file.all_split[*pair_index];
-                        let rendered = self.render_split_row(file, pair, wrap, cx);
-                        let old = pair.left.and_then(|index| file.all_rows[index].old);
-                        let new = pair.right.and_then(|index| file.all_rows[index].new);
-                        let comments = self.render_comment_ui(&file.path, old, new, cx);
-                        (rendered, comments)
-                    }
-                };
-                v_flex()
-                    .min_w_full()
-                    .child(rendered)
-                    .children(comment_rows)
-                    .into_any_element()
-            }
-        }
-    }
-
-    fn render_file_header(&self, file: &RenderedFile, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let rail = match file.kind {
-            FileChangeKind::Create => Some(cx.theme().success),
-            FileChangeKind::Delete => Some(cx.theme().danger),
-            FileChangeKind::Rename => Some(cx.theme().info),
-            FileChangeKind::Modify => None,
-        };
-        let kind_label = match file.kind {
-            FileChangeKind::Create => {
-                Some((crate::tr!("diff.created"), cx.theme().success_foreground))
-            }
-            FileChangeKind::Delete => {
-                Some((crate::tr!("diff.deleted"), cx.theme().danger_foreground))
-            }
-            FileChangeKind::Rename => {
-                Some((crate::tr!("diff.renamed"), cx.theme().info_foreground))
-            }
-            FileChangeKind::Modify => None,
-        };
-        h_flex()
-            .min_w_full()
-            .h(px(34.))
-            .px_3()
-            .gap_2()
-            .items_center()
-            .bg(cx.theme().secondary)
-            .rounded(material::radius_card(cx))
-            .relative()
-            .when_some(rail, |this, color| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(6.))
-                        .bottom(px(6.))
-                        .w(px(2.))
-                        .rounded_full()
-                        .bg(color),
-                )
-            })
-            .font_family(cx.theme().font_family.clone())
-            .child(Icon::new(IconName::File).xsmall().text_color(muted))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .line_height(px(18.))
-                    .font_medium()
-                    .child(file.path.clone()),
-            )
-            .when_some(kind_label, |this, (label, foreground)| {
-                this.child(
-                    div()
-                        .text_size(px(11.))
-                        .line_height(px(18.))
-                        .text_color(foreground)
-                        .child(label),
-                )
-            })
-            .child(div().flex_1())
-            .child(
-                h_flex()
-                    .flex_none()
-                    .gap_2()
-                    .text_size(px(13.))
-                    .child(
-                        div()
-                            .text_color(cx.theme().success)
-                            .child(format!("+{}", file.added)),
-                    )
-                    .child(
-                        div()
-                            .text_color(cx.theme().danger)
-                            .child(format!("-{}", file.removed)),
-                    ),
-            )
-            .context_menu({
-                let path = self.absolute_file_path(file, cx);
-                let cwd = self
-                    .workspace_store
-                    .read(cx)
-                    .diff_active_state()
-                    .map(|active| active.cwd);
-                move |menu, _, _| menu.path_items(&path, cwd.as_deref())
-            })
-            .into_any_element()
-    }
-
-    fn render_gap(
-        &self,
-        file_index: usize,
-        count: u32,
-        new_lines: Range<u32>,
-        expandable: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let row = h_flex()
-            .min_w_full()
-            .h(px(24.))
-            .px_3()
-            .items_center()
-            .bg(cx.theme().muted)
-            .text_size(px(11.))
-            .text_color(cx.theme().muted_foreground)
-            .font_family(cx.theme().font_family.clone());
-        if !expandable {
-            return row
-                .child(crate::tr!("diff.unmodified_lines", count = count))
-                .into_any_element();
-        }
-
-        let start = new_lines.start;
-        let up_lines = new_lines.clone();
-        let all_lines = new_lines.clone();
-        row.gap_1()
-            .child(
-                Button::new(format!("diff-gap-up-{file_index}-{start}"))
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::ChevronUp)
-                    .tooltip(crate::tr!("diff.expand_gap_up"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expand_gap(file_index, up_lines.clone(), ExpandDir::Up, cx);
-                    })),
-            )
-            .child(
-                Button::new(format!("diff-gap-all-{file_index}-{start}"))
-                    .ghost()
-                    .small()
-                    .compact()
-                    .label(crate::tr!("diff.unmodified_lines", count = count))
-                    .tooltip(crate::tr!("diff.expand_gap_all"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expand_gap(file_index, all_lines.clone(), ExpandDir::All, cx);
-                    })),
-            )
-            .child(
-                Button::new(format!("diff-gap-down-{file_index}-{start}"))
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::ChevronDown)
-                    .tooltip(crate::tr!("diff.expand_gap_down"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expand_gap(file_index, new_lines.clone(), ExpandDir::Down, cx);
-                    })),
-            )
-            .into_any_element()
-    }
-
-    /// A git error or truncation notice is prose, not code: it wraps inside the
-    /// panel instead of running off the right edge with the sentence cut in half.
-    fn render_notice(&self, message: String, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .min_w_full()
-            .px(px(material::CARD_INSET))
-            .py_2()
-            .gap_1p5()
-            .items_start()
-            .bg(cx.theme().warning.opacity(0.12))
-            .rounded(material::radius_card(cx))
-            .text_size(px(11.))
-            .text_color(cx.theme().warning_foreground)
-            .font_family(cx.theme().font_family.clone())
-            .child(
-                div()
-                    .flex_none()
-                    .child(Icon::new(IconName::TriangleAlert).xsmall()),
-            )
-            .child(div().flex_1().min_w_0().child(message))
-            .into_any_element()
     }
 
     fn render_status(&self, message: String, cx: &mut Context<Self>) -> AnyElement {
@@ -1910,13 +1416,17 @@ impl DiffPanel {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let selection = self.selection.as_ref().filter(|selection| {
-            selection.file == file
-                && match selection.side {
-                    ReviewSide::Old => old,
-                    ReviewSide::New => new,
-                } == Some(selection.line_end)
-        });
+        let selection = self
+            .cache
+            .as_ref()
+            .and_then(|cache| cache.list.selection.as_ref())
+            .filter(|selection| {
+                selection.file == file
+                    && match selection.side {
+                        ReviewSide::Old => old,
+                        ReviewSide::New => new,
+                    } == Some(selection.line_end)
+            });
         if selection.is_some() {
             if let Some(input) = &self.comment_input {
                 rows.push(
@@ -1965,146 +1475,6 @@ impl DiffPanel {
             }
         }
         rows
-    }
-
-    fn render_split_row(
-        &self,
-        file: &RenderedFile,
-        pair: PairedRow,
-        wrap: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let paired_as_context = pair
-            .left
-            .zip(pair.right)
-            .is_some_and(|(left, right)| file.all_rows[left].text == file.all_rows[right].text);
-        let cell = |row_index: Option<usize>, side: ReviewSide, cx: &mut Context<Self>| {
-            let Some(index) = row_index else {
-                return div().flex_1().min_w_0().min_h(px(18.)).into_any_element();
-            };
-            self.render_code_row(
-                file,
-                index,
-                if paired_as_context {
-                    RowKind::Context
-                } else {
-                    file.all_rows[index].kind
-                },
-                Some(side),
-                wrap,
-                cx,
-            )
-        };
-        h_flex()
-            .min_w_full()
-            .items_stretch()
-            .child(cell(pair.left, ReviewSide::Old, cx))
-            .child(div().w_px().bg(cx.theme().border.opacity(0.)))
-            .child(cell(pair.right, ReviewSide::New, cx))
-            .into_any_element()
-    }
-
-    fn render_code_row(
-        &self,
-        file: &RenderedFile,
-        row_index: usize,
-        kind: RowKind,
-        split_side: Option<ReviewSide>,
-        wrap: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let row = &file.all_rows[row_index];
-        let (bg, accent) = match kind {
-            RowKind::Added => (
-                Some(cx.theme().success.opacity(0.13)),
-                Some(cx.theme().success),
-            ),
-            RowKind::Removed => (
-                Some(cx.theme().danger.opacity(0.12)),
-                Some(cx.theme().danger),
-            ),
-            RowKind::Context => (None, None),
-        };
-        let split = split_side.is_some();
-        let gutter = |side: ReviewSide, cx: &mut Context<Self>| {
-            let line = match side {
-                ReviewSide::Old => row.old,
-                ReviewSide::New => row.new,
-            };
-            let file_down = file.path.clone();
-            let file_move = file.path.clone();
-            div()
-                .flex_none()
-                .w(px(if split { 42. } else { 44. }))
-                .px_1()
-                .text_right()
-                .text_size(px(11.))
-                .text_color(cx.theme().muted_foreground)
-                .child(line.map(|value| value.to_string()).unwrap_or_default())
-                .cursor_pointer()
-                .when_some(line, |gutter, line| {
-                    gutter
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                this.select_line(file_down.clone(), row_index, line, side, false);
-                                cx.notify();
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                            if event.dragging() {
-                                this.select_line(file_move.clone(), row_index, line, side, true);
-                                cx.notify();
-                            }
-                        }))
-                })
-        };
-        let code = div()
-            .flex_1()
-            .px_2()
-            .text_color(cx.theme().foreground)
-            .child(StyledText::new(row.text.clone()).with_highlights(row.runs.iter().cloned()))
-            .when(split || wrap, |code| code.min_w_0())
-            .when(!wrap, |code| code.whitespace_nowrap());
-        let mut cell = h_flex()
-            .min_h(px(18.))
-            .items_start()
-            .when_some(bg, |cell, color| cell.bg(color));
-        if let Some(side) = split_side {
-            cell = cell.flex_1().min_w_0().child(gutter(side, cx));
-        } else {
-            cell = cell
-                .min_w_full()
-                .border_l_2()
-                .border_color(accent.unwrap_or(gpui::transparent_black()))
-                .child(gutter(ReviewSide::Old, cx))
-                .child(gutter(ReviewSide::New, cx));
-        }
-        let line = row.text.clone();
-        let selected_here = self
-            .selection
-            .as_ref()
-            .is_some_and(|selection| selection.file == file.path);
-        let commenting = self.comment_input.is_some();
-        cell.child(code)
-            .context_menu(move |menu, _, _| {
-                menu.menu(
-                    crate::tr!("diff.copy_line").into_owned(),
-                    Box::new(CopyText(line.clone())),
-                )
-                .menu_with_enable(
-                    crate::tr!("diff.copy_selected_lines").into_owned(),
-                    Box::new(DiffSelectionMenu::CopyLines),
-                    selected_here,
-                )
-                .separator()
-                .menu_with_enable(
-                    crate::tr!("diff.add_comment").into_owned(),
-                    Box::new(DiffSelectionMenu::AddComment),
-                    selected_here && !commenting,
-                )
-            })
-            .into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2165,7 +1535,6 @@ fn turn_row(
         panel.update(cx, |this, cx| {
             this.scopes.insert(session.clone(), DiffScope::Turn(turn));
             this.cache = None;
-            this.selection = None;
             this.workspace_store.update(cx, |store, cx| {
                 store.select_diff_turn(turn, cx);
             });
@@ -2227,6 +1596,65 @@ fn base_row(
     .into_any_element()
 }
 
+impl DiffListHost for DiffPanel {
+    fn diff_list(&self) -> Option<&DiffList> {
+        self.cache.as_ref().map(|cache| &cache.list)
+    }
+
+    fn diff_list_mut(&mut self) -> Option<&mut DiffList> {
+        self.cache.as_mut().map(|cache| &mut cache.list)
+    }
+
+    fn expand_gap(
+        &mut self,
+        file: usize,
+        lines: Range<u32>,
+        direction: ExpandDir,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(list) = self.diff_list_mut() {
+            list.expand(file, lines, direction);
+        }
+        self.comment_input = None;
+        cx.notify();
+    }
+
+    fn file_menu(&self, file: usize, cx: &App) -> FileMenu {
+        let path = self
+            .diff_list()
+            .and_then(|list| list.files.get(file))
+            .map(|file| self.absolute_file_path(file, cx))
+            .unwrap_or_default();
+        let cwd = self
+            .workspace_store
+            .read(cx)
+            .diff_active_state()
+            .map(|active| active.cwd);
+        Rc::new(move |menu, _, _| menu.path_items(&path, cwd.as_deref()))
+    }
+
+    fn row_extras(
+        &self,
+        file: usize,
+        old: Option<u32>,
+        new: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(path) = self
+            .diff_list()
+            .and_then(|list| list.files.get(file))
+            .map(|file| file.path.clone())
+        else {
+            return Vec::new();
+        };
+        self.render_comment_ui(&path, old, new, cx)
+    }
+
+    fn review_comment_menu(&self) -> Option<bool> {
+        Some(self.comment_input.is_none())
+    }
+}
+
 impl Render for DiffPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
@@ -2263,7 +1691,8 @@ impl Render for DiffPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::model::RenderedRow;
+    use crate::diff::list::build_list_items_with;
+    use agent::FileChangeKind;
 
     #[test]
     fn out_of_workspace_turn_change_renders_from_stored_diff_without_file_text() {
@@ -2298,89 +1727,8 @@ mod tests {
         assert_eq!(file.added, 1);
         assert_eq!(file.removed, 1);
         assert_eq!(file.all_rows.len(), 2);
-        let items = build_list_items(std::slice::from_ref(&file));
+        let items = build_list_items_with(std::slice::from_ref(&file), &[]);
         assert_eq!(items.unified.len(), 3, "header plus two visible rows");
         assert_eq!(items.split.len(), 2, "header plus one paired row");
-    }
-
-    #[test]
-    fn resolves_file_headers_independently_for_unified_and_split_lists() {
-        let code_row = |text: &str| RenderedRow {
-            kind: RowKind::Added,
-            old: None,
-            new: Some(1),
-            text: text.into(),
-            runs: Vec::new(),
-        };
-        let first_rows = vec![code_row("one"), code_row("two"), code_row("three")];
-        let second_rows = vec![code_row("replacement")];
-        let outside_rows = vec![code_row("outside")];
-        let files = vec![
-            RenderedFile {
-                path: "src/first.rs".into(),
-                kind: FileChangeKind::Modify,
-                added: 3,
-                removed: 0,
-                all_split: vec![PairedRow {
-                    left: None,
-                    right: Some(0),
-                }],
-                all_rows: first_rows,
-                collapsed: Vec::new(),
-                expandable: false,
-            },
-            RenderedFile {
-                path: "tests/second.rs".into(),
-                kind: FileChangeKind::Modify,
-                added: 1,
-                removed: 0,
-                all_split: vec![PairedRow {
-                    left: None,
-                    right: Some(0),
-                }],
-                all_rows: second_rows,
-                collapsed: Vec::new(),
-                expandable: false,
-            },
-            RenderedFile {
-                path: "/tmp/outside.rs".into(),
-                kind: FileChangeKind::Modify,
-                added: 1,
-                removed: 0,
-                all_split: vec![PairedRow {
-                    left: None,
-                    right: Some(0),
-                }],
-                all_rows: outside_rows,
-                collapsed: Vec::new(),
-                expandable: false,
-            },
-        ];
-        let items = build_list_items(&files);
-        let (unified, split) = (items.unified, items.split);
-        let cwd = Path::new("/workspace/repository");
-
-        assert_eq!(
-            file_header_index(&files, &unified, "tests/second.rs", cwd),
-            Some(4)
-        );
-        assert_eq!(
-            file_header_index(&files, &split, "tests/second.rs", cwd),
-            Some(2)
-        );
-        assert_eq!(
-            file_header_index(
-                &files,
-                &unified,
-                "/workspace/repository/tests/second.rs",
-                cwd,
-            ),
-            Some(4)
-        );
-        assert_eq!(
-            file_header_index(&files, &unified, "/tmp/outside.rs", cwd),
-            Some(6)
-        );
-        assert_eq!(file_header_index(&files, &unified, "missing.rs", cwd), None);
     }
 }

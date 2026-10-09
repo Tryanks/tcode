@@ -11002,6 +11002,7 @@ dependencies = [
  "tcode-protocol",
  "turso",
  "ureq",
+ "url",
  "uuid",
  "zip",
 ]

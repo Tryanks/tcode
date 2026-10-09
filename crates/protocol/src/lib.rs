@@ -7,8 +7,16 @@
 mod command;
 mod event;
 mod preview;
+mod pull_request;
 mod query;
 pub use preview::{PreviewRequest, PreviewResponse};
+pub use pull_request::{
+    MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestActor, PullRequestComment, PullRequestConversation,
+    PullRequestFile, PullRequestFileText, PullRequestFiles, PullRequestMedia, PullRequestPatch,
+    PullRequestReaction, PullRequestRead, PullRequestReadResponse, PullRequestReviewAnchor,
+    PullRequestReviewState, PullRequestReviewThread, PullRequestThreadReplies,
+    PullRequestViewedFiles, PullRequestViewedState,
+};
 pub mod terminal;
 mod wire;
 
@@ -97,6 +105,10 @@ pub use wire::{
 // OrchestrateArchiveOnComplete) are removed.
 // Unreleased: the Preview topic no longer names a session, so a subscriber
 // answers automation for threads it is not viewing.
+// Unreleased: Query::PullRequest reads a linked pull request's files, file
+// text, conversation, review thread replies, viewed files and media;
+// SetPullRequestFilesViewed marks or unmarks files as viewed;
+// RefreshPullRequest drops the host's reads of one and syncs it.
 // Unreleased: thread metadata carries pinned_at, pin_order and active_order;
 // adds the PinSession, UnpinSession, ReorderPinned and ReorderActive commands.
 pub const PROTOCOL_VERSION: u32 = 10;

@@ -30,6 +30,12 @@ use tcode_core::{
 };
 use tcode_protocol::Command;
 
+mod conversation;
+mod detail;
+mod files;
+
+pub use detail::PullRequestView;
+
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace=tcode_pull_requests,no_json)]
 pub struct LinkUrl(pub String);
@@ -155,6 +161,8 @@ pub fn sidebar_badge(
     let badge = badge(links, 12., cx)?;
     let id = id.to_owned();
     let hover_links = links.to_vec();
+    let hover_store = store.clone();
+    let hover_id = id.clone();
     let trigger = crate::material::accessible_clickable(
         div(),
         SharedString::from(format!("pr-badge-{id}")),
@@ -229,7 +237,8 @@ pub fn sidebar_badge(
                     .collect();
                 for (index, (depth, link, caption)) in ordered.iter().take(8).enumerate() {
                     let (glyph, color, _) = appearance(row_state(Some(link), None), cx);
-                    let url = link.url.clone();
+                    let (store, id, key) =
+                        (hover_store.clone(), hover_id.clone(), link.key.clone());
                     rows = rows.child(
                         h_flex()
                             .id(index)
@@ -239,7 +248,13 @@ pub fn sidebar_badge(
                             .items_center()
                             .cursor_pointer()
                             .hover(|s| s.bg(cx.theme().sidebar_accent))
-                            .on_click(move |_, _, cx| cx.open_url(&url))
+                            .on_click(move |_, _, cx| {
+                                store.update(cx, |store, cx| {
+                                    store.select_session(id.clone());
+                                    store.open_tab_for(&id, RightTab::PullRequests, cx);
+                                    store.set_open_pull_request(&id, Some(key.clone()), cx);
+                                });
+                            })
                             .child(Icon::new(glyph).xsmall().text_color(color))
                             .child(
                                 div()
@@ -401,6 +416,169 @@ struct ChangeWatch {
     watching: bool,
 }
 
+fn change_watch<T: 'static>(
+    store: &Entity<WorkspaceStore>,
+    action: &ChangeWatch,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) {
+    let Some(session_id) = store.read(cx).active_session_id() else {
+        return;
+    };
+    let number = action.key.number;
+    let task = store.update(cx, |store, cx| {
+        store.command(
+            Command::WatchPullRequest {
+                session_id,
+                key: action.key.clone(),
+                watching: action.watching,
+            },
+            cx,
+        )
+    });
+    cx.spawn_in(window, async move |_, cx| {
+        if let Err(error) = task.await {
+            _ = cx.update(|window, cx| {
+                window.push_notification(
+                    Notification::warning(
+                        crate::tr!(
+                            "pull_requests.watch_failed",
+                            number = number.to_string(),
+                            reason = error.message
+                        )
+                        .into_owned(),
+                    ),
+                    cx,
+                )
+            });
+        }
+    })
+    .detach();
+}
+fn change_link<T: 'static>(
+    store: &Entity<WorkspaceStore>,
+    action: &ChangeLink,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) {
+    let Some(session_id) = store.read(cx).active_session_id() else {
+        return;
+    };
+    let command = if action.linking {
+        Command::LinkPullRequest {
+            session_id,
+            reference: action.url.clone(),
+        }
+    } else {
+        Command::UnlinkPullRequest {
+            session_id,
+            key: action.key.clone(),
+        }
+    };
+    let task = store.update(cx, |store, cx| store.command(command, cx));
+    cx.spawn_in(window, async move |_, cx| {
+        if let Err(error) = task.await {
+            _ = cx.update(|window, cx| {
+                window.push_notification(
+                    Notification::error(
+                        crate::tr!("pull_requests.update_failed", reason = error.message)
+                            .into_owned(),
+                    ),
+                    cx,
+                )
+            });
+        }
+    })
+    .detach();
+}
+
+/// The row's menu: Open on GitHub, Copy link, the watch, and the link condition.
+type RowMenu = std::rc::Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
+fn row_menu(
+    key: PullRequestKey,
+    url: String,
+    link: Option<&ThreadPullRequestLink>,
+    watchable: bool,
+) -> RowMenu {
+    let visible = link.is_some_and(|link| link.visible());
+    let watched = link.is_some_and(|link| link.visible() && link.watch.is_some());
+    // A merged pull request cannot reopen; a saved closed one may have.
+    let can_watch = visible
+        && !watched
+        && watchable
+        && link
+            .and_then(|link| link.snapshot.as_ref())
+            .is_none_or(|snapshot| snapshot.state != PullRequestState::Merged);
+    let action = ChangeLink {
+        key: key.clone(),
+        url: url.clone(),
+        linking: !visible,
+    };
+    let source_is_stack = link.is_some_and(|link| link.source == PullRequestSource::Stack);
+    std::rc::Rc::new(
+        move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+            menu.menu(
+                crate::tr!("pull_requests.open_on_github").into_owned(),
+                Box::new(OpenUrl(url.clone())),
+            )
+            .menu(
+                crate::tr!("pull_requests.copy_link").into_owned(),
+                Box::new(CopyText(url.clone())),
+            )
+            .when(watched || can_watch, |menu| {
+                menu.menu(
+                    crate::tr!(if watched {
+                        "pull_requests.stop_watching"
+                    } else {
+                        "pull_requests.watch"
+                    })
+                    .into_owned(),
+                    Box::new(ChangeWatch {
+                        key: key.clone(),
+                        watching: !watched,
+                    }),
+                )
+            })
+            .separator()
+            .menu(
+                crate::tr!(if action.linking {
+                    "pull_requests.relink"
+                } else if source_is_stack {
+                    "pull_requests.dismiss"
+                } else {
+                    "pull_requests.unlink"
+                })
+                .into_owned(),
+                Box::new(action.clone()),
+            )
+        },
+    )
+}
+
+/// Opens a pull request of the active thread here: inside the tab in a wide window, as a page
+/// over the thread on a phone.
+fn open_pull_request(
+    store: &Entity<WorkspaceStore>,
+    window_state: &Entity<WindowState>,
+    key: PullRequestKey,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(session) = store.read(cx).active_session_id() else {
+        return;
+    };
+    store.update(cx, |store, cx| {
+        store.set_open_pull_request(&session, Some(key), cx)
+    });
+    if window_state.read(cx).compact {
+        window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx);
+        window_state.update(cx, |state, cx| {
+            state.go(crate::window_state::Destination::PullRequest, cx)
+        });
+    }
+}
+
 struct PullRequestRow<'a> {
     key: PullRequestKey,
     url: String,
@@ -419,7 +597,10 @@ pub struct PullRequestsPanel {
     /// The watched row whose eye the pointer is over, which then shows what a click does.
     eye_hovered: Option<PullRequestKey>,
     agent_tools_open: bool,
-    _subscriptions: [Subscription; 2],
+    detail: Entity<PullRequestView>,
+    /// The pull request the active thread had open when last drawn.
+    shown: Option<PullRequestKey>,
+    _subscriptions: [Subscription; 3],
 }
 impl PullRequestsPanel {
     pub fn new(
@@ -438,82 +619,40 @@ impl PullRequestsPanel {
                 cx,
             ),
             cx.observe(&window_state, |_, _, cx| cx.notify()),
+            // Opening or leaving a pull request is client state, not a host topic.
+            cx.observe(&store, |this: &mut Self, store, cx| {
+                let store = store.read(cx);
+                let open = store
+                    .active_session_id()
+                    .and_then(|id| store.open_pull_request(&id).cloned());
+                if this.shown != open {
+                    this.shown = open;
+                    cx.notify();
+                }
+            }),
         ];
+        let detail = cx.new(|cx| PullRequestView::new(store.clone(), window_state.clone(), cx));
         Self {
             store,
             window_state,
             scroll: ScrollHandle::new(),
             eye_hovered: None,
             agent_tools_open: false,
+            detail,
+            shown: None,
             _subscriptions: subscriptions,
         }
     }
+
+    /// The pull request view this list opens into.
+    pub fn detail(&self) -> Entity<PullRequestView> {
+        self.detail.clone()
+    }
     fn change_watch(&mut self, action: &ChangeWatch, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.store.read(cx).active_session_id() else {
-            return;
-        };
-        let number = action.key.number;
-        let task = self.store.update(cx, |store, cx| {
-            store.command(
-                Command::WatchPullRequest {
-                    session_id,
-                    key: action.key.clone(),
-                    watching: action.watching,
-                },
-                cx,
-            )
-        });
-        cx.spawn_in(window, async move |_, cx| {
-            if let Err(error) = task.await {
-                _ = cx.update(|window, cx| {
-                    window.push_notification(
-                        Notification::warning(
-                            crate::tr!(
-                                "pull_requests.watch_failed",
-                                number = number.to_string(),
-                                reason = error.message
-                            )
-                            .into_owned(),
-                        ),
-                        cx,
-                    )
-                });
-            }
-        })
-        .detach();
+        change_watch(&self.store, action, window, cx);
     }
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session_id) = self.store.read(cx).active_session_id() else {
-            return;
-        };
-        let command = if action.linking {
-            Command::LinkPullRequest {
-                session_id,
-                reference: action.url.clone(),
-            }
-        } else {
-            Command::UnlinkPullRequest {
-                session_id,
-                key: action.key.clone(),
-            }
-        };
-        let task = self
-            .store
-            .update(cx, |store, cx| store.command(command, cx));
-        cx.spawn_in(window, async move |_, cx| {
-            if let Err(error) = task.await {
-                _ = cx.update(|window, cx| {
-                    window.push_notification(
-                        Notification::error(
-                            crate::tr!("pull_requests.update_failed", reason = error.message)
-                                .into_owned(),
-                        ),
-                        cx,
-                    )
-                });
-            }
-        })
-        .detach();
+        change_link(&self.store, action, window, cx);
     }
     fn row(&self, row: PullRequestRow<'_>, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let PullRequestRow {
@@ -528,13 +667,6 @@ impl PullRequestsPanel {
         } = row;
         let visible = link.is_some_and(|link| link.visible());
         let watched = link.is_some_and(|link| link.visible() && link.watch.is_some());
-        // A merged pull request cannot reopen; a saved closed one may have.
-        let can_watch = visible
-            && !watched
-            && watchable
-            && link
-                .and_then(|link| link.snapshot.as_ref())
-                .is_none_or(|snapshot| snapshot.state != PullRequestState::Merged);
         let snapshot = link
             .filter(|link| link.visible())
             .and_then(|link| link.snapshot.as_ref());
@@ -640,51 +772,7 @@ impl PullRequestsPanel {
                 .into_any_element()
         };
         let detail = detail.join(" · ");
-        let action = ChangeLink {
-            key: key.clone(),
-            url: url.clone(),
-            linking: !visible,
-        };
-        let open = url.clone();
-        let copy = url.clone();
-        let source_is_stack = link.is_some_and(|link| link.source == PullRequestSource::Stack);
-        let watch_key = key.clone();
-        let menu = move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
-            menu.menu(
-                crate::tr!("pull_requests.open_on_github").into_owned(),
-                Box::new(OpenUrl(open.clone())),
-            )
-            .menu(
-                crate::tr!("pull_requests.copy_link").into_owned(),
-                Box::new(CopyText(copy.clone())),
-            )
-            .when(watched || can_watch, |menu| {
-                menu.menu(
-                    crate::tr!(if watched {
-                        "pull_requests.stop_watching"
-                    } else {
-                        "pull_requests.watch"
-                    })
-                    .into_owned(),
-                    Box::new(ChangeWatch {
-                        key: watch_key.clone(),
-                        watching: !watched,
-                    }),
-                )
-            })
-            .separator()
-            .menu(
-                crate::tr!(if action.linking {
-                    "pull_requests.relink"
-                } else if source_is_stack {
-                    "pull_requests.dismiss"
-                } else {
-                    "pull_requests.unlink"
-                })
-                .into_owned(),
-                Box::new(action.clone()),
-            )
-        };
+        let menu = row_menu(key.clone(), url.clone(), link, watchable);
         let mut signals = h_flex().gap_1().flex_none().items_center();
         // The eye leads while the pull request is open or not yet read; the host ends the watch
         // once it merges or closes.
@@ -851,7 +939,12 @@ impl PullRequestsPanel {
         .items_start()
         .rounded_md()
         .cursor_pointer()
-        .on_click(move |_, _, cx| cx.open_url(&url))
+        .on_click({
+            let store = self.store.clone();
+            let window_state = self.window_state.clone();
+            let key = key.clone();
+            move |_, window, cx| open_pull_request(&store, &window_state, key.clone(), window, cx)
+        })
         .when(depth > 0, |row| {
             row.child(div().w(px(1.)).h(px(24.)).bg(cx.theme().border))
         })
@@ -986,11 +1079,15 @@ impl PullRequestsPanel {
                             .group_hover(row_id.clone(), |button| button.opacity(1.))
                             .focus(|button| button.opacity(1.))
                     })
-                    .dropdown_menu(menu.clone()),
+                    .dropdown_menu({
+                        let menu = menu.clone();
+                        move |state, window, cx| (menu)(state, window, cx)
+                    }),
                 ),
         );
 
-        row.context_menu(menu).into_any_element()
+        row.context_menu(move |state, window, cx| (menu)(state, window, cx))
+            .into_any_element()
     }
 }
 impl PullRequestsPanel {
@@ -1079,6 +1176,18 @@ impl Render for PullRequestsPanel {
             .session_status()
             .and_then(|status| status.pull_request_tools.clone());
         let compact = self.window_state.read(cx).compact;
+        // Level two: the pull request the thread opened, in the wide layout's tab.
+        if !compact
+            && let Some(session) = session.clone()
+            && let Some(key) = store.open_pull_request(&session).cloned()
+        {
+            self.detail
+                .update(cx, |detail, cx| detail.show(session, key, cx));
+            return div()
+                .size_full()
+                .child(self.detail.clone())
+                .into_any_element();
+        }
         let mut rows = v_flex().id("pull-request-rows").w_full().min_w_0().gap_1();
         let mut notice_hosts = std::collections::HashSet::new();
         for link in links

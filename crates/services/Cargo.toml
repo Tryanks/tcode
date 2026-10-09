@@ -26,6 +26,7 @@ tar = "0.4"
 # (tantivy, zstd); the store needs neither.
 turso = { version = "=0.8.1", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+url = "2"
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [dev-dependencies]
