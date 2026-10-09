@@ -9,7 +9,8 @@ use tcode_client::heartbeat::NATIVE_IDLE_MS;
 use tcode_client::host::Transport;
 use tcode_client::pairing::{PairInvite, PairedHost};
 use tcode_client::{ConnectionFailure, ConnectionState};
-use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, PairError, TraverseHost, TraverseMode};
+use tcode_traverse::manifest::ManifestSource;
+use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, PairError, TraverseHost};
 
 struct TestDir(PathBuf);
 
@@ -117,7 +118,7 @@ fn start_host(mux: HostMux, dir: &TestDir, bind_port: Option<u16>) -> TraverseHo
         HostConfig {
             host_name: "Test Host".into(),
             data_dir: dir.0.clone(),
-            traverse: TraverseMode::Off,
+            traverse: Vec::new(),
             pairing_enabled: true,
             bind_port,
         },
@@ -526,7 +527,7 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
         HostConfig {
             host_name: "Test Host".into(),
             data_dir: host_dir.0.clone(),
-            traverse: TraverseMode::Custom(dead.clone()),
+            traverse: vec![ManifestSource::Custom(dead.clone())],
             pairing_enabled: true,
             bind_port: None,
         },
@@ -791,7 +792,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
         HostConfig {
             host_name: "Renamed".into(),
             data_dir: host_dir.0.clone(),
-            traverse: TraverseMode::Off,
+            traverse: Vec::new(),
             pairing_enabled: true,
             bind_port: Some(port),
         },

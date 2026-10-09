@@ -1882,7 +1882,7 @@ mod machines {
 mod tests {
     use super::*;
     use gpui::{BorrowAppContext as _, Render, TestAppContext, VisualTestContext};
-    use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, TraverseHost, TraverseMode};
+    use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, TraverseHost};
 
     struct Probe(Entity<SpacesSection>);
 
@@ -1936,7 +1936,7 @@ mod tests {
             HostConfig {
                 host_name: "Studio".into(),
                 data_dir: root.clone(),
-                traverse: TraverseMode::Off,
+                traverse: Vec::new(),
                 pairing_enabled: true,
                 bind_port: None,
             },

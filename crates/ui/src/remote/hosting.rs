@@ -13,41 +13,30 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context,
-    Entity, Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context, Entity,
+    Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Task, Window, div, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use serde::Deserialize;
 use tcode_client::HostLink;
-use tcode_core::settings::{Settings, TraverseSetting};
+use tcode_core::settings::{Settings, TraverseInstance, TraverseSetting, TraverseSource};
 use tcode_protocol::{Command, DeviceAccess, HostingAction, HostingState, SettingsPatch};
-use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
+use tcode_traverse::manifest::ManifestSource;
+use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost};
 
 use super::qr::beside_qr;
 use super::spaces::SpacesSection;
-use crate::icon::{Icon, IconName};
+use crate::icon::IconName;
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
-use crate::widgets::menu::DropdownMenu as _;
 use crate::widgets::switch::Switch;
 
 /// How often the devices list re-reads which path each connection is on.
 const DEVICE_REFRESH: Duration = Duration::from_secs(2);
-
-/// Pick a Traverse mode from the selector. The URL of a self-hosted instance
-/// is typed into its own field, so the choice carries no URL.
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = tcode_hosting, no_json)]
-enum SelectTraverse {
-    Official,
-    Custom,
-    Off,
-}
 
 /// A caption above one group of this settings-like page. Grouped cards, not
 /// the plain content-list rows Machines uses.
@@ -153,9 +142,9 @@ impl RemoteController {
             HostConfig {
                 host_name,
                 data_dir: self.data_dir.clone(),
-                traverse: traverse_mode(traverse)?,
+                traverse: traverse_sources(traverse)?,
                 pairing_enabled: true,
-                // Fixed, so invite addresses, firewall rules and LAN probes
+                // Fixed, so the invitation's port, firewall rules and LAN probes
                 // survive restarts.
                 bind_port: Some(tcode_traverse::lan::DEFAULT_PORT),
             },
@@ -275,17 +264,20 @@ pub enum InvitationOffer {
     },
 }
 
-/// The transport's view of a Traverse setting. A self-hosted instance needs
-/// a usable base URL; the page validates it before offering Apply, so a
-/// failure here comes from a settings file edited by hand.
-fn traverse_mode(setting: &TraverseSetting) -> Result<TraverseMode, String> {
-    match setting {
-        TraverseSetting::Official => Ok(TraverseMode::Official),
-        TraverseSetting::Off => Ok(TraverseMode::Off),
-        TraverseSetting::Custom { url } => custom_traverse_url(url)
-            .map(TraverseMode::Custom)
-            .ok_or_else(|| crate::tr!("remote.traverse.invalid_url").into_owned()),
-    }
+/// The transport's view of a Traverse setting: its enabled sources. A
+/// self-hosted instance needs a usable base URL; the page validates it
+/// before saving, so a failure here comes from a settings file edited by
+/// hand.
+fn traverse_sources(setting: &TraverseSetting) -> Result<Vec<ManifestSource>, String> {
+    setting
+        .enabled()
+        .map(|instance| match instance {
+            TraverseInstance::Official => Ok(ManifestSource::Official),
+            TraverseInstance::Custom { url } => custom_traverse_url(url)
+                .map(ManifestSource::Custom)
+                .ok_or_else(|| crate::tr!("remote.traverse.invalid_url").into_owned()),
+        })
+        .collect()
 }
 
 /// A self-hosted Traverse base URL as typed: `http(s)` with a host.
@@ -329,6 +321,25 @@ fn switch_row() -> gpui::Div {
         .items_center()
 }
 
+/// A row whose control is a text field beside the label. The label keeps
+/// [`FIELD_LABEL_BASIS`] of the width, so where the field does not fit
+/// beside it the field wraps under the label instead of squeezing it.
+fn field_row(compact: bool) -> gpui::Div {
+    if compact {
+        row(true)
+    } else {
+        switch_row().flex_wrap()
+    }
+}
+
+/// The width a [`field_row`]'s label keeps before its field wraps under it.
+const FIELD_LABEL_BASIS: f32 = 200.;
+
+/// [`labels`] for a [`field_row`].
+fn field_labels(title: SharedString, description: Option<SharedString>, cx: &App) -> gpui::Div {
+    labels(title, description, cx).flex_basis(px(FIELD_LABEL_BASIS))
+}
+
 /// A row's title, with a description only where it says something the
 /// title and the control do not.
 fn labels(title: SharedString, description: Option<SharedString>, cx: &App) -> gpui::Div {
@@ -349,15 +360,12 @@ fn countdown(seconds: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// The selector's label for a mode.
-fn traverse_label(setting: &TraverseSetting) -> SharedString {
-    match setting {
-        TraverseSetting::Official => crate::tr!("remote.traverse.official"),
-        TraverseSetting::Custom { .. } => crate::tr!("remote.traverse.custom"),
-        TraverseSetting::Off => crate::tr!("remote.traverse.off"),
-    }
-    .into_owned()
-    .into()
+/// One Traverse source as the page edits it.
+struct TraverseRow {
+    enabled: bool,
+    /// A self-hosted instance's base URL as typed; `None` is the official
+    /// service.
+    url: Option<(Entity<InputState>, gpui::Subscription)>,
 }
 
 /// Settings → Remote: the editable hosting controls for *this machine*.
@@ -365,10 +373,10 @@ fn traverse_label(setting: &TraverseSetting) -> SharedString {
 /// in-progress edits belong here.
 pub struct HostingPanel {
     host_name_input: Entity<InputState>,
-    /// The selector's choice; the URL of a self-hosted instance is in
-    /// `traverse_url_input`.
-    traverse_choice: SelectTraverse,
-    traverse_url_input: Entity<InputState>,
+    /// The Traverse sources in order, the official service first.
+    traverse_rows: Vec<TraverseRow>,
+    /// The URL of a self-hosted instance about to be added.
+    traverse_add_input: Entity<InputState>,
     /// Repaint while hosting, every [`DEVICE_REFRESH`], for the devices' paths.
     ticker: Option<Task<()>>,
     spaces: Entity<SpacesSection>,
@@ -389,42 +397,78 @@ impl HostingPanel {
                 .placeholder(machine_name())
                 .default_value(settings.remote_host_name.clone().unwrap_or_default())
         });
-        let (traverse_choice, url) = match &settings.traverse {
-            TraverseSetting::Official => (SelectTraverse::Official, String::new()),
-            TraverseSetting::Custom { url } => (SelectTraverse::Custom, url.clone()),
-            TraverseSetting::Off => (SelectTraverse::Off, String::new()),
-        };
-        let traverse_url_input = cx.new(|cx| {
+        let traverse_rows = settings
+            .traverse
+            .sources
+            .iter()
+            .map(|source| TraverseRow {
+                enabled: source.enabled,
+                url: match &source.instance {
+                    TraverseInstance::Official => None,
+                    TraverseInstance::Custom { url } => Some(url_input(url, window, cx)),
+                },
+            })
+            .collect();
+        let traverse_add_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(crate::tr!("remote.traverse.url_placeholder").into_owned())
-                .default_value(url)
         });
-        // A typed name or URL takes effect when the field is left or Enter
-        // is pressed; the URL field also repaints as it turns valid.
-        let subscriptions =
-            [&host_name_input, &traverse_url_input]
-                .into_iter()
-                .map(|input| {
-                    cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
-                        match event {
-                            InputEvent::Blur | InputEvent::PressEnter { .. } => {
-                                this.apply_edits(window, cx)
-                            }
-                            InputEvent::Change => cx.notify(),
-                            InputEvent::Focus => {}
-                        }
-                    })
-                })
-                .collect();
+        let subscriptions = vec![
+            edit_on_leave(&host_name_input, window, cx),
+            // Enter adds the typed instance; the field repaints as the URL
+            // turns valid.
+            cx.subscribe_in(
+                &traverse_add_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.add_traverse(window, cx),
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::Blur | InputEvent::Focus => {}
+                },
+            ),
+        ];
         Self {
             host_name_input,
-            traverse_choice,
-            traverse_url_input,
+            traverse_rows,
+            traverse_add_input,
             ticker: None,
             spaces: cx.new(|_| SpacesSection::new(store, super::spaces::this_machine)),
             _subscriptions: subscriptions,
         }
     }
+}
+
+/// A typed name or URL takes effect when the field is left or Enter is
+/// pressed; the field also repaints as it turns valid.
+fn edit_on_leave(
+    input: &Entity<InputState>,
+    window: &mut Window,
+    cx: &mut Context<HostingPanel>,
+) -> gpui::Subscription {
+    cx.subscribe_in(
+        input,
+        window,
+        |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::Blur | InputEvent::PressEnter { .. } => this.apply_edits(window, cx),
+            InputEvent::Change => cx.notify(),
+            InputEvent::Focus => {}
+        },
+    )
+}
+
+/// The field holding a self-hosted instance's URL, with its subscription.
+fn url_input(
+    url: &str,
+    window: &mut Window,
+    cx: &mut Context<HostingPanel>,
+) -> (Entity<InputState>, gpui::Subscription) {
+    let input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder(crate::tr!("remote.traverse.url_placeholder").into_owned())
+            .default_value(url.to_owned())
+    });
+    let subscription = edit_on_leave(&input, window, cx);
+    (input, subscription)
 }
 
 impl HostingPanel {
@@ -453,15 +497,74 @@ impl HostingPanel {
         self.host_name_input.read(cx).value().trim().to_owned()
     }
 
-    /// The Traverse setting as edited, or `None` while the self-hosted URL
-    /// is not one.
+    /// The self-hosted URLs as typed, one per row (`None` for the official
+    /// service), each a usable base URL or why it is not one.
+    fn typed_urls(&self, cx: &App) -> Vec<Option<Result<url::Url, SharedString>>> {
+        let mut seen = Vec::new();
+        self.traverse_rows
+            .iter()
+            .map(|row| {
+                let (input, _) = row.url.as_ref()?;
+                Some(
+                    match custom_traverse_url(&input.read(cx).value()) {
+                        None => Err(crate::tr!("remote.traverse.invalid_url")),
+                        Some(url) if seen.contains(&url) => {
+                            Err(crate::tr!("remote.traverse.duplicate"))
+                        }
+                        Some(url) => {
+                            seen.push(url.clone());
+                            Ok(url)
+                        }
+                    }
+                    .map_err(|error| error.into_owned().into()),
+                )
+            })
+            .collect()
+    }
+
+    /// The Traverse setting as edited, or `None` while a self-hosted URL is
+    /// not a usable one.
     fn typed_traverse(&self, cx: &App) -> Option<TraverseSetting> {
-        Some(match self.traverse_choice {
-            SelectTraverse::Official => TraverseSetting::Official,
-            SelectTraverse::Off => TraverseSetting::Off,
-            SelectTraverse::Custom => TraverseSetting::Custom {
-                url: custom_traverse_url(&self.traverse_url_input.read(cx).value())?.to_string(),
-            },
+        let sources = self
+            .traverse_rows
+            .iter()
+            .zip(self.typed_urls(cx))
+            .map(|(row, url)| {
+                Some(TraverseSource {
+                    instance: match url {
+                        None => TraverseInstance::Official,
+                        Some(url) => TraverseInstance::Custom {
+                            url: url.ok()?.to_string(),
+                        },
+                    },
+                    enabled: row.enabled,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(TraverseSetting::new(sources))
+    }
+
+    /// The instance typed into the add field, or why it cannot be added;
+    /// `None` while the field is empty.
+    fn typed_addition(&self, cx: &App) -> Option<Result<url::Url, SharedString>> {
+        let value = self.traverse_add_input.read(cx).value();
+        if value.trim().is_empty() {
+            return None;
+        }
+        Some(match custom_traverse_url(&value) {
+            None => Err(crate::tr!("remote.traverse.invalid_url")
+                .into_owned()
+                .into()),
+            Some(url)
+                if self
+                    .typed_urls(cx)
+                    .into_iter()
+                    .flatten()
+                    .any(|typed| typed.as_ref() == Ok(&url)) =>
+            {
+                Err(crate::tr!("remote.traverse.duplicate").into_owned().into())
+            }
+            Some(url) => Ok(url),
         })
     }
 
@@ -556,19 +659,47 @@ impl HostingPanel {
         cx.notify();
     }
 
-    /// A chosen mode applies at once; a self-hosted instance applies once
-    /// its URL is typed and the field is left.
-    fn on_select_traverse(
+    /// A source's switch applies at once.
+    fn set_traverse_enabled(
         &mut self,
-        choice: &SelectTraverse,
+        index: usize,
+        enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.traverse_choice = choice.clone();
-        if *choice == SelectTraverse::Custom {
-            self.traverse_url_input
-                .update(cx, |state, cx| state.focus(window, cx));
+        if let Some(row) = self.traverse_rows.get_mut(index) {
+            row.enabled = enabled;
         }
+        self.apply_edits(window, cx);
+        cx.notify();
+    }
+
+    /// Remove a self-hosted instance; the official service is only ever
+    /// switched off.
+    fn remove_traverse(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .traverse_rows
+            .get(index)
+            .is_some_and(|row| row.url.is_some())
+        {
+            self.traverse_rows.remove(index);
+        }
+        self.apply_edits(window, cx);
+        cx.notify();
+    }
+
+    /// Add the typed instance, enabled, and apply it at once.
+    fn add_traverse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Ok(url)) = self.typed_addition(cx) else {
+            return;
+        };
+        let input = url_input(url.as_str(), window, cx);
+        self.traverse_rows.push(TraverseRow {
+            enabled: true,
+            url: Some(input),
+        });
+        self.traverse_add_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.apply_edits(window, cx);
         cx.notify();
     }
@@ -610,8 +741,8 @@ impl HostingPanel {
                 )
                 .into_any_element()
         });
-        let name_row = row(compact)
-            .child(labels(
+        let name_row = field_row(compact)
+            .child(field_labels(
                 crate::tr!("remote.host_name.title").into_owned().into(),
                 Some(
                     crate::tr!("remote.host_name.description")
@@ -623,7 +754,9 @@ impl HostingPanel {
             .child(
                 div()
                     .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(240.)))
+                    .when(!compact, |field| {
+                        field.w(px(240.)).min_w_0().flex_shrink(1.)
+                    })
                     .child(
                         Input::new(&self.host_name_input)
                             .small()
@@ -631,84 +764,7 @@ impl HostingPanel {
                     ),
             )
             .into_any_element();
-        let selected = match self.traverse_choice {
-            SelectTraverse::Official => TraverseSetting::Official,
-            SelectTraverse::Custom => TraverseSetting::Custom { url: String::new() },
-            SelectTraverse::Off => TraverseSetting::Off,
-        };
-        let traverse_row = row(compact)
-            .child(labels(
-                crate::tr!("remote.traverse.title").into_owned().into(),
-                None,
-                cx,
-            ))
-            .child(
-                Button::new("remote-traverse")
-                    .ghost()
-                    .outline()
-                    .compact()
-                    .child(
-                        h_flex()
-                            .w(px(180.))
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .text_size(px(13.))
-                            .child(traverse_label(&selected))
-                            .child(
-                                Icon::new(IconName::ChevronDown)
-                                    .xsmall()
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
-                    )
-                    .dropdown_menu({
-                        let choice = self.traverse_choice.clone();
-                        move |menu, _window, _cx| {
-                            let mut menu = menu;
-                            for (option, key) in [
-                                (SelectTraverse::Official, "remote.traverse.official"),
-                                (SelectTraverse::Custom, "remote.traverse.custom"),
-                                (SelectTraverse::Off, "remote.traverse.off"),
-                            ] {
-                                menu = menu.menu_with_check(
-                                    crate::tr!(key).into_owned(),
-                                    option == choice,
-                                    Box::new(option),
-                                );
-                            }
-                            menu
-                        }
-                    }),
-            )
-            .into_any_element();
-        let url_valid = custom_traverse_url(&self.traverse_url_input.read(cx).value()).is_some();
-        let url_row = (self.traverse_choice == SelectTraverse::Custom).then(|| {
-            row(compact)
-                .child(labels(
-                    crate::tr!("remote.traverse.url").into_owned().into(),
-                    Some(
-                        if url_valid {
-                            crate::tr!("remote.traverse.url_description")
-                        } else {
-                            crate::tr!("remote.traverse.invalid_url")
-                        }
-                        .into_owned()
-                        .into(),
-                    ),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .when(compact, |field| field.w_full())
-                        .when(!compact, |field| field.w(px(240.)))
-                        .child(
-                            Input::new(&self.traverse_url_input)
-                                .small()
-                                .rounded(crate::material::radius_input(cx)),
-                        ),
-                )
-                .into_any_element()
-        });
+        let traverse_rows = self.render_traverse(compact, cx);
         let mut column = v_flex().w_full().gap_3().child(
             v_flex()
                 .child(section_caption(
@@ -720,8 +776,7 @@ impl HostingPanel {
                         .child(toggle)
                         .children(pairing_row)
                         .child(name_row)
-                        .child(traverse_row)
-                        .children(url_row),
+                        .children(traverse_rows),
                 ),
         );
         if hosting {
@@ -730,6 +785,135 @@ impl HostingPanel {
                 .child(self.spaces.clone());
         }
         column.into_any_element()
+    }
+
+    /// The Traverse sources, each with its switch, and the row that adds a
+    /// self-hosted instance.
+    fn render_traverse(&self, compact: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let field = |compact: bool| {
+            div()
+                .when(compact, |field| field.flex_1().min_w_0())
+                .when(!compact, |field| {
+                    field.w(px(240.)).min_w_0().flex_shrink(1.)
+                })
+        };
+        let mut rows = vec![
+            div()
+                .w_full()
+                .px_3()
+                .pt_3()
+                .child(labels(
+                    crate::tr!("remote.traverse.title").into_owned().into(),
+                    Some(
+                        crate::tr!("remote.traverse.description")
+                            .into_owned()
+                            .into(),
+                    ),
+                    cx,
+                ))
+                .into_any_element(),
+        ];
+        let urls = self.typed_urls(cx);
+        for (index, (source, url)) in self.traverse_rows.iter().zip(urls).enumerate() {
+            let switch = Switch::new(SharedString::from(format!("remote-traverse-{index}")))
+                .checked(source.enabled)
+                .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                    this.set_traverse_enabled(index, *checked, window, cx);
+                }));
+            let element = match (&source.url, url) {
+                (Some((input, _)), Some(url)) => {
+                    let description = match url {
+                        Ok(_) => crate::tr!("remote.traverse.url_description")
+                            .into_owned()
+                            .into(),
+                        Err(error) => error,
+                    };
+                    let remove = Button::new(SharedString::from(format!(
+                        "remote-traverse-remove-{index}"
+                    )))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .aria_label(crate::tr!("remote.traverse.remove"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.remove_traverse(index, window, cx);
+                    }));
+                    field_row(compact)
+                        .child(field_labels(
+                            crate::tr!("remote.traverse.custom").into_owned().into(),
+                            Some(description),
+                            cx,
+                        ))
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .gap_3()
+                                .items_center()
+                                .when(compact, |controls| controls.w_full())
+                                .child(
+                                    field(compact).child(
+                                        Input::new(input)
+                                            .small()
+                                            .rounded(crate::material::radius_input(cx)),
+                                    ),
+                                )
+                                .child(remove)
+                                .child(switch),
+                        )
+                }
+                _ => switch_row()
+                    .child(labels(
+                        crate::tr!("remote.traverse.official").into_owned().into(),
+                        None,
+                        cx,
+                    ))
+                    .child(switch),
+            };
+            rows.push(element.into_any_element());
+        }
+        let addition = self.typed_addition(cx);
+        let add_description = match &addition {
+            Some(Err(error)) => error.clone(),
+            _ => crate::tr!("remote.traverse.url_description")
+                .into_owned()
+                .into(),
+        };
+        rows.push(
+            field_row(compact)
+                .child(field_labels(
+                    crate::tr!("remote.traverse.add_title").into_owned().into(),
+                    Some(add_description),
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .gap_3()
+                        .items_center()
+                        .when(compact, |controls| controls.w_full())
+                        .child(
+                            field(compact).child(
+                                Input::new(&self.traverse_add_input)
+                                    .small()
+                                    .rounded(crate::material::radius_input(cx)),
+                            ),
+                        )
+                        .child(
+                            Button::new("remote-traverse-add")
+                                .ghost()
+                                .outline()
+                                .compact()
+                                .icon(IconName::Plus)
+                                .label(crate::tr!("remote.traverse.add"))
+                                .disabled(!matches!(addition, Some(Ok(_))))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_traverse(window, cx);
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        );
+        rows
     }
 
     fn render_devices(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -937,7 +1121,6 @@ impl Render for HostingPanel {
             .w_full()
             .min_w_0()
             .debug_selector(|| "hosting-settings".into())
-            .on_action(cx.listener(Self::on_select_traverse))
             .child(self.render_hosting(compact, cx))
     }
 }
@@ -958,8 +1141,8 @@ mod tests {
         }
     }
 
-    /// Edits apply themselves: a Traverse choice when it is made, a typed
-    /// name when its field is left. The pairing switch exists only while
+    /// Edits apply themselves: a Traverse source's switch, addition or
+    /// removal when it is made, a typed name when its field is left. The pairing switch exists only while
     /// hosting; flipping it reaches the transport, which drops or mints the
     /// invitation. The invitation itself is the Hosts page's to show, never
     /// this settings panel's.
@@ -1010,8 +1193,14 @@ mod tests {
             "no pairing switch while not hosting"
         );
         let panel = window.read_with(cx, |probe, _| probe.0.clone()).unwrap();
+        let saved_traverse = |cx: &mut gpui::VisualTestContext| {
+            cx.read(|cx| {
+                serde_json::to_value(&cx.global::<RemoteController>().local_settings().traverse)
+                    .unwrap()
+            })
+        };
         panel.update_in(cx, |panel, window, cx| {
-            panel.on_select_traverse(&SelectTraverse::Off, window, cx);
+            panel.set_traverse_enabled(0, false, window, cx);
             panel
                 .host_name_input
                 .update(cx, |input, cx| input.set_value("Studio", window, cx));
@@ -1019,9 +1208,38 @@ mod tests {
         });
         cx.read(|cx| {
             let saved = cx.global::<RemoteController>().local_settings();
-            assert_eq!(saved.traverse, TraverseSetting::Off);
+            assert_eq!(saved.traverse.enabled().count(), 0);
             assert_eq!(saved.remote_host_name.as_deref(), Some("Studio"));
         });
+        // A self-hosted instance joins the list enabled once its URL is
+        // usable; one already listed is not added twice.
+        for typed in [
+            "traverse.example",
+            "https://traverse.example",
+            "https://traverse.example/",
+        ] {
+            panel.update_in(cx, |panel, window, cx| {
+                panel
+                    .traverse_add_input
+                    .update(cx, |input, cx| input.set_value(typed, window, cx));
+                panel.add_traverse(window, cx);
+            });
+        }
+        assert_eq!(
+            saved_traverse(cx),
+            serde_json::json!({"sources": [
+                {"kind": "official", "enabled": false},
+                {"kind": "custom", "url": "https://traverse.example/", "enabled": true},
+            ]})
+        );
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_traverse_enabled(0, true, window, cx);
+            panel.remove_traverse(1, window, cx);
+        });
+        assert_eq!(
+            saved_traverse(cx),
+            serde_json::json!({"sources": [{"kind": "official", "enabled": true}]})
+        );
 
         // A random port: the desktop's fixed one may be taken on this machine.
         let host = TraverseHost::start(
@@ -1029,7 +1247,7 @@ mod tests {
             HostConfig {
                 host_name: "Test Host".into(),
                 data_dir: root.clone(),
-                traverse: TraverseMode::Off,
+                traverse: Vec::new(),
                 pairing_enabled: true,
                 bind_port: None,
             },
@@ -1088,18 +1306,33 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// A self-hosted instance is named by the base URL its manifest is
-    /// served from; anything a browser would not fetch is refused before it
-    /// can be saved.
+    /// The transport publishes to the enabled sources, in order. A
+    /// self-hosted instance is named by the base URL its manifest is served
+    /// from; anything a browser would not fetch is refused.
     #[test]
     fn a_self_hosted_traverse_needs_a_fetchable_base_url() {
+        let custom = |url: &str, enabled| TraverseSource {
+            instance: TraverseInstance::Custom { url: url.into() },
+            enabled,
+        };
+        let official = |enabled| TraverseSource {
+            instance: TraverseInstance::Official,
+            enabled,
+        };
         assert_eq!(
-            traverse_mode(&TraverseSetting::Custom {
-                url: " https://traverse.example/ ".into()
-            }),
-            Ok(TraverseMode::Custom(
-                url::Url::parse("https://traverse.example/").unwrap()
-            ))
+            traverse_sources(&TraverseSetting::new(vec![
+                official(true),
+                custom(" https://traverse.example/ ", true),
+                custom("https://disabled.example/", false),
+            ])),
+            Ok(vec![
+                ManifestSource::Official,
+                ManifestSource::Custom(url::Url::parse("https://traverse.example/").unwrap())
+            ])
+        );
+        assert_eq!(
+            traverse_sources(&TraverseSetting::new(vec![official(false)])),
+            Ok(Vec::new())
         );
         for rejected in [
             "",
@@ -1108,17 +1341,13 @@ mod tests {
             "https://",
         ] {
             assert!(
-                traverse_mode(&TraverseSetting::Custom {
-                    url: rejected.into()
-                })
+                traverse_sources(&TraverseSetting::new(vec![
+                    official(true),
+                    custom(rejected, true)
+                ]))
                 .is_err(),
                 "{rejected:?}"
             );
         }
-        assert_eq!(
-            traverse_mode(&TraverseSetting::Official),
-            Ok(TraverseMode::Official)
-        );
-        assert_eq!(traverse_mode(&TraverseSetting::Off), Ok(TraverseMode::Off));
     }
 }

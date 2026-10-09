@@ -1269,13 +1269,16 @@ remote:
     description: "显示给其他设备。"
   traverse:
     title: "Traverse"
+    description: "让设备在其他网络中也能连接到这台机器的中继与查找服务。全部关闭时，设备只能在局域网内或通过在设备上输入的地址连接。"
     official: "官方 Traverse"
     custom: "自建 Traverse"
-    off: "关闭"
-    url: "Traverse 地址"
     url_description: "你的实例提供清单的基础 URL。"
     url_placeholder: "https://traverse.example"
     invalid_url: "请输入 http 或 https URL。"
+    duplicate: "这个实例已在列表中。"
+    add_title: "添加自建 Traverse"
+    add: "添加"
+    remove: "移除这个 Traverse 实例"
   invite:
     title: "邀请"
     expired: "邀请已过期"
