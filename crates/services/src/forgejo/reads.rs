@@ -104,7 +104,10 @@ impl Pull<'_> {
     /// Every issue comment: the servers answer the whole list whatever page is asked for.
     pub(super) fn issue_comments(&self) -> Result<Vec<Value>, ForgeError> {
         Ok(self
-            .get(&format!("issues/{}/comments", self.key.number), "IssueComments")?
+            .get(
+                &format!("issues/{}/comments", self.key.number),
+                "IssueComments",
+            )?
             .as_array()
             .cloned()
             .unwrap_or_default())
@@ -117,7 +120,11 @@ pub(super) fn head_branch(pr: &Value) -> Option<String> {
     let head = &pr["head"];
     match text(head, "ref") {
         Some(reference) if reference.starts_with("refs/pull/") => text(head, "label")
-            .map(|label| label.rsplit_once(':').map_or(label.clone(), |(_, branch)| branch.to_owned()))
+            .map(|label| {
+                label
+                    .rsplit_once(':')
+                    .map_or(label.clone(), |(_, branch)| branch.to_owned())
+            })
             .or(Some(reference)),
         other => other,
     }
