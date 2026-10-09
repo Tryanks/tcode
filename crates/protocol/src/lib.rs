@@ -97,6 +97,8 @@ pub use wire::{
 // OrchestrateArchiveOnComplete) are removed.
 // Unreleased: the Preview topic no longer names a session, so a subscriber
 // answers automation for threads it is not viewing.
+// Unreleased: thread metadata carries pinned_at, pin_order and active_order;
+// adds the PinSession, UnpinSession, ReorderPinned and ReorderActive commands.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

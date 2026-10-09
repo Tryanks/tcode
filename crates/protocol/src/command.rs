@@ -324,6 +324,24 @@ pub enum Command {
     UnsettleSession {
         session_id: String,
     },
+    /// Pin a thread, promoting it out of Settled. A thread pinned for the
+    /// first time takes `order_key`; one already pinned keeps its own.
+    PinSession {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order_key: Option<String>,
+    },
+    UnpinSession {
+        session_id: String,
+    },
+    ReorderPinned {
+        session_id: String,
+        order_key: String,
+    },
+    ReorderActive {
+        session_id: String,
+        order_key: String,
+    },
     ArchiveSession {
         session_id: String,
     },
@@ -491,6 +509,10 @@ impl Command {
             | Self::SettleSession { session_id, .. }
             | Self::CancelAgent { session_id }
             | Self::UnsettleSession { session_id, .. }
+            | Self::PinSession { session_id, .. }
+            | Self::UnpinSession { session_id }
+            | Self::ReorderPinned { session_id, .. }
+            | Self::ReorderActive { session_id, .. }
             | Self::SetAutoSettle { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
             | Self::UnarchiveSession { session_id, .. }
