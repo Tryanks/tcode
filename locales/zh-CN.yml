@@ -1331,11 +1331,16 @@ hosts:
     scan: "扫描二维码"
     paste: "粘贴邀请链接"
     bad_invite: "这不是有效的 Tcode 邀请链接。"
-    connecting: "正在连接 %{name}…"
+    connecting: "正在连接主机…"
     rejected: "主机拒绝了这个邀请。请确认已开启“接受新设备配对”，并使用新的邀请。"
     unconfirmed: "无法确认配对结果。请在主机上生成新的邀请后重试。"
     disabled: "这台主机已关闭新设备配对。请在主机上开启“接受新设备配对”后重试。"
-    network_error: "无法连接 %{address}：%{reason}"
+    address: "主机的 IP 地址"
+    address_description: "在当前网络中没有找到这台主机。请输入它显示的 IP 地址（tcode-headless 输出中的 Addresses:，或主机的网络设置），然后用同一个邀请重新连接。"
+    address_placeholder: "192.168.1.20"
+    bad_address: "请输入 IPv4 或 IPv6 地址，不要带端口。"
+    address_unreachable: "无法通过 %{address} 连接主机。请检查地址，并确认主机的 UDP 端口在当前网络中可以接受连接。"
+    retry: "重试"
     failed: "添加失败：%{reason}"
 
 mobile:

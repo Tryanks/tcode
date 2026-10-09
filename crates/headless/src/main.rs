@@ -163,11 +163,16 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     // thread ends with the host's event stream. A copy left by a serve that
     // did not shut down goes first.
     let events = traverse_host.invitation_events();
-    sync_invitation_file(&remote_data_dir, None)?;
+    sync_invitation_file(&remote_data_dir, None, &[])?;
     let invitation_dir = remote_data_dir.clone();
+    let addressed = Arc::downgrade(&traverse_host);
     std::thread::spawn(move || {
         while let Ok(invitation) = events.recv_blocking() {
-            if let Err(error) = sync_invitation_file(&invitation_dir, invitation.as_ref()) {
+            let addrs = addressed
+                .upgrade()
+                .map(|host| direct_addrs(&host))
+                .unwrap_or_default();
+            if let Err(error) = sync_invitation_file(&invitation_dir, invitation.as_ref(), &addrs) {
                 eprintln!("tcode-headless: {error}");
             }
         }
@@ -187,12 +192,17 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     println!("Machine id: {}", traverse_host.endpoint_id());
     println!("UDP port: {port}");
     if relayed {
-        // An invite minted before the relay is known would only carry LAN
-        // addresses; wait briefly, never indefinitely.
+        // An invite minted before the relay is known would name none; wait
+        // briefly, never indefinitely.
         traverse_host.wait_online(Duration::from_secs(5));
     }
     if traverse_host.pairing_enabled() {
-        print_invitation(&traverse_host.new_invitation())?;
+        let invitation = traverse_host.new_invitation();
+        print_invite(
+            &invitation.invite,
+            invitation.remaining().as_secs(),
+            &direct_addrs(&traverse_host),
+        )?;
     } else {
         println!("Pairing disabled; enable Accept new devices from a paired client");
     }
@@ -348,11 +358,22 @@ fn set_password_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `serve` keeps the current invitation here for `pair` to print.
+/// `serve` keeps the current invitation here for `pair` to print, with the
+/// machine's addresses for a person to type where nothing finds it; the
+/// link itself names none.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct InvitationFile {
     expires_unix: u64,
     invite: String,
+    #[serde(default)]
+    addrs: Vec<String>,
+}
+
+fn direct_addrs(host: &TraverseHost) -> Vec<String> {
+    host.direct_addrs()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn now_unix() -> u64 {
@@ -363,7 +384,11 @@ fn now_unix() -> u64 {
 }
 
 /// Write the invitation in effect, or remove the file when there is none.
-fn sync_invitation_file(data_dir: &Path, invitation: Option<&Invitation>) -> Result<(), String> {
+fn sync_invitation_file(
+    data_dir: &Path,
+    invitation: Option<&Invitation>,
+    addrs: &[String],
+) -> Result<(), String> {
     let path = data_dir.join(INVITATION_FILE);
     let Some(invitation) = invitation else {
         return match std::fs::remove_file(&path) {
@@ -375,6 +400,7 @@ fn sync_invitation_file(data_dir: &Path, invitation: Option<&Invitation>) -> Res
     let file = InvitationFile {
         expires_unix: now_unix() + invitation.remaining().as_secs(),
         invite: invitation.url(),
+        addrs: addrs.to_vec(),
     };
     let bytes = serde_json::to_vec_pretty(&file).map_err(|error| error.to_string())?;
     write_private(&path, &bytes)
@@ -394,14 +420,11 @@ fn pair_command(args: &[String]) -> Result<(), String> {
         return Err("no valid invitation; the logged-in browser can create one from Settings → Remote, or restart serve".into());
     };
     let invite = parse_pair_url(&file.invite).ok_or("invalid invitation file")?;
-    print_invite(&invite, file.expires_unix - now_unix())
+    print_invite(&invite, file.expires_unix - now_unix(), &file.addrs)
 }
 
-fn print_invitation(invitation: &Invitation) -> Result<(), String> {
-    print_invite(&invitation.invite, invitation.remaining().as_secs())
-}
-
-fn print_invite(invite: &PairInvite, remaining_secs: u64) -> Result<(), String> {
+/// `addrs` are printed for a person to read, never put in the link.
+fn print_invite(invite: &PairInvite, remaining_secs: u64, addrs: &[String]) -> Result<(), String> {
     let url = pair_url(invite);
     let qr = QrCode::new(url.as_bytes()).map_err(|error| error.to_string())?;
     println!("Invitation (scan the QR or paste the link; one device, five minutes):");
@@ -410,7 +433,7 @@ fn print_invite(invite: &PairInvite, remaining_secs: u64) -> Result<(), String> 
         Some(relay) => println!("Relay: {relay}"),
         None => println!("Relay: none (LAN only)"),
     }
-    println!("Addresses: {}", invite.addrs.join(", "));
+    println!("Addresses: {}", addrs.join(", "));
     println!("{url}");
     println!("{}", qr.render::<Dense1x2>().quiet_zone(true).build());
     Ok(())

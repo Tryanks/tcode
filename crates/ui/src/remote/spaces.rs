@@ -1947,7 +1947,8 @@ mod tests {
         let invite = tcode_client::pairing::parse_pair_url(&joined_by).unwrap();
         let device = DeviceIdentity::load_or_create(&member_dir).unwrap();
         device.set_details("Phone".into(), None);
-        tcode_traverse::pair_blocking(&invite, &device).unwrap();
+        tcode_traverse::pair_blocking(&invite, Some(std::net::Ipv4Addr::LOCALHOST.into()), &device)
+            .unwrap();
         let member_id = device.endpoint_id().to_string();
         cx.update(|cx| {
             let mut controller = crate::remote::RemoteController::new(
@@ -2002,7 +2003,11 @@ mod tests {
             "the link the member joined by is retired"
         );
         assert_eq!(
-            tcode_traverse::pair_blocking(&invite, &device),
+            tcode_traverse::pair_blocking(
+                &invite,
+                Some(std::net::Ipv4Addr::LOCALHOST.into()),
+                &device
+            ),
             Err(tcode_traverse::PairError::Invalid)
         );
         cx.update(|_, cx| {

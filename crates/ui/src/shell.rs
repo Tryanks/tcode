@@ -2763,6 +2763,7 @@ mod tests {
         fn pair(
             &self,
             _: tcode_client::pairing::PairInvite,
+            _: Option<std::net::IpAddr>,
         ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
         {
             panic!("a cold start must reuse the saved pairing")
@@ -2812,7 +2813,7 @@ mod tests {
             saved: tcode_client::pairing::PairedHost {
                 host_id: "last-host".into(),
                 name: "Last machine".into(),
-                traverse: None,
+                traverse: Vec::new(),
                 relay: None,
                 addrs: vec!["127.0.0.1:47503".into()],
                 last_connected_unix: Some(1),
@@ -2978,7 +2979,7 @@ mod tests {
             saved: tcode_client::pairing::PairedHost {
                 host_id: "pending-host".into(),
                 name: "Pending host".into(),
-                traverse: None,
+                traverse: Vec::new(),
                 relay: None,
                 addrs: vec!["127.0.0.1:48442".into()],
                 last_connected_unix: None,

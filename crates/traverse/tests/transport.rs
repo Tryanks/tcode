@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tcode_client::heartbeat::NATIVE_IDLE_MS;
 use tcode_client::host::Transport;
-use tcode_client::pairing::PairInvite;
+use tcode_client::pairing::{PairInvite, PairedHost};
 use tcode_client::{ConnectionFailure, ConnectionState};
 use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, PairError, TraverseHost, TraverseMode};
 
@@ -131,6 +131,13 @@ fn device(dir: &TestDir, name: &str) -> DeviceIdentity {
     device
 }
 
+/// Pair as a person does once nothing found the machine: these machines
+/// run Off on loopback and a link names no address, so the address typed
+/// for the link's port is the path that does not depend on DNS-SD.
+fn pair(invite: &PairInvite, device: &DeviceIdentity) -> Result<PairedHost, PairError> {
+    tcode_traverse::pair_blocking(invite, Some(std::net::Ipv4Addr::LOCALHOST.into()), device)
+}
+
 // Native multipath may select a global interface even between local peers.
 fn connected_directly(state: &ConnectionState) -> bool {
     matches!(
@@ -217,14 +224,6 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     let minted = host.new_invitation();
     let invite = &minted.invite;
     assert_eq!(invite.host_id, host.endpoint_id());
-    assert!(
-        invite
-            .addrs
-            .iter()
-            .any(|addr| addr.starts_with("127.0.0.1:")),
-        "the invite names the loopback socket: {:?}",
-        invite.addrs
-    );
     assert!(tcode_client::pairing::valid_invitation_secret(
         &invite.secret
     ));
@@ -235,13 +234,10 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
         ..invite.clone()
     };
     for _ in 0..5 {
-        assert_eq!(
-            tcode_traverse::pair_blocking(&wrong, &phone),
-            Err(PairError::Invalid)
-        );
+        assert_eq!(pair(&wrong, &phone), Err(PairError::Invalid));
     }
     assert_eq!(
-        tcode_traverse::pair_blocking(invite, &phone),
+        pair(invite, &phone),
         Err(PairError::Invalid),
         "five wrong secrets burn the invitation even for the right one"
     );
@@ -252,7 +248,7 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
     let minted = host.new_invitation();
     assert_ne!(old.invite.secret, minted.invite.secret);
     assert_eq!(
-        tcode_traverse::pair_blocking(&old.invite, &phone),
+        pair(&old.invite, &phone),
         Err(PairError::Invalid),
         "a new invitation replaces the old one"
     );
@@ -260,12 +256,11 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
         host.invitation().map(|(active, _)| active.invite),
         Some(minted.invite.clone())
     );
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    let paired = pair(&minted.invite, &phone).unwrap();
     assert_eq!(paired.host_id, host.endpoint_id());
     assert_eq!(paired.name, "Test Host");
-    assert_eq!(paired.addrs, minted.invite.addrs);
     assert_eq!(
-        tcode_traverse::pair_blocking(&minted.invite, &other),
+        pair(&minted.invite, &other),
         Err(PairError::Invalid),
         "an invitation is single use"
     );
@@ -289,10 +284,49 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
 
     host.set_pairing_enabled(false);
     let minted = host.new_invitation();
-    assert_eq!(
-        tcode_traverse::pair_blocking(&minted.invite, &other),
-        Err(PairError::Disabled)
+    assert_eq!(pair(&minted.invite, &other), Err(PairError::Disabled));
+    host.shutdown();
+}
+
+/// A LAN-only machine the browse cannot find: the link names no address,
+/// so the first attempt opens no path and sends no secret. The same
+/// invitation then pairs at the address the person types, on the link's
+/// port, and the paired machine is reached again at the address that
+/// worked, with nothing else to find it by.
+#[test]
+fn an_invitation_that_finds_no_path_pairs_at_a_typed_address() {
+    let host_dir = TestDir::new("typed-host");
+    let (mux, _, _) = fake_host();
+    let host = start_host(mux, &host_dir, None);
+    let dir = TestDir::new("typed-phone");
+    let phone = device(&dir, "phone");
+    phone.set_lan_options(tcode_traverse::lan::LanOptions {
+        browse: tcode_traverse::lan::Browse::Off,
+        multicast_lock: None,
+    });
+    let link = tcode_client::pairing::parse_pair_url(&host.new_invitation().url()).unwrap();
+
+    let started = Instant::now();
+    let failure = tcode_traverse::pair_blocking(&link, None, &phone).unwrap_err();
+    assert!(
+        matches!(failure, PairError::Unreachable(_)),
+        "{failure:?} after {:?}",
+        started.elapsed()
     );
+    assert!(host.invitation().is_some(), "the secret was never sent");
+
+    let typed = std::net::Ipv4Addr::LOCALHOST.into();
+    let paired = tcode_traverse::pair_blocking(&link, Some(typed), &phone).unwrap();
+    assert_eq!(paired.name, "Test Host");
+    assert_eq!(
+        paired.addrs,
+        [std::net::SocketAddr::new(typed, link.port).to_string()]
+    );
+    assert!(host.invitation().is_none(), "the invitation is used");
+
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, syncing_directly);
+    client.to_host.close();
     host.shutdown();
 }
 
@@ -317,10 +351,7 @@ fn invitation_changes_are_reported_in_order() {
         ..second.invite
     };
     for attempt in 0..5 {
-        assert_eq!(
-            tcode_traverse::pair_blocking(&wrong, &phone),
-            Err(PairError::Invalid)
-        );
+        assert_eq!(pair(&wrong, &phone), Err(PairError::Invalid));
         if attempt < 4 {
             assert!(events.try_recv().is_err(), "a wrong secret changes nothing");
         }
@@ -332,7 +363,7 @@ fn invitation_changes_are_reported_in_order() {
     );
     let third = host.new_invitation();
     assert_eq!(events.recv_blocking().unwrap(), Some(third.clone()));
-    tcode_traverse::pair_blocking(&third.invite, &phone).unwrap();
+    pair(&third.invite, &phone).unwrap();
     assert_eq!(events.recv_blocking().unwrap(), None, "used");
     host.set_pairing_enabled(false);
     assert!(events.try_recv().is_err(), "nothing to withdraw");
@@ -412,11 +443,11 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
 
     let minted = off_host.new_invitation();
     assert_eq!(
-        minted.invite.traverse.as_deref(),
-        Some(tcode_client::pairing::TRAVERSE_OFF),
+        minted.invite.traverse,
+        [tcode_client::pairing::TRAVERSE_OFF],
         "an Off machine says so in its invitation"
     );
-    let off = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    let off = pair(&minted.invite, &phone).unwrap();
     tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&off)).unwrap();
     wait_relays(&phone, &[]);
 
@@ -424,17 +455,16 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     // official service, which the machine never checks.
     let minted = official_host.new_invitation();
     let invite = PairInvite {
-        traverse: None,
+        traverse: Vec::new(),
         ..minted.invite
     };
-    let official = tcode_traverse::pair_blocking(&invite, &phone).unwrap();
-    assert_eq!(official.traverse, None);
+    let official = pair(&invite, &phone).unwrap();
+    assert!(official.traverse.is_empty());
     wait_relays(&phone, &["https://official.relay.test/"]);
     // Pair this machine while Off, so its custom source can only be loaded
     // by the saved-host reconciliation below, not by pairing itself.
-    let mut custom =
-        tcode_traverse::pair_blocking(&custom_host.new_invitation().invite, &phone).unwrap();
-    custom.traverse = Some(custom_base.to_string());
+    let mut custom = pair(&custom_host.new_invitation().invite, &phone).unwrap();
+    custom.traverse = vec![custom_base.to_string()];
     tcode_traverse::hosts::save_hosts(&dir.0, &[off.clone(), official, custom]).unwrap();
     phone.hosts_changed();
     // The new relay proves reconciliation ran; the saved official source
@@ -444,21 +474,39 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
         &["https://custom.relay.test/", "https://official.relay.test/"],
     );
 
-    tcode_traverse::hosts::save_hosts(&dir.0, &[off]).unwrap();
+    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&off)).unwrap();
+    phone.hosts_changed();
+    wait_relays(&phone, &[]);
+
+    // A machine that publishes to several instances lists them all, and
+    // pairing with it brings every one's relays.
+    let minted = official_host.new_invitation();
+    let invite = PairInvite {
+        traverse: vec![
+            tcode_client::pairing::TRAVERSE_OFFICIAL.into(),
+            custom_base.to_string(),
+        ],
+        ..minted.invite
+    };
+    let both = pair(&invite, &phone).unwrap();
+    tcode_traverse::hosts::save_hosts(&dir.0, &[off.clone(), both]).unwrap();
+    phone.hosts_changed();
+    wait_relays(
+        &phone,
+        &["https://custom.relay.test/", "https://official.relay.test/"],
+    );
+    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&off)).unwrap();
     phone.hosts_changed();
     wait_relays(&phone, &[]);
 
     // A pairing that fails leaves nothing of the instance it tried behind.
     let minted = official_host.new_invitation();
     let wrong = PairInvite {
-        traverse: None,
+        traverse: Vec::new(),
         secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),
         ..minted.invite
     };
-    assert_eq!(
-        tcode_traverse::pair_blocking(&wrong, &phone),
-        Err(PairError::Invalid)
-    );
+    assert_eq!(pair(&wrong, &phone), Err(PairError::Invalid));
     wait_relays(&phone, &[]);
     off_host.shutdown();
     official_host.shutdown();
@@ -487,13 +535,13 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
     )
     .expect("hosting starts without the manifest");
     assert_eq!(host.endpoint_id().len(), 64);
-    assert!(host.addr().relays.is_empty(), "no relay in hand");
+    assert!(host.addr().relay.is_none(), "no relay in hand");
     let dir = TestDir::new("dead-traverse-phone");
     let phone = device(&dir, "phone");
     let minted = host.new_invitation();
-    assert_eq!(minted.invite.traverse.as_deref(), Some(dead.as_str()));
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
-    assert_eq!(paired.traverse.as_deref(), Some(dead.as_str()));
+    assert_eq!(minted.invite.traverse, [dead.to_string()]);
+    let paired = pair(&minted.invite, &phone).unwrap();
+    assert_eq!(paired.traverse, [dead.to_string()]);
     let client = tcode_traverse::connect(&paired, &phone);
     wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
@@ -520,7 +568,7 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     let dir = TestDir::new("idle-device");
     let phone = device(&dir, "phone");
     let minted = host.new_invitation();
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    let paired = pair(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
     wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
@@ -551,9 +599,9 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     let device_a = device(&dir_a, "A");
     let device_b = device(&dir_b, "B");
     let minted = host.new_invitation();
-    let host_a = tcode_traverse::pair_blocking(&minted.invite, &device_a).unwrap();
+    let host_a = pair(&minted.invite, &device_a).unwrap();
     let minted = host.new_invitation();
-    let host_b = tcode_traverse::pair_blocking(&minted.invite, &device_b).unwrap();
+    let host_b = pair(&minted.invite, &device_b).unwrap();
     let client_a = tcode_traverse::connect(&host_a, &device_a);
     let client_b = tcode_traverse::connect(&host_b, &device_b);
     wait_state(&client_a, syncing_directly);
@@ -649,7 +697,7 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     let dir = TestDir::new("revoke-phone");
     let phone = device(&dir, "phone");
     let minted = host.new_invitation();
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    let paired = pair(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
     wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
@@ -715,7 +763,7 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     let phone = device(&dir, "phone");
     phone.set_details("phone".into(), Some("Android 15".into()));
     let minted = host.new_invitation();
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    let paired = pair(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
     wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
@@ -874,7 +922,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let member = device(&member_dir, "Collaborator");
     let other_dir = TestDir::new("spaces-other");
     let other = device(&other_dir, "Other");
-    let paired = tcode_traverse::pair_blocking(&invite, &member).unwrap();
+    let paired = pair(&invite, &member).unwrap();
     assert!(host.invitation().is_some());
     assert_eq!(paired.space_id.as_deref(), Some(id.as_str()));
     assert_eq!(paired.space_name.as_deref(), Some("Shared"));
@@ -906,10 +954,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         }
     );
     assert!(state.spaces[0].members[0].path.is_some());
-    assert_eq!(
-        tcode_traverse::pair_blocking(&invite, &member),
-        Err(PairError::AlreadyMember)
-    );
+    assert_eq!(pair(&invite, &member), Err(PairError::AlreadyMember));
 
     client
         .to_host
@@ -941,16 +986,10 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
 
     host.set_space_link_enabled(&id, false).unwrap();
     assert!(host.space_link_url(&id).is_none());
-    assert_eq!(
-        tcode_traverse::pair_blocking(&invite, &other),
-        Err(PairError::SpaceUnavailable)
-    );
+    assert_eq!(pair(&invite, &other), Err(PairError::SpaceUnavailable));
     host.set_space_link_enabled(&id, true).unwrap();
     host.set_pairing_enabled(false);
-    assert_eq!(
-        tcode_traverse::pair_blocking(&invite, &other),
-        Err(PairError::Disabled)
-    );
+    assert_eq!(pair(&invite, &other), Err(PairError::Disabled));
     host.set_pairing_enabled(true);
     let one_shot = host.new_invitation();
     let wrong = PairInvite {
@@ -959,14 +998,8 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     };
     let blocker = host_dir.0.join("traverse.tmp");
     std::fs::create_dir(&blocker).unwrap();
-    assert_eq!(
-        tcode_traverse::pair_blocking(&wrong, &other),
-        Err(PairError::Busy)
-    );
-    assert_eq!(
-        tcode_traverse::pair_blocking(&invite, &other),
-        Err(PairError::Busy)
-    );
+    assert_eq!(pair(&wrong, &other), Err(PairError::Busy));
+    assert_eq!(pair(&invite, &other), Err(PairError::Busy));
     assert_eq!(host.devices().len(), 1);
     assert_eq!(
         HostIdentity::load_or_create(&host_dir.0, "Test Host")
@@ -977,10 +1010,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     );
     std::fs::remove_dir(blocker).unwrap();
     for _ in 0..5 {
-        assert_eq!(
-            tcode_traverse::pair_blocking(&wrong, &other),
-            Err(PairError::Invalid)
-        );
+        assert_eq!(pair(&wrong, &other), Err(PairError::Invalid));
     }
     assert!(host.spaces()[0].link_dead);
     assert!(host.space_link_url(&id).is_none());
@@ -991,30 +1021,21 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
             .link_failures,
         5
     );
-    assert_eq!(
-        tcode_traverse::pair_blocking(&invite, &other),
-        Err(PairError::SpaceUnavailable)
-    );
+    assert_eq!(pair(&invite, &other), Err(PairError::SpaceUnavailable));
     let full_dir = TestDir::new("spaces-full");
     let full = device(&full_dir, "Owner");
-    let full_paired = tcode_traverse::pair_blocking(&one_shot.invite, &full).unwrap();
+    let full_paired = pair(&one_shot.invite, &full).unwrap();
     assert!(full_paired.space_id.is_none());
     scoped_ping(&client, &host_rx, &host_tx, &principal, 3);
     assert_stayed_connected(&client);
 
     host.regenerate_space_link(&id).unwrap();
     let regenerated = space_invite(&host, &id);
-    assert_eq!(
-        tcode_traverse::pair_blocking(&regenerated, &full),
-        Err(PairError::AlreadyMember)
-    );
+    assert_eq!(pair(&regenerated, &full), Err(PairError::AlreadyMember));
 
     assert_ne!(regenerated.secret, invite.secret);
-    assert_eq!(
-        tcode_traverse::pair_blocking(&invite, &other),
-        Err(PairError::Invalid)
-    );
-    let other_paired = tcode_traverse::pair_blocking(&regenerated, &other).unwrap();
+    assert_eq!(pair(&invite, &other), Err(PairError::Invalid));
+    let other_paired = pair(&regenerated, &other).unwrap();
     let other_client = tcode_traverse::connect(&other_paired, &other);
     wait_state(&other_client, syncing_directly);
     let mut other_principal = principal.clone();
@@ -1052,7 +1073,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let rejected = tcode_traverse::connect(&paired, &member);
     wait_state(&rejected, unpaired);
     rejected.to_host.close();
-    tcode_traverse::pair_blocking(&regenerated, &member).unwrap();
+    pair(&regenerated, &member).unwrap();
     let blocker = host_dir.0.join("traverse.tmp");
     std::fs::create_dir(&blocker).unwrap();
     assert!(
@@ -1071,11 +1092,8 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
         regenerate_link: true,
     }))
     .unwrap();
-    assert_eq!(
-        tcode_traverse::pair_blocking(&regenerated, &member),
-        Err(PairError::Invalid)
-    );
-    let repaired = tcode_traverse::pair_blocking(&space_invite(&host, &id), &member).unwrap();
+    assert_eq!(pair(&regenerated, &member), Err(PairError::Invalid));
+    let repaired = pair(&space_invite(&host, &id), &member).unwrap();
     if let Principal::Space {
         policy_revision, ..
     } = &mut principal
@@ -1153,10 +1171,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     scoped_ping(&client, &host_rx, &host_tx, &principal, 8);
     let moved_space = host.create_space("Moved".into()).unwrap();
     let moved_invite = space_invite(&host, &moved_space);
-    assert_eq!(
-        tcode_traverse::pair_blocking(&moved_invite, &member),
-        Err(PairError::AlreadyMember)
-    );
+    assert_eq!(pair(&moved_invite, &member), Err(PairError::AlreadyMember));
     host.move_member(&member.endpoint_id().to_string(), &moved_space)
         .unwrap();
     wait_state(&client, |state| {
@@ -1190,7 +1205,7 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     assert_eq!(host.devices().len(), 1);
     assert_eq!(host.devices()[0].access, DeviceAccess::Full);
     assert_eq!(
-        tcode_traverse::pair_blocking(&regenerated, &member),
+        pair(&regenerated, &member),
         Err(PairError::SpaceUnavailable)
     );
     client.to_host.close();

@@ -32,7 +32,7 @@ use std::{
 use iroh::{RelayConfig, RelayMap, RelayUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tcode_client::pairing::TRAVERSE_OFF;
+use tcode_client::pairing::{TRAVERSE_OFF, TRAVERSE_OFFICIAL};
 use url::Url;
 
 pub const OFFICIAL_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Tryanks/tcode/main/crates/traverse/src/traverse_manifest.json";
@@ -163,14 +163,28 @@ pub enum ManifestSource {
 }
 
 impl ManifestSource {
-    /// What a device stores per machine: `None` is the official service,
-    /// [`TRAVERSE_OFF`] no service at all.
-    pub fn from_traverse(base: Option<&str>) -> Option<Self> {
-        match base {
-            None => Some(Self::Official),
-            Some(TRAVERSE_OFF) => None,
-            Some(base) => Url::parse(base).ok().map(Self::Custom),
+    /// The instances behind what a device stores per machine, see
+    /// [`tcode_client::pairing::PairInvite::traverse`]: an empty list is the
+    /// official service, [`TRAVERSE_OFF`] no service at all. An entry that
+    /// is not a URL names nothing.
+    pub fn from_traverse(traverse: &[String]) -> Vec<Self> {
+        if traverse.is_empty() {
+            return vec![Self::Official];
         }
+        let mut sources = Vec::new();
+        for entry in traverse {
+            let source = match entry.as_str() {
+                TRAVERSE_OFF => None,
+                TRAVERSE_OFFICIAL => Some(Self::Official),
+                base => Url::parse(base).ok().map(Self::Custom),
+            };
+            if let Some(source) = source
+                && !sources.contains(&source)
+            {
+                sources.push(source);
+            }
+        }
+        sources
     }
 
     /// Where the manifest is fetched from.
@@ -674,12 +688,25 @@ mod tests {
         );
         let file = ManifestSource::Custom(Url::parse("file:///tmp/relays.json").unwrap());
         assert_eq!(file.url().as_str(), "file:///tmp/relays.json");
+        let from = |entries: &[&str]| {
+            ManifestSource::from_traverse(
+                &entries.iter().map(|&e| e.to_owned()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(from(&[]), [ManifestSource::Official]);
+        assert_eq!(from(&[TRAVERSE_OFF]), []);
+        assert_eq!(from(&["not a url"]), []);
         assert_eq!(
-            ManifestSource::from_traverse(None),
-            Some(ManifestSource::Official)
+            from(&[
+                "https://traverse.example/",
+                TRAVERSE_OFFICIAL,
+                "https://traverse.example/"
+            ]),
+            [
+                ManifestSource::Custom(Url::parse("https://traverse.example/").unwrap()),
+                ManifestSource::Official
+            ]
         );
-        assert_eq!(ManifestSource::from_traverse(Some(TRAVERSE_OFF)), None);
-        assert_eq!(ManifestSource::from_traverse(Some("not a url")), None);
     }
 
     #[test]

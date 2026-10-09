@@ -1338,11 +1338,16 @@ hosts:
     scan: "Scan a QR code"
     paste: "Paste an invitation link"
     bad_invite: "That is not a Tcode invitation link."
-    connecting: "Connecting to %{name}…"
+    connecting: "Connecting to the machine…"
     rejected: "The machine rejected this invitation. Check that Accept new devices is on and use a new invitation."
     unconfirmed: "The pairing result could not be confirmed. Create a new invitation on the machine and try again."
     disabled: "This machine is not accepting new device pairings. Turn on Accept new devices there and try again."
-    network_error: "Could not reach %{address}: %{reason}"
+    address: "Machine's IP address"
+    address_description: "Nothing found the machine on this network. Type the IP address it shows (Addresses: in tcode-headless output, or its network settings) and connect again with the same invitation."
+    address_placeholder: "192.168.1.20"
+    bad_address: "Enter an IPv4 or IPv6 address, without a port."
+    address_unreachable: "Could not reach the machine at %{address}. Check the address, and that the machine's UDP port accepts connections on this network."
+    retry: "Try again"
     failed: "Could not add the machine: %{reason}"
 
 mobile:

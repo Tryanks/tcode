@@ -4288,7 +4288,7 @@ pub(crate) mod tests {
         let mut host = tcode_client::pairing::PairedHost {
             host_id: "machine".into(),
             name: "Machine".into(),
-            traverse: None,
+            traverse: Vec::new(),
             relay: None,
             addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,
