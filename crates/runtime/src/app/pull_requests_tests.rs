@@ -2,7 +2,8 @@ use super::*;
 use crate::app::test_support::*;
 use serde_json::{Value, json};
 use std::sync::Mutex;
-use tcode_core::pull_request::PullRequestStack;
+use tcode_core::pull_request::{PullRequestReviewDraftEdit, PullRequestStack};
+use tcode_protocol::Command;
 use tcode_services::{github::Credentials, settings::SettingsStore};
 
 use crate::app::test_support::github_fixture as fixture;
@@ -34,10 +35,14 @@ fn pr(number: u64, state: &str, stack: bool) -> Value {
     })
 }
 fn client(store: &SessionStore, fixture: &fixture::Fixture) -> Arc<GitHubApi> {
+    client_as(store, fixture, "fixture")
+}
+/// The host reading GitHub with `token`, which names the account.
+fn client_as(store: &SessionStore, fixture: &fixture::Fixture, token: &str) -> Arc<GitHubApi> {
     GitHubApi::new(
         Credentials::new(
             SettingsStore::new(store.root().to_path_buf()),
-            [("GH_TOKEN".into(), "fixture".into())],
+            [("GH_TOKEN".into(), token.into())],
         ),
         fixture.builder(),
     )
@@ -1088,4 +1093,408 @@ fn reads_answer_only_a_linked_pull_request_and_a_synced_change_reads_it_fresh() 
         "a pull request in no stack the thread shows is still refused"
     );
     assert_eq!(conversations(), 3);
+}
+
+#[test]
+fn a_review_draft_is_the_hosts_across_a_restart_and_a_moved_head_keeps_it_until_moved() {
+    const BASE: &str = "3333333333333333333333333333333333333333";
+    const OLD: &str = "1111111111111111111111111111111111111111";
+    const NEW: &str = "2222222222222222222222222222222222222222";
+    let dir = TestStore::new("tcode-pr-review");
+    let fixture = fixture::Fixture::new();
+    let api = client(&dir, &fixture);
+    // The head GitHub reports, and every request line and body it saw.
+    let model = Arc::new(Mutex::new((OLD, Vec::<(String, String)>::new())));
+    let responding = model.clone();
+    let _server = fixture.serve(move |exchange| {
+        let line = exchange.request.lines().next().unwrap().to_owned();
+        let diff = exchange.request.contains("application/vnd.github.diff");
+        let body = String::from_utf8_lossy(&exchange.body).into_owned();
+        let mut model = responding.lock().unwrap();
+        model.1.push((line.clone(), body.clone()));
+        let head = model.0;
+        // Line 8 is rewritten at the new head; every other line reads the same.
+        let text = (1..=12)
+            .map(|line| match (line, head) {
+                (8, NEW) => "changed".to_owned(),
+                _ => format!("line {line}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let reply = if diff {
+            "diff --git a/src/lib.rs b/src/lib.rs\nindex 1111111..2222222 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,10 +1,10 @@\n line 1\n".to_owned()
+        } else if line.starts_with("GET /repos/sample/project/pulls/1 ") {
+            json!({"base": {"sha": BASE}, "head": {"sha": head}, "changed_files": 1, "node_id": "PR_1"})
+                .to_string()
+        } else if line.starts_with("GET /repos/sample/project/contents/src/lib.rs?ref=") {
+            if line.contains(NEW) {
+                text
+            } else {
+                (1..=12)
+                    .map(|line| format!("line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        } else if body.contains("PullRequestSummaries") {
+            json!({"data": {"s0": {"pullRequest": pr(1, "OPEN", false)}}}).to_string()
+        } else {
+            json!({"id": 1}).to_string()
+        };
+        exchange.reply(200, "", reply.as_bytes());
+    });
+    let key = PullRequestKey::new("github.com", "sample/project", 1);
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*dir).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api.clone());
+        let meta = linked("active", 1, false);
+        dir.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+    });
+    let mut next_id = 0;
+    let mut command = |state: &TestEntity, cx: &mut TestAppContext, command: Command| {
+        next_id += 1;
+        state.dispatch_command(cx, next_id, command);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if let Some(result) =
+                cx.drain_outgoing()
+                    .into_iter()
+                    .find_map(|message| match message {
+                        tcode_protocol::HostMessage::Ack { id, result } if id == next_id => {
+                            Some(result)
+                        }
+                        _ => None,
+                    })
+            {
+                return result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the command was answered"
+            );
+        }
+    };
+    let edit = |edit| Command::EditPullRequestReviewDraft {
+        session_id: "active".into(),
+        key: key.clone(),
+        edit,
+    };
+    let add = |line: u32| {
+        edit(PullRequestReviewDraftEdit::AddComment {
+            head: OLD.into(),
+            revision: OLD.into(),
+            path: "src/lib.rs".into(),
+            side: tcode_core::session::ReviewSide::New,
+            start_line: line,
+            end_line: line,
+            body: format!("Line {line}"),
+        })
+    };
+    let drafts = |state: &TestEntity| {
+        state.read(|state| state.find_meta("active").unwrap().pull_request_reviews)
+    };
+    command(&state, &mut cx, add(3)).unwrap();
+    command(&state, &mut cx, add(8)).unwrap();
+    assert_eq!(
+        command(&state, &mut cx, add(11)).unwrap_err().code,
+        "pull_request_not_in_diff",
+        "a line outside every hunk is refused before GitHub would refuse the review"
+    );
+    command(
+        &state,
+        &mut cx,
+        edit(PullRequestReviewDraftEdit::SetBody {
+            body: "Two things".into(),
+        }),
+    )
+    .unwrap();
+
+    // A restart: a fresh host over the same data.
+    state
+        .update(&mut cx, |state, _| state.close_store())
+        .unwrap();
+    let store = SessionStore::open_at(dir.root().clone()).unwrap();
+    let sessions = store.load_index().unwrap();
+    let draft = sessions[0].pull_request_reviews.clone();
+    assert_eq!(draft.len(), 1);
+    assert_eq!(
+        (
+            draft[0].head.as_str(),
+            draft[0].body.as_str(),
+            draft[0]
+                .comments
+                .iter()
+                .map(|comment| comment.end_line)
+                .collect::<Vec<_>>()
+        ),
+        (OLD, "Two things", vec![3, 8])
+    );
+    let state = cx.new_entity(TestClientState::new(store.clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        state.sessions = sessions;
+    });
+    let submit = |head: &str| Command::RunPullRequestAction {
+        session_id: "active".into(),
+        key: key.clone(),
+        action: PullRequestAction::SubmitReview {
+            verdict: tcode_protocol::PullRequestReviewVerdict::Comment,
+            head: head.into(),
+        },
+    };
+    let reviews = || {
+        model
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .filter(|(line, _)| line.starts_with("POST /repos/sample/project/pulls/1/reviews "))
+            .map(|(_, body)| serde_json::from_str::<Value>(body).unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    model.lock().unwrap().0 = NEW;
+    assert_eq!(
+        command(&state, &mut cx, submit(OLD)).unwrap(),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Rejected(
+            tcode_protocol::PullRequestRejection::StaleHead { head: NEW.into() }
+        ))
+    );
+    assert!(reviews().is_empty());
+    assert_eq!(
+        drafts(&state),
+        draft,
+        "a stale submission keeps the draft whole"
+    );
+    assert_eq!(
+        command(
+            &state,
+            &mut cx,
+            edit(PullRequestReviewDraftEdit::AddComment {
+                head: NEW.into(),
+                revision: NEW.into(),
+                path: "src/lib.rs".into(),
+                side: tcode_core::session::ReviewSide::New,
+                start_line: 5,
+                end_line: 5,
+                body: "Read at the new head".into(),
+            })
+        )
+        .unwrap_err()
+        .code,
+        "pull_request_head_changed",
+        "a comment read at the new head is refused while the draft is at the old one"
+    );
+    assert_eq!(drafts(&state), draft);
+
+    command(
+        &state,
+        &mut cx,
+        edit(PullRequestReviewDraftEdit::MoveToHead),
+    )
+    .unwrap();
+    let moved = drafts(&state);
+    assert_eq!(moved[0].head, NEW);
+    assert_eq!(
+        moved[0]
+            .comments
+            .iter()
+            .map(|comment| (comment.end_line, comment.placed, comment.revision.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(3, true, NEW), (8, false, OLD)],
+        "a comment whose line reads the same moves; one whose line changed is kept unplaced"
+    );
+    assert_eq!(
+        command(&state, &mut cx, submit(NEW)).unwrap(),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Rejected(
+            tcode_protocol::PullRequestRejection::Invalid
+        )),
+        "an unplaced comment is never sent"
+    );
+    let unplaced = moved[0].comments[1].id;
+    command(
+        &state,
+        &mut cx,
+        edit(PullRequestReviewDraftEdit::RemoveComment { id: unplaced }),
+    )
+    .unwrap();
+    assert_eq!(
+        command(&state, &mut cx, submit(NEW)).unwrap(),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Applied)
+    );
+    assert_eq!(
+        reviews(),
+        vec![json!({
+            "commit_id": NEW,
+            "event": "COMMENT",
+            "body": "Two things",
+            "comments": [{"path": "src/lib.rs", "line": 3, "side": "RIGHT", "body": "Line 3"}],
+        })]
+    );
+    assert!(
+        drafts(&state).is_empty(),
+        "a submitted review leaves the draft"
+    );
+    cx.run_until(|state| !state.pull_requests.syncing && state.pull_requests.requested.is_empty());
+    assert!(
+        model
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .any(|(_, body)| body.contains("PullRequestSummaries")),
+        "the sync reads the pull request after the write"
+    );
+    state
+        .update(&mut cx, |state, _| state.close_store())
+        .unwrap();
+}
+
+#[test]
+fn a_review_draft_is_its_accounts_and_an_unanswered_submission_waits_for_a_later_read() {
+    const HEAD: &str = "1111111111111111111111111111111111111111";
+    let dir = TestStore::new("tcode-pr-review-account");
+    let fixture = fixture::Fixture::new();
+    let (first_account, second_account) =
+        (client(&dir, &fixture), client_as(&dir, &fixture, "other"));
+    let posted = Arc::new(Mutex::new(0));
+    let counting = posted.clone();
+    let _server = fixture.serve(move |exchange| {
+        let line = exchange.request.lines().next().unwrap().to_owned();
+        let body = String::from_utf8_lossy(&exchange.body).into_owned();
+        if line.starts_with("POST /repos/sample/project/pulls/1/reviews ") {
+            *counting.lock().unwrap() += 1;
+            return exchange.reply(502, "", b"");
+        }
+        let reply = if line.starts_with("GET /repos/sample/project/pulls/1 ") {
+            json!({"base": {"sha": HEAD}, "head": {"sha": HEAD}, "changed_files": 1, "node_id": "PR_1"})
+        } else if body.contains("PullRequestSummaries") {
+            json!({"data": {"s0": {"pullRequest": pr(1, "OPEN", false)}}})
+        } else if body.contains("PullRequestConversation") {
+            json!({"data": {"repository": {"pullRequest": {
+                "id": "PR_1", "body": "Description", "createdAt": "2026-10-01T00:00:00Z",
+                "url": "https://github.com/sample/project/pull/1", "author": {"login": "octocat"},
+                "comments": {"pageInfo": {"hasNextPage": false}, "nodes": []},
+                "reviews": {"pageInfo": {"hasNextPage": false}, "nodes": []},
+            }}}})
+        } else {
+            json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "pageInfo": {"hasNextPage": false}, "nodes": [],
+            }}}}})
+        };
+        exchange.reply(200, "", &serde_json::to_vec(&reply).unwrap());
+    });
+    let key = PullRequestKey::new("github.com", "sample/project", 1);
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*dir).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(first_account);
+        let meta = linked("active", 1, false);
+        dir.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+    });
+    let mut next_id = 0;
+    let mut answer = |state: &TestEntity, cx: &mut TestAppContext, payload| {
+        next_id += 1;
+        state.deliver(cx, next_id, payload);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if let Some(result) =
+                cx.drain_outgoing()
+                    .into_iter()
+                    .find_map(|message| match message {
+                        tcode_protocol::HostMessage::Ack { id, result } if id == next_id => {
+                            Some(result.map(|response| json!(response)))
+                        }
+                        tcode_protocol::HostMessage::QueryResult { id, result }
+                            if id == next_id =>
+                        {
+                            Some(result.map(|response| json!(response)))
+                        }
+                        _ => None,
+                    })
+            {
+                return result;
+            }
+            assert!(std::time::Instant::now() < deadline, "it was answered");
+        }
+    };
+    let body = |body: &str| {
+        tcode_protocol::ClientPayload::Command(Command::EditPullRequestReviewDraft {
+            session_id: "active".into(),
+            key: key.clone(),
+            edit: PullRequestReviewDraftEdit::SetBody { body: body.into() },
+        })
+    };
+    let submit = tcode_protocol::ClientPayload::Command(Command::RunPullRequestAction {
+        session_id: "active".into(),
+        key: key.clone(),
+        action: PullRequestAction::SubmitReview {
+            verdict: tcode_protocol::PullRequestReviewVerdict::Comment,
+            head: HEAD.into(),
+        },
+    });
+    let conversation = tcode_protocol::ClientPayload::Query(tcode_protocol::Query::PullRequest {
+        session_id: "active".into(),
+        key: key.clone(),
+        read: tcode_protocol::PullRequestRead::Conversation,
+    });
+    let drafts = |state: &TestEntity| {
+        state.read(|state| state.find_meta("active").unwrap().pull_request_reviews)
+    };
+
+    answer(&state, &mut cx, body("Under the first account")).unwrap();
+    assert_eq!(
+        answer(&state, &mut cx, submit.clone()).unwrap(),
+        json!(CommandResponse::PullRequestAction(
+            PullRequestActionResult::Uncertain
+        ))
+    );
+    assert!(drafts(&state)[0].uncertain, "the draft waits for a read");
+    answer(&state, &mut cx, conversation.clone()).unwrap();
+    assert!(
+        !drafts(&state)[0].uncertain,
+        "a conversation read after the submission shows what GitHub made of it"
+    );
+    let first = drafts(&state);
+
+    // The host now reads GitHub as someone else.
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(second_account);
+    });
+    let read = answer(&state, &mut cx, conversation).unwrap();
+    let account = read["content"]["response"]["content"]["account"]
+        .as_str()
+        .unwrap();
+    assert_ne!(account, first[0].account);
+    assert_eq!(
+        pull_request::review_draft(&drafts(&state), &key, account),
+        None,
+        "the other account's draft is not shown"
+    );
+    assert_eq!(
+        answer(&state, &mut cx, submit).unwrap(),
+        json!(CommandResponse::PullRequestAction(
+            PullRequestActionResult::Rejected(tcode_protocol::PullRequestRejection::Invalid)
+        )),
+        "nor submitted"
+    );
+    assert_eq!(*posted.lock().unwrap(), 1);
+    answer(&state, &mut cx, body("Under the second account")).unwrap();
+    assert_eq!(drafts(&state)[0], first[0], "and kept as it was");
+    assert_eq!(
+        pull_request::review_draft(&drafts(&state), &key, account).map(|draft| &*draft.body),
+        Some("Under the second account")
+    );
+
+    state.update(&mut cx, |state, cx| {
+        state.unlink_pull_request("active", &key, cx)
+    });
+    assert_eq!(drafts(&state).len(), 2, "unlinking keeps both drafts");
+    state
+        .update(&mut cx, |state, _| state.close_store())
+        .unwrap();
 }

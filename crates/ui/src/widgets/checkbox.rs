@@ -17,6 +17,8 @@ pub struct Checkbox {
     base: gpui_base::Checkbox,
     style: StyleRefinement,
     label: Option<SharedString>,
+    /// The name assistive technology reads when the visible text is in the children.
+    aria_label: Option<SharedString>,
     children: Vec<AnyElement>,
     checked: bool,
     disabled: bool,
@@ -30,6 +32,7 @@ impl Checkbox {
             base: gpui_base::Checkbox::new(id),
             style: StyleRefinement::default(),
             label: None,
+            aria_label: None,
             children: Vec::new(),
             checked: false,
             disabled: false,
@@ -39,6 +42,10 @@ impl Checkbox {
     }
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
         self
     }
     pub fn checked(mut self, checked: bool) -> Self {
@@ -91,7 +98,9 @@ impl RenderOnce for Checkbox {
         self.base
             .checked(checked)
             .disabled(self.disabled)
-            .when_some(label.clone(), |this, label| this.accessibility_label(label))
+            .when_some(label.clone().or(self.aria_label), |this, label| {
+                this.accessibility_label(label)
+            })
             .when_some(self.on_click, |this, handler| {
                 this.on_change(move |state, _, window, cx| {
                     let value = matches!(state, gpui_base::CheckboxState::Checked);

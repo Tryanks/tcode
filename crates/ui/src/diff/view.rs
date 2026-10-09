@@ -1453,25 +1453,15 @@ impl DiffPanel {
                         .into_any_element(),
                 );
             } else {
-                rows.push(
-                    h_flex()
-                        .min_w_full()
-                        .px_3()
-                        .py_1()
-                        .bg(cx.theme().muted)
-                        .rounded(material::radius_card(cx))
-                        .font_family(cx.theme().font_family.clone())
-                        .child(
-                            Button::new("diff-add-comment")
-                                .ghost()
-                                .small()
-                                .label(crate::tr!("diff.add_comment"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start_comment(window, cx);
-                                })),
-                        )
-                        .into_any_element(),
-                );
+                rows.push(super::list::selection_row(
+                    "diff-add-comment",
+                    crate::tr!("diff.add_comment").into(),
+                    None,
+                    cx.listener(|this, _, window, cx| {
+                        this.start_comment(window, cx);
+                    }),
+                    cx,
+                ));
             }
         }
         rows
@@ -1650,8 +1640,11 @@ impl DiffListHost for DiffPanel {
         self.render_comment_ui(&path, old, new, cx)
     }
 
-    fn review_comment_menu(&self) -> Option<bool> {
-        Some(self.comment_input.is_none())
+    fn review_comment_menu(&self, _cx: &App) -> Option<(bool, gpui::SharedString)> {
+        Some((
+            self.comment_input.is_none(),
+            crate::tr!("diff.add_comment").into(),
+        ))
     }
 }
 
