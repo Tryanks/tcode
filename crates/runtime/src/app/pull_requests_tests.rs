@@ -1830,8 +1830,8 @@ fn a_stack_merge_is_followed_across_a_restart_and_never_submitted_again() {
             .collect::<Vec<_>>()
     };
 
-    // Submitted once, then followed by its operation until GitHub says it merged.
-    host.lock().unwrap().status.insert("op-1".into(), "merged");
+    // Submitted once, then followed by its operation until GitHub says it merged. GitHub keeps
+    // answering pending until the record is read, so no poll can end it first.
     assert_eq!(
         act(&mut cx),
         CommandResponse::PullRequestAction(PullRequestActionResult::Pending {
@@ -1844,6 +1844,7 @@ fn a_stack_merge_is_followed_across_a_restart_and_never_submitted_again() {
         Some(StackOperationKind::Merging { ref id, target: 3, ref layers, adopted: false })
             if id == "op-1" && *layers == [2, 3]
     ));
+    host.lock().unwrap().status.insert("op-1".into(), "merged");
     cx.run_until(|state| {
         state
             .find_meta("active")
