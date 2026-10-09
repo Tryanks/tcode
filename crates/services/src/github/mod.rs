@@ -4,6 +4,7 @@ pub mod api;
 pub mod credentials;
 pub mod graphql;
 pub mod media;
+mod merge_message;
 pub mod pull_request_actions;
 pub mod pull_request_reads;
 pub mod pull_request_watch;

@@ -69,6 +69,7 @@ pub struct PullRequestReads {
     viewed: ReadCache<PullRequestViewedFiles>,
     pub(super) labels: ReadCache<PullRequestLabelCandidates>,
     pub(super) reviewers: ReadCache<PullRequestReviewerCandidates>,
+    pub(super) action_states: ReadCache<tcode_protocol::PullRequestActionState>,
     /// Filled only by a successful read, oldest first.
     node_ids: Mutex<Vec<(PullRequestKey, String)>>,
 }
@@ -82,7 +83,7 @@ pub(super) struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    fn read_key(&self, read: impl Into<String>) -> ReadKey {
+    pub(super) fn read_key(&self, read: impl Into<String>) -> ReadKey {
         ReadKey {
             pull_request: self.key.clone(),
             account: self.account.clone(),
@@ -538,6 +539,7 @@ impl PullRequestReads {
             viewed: ReadCache::new(4 * 1024 * 1024),
             labels: ReadCache::new(1024 * 1024),
             reviewers: ReadCache::new(1024 * 1024),
+            action_states: ReadCache::new(1024 * 1024),
             node_ids: Mutex::new(Vec::new()),
         })
     }
@@ -834,6 +836,7 @@ impl PullRequestReads {
         self.viewed.invalidate(key);
         self.labels.invalidate(key);
         self.reviewers.invalidate(key);
+        self.action_states.invalidate(key);
     }
 }
 

@@ -2,23 +2,146 @@
 //! whatever a write may have changed is dropped from the reads, so the next read sees it.
 
 use super::{
-    CredentialError, GitHubError, RequestOptions, RestRequest,
+    CredentialError, Fresh, GitHubError, RequestOptions, RestRequest,
     graphql::Document,
+    merge_message::remove_agent_credits,
     pull_request_reads::{
         MAX_PAGES, PullRequestReads, Reader, is_revision, percent_encode, reaction_name,
     },
+    pull_request_watch,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, UNIX_EPOCH},
+};
 use tcode_core::{
-    pull_request::{PullRequestKey, PullRequestReviewDraftComment},
+    pull_request::{PullRequestKey, PullRequestMergeMethod, PullRequestReviewDraftComment},
+    pull_request_watch::CheckStatus,
     session::ReviewSide,
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult as Outcome, PullRequestFile, PullRequestFileText,
-    PullRequestPatch, PullRequestRejection as Rejection, PullRequestReviewVerdict,
-    PullRequestReviewerKind,
+    PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState, PullRequestFile,
+    PullRequestFileText, PullRequestMergeState, PullRequestPatch,
+    PullRequestRejection as Rejection, PullRequestReviewVerdict, PullRequestReviewerKind,
 };
+
+/// Merge state and checks move on their own, so a shown action state is read again sooner than
+/// the conversation.
+const ACTION_STATE_TTL: Duration = Duration::from_secs(30);
+
+/// What `gh pr merge` and `gh pr update-branch` read before they act, with the account's rights,
+/// the repository's merge settings and the head's checks.
+const ACTION_STATE: &str = "query PullRequestActionState($owner: String!, $name: String!, $number: Int!, $headRef: String!) { repository(owner: $owner, name: $name) { viewerPermission mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed pullRequest(number: $number) { id headRefOid isMergeQueueEnabled mergeStateStatus viewerCanUpdate viewerCanUpdateBranch autoMergeRequest { mergeMethod } mergeQueueEntry { position } baseRef { compare(headRef: $headRef) { behindBy } } commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { __typename ... on StatusContext { context state createdAt } ... on CheckRun { name status conclusion startedAt completedAt checkSuite { workflowRun { workflow { name } } } } } } } } } } } } }";
+
+const MERGE_MESSAGE: &str = "query PullRequestMergeMessage($owner: String!, $name: String!, $number: Int!, $method: PullRequestMergeMethod!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { isMergeQueueEnabled headRefOid viewerMergeBodyText(mergeType: $method) } } }";
+
+fn method_name(method: PullRequestMergeMethod) -> &'static str {
+    match method {
+        PullRequestMergeMethod::Merge => "MERGE",
+        PullRequestMergeMethod::Squash => "SQUASH",
+        PullRequestMergeMethod::Rebase => "REBASE",
+    }
+}
+
+fn method_of(name: &str) -> Option<PullRequestMergeMethod> {
+    match name {
+        "MERGE" => Some(PullRequestMergeMethod::Merge),
+        "SQUASH" => Some(PullRequestMergeMethod::Squash),
+        "REBASE" => Some(PullRequestMergeMethod::Rebase),
+        _ => None,
+    }
+}
+
+/// The pull request's node id and its action state.
+fn action_state(response: &Value) -> Result<(String, PullRequestActionState), GitHubError> {
+    let repository = &response["data"]["repository"];
+    let pr = &repository["pullRequest"];
+    if pr.is_null() {
+        return Err(GitHubError::NotFound);
+    }
+    let id = pr["id"].as_str().ok_or(GitHubError::InvalidResponse)?;
+    let head = pr["headRefOid"]
+        .as_str()
+        .filter(|head| is_revision(head))
+        .ok_or(GitHubError::InvalidResponse)?;
+    let contexts: Vec<Value> = pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]
+        ["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let checks = pull_request_watch::checks(&contexts);
+    // Write or above merges and reverts (study: provider permission map).
+    let writes = matches!(
+        repository["viewerPermission"].as_str(),
+        Some("ADMIN" | "MAINTAIN" | "WRITE")
+    );
+    let state = PullRequestActionState {
+        head: head.to_owned(),
+        merge_state: match pr["mergeStateStatus"].as_str() {
+            Some("CLEAN") => PullRequestMergeState::Clean,
+            Some("UNSTABLE") => PullRequestMergeState::Unstable,
+            Some("HAS_HOOKS") => PullRequestMergeState::HasHooks,
+            Some("BLOCKED") => PullRequestMergeState::Blocked,
+            Some("BEHIND") => PullRequestMergeState::Behind,
+            Some("DIRTY") => PullRequestMergeState::Dirty,
+            Some("DRAFT") => PullRequestMergeState::Draft,
+            _ => PullRequestMergeState::Unknown,
+        },
+        behind_by: pr["baseRef"]["compare"]["behindBy"].as_u64(),
+        merge_queue: pr["isMergeQueueEnabled"].as_bool() == Some(true),
+        merge_methods: [
+            ("mergeCommitAllowed", PullRequestMergeMethod::Merge),
+            ("squashMergeAllowed", PullRequestMergeMethod::Squash),
+            ("rebaseMergeAllowed", PullRequestMergeMethod::Rebase),
+        ]
+        .into_iter()
+        .filter(|(field, _)| repository[*field].as_bool() == Some(true))
+        .map(|(_, method)| method)
+        .collect(),
+        auto_merge_allowed: repository["autoMergeAllowed"].as_bool() == Some(true),
+        auto_merge: pr["autoMergeRequest"]["mergeMethod"]
+            .as_str()
+            .and_then(method_of),
+        queued: pr["mergeQueueEntry"].is_object(),
+        queue_position: pr["mergeQueueEntry"]["position"]
+            .as_u64()
+            .map(|position| position as u32),
+        failing_checks: checks
+            .iter()
+            .filter(|check| check.status.failed())
+            .map(|check| check.name.clone())
+            .collect(),
+        pending_checks: checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Pending)
+            .count() as u32,
+        can_update: pr["viewerCanUpdate"].as_bool() == Some(true),
+        can_update_branch: pr["viewerCanUpdateBranch"].as_bool() == Some(true),
+        can_merge: writes,
+    };
+    Ok((id.to_owned(), state))
+}
+
+/// What GitHub says became of a merge: merged, queued, or armed to merge later.
+fn merge_outcome(pr: &Value) -> Outcome {
+    if pr["merged"].as_bool() == Some(true) {
+        Outcome::Applied
+    } else if pr["mergeQueueEntry"].is_object() {
+        Outcome::Queued {
+            position: pr["mergeQueueEntry"]["position"]
+                .as_u64()
+                .map(|position| position as u32),
+        }
+    } else if let Some(method) = pr["autoMergeRequest"]["mergeMethod"]
+        .as_str()
+        .and_then(method_of)
+    {
+        Outcome::AutoMergeEnabled { method }
+    } else {
+        Outcome::Uncertain
+    }
+}
 
 /// A pending comment's id and the revision its lines now read at, if they still do.
 pub type Moved = (u64, Option<String>);
@@ -73,6 +196,7 @@ enum Affects {
     Conversation,
     Labels,
     Reviewers,
+    Everything,
 }
 
 /// Why a write was not sent, or why GitHub refused it.
@@ -123,21 +247,137 @@ fn side(side: ReviewSide) -> &'static str {
 }
 
 impl Reader<'_> {
-    fn mutate(&self, operation: &'static str, query: &str, variables: Value) -> Outcome {
+    fn mutation(
+        &self,
+        operation: &'static str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, GitHubError> {
         let Value::Object(variables) = variables else {
             unreachable!("mutation variables are an object")
         };
-        answered(self.api.graphql(
-            &self.key.host,
-            &Document {
-                query: query.to_owned(),
-                variables: variables.into_iter().collect::<BTreeMap<_, _>>(),
+        self.api
+            .graphql(
+                &self.key.host,
+                &Document {
+                    query: query.to_owned(),
+                    variables: variables.into_iter().collect::<BTreeMap<_, _>>(),
+                },
+                &RequestOptions {
+                    operation,
+                    ..self.options.clone()
+                },
+            )?
+            .json()
+    }
+
+    fn mutate(&self, operation: &'static str, query: &str, variables: Value) -> Outcome {
+        answered(self.mutation(operation, query, variables))
+    }
+
+    /// Read now, not from the cache: a lifecycle write acts on the pull request as it stands.
+    fn action_state(&self) -> Result<(String, PullRequestActionState), GitHubError> {
+        let response = self.query(
+            "PullRequestActionState",
+            ACTION_STATE.to_owned(),
+            [(
+                "headRef",
+                json!(format!("refs/pull/{}/head", self.key.number)),
+            )],
+        )?;
+        action_state(&response)
+    }
+
+    /// GitHub's merge or squash message without agents' credits, when that differs from it.
+    fn cleaned_message(
+        &self,
+        head: &str,
+        method: PullRequestMergeMethod,
+    ) -> Result<Option<String>, Rejection> {
+        let response = self
+            .query(
+                "PullRequestMergeMessage",
+                MERGE_MESSAGE.to_owned(),
+                [("method", json!(method_name(method)))],
+            )
+            .map_err(rejection)?;
+        let pr = &response["data"]["repository"]["pullRequest"];
+        let current = pr["headRefOid"].as_str().ok_or(Rejection::Failed)?;
+        if current != head {
+            return Err(Rejection::StaleHead {
+                head: current.to_owned(),
+            });
+        }
+        // A merge queue writes its own message and ignores one sent with the merge.
+        if pr["isMergeQueueEnabled"].as_bool() == Some(true) {
+            return Ok(None);
+        }
+        let message = pr["viewerMergeBodyText"]
+            .as_str()
+            .ok_or(Rejection::Failed)?;
+        let cleaned = remove_agent_credits(message);
+        Ok((cleaned != message).then_some(cleaned))
+    }
+
+    fn merge(
+        &self,
+        head: &str,
+        method: PullRequestMergeMethod,
+        auto: bool,
+        remove_credits: bool,
+    ) -> Result<Outcome, Rejection> {
+        let (id, state) = self.action_state().map_err(rejection)?;
+        if state.head != head {
+            return Err(Rejection::StaleHead { head: state.head });
+        }
+        if !state.merge_methods.contains(&method) {
+            return Err(Rejection::Invalid);
+        }
+        let mut input = json!({
+            "pullRequestId": id,
+            "mergeMethod": method_name(method),
+            "expectedHeadOid": head,
+        });
+        // Rebasing keeps each commit's own message.
+        if remove_credits
+            && method != PullRequestMergeMethod::Rebase
+            && !state.merge_queue
+            && let Some(body) = self.cleaned_message(head, method)?
+        {
+            input["commitBody"] = json!(body);
+        }
+        // A merge queue takes a pull request through auto-merge, and auto-merge asked of one
+        // that can merge now simply merges it, as `gh pr merge --auto` does.
+        let arm = state.merge_queue
+            || (auto
+                && !matches!(
+                    state.merge_state,
+                    PullRequestMergeState::Clean
+                        | PullRequestMergeState::HasHooks
+                        | PullRequestMergeState::Unstable
+                ));
+        let (operation, field, input_type) = if arm {
+            (
+                "EnablePullRequestAutoMerge",
+                "enablePullRequestAutoMerge",
+                "EnablePullRequestAutoMergeInput",
+            )
+        } else {
+            (
+                "MergePullRequest",
+                "mergePullRequest",
+                "MergePullRequestInput",
+            )
+        };
+        let query = format!(
+            "mutation {operation}($input: {input_type}!) {{ {field}(input: $input) {{ pullRequest {{ merged mergeQueueEntry {{ position }} autoMergeRequest {{ mergeMethod }} }} }} }}"
+        );
+        Ok(
+            match self.mutation(operation, &query, json!({ "input": input })) {
+                Ok(answer) => merge_outcome(&answer["data"][field]["pullRequest"]),
+                Err(error) => answered::<()>(Err(error)),
             },
-            &RequestOptions {
-                operation,
-                ..self.options.clone()
-            },
-        ))
+        )
     }
 
     fn send(
@@ -218,6 +458,18 @@ impl Reader<'_> {
 }
 
 impl PullRequestReads {
+    pub fn action_state(
+        &self,
+        key: &PullRequestKey,
+    ) -> Result<Fresh<PullRequestActionState>, GitHubError> {
+        let reader = self.reader(key)?;
+        self.action_states.read(
+            reader.read_key("action state"),
+            || Ok((reader.action_state()?.1, ACTION_STATE_TTL)),
+            |state| 256 + state.failing_checks.iter().map(String::len).sum::<usize>(),
+        )
+    }
+
     /// Every action but a review, whose content is the runtime's draft: see [`Self::submit_review`].
     pub fn act(&self, key: &PullRequestKey, action: &PullRequestAction) -> Outcome {
         let affects = match action {
@@ -225,7 +477,14 @@ impl PullRequestReads {
                 Affects::Labels
             }
             PullRequestAction::RequestReviewers { .. } => Affects::Reviewers,
-            _ => Affects::Conversation,
+            PullRequestAction::Comment { .. }
+            | PullRequestAction::SubmitReview { .. }
+            | PullRequestAction::ReplyToThread { .. }
+            | PullRequestAction::ResolveThread { .. }
+            | PullRequestAction::React { .. }
+            | PullRequestAction::EditComment { .. }
+            | PullRequestAction::Edit { .. } => Affects::Conversation,
+            _ => Affects::Everything,
         };
         let outcome = self.write(key, action).unwrap_or_else(Outcome::Rejected);
         self.written(key, affects, &outcome);
@@ -396,6 +655,84 @@ impl PullRequestReads {
                     })),
                 )
             }
+            PullRequestAction::ReadyForReview
+            | PullRequestAction::ConvertToDraft
+            | PullRequestAction::Close
+            | PullRequestAction::Reopen
+            | PullRequestAction::DisableAutoMerge => {
+                let (operation, field) = match action {
+                    PullRequestAction::ReadyForReview => {
+                        ("MarkPullRequestReady", "markPullRequestReadyForReview")
+                    }
+                    PullRequestAction::ConvertToDraft => {
+                        ("ConvertPullRequestToDraft", "convertPullRequestToDraft")
+                    }
+                    PullRequestAction::Close => ("ClosePullRequest", "closePullRequest"),
+                    PullRequestAction::Reopen => ("ReopenPullRequest", "reopenPullRequest"),
+                    _ => ("DisablePullRequestAutoMerge", "disablePullRequestAutoMerge"),
+                };
+                let (id, _) = reader.action_state().map_err(rejection)?;
+                reader.mutate(
+                    operation,
+                    &format!(
+                        "mutation {operation}($pullRequestId: ID!) {{ {field}(input: {{ pullRequestId: $pullRequestId }}) {{ clientMutationId }} }}"
+                    ),
+                    json!({"pullRequestId": id}),
+                )
+            }
+            PullRequestAction::Revert => {
+                let (id, _) = reader.action_state().map_err(rejection)?;
+                match reader.mutation(
+                    "RevertPullRequest",
+                    "mutation RevertPullRequest($pullRequestId: ID!) { revertPullRequest(input: { pullRequestId: $pullRequestId }) { revertPullRequest { number url } } }",
+                    json!({"pullRequestId": id}),
+                ) {
+                    Ok(answer) => {
+                        let opened = &answer["data"]["revertPullRequest"]["revertPullRequest"];
+                        match (opened["number"].as_u64(), opened["url"].as_str()) {
+                            (Some(number), Some(url)) => Outcome::Opened {
+                                number,
+                                url: url.to_owned(),
+                            },
+                            // Something answered, and may have opened one.
+                            _ => Outcome::Uncertain,
+                        }
+                    }
+                    Err(error) => answered::<()>(Err(error)),
+                }
+            }
+            PullRequestAction::UpdateBranch { head, rebase } => {
+                if !is_revision(head) {
+                    return Err(Rejection::Invalid);
+                }
+                let (id, state) = reader.action_state().map_err(rejection)?;
+                if state.head != *head {
+                    return Err(Rejection::StaleHead { head: state.head });
+                }
+                if state.behind_by == Some(0) {
+                    return Ok(Outcome::UpToDate);
+                }
+                reader.mutate(
+                    "UpdatePullRequestBranch",
+                    "mutation UpdatePullRequestBranch($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $updateMethod: PullRequestBranchUpdateMethod!) { updatePullRequestBranch(input: { pullRequestId: $pullRequestId, expectedHeadOid: $expectedHeadOid, updateMethod: $updateMethod }) { clientMutationId } }",
+                    json!({
+                        "pullRequestId": id,
+                        "expectedHeadOid": head,
+                        "updateMethod": if *rebase { "REBASE" } else { "MERGE" },
+                    }),
+                )
+            }
+            PullRequestAction::Merge {
+                head,
+                method,
+                auto,
+                remove_credits,
+            } => {
+                if !is_revision(head) {
+                    return Err(Rejection::Invalid);
+                }
+                reader.merge(head, *method, *auto, *remove_credits)?
+            }
         })
     }
 
@@ -562,6 +899,7 @@ impl PullRequestReads {
             }
             Affects::Labels => self.labels.invalidate(key),
             Affects::Reviewers => self.reviewers.invalidate(key),
+            Affects::Everything => self.invalidate(key),
         }
     }
 }

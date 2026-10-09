@@ -82,7 +82,7 @@ pub enum CheckStatus {
 
 impl CheckStatus {
     /// "action-required" is a finished check that needs someone, so the agent hears about it.
-    fn failed(self) -> bool {
+    pub fn failed(self) -> bool {
         matches!(self, Self::Failure | Self::Cancelled | Self::ActionRequired)
     }
 }

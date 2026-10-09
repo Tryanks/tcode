@@ -188,6 +188,53 @@ pub fn shown(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> bool {
     })
 }
 
+/// GitHub's merge methods, in the order its merge button lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestMergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+/// How a merge, a branch update or auto-merge may reach a pull request the thread shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestStackRoute {
+    /// In no native stack: it merges as one pull request.
+    Single,
+    /// Layer `index` (from 1, bottom first) of a native stack of `layers`, which GitHub merges
+    /// with the layers below it.
+    Layer { index: u32, layers: u32 },
+    /// Whether it is in a native stack is not known yet.
+    Unknown,
+}
+
+pub fn stack_route(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> PullRequestStackRoute {
+    let visible = || links.iter().filter(|link| link.visible());
+    let layer = visible().find_map(|link| match &link.stack {
+        PullRequestStackState::Native(stack)
+            if link.key.host == key.host && link.key.repository == key.repository =>
+        {
+            let index = stack
+                .layers
+                .iter()
+                .position(|layer| layer.number == key.number)?;
+            Some(PullRequestStackRoute::Layer {
+                index: index as u32 + 1,
+                layers: stack.layers.len() as u32,
+            })
+        }
+        _ => None,
+    });
+    match (layer, visible().find(|link| link.key == *key)) {
+        (Some(layer), _) => layer,
+        (None, Some(link)) if link.stack == PullRequestStackState::None => {
+            PullRequestStackRoute::Single
+        }
+        _ => PullRequestStackRoute::Unknown,
+    }
+}
+
 /// The visible links a watch holds, which keep their thread waiting between wakes.
 pub fn watched(links: &[ThreadPullRequestLink]) -> impl Iterator<Item = &ThreadPullRequestLink> {
     links

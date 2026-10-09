@@ -2,7 +2,7 @@
 
 use agent::FileChangeKind;
 use serde::{Deserialize, Serialize};
-use tcode_core::session::ReviewSide;
+use tcode_core::{pull_request::PullRequestMergeMethod, session::ReviewSide};
 
 /// The largest image a media read returns; past it the host stops reading.
 pub const MAX_PULL_REQUEST_MEDIA_BYTES: usize = 8 * 1024 * 1024;
@@ -39,6 +39,8 @@ pub enum PullRequestRead {
     /// Whoever the pull request may be sent to for review, with current requests marked. The
     /// organization's teams are not listed: that needs `read:org`, which a token need not carry.
     ReviewerCandidates,
+    /// What merging, updating the branch and the other lifecycle actions would meet now.
+    ActionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +328,53 @@ pub struct PullRequestReviewerCandidates {
     pub complete: bool,
 }
 
+/// GitHub's merge state status: what merging now would meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestMergeState {
+    Clean,
+    /// Mergeable, with checks that are not passing.
+    Unstable,
+    /// Mergeable, with pre-receive hooks to pass.
+    HasHooks,
+    /// Requirements such as reviews or checks are not met.
+    Blocked,
+    /// The branch protection requires the head to be up to date with the base.
+    Behind,
+    /// Conflicts with the base.
+    Dirty,
+    Draft,
+    Unknown,
+}
+
+/// What a lifecycle action would meet: read fresh before every one of them, and on request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestActionState {
+    /// The head a branch update or a merge must still find.
+    pub head: String,
+    pub merge_state: PullRequestMergeState,
+    /// Commits on the base the head does not have; `None` when GitHub could not compare them.
+    pub behind_by: Option<u64>,
+    pub merge_queue: bool,
+    /// The repository's enabled methods, in GitHub's order.
+    pub merge_methods: Vec<PullRequestMergeMethod>,
+    /// The repository allows auto-merge.
+    pub auto_merge_allowed: bool,
+    /// The method auto-merge is armed with.
+    pub auto_merge: Option<PullRequestMergeMethod>,
+    pub queued: bool,
+    /// Where in the merge queue, when GitHub says.
+    pub queue_position: Option<u32>,
+    /// Failing checks of the head by name; a list cut short names only the first page's.
+    pub failing_checks: Vec<String>,
+    pub pending_checks: u32,
+    /// Mark ready, convert to draft, close and reopen.
+    pub can_update: bool,
+    pub can_update_branch: bool,
+    /// Merge, auto-merge and revert.
+    pub can_merge: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum PullRequestReadResponse {
@@ -337,6 +386,7 @@ pub enum PullRequestReadResponse {
     Media(PullRequestMedia),
     LabelCandidates(PullRequestLabelCandidates),
     ReviewerCandidates(PullRequestReviewerCandidates),
+    ActionState(PullRequestActionState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,6 +447,28 @@ pub enum PullRequestAction {
         reviewers: Vec<PullRequestReviewer>,
         requested: bool,
     },
+    ReadyForReview,
+    ConvertToDraft,
+    Close,
+    Reopen,
+    /// Opens a pull request that reverses this merged one, linked to the thread.
+    Revert,
+    /// Brings the base into the head on GitHub, by a merge commit unless `rebase`. `head` is the
+    /// commit the user saw; a moved head sends nothing.
+    UpdateBranch {
+        head: String,
+        rebase: bool,
+    },
+    /// Merges at `head` with `method`, or joins the merge queue when the repository has one.
+    /// With `auto`, a pull request that cannot merge yet has auto-merge armed instead. With
+    /// `remove_credits`, a merge or squash leaves agents' credit lines out of GitHub's message.
+    Merge {
+        head: String,
+        method: PullRequestMergeMethod,
+        auto: bool,
+        remove_credits: bool,
+    },
+    DisableAutoMerge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,6 +486,21 @@ pub enum PullRequestActionResult {
     },
     /// The write was sent and no answer says whether GitHub applied it.
     Uncertain,
+    /// The branch already had the base; nothing was sent.
+    UpToDate,
+    /// The merge queue took the pull request; it is not merged yet.
+    Queued {
+        position: Option<u32>,
+    },
+    /// GitHub merges the pull request with `method` once its requirements pass.
+    AutoMergeEnabled {
+        method: PullRequestMergeMethod,
+    },
+    /// A new pull request was opened, and linked to the thread.
+    Opened {
+        number: u64,
+        url: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,4 +526,12 @@ pub enum PullRequestRejection {
     },
     /// A read the write needed failed, so it was not sent.
     Failed,
+    /// Layer `index` of a native stack of `layers` merges with the layers below it, which Tcode
+    /// does not do yet.
+    InStack {
+        index: u32,
+        layers: u32,
+    },
+    /// Whether the pull request is in a native stack is not known yet.
+    StackUnknown,
 }

@@ -1327,3 +1327,176 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_moved_head_keeps_it_until_
         .update(&mut cx, |state, _| state.close_store())
         .unwrap();
 }
+
+#[test]
+fn a_stack_layer_is_never_merged_alone_and_a_revert_is_linked_as_created() {
+    const HEAD: &str = "2222222222222222222222222222222222222222";
+    let dir = TestStore::new("tcode-pr-lifecycle");
+    let fixture = fixture::Fixture::new();
+    let api = client(&dir, &fixture);
+    let operations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = operations.clone();
+    let _server = fixture.serve(move |exchange| {
+        let sent: Value = serde_json::from_slice(&exchange.body).unwrap_or_default();
+        let operation = sent["query"]
+            .as_str()
+            .and_then(|query| query.split(['(', ' ']).nth(1))
+            .unwrap_or_default()
+            .to_owned();
+        seen.lock().unwrap().push(operation.clone());
+        let reply = match operation.as_str() {
+            "PullRequestActionState" => json!({"data": {"repository": {
+                "viewerPermission": "WRITE", "mergeCommitAllowed": true,
+                "pullRequest": {"id": "PR_1", "headRefOid": HEAD, "mergeStateStatus": "CLEAN"},
+            }}}),
+            "RevertPullRequest" => json!({"data": {"revertPullRequest": {"revertPullRequest": {
+                "number": 9, "url": "https://github.com/sample/project/pull/9",
+            }}}}),
+            "MergePullRequest" => {
+                json!({"data": {"mergePullRequest": {"pullRequest": {"merged": true}}}})
+            }
+            _ => json!({"data": {"s0": {"pullRequest": pr(1, "OPEN", false)}}}),
+        };
+        exchange.reply(200, "", &serde_json::to_vec(&reply).unwrap());
+    });
+    let key = PullRequestKey::new("github.com", "sample/project", 1);
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*dir).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        let meta = linked("active", 1, false);
+        dir.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+    });
+    let mut next_id = 0;
+    let mut act = |state: &TestEntity, cx: &mut TestAppContext, action: PullRequestAction| {
+        next_id += 1;
+        state.dispatch_command(
+            cx,
+            next_id,
+            Command::RunPullRequestAction {
+                session_id: "active".into(),
+                key: key.clone(),
+                action,
+            },
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            if let Some(result) =
+                cx.drain_outgoing()
+                    .into_iter()
+                    .find_map(|message| match message {
+                        tcode_protocol::HostMessage::Ack { id, result } if id == next_id => {
+                            Some(result)
+                        }
+                        _ => None,
+                    })
+            {
+                return result.unwrap();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the action was answered"
+            );
+        }
+    };
+    let merge = || PullRequestAction::Merge {
+        head: HEAD.into(),
+        method: tcode_core::pull_request::PullRequestMergeMethod::Merge,
+        auto: false,
+        remove_credits: false,
+    };
+    let update = || PullRequestAction::UpdateBranch {
+        head: HEAD.into(),
+        rebase: false,
+    };
+    let rejected = |rejection| {
+        CommandResponse::PullRequestAction(PullRequestActionResult::Rejected(rejection))
+    };
+    let set_stack = |state: &TestEntity, cx: &mut TestAppContext, stack| {
+        state.update(cx, |state, _| {
+            state
+                .sessions
+                .iter_mut()
+                .find(|meta| meta.id == "active")
+                .unwrap()
+                .pull_requests[0]
+                .stack = stack;
+        });
+    };
+
+    for action in [merge(), update()] {
+        assert_eq!(
+            act(&state, &mut cx, action),
+            rejected(tcode_protocol::PullRequestRejection::StackUnknown),
+            "a pull request whose stack is not known yet is not merged as one"
+        );
+    }
+    let layer = |number: u64| tcode_core::pull_request::PullRequestStackLayer {
+        url: format!("https://github.com/sample/project/pull/{number}"),
+        number,
+        head_branch: format!("layer-{number}"),
+        state: PullRequestState::Open,
+    };
+    set_stack(
+        &state,
+        &mut cx,
+        PullRequestStackState::Native(PullRequestStack {
+            id: "stack".into(),
+            number: 7,
+            url: "https://github.com/sample/project/stacks/7".into(),
+            base: "main".into(),
+            layers: vec![layer(3), layer(1)],
+        }),
+    );
+    for action in [merge(), update()] {
+        assert_eq!(
+            act(&state, &mut cx, action),
+            rejected(tcode_protocol::PullRequestRejection::InStack {
+                index: 2,
+                layers: 2
+            })
+        );
+    }
+    assert!(
+        operations.lock().unwrap().is_empty(),
+        "a stack-routed write reads and sends nothing"
+    );
+
+    set_stack(&state, &mut cx, PullRequestStackState::None);
+    assert_eq!(
+        act(&state, &mut cx, merge()),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Applied)
+    );
+    assert_eq!(
+        act(&state, &mut cx, PullRequestAction::Revert),
+        CommandResponse::PullRequestAction(PullRequestActionResult::Opened {
+            number: 9,
+            url: "https://github.com/sample/project/pull/9".into()
+        })
+    );
+    let links = state.read(|state| state.find_meta("active").unwrap().pull_requests);
+    let revert = links
+        .iter()
+        .find(|link| link.key.number == 9)
+        .expect("the revert is linked to the thread");
+    assert_eq!(
+        (revert.source, revert.url.as_str()),
+        (
+            PullRequestSource::Created,
+            "https://github.com/sample/project/pull/9"
+        )
+    );
+    // The sync reads the pull requests after the writes.
+    cx.run_until(|_| {
+        operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|operation| operation == "PullRequestSummaries")
+    });
+    state
+        .update(&mut cx, |state, _| state.close_store())
+        .unwrap();
+}
