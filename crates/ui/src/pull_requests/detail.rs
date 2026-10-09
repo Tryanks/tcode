@@ -329,9 +329,19 @@ impl PullRequestView {
         land: impl FnOnce(&mut PullRequestPage, Result<(PullRequestReadResponse, u64), ProtocolError>)
         + 'static,
     ) {
-        let Some((session, key)) = self.current.clone() else {
-            return;
-        };
+        if let Some(current) = self.current.clone() {
+            self.read_of(current, read, cx, land);
+        }
+    }
+
+    fn read_of(
+        &mut self,
+        (session, key): (String, PullRequestKey),
+        read: PullRequestRead,
+        cx: &mut Context<Self>,
+        land: impl FnOnce(&mut PullRequestPage, Result<(PullRequestReadResponse, u64), ProtocolError>)
+        + 'static,
+    ) {
         let task = self.store.update(cx, |store, cx| {
             store.read_pull_request(session.clone(), key.clone(), read, cx)
         });
@@ -478,9 +488,18 @@ impl PullRequestView {
     }
 
     pub(super) fn read_action_state(&mut self, cx: &mut Context<Self>) {
-        let Some(page) = self.page_mut() else { return };
-        page.action_state.loading = true;
-        self.read(PullRequestRead::ActionState, cx, |page, result| {
+        if let Some(current) = self.current.clone() {
+            self.read_action_state_of(current, cx);
+        }
+    }
+
+    fn read_action_state_of(&mut self, page: (String, PullRequestKey), cx: &mut Context<Self>) {
+        self.pages
+            .entry(page.clone())
+            .or_default()
+            .action_state
+            .loading = true;
+        self.read_of(page, PullRequestRead::ActionState, cx, |page, result| {
             page.action_state.loading = false;
             match result {
                 Ok((PullRequestReadResponse::ActionState(state), expires_at)) => {
@@ -488,6 +507,8 @@ impl PullRequestView {
                     page.action_state.error = None;
                     page.action_state.loaded_at = now();
                     page.action_state.data = Some(state);
+                    // GitHub's state as it now is answers a write that went unanswered.
+                    page.writes.waiting = false;
                 }
                 Ok(_) => {}
                 Err(error) => page.action_state.error = Some(error),
@@ -495,54 +516,73 @@ impl PullRequestView {
         });
     }
 
-    /// Where a lifecycle action of the pull request on view goes; its answer has the view read
-    /// what it may have changed.
+    /// Whether a lifecycle write to the pull request is in flight, or went unanswered and
+    /// GitHub has not been read since; the detail and the list rows wait alike.
+    pub(super) fn lifecycle_busy(&self, session: &str, key: &PullRequestKey) -> bool {
+        self.pages
+            .get(&(session.to_owned(), key.clone()))
+            .is_some_and(|page| page.writes.waiting || page.writes.busy.contains(LIFECYCLE))
+    }
+
+    /// Where a lifecycle action goes; its answer has the view read what it may have changed.
+    /// `shown` carries what the detail has read of it; a list row offers from its link alone.
     pub(super) fn lifecycle_target(
         &self,
+        session: &str,
+        key: &PullRequestKey,
+        shown: bool,
         cx: &mut Context<Self>,
     ) -> Option<super::lifecycle::Target> {
-        let (session, key) = self.current.clone()?;
-        let page = self.page();
+        let current = (session.to_owned(), key.clone());
+        let page = self.pages.get(&current).filter(|_| shown);
         let mut target = super::lifecycle::Target::new(
             &self.store,
             &self.window_state,
-            &session,
-            &key,
+            session,
+            key,
             page.and_then(|page| page.action_state.data.clone()),
             page.and_then(|page| page.merge_method),
             cx,
         )?;
+        target.offer.busy = self.lifecycle_busy(session, key);
         let view = cx.entity().downgrade();
-        let current = (session, key);
         let sent = current.clone();
         target.started = std::rc::Rc::new({
             let view = view.clone();
             move |cx| {
                 let _ = view.update(cx, |view, cx| {
-                    if let Some(page) = view.pages.get_mut(&sent) {
-                        page.writes.busy.insert(LIFECYCLE.into());
-                    }
+                    let page = view.pages.entry(sent.clone()).or_default();
+                    page.writes.busy.insert(LIFECYCLE.into());
                     cx.notify();
                 });
             }
         });
         target.done = std::rc::Rc::new(move |result, _, cx| {
             let _ = view.update(cx, |view, cx| {
-                if let Some(page) = view.pages.get_mut(&current) {
-                    page.writes.busy.remove(LIFECYCLE);
-                    page.action_state.expires_at = 0;
-                    if !matches!(result, tcode_protocol::PullRequestActionResult::Rejected(_)) {
-                        page.conversation.expires_at = 0;
-                        page.files.expires_at = 0;
-                    }
-                    if *result == tcode_protocol::PullRequestActionResult::Uncertain {
-                        page.writes.waiting = true;
+                let page = view.pages.entry(current.clone()).or_default();
+                page.writes.busy.remove(LIFECYCLE);
+                page.action_state.expires_at = 0;
+                if !matches!(result, tcode_protocol::PullRequestActionResult::Rejected(_)) {
+                    page.conversation.expires_at = 0;
+                    page.files.expires_at = 0;
+                }
+                if *result == tcode_protocol::PullRequestActionResult::Uncertain {
+                    page.writes.waiting = true;
+                    // The detail reads it when shown; a row's pull request is read here.
+                    if view.current.as_ref() != Some(&current) {
+                        view.read_action_state_of(current.clone(), cx);
                     }
                 }
                 cx.notify();
             });
         });
         Some(target)
+    }
+
+    /// The target of the pull request on view.
+    fn shown_target(&self, cx: &mut Context<Self>) -> Option<super::lifecycle::Target> {
+        let (session, key) = self.current.as_ref()?;
+        self.lifecycle_target(session, key, true, cx)
     }
 
     fn run_lifecycle(
@@ -555,7 +595,7 @@ impl PullRequestView {
             cx.propagate();
             return;
         }
-        if let Some(target) = self.lifecycle_target(cx) {
+        if let Some(target) = self.shown_target(cx) {
             target.run(action.kind, window, cx);
         }
     }
@@ -981,16 +1021,11 @@ impl PullRequestView {
         snapshot: &tcode_core::pull_request::PullRequestSnapshot,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let state = self.page()?.action_state.data.as_ref()?;
+        let offer = self.shown_target(cx)?.offer;
+        let state = offer.action.as_ref()?;
         let behind = state.behind_by.filter(|behind| *behind > 0)?;
-        let links = self
-            .store
-            .read(cx)
-            .pull_requests(&self.current.as_ref()?.0)
-            .to_vec();
-        if snapshot.mergeability == Mergeability::Conflicting
-            || tcode_core::pull_request::stack_route(&links, key)
-                != tcode_core::pull_request::PullRequestStackRoute::Single
+        if offer.conflicting
+            || offer.route != tcode_core::pull_request::PullRequestStackRoute::Single
         {
             return None;
         }
@@ -1012,6 +1047,7 @@ impl PullRequestView {
         )
         .into_owned();
         let updates = (state.can_update_branch && !self.read_only(cx)).then(|| key.clone());
+        let busy = offer.busy;
         let chip = Button::new("pr-behind")
             .ghost()
             .compact()
@@ -1028,13 +1064,15 @@ impl PullRequestView {
                         })
                     };
                     menu.label(tooltip.clone())
-                        .menu(
+                        .menu_with_enable(
                             crate::tr!("pull_requests.actions.update_branch").into_owned(),
                             item(super::lifecycle::Lifecycle::UpdateBranch),
+                            !busy,
                         )
-                        .menu(
+                        .menu_with_enable(
                             crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
                             item(super::lifecycle::Lifecycle::UpdateRebase),
+                            !busy,
                         )
                 })
                 .into_any_element(),
@@ -1437,7 +1475,7 @@ impl PullRequestView {
     /// The menu of the row this pull request was opened from.
     fn menu(&self, cx: &mut Context<Self>) -> Option<super::RowMenu> {
         let offer = (!self.read_only(cx))
-            .then(|| self.lifecycle_target(cx).map(|target| target.offer))
+            .then(|| self.shown_target(cx).map(|target| target.offer))
             .flatten();
         let (session, key) = self.current.as_ref()?;
         let link = self.link(cx);
@@ -1453,7 +1491,7 @@ impl PullRequestView {
             self.url(cx).unwrap_or_default(),
             link.as_ref(),
             watchable,
-            offer,
+            move |_| offer.clone(),
         ))
     }
 
@@ -1528,11 +1566,10 @@ impl PullRequestView {
         if self.read_only(cx) {
             return None;
         }
-        let target = self.lifecycle_target(cx)?;
+        let target = self.shown_target(cx)?;
         let primary = target.offer.primary()?;
-        let busy = self.busy(LIFECYCLE);
         Some(super::lifecycle::primary_element(
-            &target, primary, busy, compact, cx,
+            &target, primary, compact, cx,
         ))
     }
 

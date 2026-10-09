@@ -1,6 +1,7 @@
 //! What can become of a pull request: the primary action, the ⋯ menu's lifecycle group, the
 //! confirmations, the merge dialog and the words each answer gets. The host reads the pull
-//! request fresh before every one of these writes and answers it; nothing here retries one.
+//! request fresh before a merge or a branch update and answers every write; nothing here
+//! retries one.
 
 use std::rc::Rc;
 
@@ -12,7 +13,7 @@ use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::pull_request::{
     ChecksState, Mergeability, PullRequestKey, PullRequestMergeMethod, PullRequestStackRoute,
-    PullRequestState, ThreadPullRequestLink,
+    PullRequestState, ThreadPullRequestLink, stack_route,
 };
 use tcode_protocol::{
     Command, PullRequestAction, PullRequestActionResult, PullRequestActionState,
@@ -102,65 +103,60 @@ pub(super) struct Offer {
     pub(super) action: Option<PullRequestActionState>,
     /// The method a merge would use.
     pub(super) method: Option<PullRequestMergeMethod>,
+    /// A write is in flight, or one went unanswered and GitHub has not been read since.
+    pub(super) busy: bool,
 }
 
 impl Offer {
-    /// `None` until the link or its stack says what state the pull request is in.
+    /// `None` until the link or its stack says what state the pull request is in. The host's
+    /// action state, read fresh, speaks over the link's snapshot where it has a word.
     pub(super) fn new(
         key: &PullRequestKey,
         links: &[ThreadPullRequestLink],
         action: Option<PullRequestActionState>,
         chosen: Option<PullRequestMergeMethod>,
         project_default: Option<PullRequestMergeMethod>,
+        busy: bool,
     ) -> Option<Self> {
         let link = links.iter().find(|link| link.key == *key && link.visible());
         let snapshot = link.and_then(|link| link.snapshot.as_ref());
-        let layer = links
-            .iter()
-            .filter(|link| link.visible())
-            .find_map(|link| match &link.stack {
-                tcode_core::pull_request::PullRequestStackState::Native(stack)
-                    if link.key.host == key.host && link.key.repository == key.repository =>
-                {
-                    stack
-                        .layers
-                        .iter()
-                        .find(|layer| layer.number == key.number)
-                        .cloned()
-                }
-                _ => None,
-            });
+        let (route, layer) = stack_route(links, key);
         let state = snapshot
             .map(|snapshot| snapshot.state)
-            .or(layer.as_ref().map(|layer| layer.state))?;
+            .or(layer.map(|layer| layer.state))?;
         let url = link
             .map(|link| link.url.clone())
             .filter(|url| !url.is_empty())
-            .or(layer.map(|layer| layer.url))
+            .or(layer.map(|layer| layer.url.clone()))
             .unwrap_or_default();
         let method = action
             .as_ref()
             .and_then(|action| merge_method(&action.merge_methods, chosen, project_default));
+        let conflicting = match &action {
+            Some(action) if action.merge_state != PullRequestMergeState::Unknown => {
+                action.merge_state == PullRequestMergeState::Dirty
+            }
+            _ => snapshot.is_some_and(|s| s.mergeability == Mergeability::Conflicting),
+        };
+        let checks = |checks: ChecksState| snapshot.is_some_and(|s| s.checks_state == Some(checks));
         Some(Self {
             key: key.clone(),
             url,
             state,
             draft: snapshot.is_some_and(|snapshot| snapshot.is_draft),
-            conflicting: snapshot.is_some_and(|s| s.mergeability == Mergeability::Conflicting)
-                || action
-                    .as_ref()
-                    .is_some_and(|action| action.merge_state == PullRequestMergeState::Dirty),
-            checks_failing: snapshot.is_some_and(|s| s.checks_state == Some(ChecksState::Failing))
-                || action
-                    .as_ref()
-                    .is_some_and(|action| !action.failing_checks.is_empty()),
-            checks_pending: snapshot.is_some_and(|s| s.checks_state == Some(ChecksState::Pending))
-                || action
-                    .as_ref()
-                    .is_some_and(|action| action.pending_checks > 0),
-            route: tcode_core::pull_request::stack_route(links, key),
+            conflicting,
+            checks_failing: match &action {
+                Some(action) => !action.failing_checks.is_empty(),
+                None => checks(ChecksState::Failing),
+            },
+            checks_pending: match &action {
+                Some(action) => action.pending_checks > 0,
+                None => checks(ChecksState::Pending),
+            },
+            route,
             action,
             method,
+            busy,
         })
     }
 
@@ -223,66 +219,78 @@ impl Offer {
     }
 
     /// The menu's lifecycle group, added once to the row menu every pull request menu builds.
+    /// Its writes wait while one is in flight or unanswered.
     pub(super) fn menu(&self, menu: PopupMenu) -> PopupMenu {
         let action = self.action.as_ref();
         let may = |allowed: fn(&PullRequestActionState) -> bool| action.is_none_or(allowed);
         let primary = self.primary();
         let open = self.state == PullRequestState::Open;
         let number = self.key.number.to_string();
+        let write = |menu: PopupMenu, label: &str, kind: Lifecycle| {
+            menu.menu_with_enable(crate::tr!(label).into_owned(), self.item(kind), !self.busy)
+        };
         let mut menu = menu.separator();
         if open && may(|action| action.can_update) {
             if !self.draft {
-                menu = menu.menu(
-                    crate::tr!("pull_requests.actions.draft").into_owned(),
-                    self.item(Lifecycle::Draft),
-                );
+                menu = write(menu, "pull_requests.actions.draft", Lifecycle::Draft);
             } else if primary != Some(Primary::Ready) {
-                menu = menu.menu(
-                    crate::tr!("pull_requests.actions.ready").into_owned(),
-                    self.item(Lifecycle::Ready),
-                );
+                menu = write(menu, "pull_requests.actions.ready", Lifecycle::Ready);
             }
+        }
+        if open
+            && self.route == PullRequestStackRoute::Single
+            && !self.conflicting
+            && let Some(action) = action
+            && action.behind_by.is_some_and(|behind| behind > 0)
+            && action.can_update_branch
+        {
+            menu = write(
+                menu,
+                "pull_requests.actions.update_branch",
+                Lifecycle::UpdateBranch,
+            );
+            menu = write(
+                menu,
+                "pull_requests.actions.update_rebase_menu",
+                Lifecycle::UpdateRebase,
+            );
         }
         if open && !self.draft && may(|action| action.can_merge) {
             match self.route {
                 PullRequestStackRoute::Single => {
-                    if let Some(action) = action
-                        && action.behind_by.is_some_and(|behind| behind > 0)
-                        && action.can_update_branch
-                        && !self.conflicting
-                    {
-                        menu = menu
-                            .menu(
-                                crate::tr!("pull_requests.actions.update_branch").into_owned(),
-                                self.item(Lifecycle::UpdateBranch),
-                            )
-                            .menu(
-                                crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
-                                self.item(Lifecycle::UpdateRebase),
-                            );
-                    }
-                    if !matches!(primary, Some(Primary::Merge { .. }))
+                    if !self.conflicting
+                        && !matches!(primary, Some(Primary::Merge { .. }))
                         && action.is_none_or(|action| !action.merge_methods.is_empty())
                     {
-                        menu = menu.menu(
+                        // GitHub would refuse it until reviews or checks allow.
+                        let blocked = action.is_some_and(|action| {
+                            action.merge_state == PullRequestMergeState::Blocked
+                        });
+                        menu = menu.menu_with_enable(
                             crate::tr!("pull_requests.actions.merge_now").into_owned(),
                             self.item(Lifecycle::Merge),
+                            !self.busy && !blocked,
                         );
+                        if blocked {
+                            menu = menu
+                                .label(crate::tr!("pull_requests.actions.blocked").into_owned());
+                        }
                     }
                     if let Some(action) = action {
                         if action.auto_merge.is_some() {
-                            menu = menu.menu(
-                                crate::tr!("pull_requests.actions.disable_auto_merge").into_owned(),
-                                self.item(Lifecycle::DisableAutoMerge),
+                            menu = write(
+                                menu,
+                                "pull_requests.actions.disable_auto_merge",
+                                Lifecycle::DisableAutoMerge,
                             );
                         } else if action.auto_merge_allowed
                             && !action.merge_queue
                             && primary != Some(Primary::EnableAutoMerge)
                         {
-                            menu = menu.menu(
-                                crate::tr!("pull_requests.actions.enable_auto_merge_menu")
-                                    .into_owned(),
-                                self.item(Lifecycle::EnableAutoMerge),
+                            menu = write(
+                                menu,
+                                "pull_requests.actions.enable_auto_merge_menu",
+                                Lifecycle::EnableAutoMerge,
                             );
                         }
                         if action.merge_methods.len() >= 2 {
@@ -324,18 +332,15 @@ impl Offer {
         }
         menu = menu.separator();
         match self.state {
-            PullRequestState::Open if may(|action| action.can_update) => menu.menu(
-                crate::tr!("pull_requests.actions.close_menu").into_owned(),
-                self.item(Lifecycle::Close),
-            ),
-            PullRequestState::Closed if may(|action| action.can_update) => menu.menu(
-                crate::tr!("pull_requests.actions.reopen").into_owned(),
-                self.item(Lifecycle::Reopen),
-            ),
-            PullRequestState::Merged if may(|action| action.can_merge) => menu.menu(
-                crate::tr!("pull_requests.actions.revert_menu").into_owned(),
-                self.item(Lifecycle::Revert),
-            ),
+            PullRequestState::Open if may(|action| action.can_update) => {
+                write(menu, "pull_requests.actions.close_menu", Lifecycle::Close)
+            }
+            PullRequestState::Closed if may(|action| action.can_update) => {
+                write(menu, "pull_requests.actions.reopen", Lifecycle::Reopen)
+            }
+            PullRequestState::Merged if may(|action| action.can_merge) => {
+                write(menu, "pull_requests.actions.revert_menu", Lifecycle::Revert)
+            }
             _ => menu,
         }
     }
@@ -397,6 +402,9 @@ pub(super) struct Target {
     pub(super) title: String,
     pub(super) head_branch: String,
     pub(super) base_branch: String,
+    /// The thread's project, by id and name.
+    project: Option<(String, String)>,
+    project_default: Option<PullRequestMergeMethod>,
     /// Told when the write is sent.
     pub(super) started: Rc<dyn Fn(&mut App)>,
     /// Told every answer, after its toast.
@@ -416,17 +424,20 @@ impl Target {
     ) -> Option<Self> {
         let workspace = store.read(cx);
         let links = workspace.pull_requests(session);
-        let project_default = workspace
+        let project = workspace
             .thread_meta(session)
             .and_then(|meta| meta.project_id.clone())
-            .and_then(|project| {
+            .and_then(|id| {
                 workspace
-                    .settings()
-                    .project_merge_methods
-                    .get(&project)
-                    .copied()
+                    .projects()
+                    .into_iter()
+                    .find(|project| project.id == id)
+                    .map(|project| (project.id, project.name))
             });
-        let offer = Offer::new(key, links, action, chosen, project_default)?;
+        let project_default = project
+            .as_ref()
+            .and_then(|(id, _)| workspace.settings().project_merge_methods.get(id).copied());
+        let offer = Offer::new(key, links, action, chosen, project_default, false)?;
         let snapshot = links
             .iter()
             .find(|link| link.key == *key)
@@ -445,6 +456,8 @@ impl Target {
                 .map(|s| s.head_branch.clone())
                 .unwrap_or_default(),
             base_branch: snapshot.map(|s| s.base_branch).unwrap_or_default(),
+            project,
+            project_default,
             started: Rc::new(|_| {}),
             done: Rc::new(|_, _, _| {}),
         })
@@ -452,6 +465,18 @@ impl Target {
 
     fn number(&self) -> String {
         self.offer.key.number.to_string()
+    }
+
+    /// Whether the thread's composer may be given a message: not read-only on this device, and
+    /// neither settled nor archived.
+    fn takes_messages(&self, cx: &App) -> bool {
+        let workspace = self.store.read(cx);
+        workspace
+            .session_status()
+            .is_some_and(|status| !status.conversation_read_only)
+            && workspace
+                .thread_meta(&self.session)
+                .is_some_and(|meta| meta.archived_at.is_none() && !meta.is_settled())
     }
 
     /// Writes at once, confirms first, opens the merge dialog, or fills the composer.
@@ -527,13 +552,13 @@ impl Target {
             }
             Lifecycle::Merge => open_merge_dialog(self, false, window, cx),
             Lifecycle::EnableAutoMerge => open_merge_dialog(self, true, window, cx),
-            Lifecycle::AskConflicts | Lifecycle::AskChecks => self.ask(kind, window, cx),
+            Lifecycle::AskConflicts | Lifecycle::AskChecks => self.ask(kind, cx),
         }
     }
 
     /// Puts a message for the agent into this thread's composer; the user reads, edits and sends
     /// it, or not.
-    fn ask(self, kind: Lifecycle, window: &mut Window, cx: &mut App) {
+    fn ask(self, kind: Lifecycle, cx: &mut App) {
         let number = self.number();
         let text = if kind == Lifecycle::AskConflicts {
             crate::tr!(
@@ -581,7 +606,6 @@ impl Target {
         if self.window_state.read(cx).destination() == Destination::PullRequest {
             self.window_state.update(cx, |state, cx| state.back(cx));
         }
-        let _ = window;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -667,7 +691,7 @@ impl Target {
         if let Some(note) = self.toast(kind, result) {
             let key = &self.offer.key;
             window.push_notification(
-                note.id1::<LifecycleWrite>(SharedString::from(format!(
+                note.id1::<super::compose::PullRequestWrite>(SharedString::from(format!(
                     "{}/{}#{}",
                     key.host, key.repository, key.number
                 ))),
@@ -858,17 +882,12 @@ impl Target {
     }
 }
 
-/// One toast slot per pull request: a newer answer replaces the older one.
-struct LifecycleWrite;
-
 /// The merge confirmation: what GitHub holds now, the method, and what the merge would meet.
 struct MergeDialog {
     target: Target,
     auto: bool,
     state: Option<Result<PullRequestActionState, String>>,
     method: Option<PullRequestMergeMethod>,
-    project: Option<(String, String)>,
-    project_default: Option<PullRequestMergeMethod>,
     make_default: bool,
     remove_credits: bool,
     sending: bool,
@@ -894,7 +913,7 @@ impl MergeDialog {
                         this.method = merge_method(
                             &state.merge_methods,
                             this.target.offer.method,
-                            this.project_default,
+                            this.target.project_default,
                         );
                         Ok(state)
                     }
@@ -917,7 +936,7 @@ impl MergeDialog {
         self.sending = true;
         cx.notify();
         if self.make_default
-            && let Some((project, _)) = self.project.clone()
+            && let Some((project, _)) = self.target.project.clone()
         {
             self.target.store.update(cx, |store, _| {
                 store.set_project_merge_method(project, method)
@@ -1073,8 +1092,8 @@ impl Render for MergeDialog {
         };
         let default_box = self
             .method
-            .filter(|method| state.is_some() && Some(*method) != self.project_default)
-            .zip(self.project.clone())
+            .filter(|method| state.is_some() && Some(*method) != target.project_default)
+            .zip(target.project.clone())
             .map(|(method, (_, project))| {
                 let view = view.clone();
                 Checkbox::new("pr-merge-default")
@@ -1271,21 +1290,11 @@ impl Render for MergeDialog {
 }
 
 fn open_merge_dialog(target: Target, auto: bool, window: &mut Window, cx: &mut App) {
-    let workspace = target.store.read(cx);
-    let settings = workspace.settings();
-    let project = workspace
-        .thread_meta(&target.session)
-        .and_then(|meta| meta.project_id.clone())
-        .and_then(|id| {
-            workspace
-                .projects()
-                .into_iter()
-                .find(|project| project.id == id)
-                .map(|project| (project.id, project.name))
-        });
-    let project_default = project
-        .as_ref()
-        .and_then(|(id, _)| settings.project_merge_methods.get(id).copied());
+    let remove_credits = target
+        .store
+        .read(cx)
+        .settings()
+        .remove_agent_credits_on_merge;
     let number = target.number();
     let compact = target.window_state.read(cx).compact;
     let dialog = cx.new(|cx| {
@@ -1294,10 +1303,8 @@ fn open_merge_dialog(target: Target, auto: bool, window: &mut Window, cx: &mut A
             auto,
             state: None,
             method: None,
-            project,
-            project_default,
             make_default: false,
-            remove_credits: settings.remove_agent_credits_on_merge,
+            remove_credits,
             sending: false,
         };
         dialog.load(cx);
@@ -1336,10 +1343,10 @@ fn open_merge_dialog(target: Target, auto: bool, window: &mut Window, cx: &mut A
 pub(super) fn primary_element(
     target: &Target,
     primary: Primary,
-    busy: bool,
     compact: bool,
     cx: &App,
 ) -> AnyElement {
+    let busy = target.offer.busy;
     let number = target.number();
     let key = target.offer.key.clone();
     let url = target.offer.url.clone();
@@ -1417,11 +1424,7 @@ pub(super) fn primary_element(
                     ),
                 )
             };
-            let can_ask = !target
-                .store
-                .read(cx)
-                .session_status()
-                .is_none_or(|status| status.conversation_read_only);
+            let can_ask = target.takes_messages(cx);
             use crate::widgets::menu::DropdownMenu as _;
             button(icon, label)
                 .dropdown_menu(move |menu, _, _| {
