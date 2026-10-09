@@ -581,7 +581,7 @@ impl ActiveSession {
             return Ok(false);
         };
         // A retried delivery already carries the block it was first dispatched with.
-        let instructions = tcode_core::pull_request::LINKING_INSTRUCTIONS;
+        let instructions = tcode_core::pull_request::linking_instructions();
         if let Some(len) = send.context_len.filter(|len| *len >= instructions.len())
             && let Some(own) = send.text.strip_prefix(instructions)
         {

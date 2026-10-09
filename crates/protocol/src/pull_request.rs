@@ -1,4 +1,4 @@
-//! The read side of a linked pull request, as the host's GitHub reads answer it.
+//! The read side of a linked pull request, as the pull request host answers it.
 
 use agent::FileChangeKind;
 use serde::{Deserialize, Serialize};
@@ -14,9 +14,9 @@ pub const MAX_PULL_REQUEST_MEDIA_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum PullRequestRead {
-    /// `None` asks for the whole diff; a page is asked for only after a reply named it.
+    /// `None` asks for the whole diff; a cursor is sent only after a reply named it.
     Files {
-        page: Option<u32>,
+        cursor: Option<String>,
     },
     /// A file's text at an immutable revision, read when its diff is expanded.
     FileText {
@@ -57,11 +57,12 @@ pub struct PullRequestFiles {
     pub base: String,
     pub head: String,
     pub files: Vec<PullRequestFile>,
-    /// GitHub refused or cut the whole diff and pages its changed files instead.
-    pub next_page: Option<u32>,
+    /// The host refused or cut the whole diff and pages its changed files instead: where the
+    /// next page starts, opaque to the client.
+    pub next_cursor: Option<String>,
     /// Every changed file has been listed once the pages before this one were read too.
     pub complete: bool,
-    /// GitHub's count of changed files, which a listing may fall short of.
+    /// The host's count of changed files, which a listing may fall short of.
     pub changed_files: u64,
 }
 
@@ -217,9 +218,45 @@ pub struct PullRequestConversation {
     /// Requested reviewers first, then whoever reviewed without a request outstanding.
     #[serde(default)]
     pub reviewers: Vec<PullRequestReviewerState>,
+    pub capabilities: PullRequestCapabilities,
 }
 
-/// What the signed-in account may do to the pull request, as GitHub grants it. Per-comment and
+/// What the host offers at all, whoever reads it: an action it lacks is not offered, rather
+/// than shown as one the account may not take. What the account may do travels apart, in
+/// [`PullRequestPermissions`] and on each comment and thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestCapabilities {
+    /// Replies to review threads.
+    pub reply: bool,
+    /// Resolving and unresolving review threads.
+    pub resolve: bool,
+    pub reactions: bool,
+    /// The request-changes review verdict.
+    pub request_changes: bool,
+    /// Marking a pull request ready for review and converting it to a draft.
+    pub draft: bool,
+    pub reopen: bool,
+    pub auto_merge: bool,
+    /// Bringing the base into the head on the host.
+    pub update_branch: bool,
+    /// Opening a pull request that reverses a merged one.
+    pub revert: bool,
+}
+impl PullRequestCapabilities {
+    pub const ALL: Self = Self {
+        reply: true,
+        resolve: true,
+        reactions: true,
+        request_changes: true,
+        draft: true,
+        reopen: true,
+        auto_merge: true,
+        update_branch: true,
+        revert: true,
+    };
+}
+
+/// What the signed-in account may do to the pull request, as the host grants it. Per-comment and
 /// per-thread rights travel on the comment and thread.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestPermissions {
@@ -233,6 +270,8 @@ pub struct PullRequestPermissions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestLabel {
+    /// The host's id for the label, which a write names it by; opaque to the client.
+    pub id: String,
     pub name: String,
     /// Hex without the `#`.
     pub color: Option<String>,
@@ -290,6 +329,8 @@ pub enum PullRequestMedia {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestLabelCandidate {
+    /// The host's id for the label, which a write names it by; opaque to the client.
+    pub id: String,
     pub name: String,
     /// Hex without the `#`.
     pub color: Option<String>,
@@ -315,6 +356,9 @@ pub enum PullRequestReviewerKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestReviewer {
+    /// The host's id for the reviewer, which a write names them by; opaque to the client.
+    pub id: String,
+    /// As the host shows the reviewer.
     pub login: String,
     pub kind: PullRequestReviewerKind,
 }
@@ -382,6 +426,8 @@ pub struct PullRequestActionState {
     pub can_update_branch: bool,
     /// Merge, auto-merge and revert.
     pub can_merge: bool,
+    /// The host's, as the conversation carries them, for the lifecycle actions read from here.
+    pub capabilities: PullRequestCapabilities,
 }
 
 /// A native stack as GitHub has it now, read before a stack write is confirmed.
@@ -490,8 +536,8 @@ pub enum PullRequestAction {
         title: Option<String>,
         body: Option<String>,
     },
-    /// The additions in one request, then one request per removal, in order, stopping at the
-    /// first that fails.
+    /// Labels by their ids: the additions in one request, then one request per removal, in
+    /// order, stopping at the first that fails.
     SetLabels {
         add: Vec<String>,
         remove: Vec<String>,

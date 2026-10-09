@@ -11207,9 +11207,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     .unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
-        state.github = tcode_services::github::GitHubApi::host(
-            tcode_services::github::Credentials::new(SettingsStore::new(store.root().clone()), []),
-        );
+        state.forge = tcode_services::forge::connect(SettingsStore::new(store.root().clone()), []);
     });
     state.dispatch_command(
         cx,

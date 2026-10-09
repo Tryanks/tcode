@@ -7,16 +7,10 @@ use tcode_protocol::{
     CommandResponse, ProtocolError, PullRequestAction, PullRequestActionResult, PullRequestRead,
     PullRequestReadResponse, QueryResponse,
 };
-use tcode_services::github::{
-    CredentialError, GitHubApi, GitHubError, pull_request_actions,
-    pull_request_reads::PullRequestReads,
-    pull_requests::{PullRequests, Summary},
-    repository::{self, Repository},
-};
+use tcode_services::forge::{Forge, ForgeError, ForgeErrorKind, Summary};
 
 pub(super) struct PullRequestRuntime {
-    service: Arc<PullRequests>,
-    pub(super) reads: Arc<PullRequestReads>,
+    pub(super) forge: Arc<dyn Forge>,
     last_synced: HashMap<PullRequestKey, u64>,
     requested: HashMap<PullRequestKey, u64>,
     generation: u64,
@@ -35,10 +29,9 @@ pub(super) struct PullRequestRuntime {
     submissions: u64,
 }
 impl PullRequestRuntime {
-    pub(super) fn new(api: Arc<GitHubApi>) -> Self {
+    pub(super) fn new(forge: Arc<dyn Forge>) -> Self {
         Self {
-            service: PullRequests::new(api.clone()),
-            reads: PullRequestReads::new(api),
+            forge,
             last_synced: HashMap::new(),
             requested: HashMap::new(),
             generation: 0,
@@ -70,16 +63,18 @@ pub(super) fn failure(message: impl Into<String>) -> ProtocolError {
 }
 /// Codes a client localizes; the message is the transport's display, which carries no request
 /// values.
-fn read_error(error: GitHubError) -> ProtocolError {
-    let code = match &error {
-        GitHubError::Credential(CredentialError::Disabled) => "pull_request_host_disabled",
-        GitHubError::Credential(_) | GitHubError::Unauthorized => "pull_request_no_credential",
-        GitHubError::RateLimited { .. } | GitHubError::Paused { .. } => "pull_request_rate_limited",
-        GitHubError::NotFound => "pull_request_not_found",
-        GitHubError::BodyTooLarge => "pull_request_too_large",
-        GitHubError::InvalidInput => "pull_request_invalid_read",
-        GitHubError::UnsupportedMedia => "pull_request_unsupported_media",
-        GitHubError::Deadline => "pull_request_deadline",
+fn read_error(error: ForgeError) -> ProtocolError {
+    let code = match &error.kind {
+        ForgeErrorKind::HostDisabled => "pull_request_host_disabled",
+        ForgeErrorKind::NoCredential | ForgeErrorKind::Unauthorized => "pull_request_no_credential",
+        ForgeErrorKind::RateLimited { .. } | ForgeErrorKind::Paused { .. } => {
+            "pull_request_rate_limited"
+        }
+        ForgeErrorKind::NotFound => "pull_request_not_found",
+        ForgeErrorKind::TooLarge => "pull_request_too_large",
+        ForgeErrorKind::InvalidInput => "pull_request_invalid_read",
+        ForgeErrorKind::UnsupportedMedia => "pull_request_unsupported_media",
+        ForgeErrorKind::Deadline => "pull_request_deadline",
         _ => "pull_request_failed",
     };
     ProtocolError {
@@ -88,10 +83,11 @@ fn read_error(error: GitHubError) -> ProtocolError {
     }
 }
 fn resolve_reference(
+    forge: &dyn Forge,
     cwd: &Path,
     reference: &str,
 ) -> Result<(PullRequestKey, String), ProtocolError> {
-    if let Some(target) = repository::pull_request_url(reference) {
+    if let Some(target) = forge.pull_request_url(reference) {
         return Ok(target);
     }
     let invalid = || ProtocolError {
@@ -106,11 +102,19 @@ fn resolve_reference(
     if number == 0 {
         return Err(invalid());
     }
-    let repository = repository::resolve(cwd).ok_or_else(|| ProtocolError {
+    let no_repository = || ProtocolError {
         code: "pull_request_no_repository".into(),
-        message: "This project has no GitHub repository. Use a full PR URL.".into(),
-    })?;
-    Ok((repository.key(number), repository.url(number)))
+        message: format!(
+            "This project has no {} repository. Use a full PR URL.",
+            pull_request::host_names()
+        ),
+    };
+    let key = forge
+        .checkout_repository(cwd)
+        .ok_or_else(no_repository)?
+        .key(number);
+    let url = forge.url(&key).ok_or_else(no_repository)?;
+    Ok((key, url))
 }
 impl AppState {
     pub(crate) fn pump_pull_request_requests(
@@ -239,12 +243,14 @@ impl AppState {
             Operation::List => unreachable!(),
         };
         let cwd = self.pull_request_project_cwd(&meta);
+        let forge = self.pull_requests.forge.clone();
         let host = cx.clone();
         cx.spawn_detached(async move {
             let target = host
                 .unblock(move || {
                     if let Some(url) = target.url {
-                        return repository::pull_request_url(&url)
+                        return forge
+                            .pull_request_url(&url)
                             .ok_or_else(|| "Invalid pull request URL.".to_owned());
                     }
                     let missing = || "Pass url or repository plus number.".to_owned();
@@ -252,11 +258,15 @@ impl AppState {
                     let name = target.repository.ok_or_else(missing)?;
                     let host = target
                         .host
-                        .or_else(|| repository::resolve(&cwd).map(|r| r.host))
+                        .or_else(|| forge.checkout_repository(&cwd).map(|r| r.host))
                         .ok_or_else(|| "Pass host or a full PR URL.".to_owned())?;
-                    let repository = repository::selector(&name, &host)
-                        .ok_or_else(|| "Invalid GitHub repository.".to_owned())?;
-                    Ok((repository.key(number), repository.url(number)))
+                    let invalid = || format!("Invalid {} repository.", pull_request::host_names());
+                    let key = forge
+                        .repository(&name, &host)
+                        .ok_or_else(invalid)?
+                        .key(number);
+                    let url = forge.url(&key).ok_or_else(invalid)?;
+                    Ok((key, url))
                 })
                 .await;
             host.enqueue(move |state, cx| {
@@ -327,7 +337,7 @@ impl AppState {
         if let Err(error) = self.linked_pull_request(session_id, &key) {
             return cx.spawn_background(async move { Err(error) });
         }
-        let reads = self.pull_requests.reads.clone();
+        let forge = self.pull_requests.forge.clone();
         let conversation = matches!(read, PullRequestRead::Conversation).then(|| {
             (
                 session_id.to_owned(),
@@ -335,64 +345,7 @@ impl AppState {
                 self.pull_requests.submissions,
             )
         });
-        let task = cx.unblock(move || {
-            use tcode_services::github::Fresh;
-            fn reply<V: Clone>(
-                fresh: Fresh<V>,
-                wrap: impl FnOnce(V) -> PullRequestReadResponse,
-            ) -> (PullRequestReadResponse, SystemTime) {
-                (wrap((*fresh.value).clone()), fresh.expires_at)
-            }
-            Ok::<_, GitHubError>(match read {
-                PullRequestRead::Files { page } => {
-                    reply(reads.files(&key, page)?, PullRequestReadResponse::Files)
-                }
-                PullRequestRead::FileText { revision, path } => reply(
-                    reads.file_text(&key, &revision, &path)?,
-                    PullRequestReadResponse::FileText,
-                ),
-                PullRequestRead::Conversation => reply(reads.conversation(&key)?, |conversation| {
-                    PullRequestReadResponse::Conversation(Box::new(conversation))
-                }),
-                PullRequestRead::ThreadReplies { thread_id, after } => reply(
-                    reads.thread_replies(&key, &thread_id, &after)?,
-                    PullRequestReadResponse::ThreadReplies,
-                ),
-                PullRequestRead::ViewedFiles => reply(
-                    reads.viewed_files(&key)?,
-                    PullRequestReadResponse::ViewedFiles,
-                ),
-                PullRequestRead::LabelCandidates => reply(
-                    reads.label_candidates(&key)?,
-                    PullRequestReadResponse::LabelCandidates,
-                ),
-                PullRequestRead::ReviewerCandidates => reply(
-                    reads.reviewer_candidates(&key)?,
-                    PullRequestReadResponse::ReviewerCandidates,
-                ),
-                PullRequestRead::ActionState => reply(
-                    reads.action_state(&key)?,
-                    PullRequestReadResponse::ActionState,
-                ),
-                // Read for one confirmation and never kept: the write reads it again.
-                PullRequestRead::StackState { rebase } => (
-                    PullRequestReadResponse::StackState(reads.stack_state(&key, rebase)?),
-                    SystemTime::now(),
-                ),
-                PullRequestRead::Media { url, validator } => {
-                    let media = reads.media(&key, &url, validator.as_deref())?;
-                    let expires_at = match &media {
-                        tcode_protocol::PullRequestMedia::Image { expires_at, .. }
-                        | tcode_protocol::PullRequestMedia::NotModified { expires_at } => {
-                            UNIX_EPOCH + Duration::from_secs(*expires_at)
-                        }
-                        tcode_protocol::PullRequestMedia::External { .. }
-                        | tcode_protocol::PullRequestMedia::Unsupported => SystemTime::now(),
-                    };
-                    (PullRequestReadResponse::Media(media), expires_at)
-                }
-            })
-        });
+        let task = cx.unblock(move || forge.read(&key, read));
         let host = cx.clone();
         cx.spawn_background(async move {
             let answer = task.await;
@@ -428,11 +381,11 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<(), ProtocolError> {
         self.linked_pull_request(session_id, &key)?;
-        self.pull_requests.reads.invalidate(&key);
+        self.pull_requests.forge.invalidate(&key);
         self.request_pull_request_sync(key, cx);
         Ok(())
     }
-    /// A conversation read that began after every submission landed shows what GitHub made of
+    /// A conversation read that began after every submission landed shows what the host made of
     /// them, which is what an unanswered one waits for.
     fn read_after_submission(
         &mut self,
@@ -466,16 +419,16 @@ impl AppState {
         if let Err(error) = self.linked_pull_request(session_id, &key) {
             return cx.spawn_background(async move { Err(error) });
         }
-        let reads = self.pull_requests.reads.clone();
-        let task = cx.unblock(move || reads.set_viewed(&key, &paths, viewed));
+        let forge = self.pull_requests.forge.clone();
+        let task = cx.unblock(move || forge.set_viewed(&key, &paths, viewed));
         cx.spawn_background(async move {
             task.await
                 .map(|()| CommandResponse::Unit)
                 .map_err(read_error)
         })
     }
-    /// A write to the pull request. Whenever GitHub may have applied it, the sync reads the pull
-    /// request again. A review takes the account's draft and leaves it only once GitHub took it;
+    /// A write to the pull request. Whenever the host may have applied it, the sync reads the pull
+    /// request again. A review takes the account's draft and leaves it only once the host took it;
     /// a revert's new pull request is linked to the thread.
     pub fn run_pull_request_action(
         &mut self,
@@ -522,19 +475,14 @@ impl AppState {
             }
         }
         let drafts = self.review_drafts(session_id);
-        let reads = self.pull_requests.reads.clone();
+        let forge = self.pull_requests.forge.clone();
         let writing = key.clone();
         let task = cx.unblock(move || match &action {
             PullRequestAction::SubmitReview { verdict, head } => {
-                let account = match reads.account(&writing) {
+                let account = match forge.account(&writing) {
                     Ok(account) => account,
                     Err(error) => {
-                        return (
-                            None,
-                            PullRequestActionResult::Rejected(pull_request_actions::rejection(
-                                error,
-                            )),
-                        );
+                        return (None, PullRequestActionResult::Rejected(error.rejection()));
                     }
                 };
                 let (anchor, body, comments) =
@@ -546,13 +494,13 @@ impl AppState {
                         ),
                         None => ("", String::new(), &[][..]),
                     };
-                // Comments are anchored at the draft's head, which is what GitHub must still be at.
+                // Comments are anchored at the draft's head, which is what the host must still be at.
                 let head = if comments.is_empty() { head } else { anchor };
-                let outcome = reads.submit_review(&writing, *verdict, head, &body, comments);
+                let outcome = forge.submit_review(&writing, *verdict, head, &body, comments);
                 let ids: Vec<_> = comments.iter().map(|comment| comment.id).collect();
                 (Some((account, ids, body)), outcome)
             }
-            action => (None, reads.act(&writing, action)),
+            action => (None, forge.act(&writing, action)),
         });
         let host = cx.clone();
         let id = session_id.to_owned();
@@ -606,7 +554,7 @@ impl AppState {
             .map(|meta| meta.pull_request_reviews)
             .unwrap_or_default()
     }
-    /// A new comment is taken only on lines GitHub would accept at the draft's head, and moving
+    /// A new comment is taken only on lines the host would accept at the draft's head, and moving
     /// the draft reads where each comment's lines are now; both read the diff first.
     pub fn edit_pull_request_review_draft(
         &mut self,
@@ -616,11 +564,11 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<CommandResponse, ProtocolError>> {
         use pull_request::PullRequestReviewDraftEdit as Edit;
-        use tcode_services::github::pull_request_actions::Anchoring;
+        use tcode_services::forge::Anchoring;
         if let Err(error) = self.linked_pull_request(session_id, &key) {
             return cx.spawn_background(async move { Err(error) });
         }
-        let reads = self.pull_requests.reads.clone();
+        let forge = self.pull_requests.forge.clone();
         let drafts = self.review_drafts(session_id);
         let id = session_id.to_owned();
         let host = cx.clone();
@@ -634,8 +582,8 @@ impl AppState {
                 message: "The pull request's head changed.".into(),
             };
             let account = {
-                let (reads, key) = (reads.clone(), key.clone());
-                host.unblock(move || reads.account(&key))
+                let (forge, key) = (forge.clone(), key.clone());
+                host.unblock(move || forge.account(&key))
                     .await
                     .map_err(read_error)?
             };
@@ -648,8 +596,8 @@ impl AppState {
                     end_line,
                     ..
                 } => {
-                    let (reads, key, head, path, side) = (
-                        reads.clone(),
+                    let (reading, read_key, head, path, side) = (
+                        forge.clone(),
                         key.clone(),
                         head.clone(),
                         path.clone(),
@@ -657,7 +605,7 @@ impl AppState {
                     );
                     let lines = (*start_line, *end_line);
                     match host
-                        .unblock(move || reads.commentable(&key, &head, &path, side, lines))
+                        .unblock(move || reading.commentable(&read_key, &head, &path, side, lines))
                         .await
                         .map_err(read_error)?
                     {
@@ -665,19 +613,22 @@ impl AppState {
                         Anchoring::OutsideDiff => {
                             return Err(anchor_error(
                                 "pull_request_not_in_diff",
-                                "GitHub only accepts comments on lines in the diff.",
+                                &format!(
+                                    "{} only accepts comments on lines in the diff.",
+                                    forge.terms(&key).name
+                                ),
                             ));
                         }
                         Anchoring::Moved => return Err(head_changed()),
                     }
                 }
                 Edit::MoveToHead => {
-                    let (reads, key) = (reads.clone(), key.clone());
+                    let (forge, key) = (forge.clone(), key.clone());
                     let comments = pull_request::review_draft(&drafts, &key, &account)
                         .map(|draft| draft.comments.clone())
                         .unwrap_or_default();
                     Some(
-                        host.unblock(move || reads.reanchor(&key, &comments))
+                        host.unblock(move || forge.reanchor(&key, &comments))
                             .await
                             .map_err(read_error)?,
                     )
@@ -745,11 +696,12 @@ impl AppState {
             .as_ref()
             .map(|meta| self.pull_request_project_cwd(meta));
         let id = session_id.to_owned();
+        let forge = self.pull_requests.forge.clone();
         let host = cx.clone();
         cx.spawn_background(async move {
             let cwd = cwd.ok_or_else(|| failure("Unknown thread."))?;
             let target = host
-                .unblock(move || resolve_reference(&cwd, &reference))
+                .unblock(move || resolve_reference(forge.as_ref(), &cwd, &reference))
                 .await?;
             let key = target.0.clone();
             let already_linked = host
@@ -972,7 +924,7 @@ impl AppState {
                             .is_none_or(|last| now.saturating_sub(*last) >= 900))
             })
             .collect();
-        let service = self.pull_requests.service.clone();
+        let forge = self.pull_requests.forge.clone();
         let host = cx.clone();
         cx.spawn_background(async move {
             let mut failures = HashMap::<String, usize>::new();
@@ -983,9 +935,9 @@ impl AppState {
                         let key = group.key.clone();
                         let observations = group.observations.clone();
                         let forced = group.request.is_some();
-                        let service = service.clone();
+                        let forge = forge.clone();
                         let read = host.unblock(move || {
-                            let summary = service.summary(&key)?;
+                            let summary = forge.summary(&key)?;
                             let changed = observations.iter().any(|(snapshot, stack)| {
                                 let known = match stack {
                                     PullRequestStackState::Native(stack) => Some(stack.number),
@@ -999,11 +951,11 @@ impl AppState {
                             let stack = if summary.stack_number == Some(None) {
                                 Some(PullRequestStackState::None)
                             } else if forced || changed {
-                                Some(service.stack(&key)?)
+                                Some(forge.stack(&key)?)
                             } else {
                                 None
                             };
-                            Ok::<_, GitHubError>((summary, stack))
+                            Ok::<_, ForgeError>((summary, stack))
                         });
                         (group, read)
                     })
@@ -1050,18 +1002,16 @@ impl AppState {
         projects: Vec<Option<String>>,
         threads: Vec<String>,
         generation: Option<u64>,
-        result: Result<(Summary, Option<PullRequestStackState>), GitHubError>,
+        result: Result<(Summary, Option<PullRequestStackState>), ForgeError>,
         cx: &mut HostCx,
     ) {
         if let Err(error) = &result {
-            let reason = match error {
-                GitHubError::Credential(tcode_services::github::CredentialError::Disabled) => {
-                    PullRequestSyncError::HostDisabled
-                }
-                GitHubError::Credential(_) | GitHubError::Unauthorized => {
+            let reason = match &error.kind {
+                ForgeErrorKind::HostDisabled => PullRequestSyncError::HostDisabled,
+                ForgeErrorKind::NoCredential | ForgeErrorKind::Unauthorized => {
                     PullRequestSyncError::NoCredential
                 }
-                GitHubError::RateLimited { retry_at, .. } | GitHubError::Paused { retry_at } => {
+                ForgeErrorKind::RateLimited { retry_at } | ForgeErrorKind::Paused { retry_at } => {
                     PullRequestSyncError::RateLimited {
                         retry_at: retry_at
                             .duration_since(UNIX_EPOCH)
@@ -1069,7 +1019,7 @@ impl AppState {
                             .as_secs(),
                     }
                 }
-                GitHubError::NotFound => PullRequestSyncError::NotFound,
+                ForgeErrorKind::NotFound => PullRequestSyncError::NotFound,
                 _ => PullRequestSyncError::Failed,
             };
             for id in &threads {
@@ -1087,7 +1037,7 @@ impl AppState {
         }
         let (summary, stack) = match result {
             Ok(result) => result,
-            Err(GitHubError::Paused { retry_at } | GitHubError::RateLimited { retry_at, .. }) => {
+            Err(error) if let Some(retry_at) = error.retry_at() => {
                 for project in projects {
                     let until = self
                         .pull_requests
@@ -1132,20 +1082,20 @@ impl AppState {
                 || link.stack != stack;
             let mut changed = observation_changed;
             if observation_changed {
-                self.pull_requests.reads.invalidate(&key);
+                self.pull_requests.forge.invalidate(&key);
             }
             if !meta.is_settled()
                 && let PullRequestStackState::Native(topology) = &stack
             {
                 for layer in &topology.layers {
                     let sibling = PullRequestKey::new(&key.host, &key.repository, layer.number);
-                    let Some(repository) = Repository::from_key(&sibling) else {
+                    let Some(url) = self.pull_requests.forge.url(&sibling) else {
                         continue;
                     };
                     if pull_request::link_pull_request(
                         &mut meta.pull_requests,
                         sibling.clone(),
-                        repository.url(layer.number),
+                        url,
                         PullRequestSource::Stack,
                         now_secs(),
                         false,
@@ -1222,51 +1172,25 @@ impl AppState {
             group.1 |= refresh;
         }
         let groups: Vec<_> = grouped.into_iter().collect();
-        let service = self.pull_requests.service.clone();
+        let forge = self.pull_requests.forge.clone();
         let host = cx.clone();
         cx.spawn_background(async move {
             for chunk in groups.chunks(32) {
                 let mut tasks = Vec::new();
                 for ((cwd, root), (metas, refresh)) in chunk {
-                    let cwd = cwd.clone();
-                    let root = root.clone();
-                    let refresh = *refresh;
-                    let service = service.clone();
+                    let (cwd, root, refresh) = (cwd.clone(), root.clone(), *refresh);
+                    let forge = forge.clone();
                     tasks.push((
                         metas.clone(),
                         root.clone(),
-                        host.unblock(move || {
-                            let cwd = if cwd.exists() { cwd } else { root.clone() };
-                            let head = repository::branch_head(&cwd)?;
-                            let project_repository = repository::resolve(&root)?;
-                            if head.repository != project_repository {
-                                return None;
-                            }
-                            let result = match service.branch(&head, refresh) {
-                                Ok(Some(result)) => result,
-                                _ => return None,
-                            };
-                            if result.key.host != project_repository.host
-                                || result.key.repository
-                                    != project_repository.key(result.key.number).repository
-                            {
-                                return None;
-                            }
-                            if repository::branch_head(&cwd).as_ref() != Some(&head)
-                                || repository::resolve(&root).as_ref() != Some(&project_repository)
-                            {
-                                return None;
-                            }
-                            Some((head, result))
-                        }),
+                        host.unblock(move || forge.discover(&cwd, &root, refresh)),
                     ));
                 }
                 for (metas, root, task) in tasks {
-                    let Some((head, result)) = task.await else {
+                    let Some(result) = task.await else {
                         continue;
                     };
                     for meta in metas {
-                        let head = head.clone();
                         let result = result.clone();
                         let root = root.clone();
                         let _ = host
@@ -1286,7 +1210,7 @@ impl AppState {
                                 if state
                                     .resident(&meta.id)
                                     .and_then(|r| r.git_branch.as_ref())
-                                    .is_some_and(|branch| branch != &head.branch)
+                                    .is_some_and(|branch| branch != &result.branch)
                                 {
                                     return;
                                 }
@@ -1326,7 +1250,7 @@ impl AppState {
     ) {
         if let AgentEvent::ItemStarted(item) | AgentEvent::ItemCompleted(item) = event
             && let ItemContent::CommandExecution { command, .. } = &item.content
-            && merges_or_closes(command)
+            && pull_request::merges_or_closes(command)
         {
             self.pull_requests.merge_commands.insert(id.to_owned());
         }
@@ -1340,36 +1264,6 @@ impl AppState {
             self.discover_pull_requests_for(id, true, cx);
         }
     }
-}
-
-/// Upstream's `\b(?:gh\s+pr|glab\s+mr)\s+(?:merge|close)\b` over the raw command text.
-fn merges_or_closes(command: &str) -> bool {
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    let spaced = |text: &'static str| {
-        move |rest: &str| -> Option<usize> {
-            let trimmed = rest.trim_start();
-            (trimmed.len() < rest.len() && trimmed.starts_with(text))
-                .then(|| rest.len() - trimmed.len() + text.len())
-        }
-    };
-    command.char_indices().any(|(start, _)| {
-        if command[..start].ends_with(word) {
-            return false;
-        }
-        let rest = &command[start..];
-        let Some(rest) = [("gh", "pr"), ("glab", "mr")]
-            .into_iter()
-            .find_map(|(tool, noun)| {
-                let after = rest.strip_prefix(tool)?;
-                Some(&after[spaced(noun)(after)?..])
-            })
-        else {
-            return false;
-        };
-        ["merge", "close"]
-            .into_iter()
-            .any(|verb| spaced(verb)(rest).is_some_and(|end| !rest[end..].starts_with(word)))
-    })
 }
 
 #[cfg(test)]

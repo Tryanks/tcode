@@ -41,6 +41,8 @@ pub(super) enum PickerKind {
 /// One row a picker offers: its name, whether the pull request has it, and how it is drawn.
 #[derive(Clone)]
 struct Row {
+    /// The host's id, which the write names it by.
+    id: String,
     key: String,
     reviewer: Option<PullRequestReviewer>,
     applied: bool,
@@ -188,7 +190,7 @@ impl PullRequestView {
         let (adds, removes) = (names(adds), names(removes));
         let reviewers = |keys: &[String]| -> Vec<PullRequestReviewer> {
             keys.iter()
-                .filter_map(|key| rows.iter().find(|row| row.key == *key))
+                .filter_map(|id| rows.iter().find(|row| row.id == *id))
                 .filter_map(|row| row.reviewer.clone())
                 .collect()
         };
@@ -503,7 +505,7 @@ impl PullRequestView {
                         .overflow_y_scroll()
                         .children(shown.into_iter().enumerate().map(|(index, row)| {
                             let checked =
-                                picker.staged.get(&row.key).copied().unwrap_or(row.applied);
+                                picker.staged.get(&row.id).copied().unwrap_or(row.applied);
                             let lead = match kind {
                                 PickerKind::Labels => {
                                     dot(label_color(row.color.as_deref(), cx)).into_any_element()
@@ -513,7 +515,7 @@ impl PullRequestView {
                                 }
                             };
                             let toggle_view = view.clone();
-                            let (key, applied) = (row.key.clone(), row.applied);
+                            let (id, applied) = (row.id.clone(), row.applied);
                             Checkbox::new(("pr-picker-row", index))
                                 .aria_label(row.key.clone())
                                 .checked(checked)
@@ -535,7 +537,7 @@ impl PullRequestView {
                                 }))
                                 .on_click(move |_, _, cx| {
                                     toggle_view.update(cx, |view, cx| {
-                                        view.toggle_staged(key.clone(), applied, cx)
+                                        view.toggle_staged(id.clone(), applied, cx)
                                     })
                                 })
                                 .into_any_element()
@@ -615,6 +617,7 @@ fn label_rows(labels: PullRequestLabelCandidates) -> Vec<Row> {
         .labels
         .into_iter()
         .map(|label| Row {
+            id: label.id,
             key: label.name,
             reviewer: None,
             applied: label.applied,
@@ -632,6 +635,7 @@ fn reviewer_rows(reviewers: PullRequestReviewerCandidates) -> Vec<Row> {
         .reviewers
         .into_iter()
         .map(|candidate| Row {
+            id: candidate.reviewer.id.clone(),
             key: candidate.reviewer.login.clone(),
             applied: candidate.requested,
             color: None,

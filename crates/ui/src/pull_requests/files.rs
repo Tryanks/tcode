@@ -569,7 +569,7 @@ impl PullRequestView {
             .files
             .data
             .as_ref()
-            .is_some_and(|files| files.next_page.is_some());
+            .is_some_and(|files| files.next_cursor.is_some());
         let count = threads.len() + pending.len();
         let label = if more {
             crate::tr!(
@@ -766,7 +766,7 @@ impl PullRequestView {
     fn count_label(&self) -> String {
         let files = self.page().and_then(|page| page.files.data.as_ref());
         let count = files.map_or(0, |files| files.files.len());
-        if files.is_some_and(|files| files.next_page.is_some()) {
+        if files.is_some_and(|files| files.next_cursor.is_some()) {
             crate::tr!("pull_requests.files.count_more", count = count.to_string())
         } else if count == 1 {
             crate::tr!("pull_requests.files.count_one")
@@ -1222,7 +1222,7 @@ impl PullRequestView {
             };
         }
         let files = files.cloned().unwrap_or_else(|| unreachable!());
-        if files.files.is_empty() && files.next_page.is_none() {
+        if files.files.is_empty() && files.next_cursor.is_none() {
             return material::empty_state(
                 Icon::new(IconName::File),
                 crate::tr!("pull_requests.files.empty_title").into_owned(),
@@ -1240,7 +1240,7 @@ impl PullRequestView {
             .as_ref()
             .and_then(|list| list.top_file(split))
             .is_some_and(|top| top + 20 >= files.files.len());
-        if let Some(next) = files.next_page
+        if let Some(next) = files.next_cursor.clone()
             && near_end
             && !page.files_view.page_loading
             && page.files_view.page_error.is_none()
@@ -1254,7 +1254,7 @@ impl PullRequestView {
         let wide = !compact
             && f32::from(window.viewport_size().width) >= FILE_COLUMN_MIN_WIDTH
             && self.file_column;
-        let partial = (files.next_page.is_none() && !files.complete).then(|| {
+        let partial = (files.next_cursor.is_none() && !files.complete).then(|| {
             let listed = files.files.len();
             let text = if files.changed_files > listed as u64 {
                 crate::tr!(
@@ -1269,7 +1269,8 @@ impl PullRequestView {
             div().mx_2().mb_1().child(render_notice(text, cx))
         });
         let footer = files
-            .next_page
+            .next_cursor
+            .as_ref()
             .filter(|_| page.files_view.page_loading || page.files_view.page_error.is_some())
             .map(|_| {
                 let failed = page.files_view.page_error.is_some();

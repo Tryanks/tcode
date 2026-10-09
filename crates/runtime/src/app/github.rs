@@ -5,10 +5,10 @@ impl AppState {
     pub fn refresh_github_credentials(&mut self, cx: &HostCx) {
         self.github_generation += 1;
         let generation = self.github_generation;
-        let credentials = self.github.credentials().clone();
+        let forge = self.forge.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let status = host_cx.unblock(move || credentials.discover()).await;
+            let status = host_cx.unblock(move || forge.credential_status()).await;
             host_cx.enqueue(move |state, _| {
                 if generation == state.github_generation {
                     state.settings.github.status = status;
@@ -46,7 +46,7 @@ impl AppState {
                     message: error,
                 })?;
             host_cx.enqueue(move |state, cx| {
-                state.github.credentials().invalidate(&host);
+                state.forge.forget_credential(&host);
                 state.refresh_github_credentials(cx);
             });
             Ok(CommandResponse::Unit)

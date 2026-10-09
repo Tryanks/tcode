@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod credentials;
+mod forge;
 pub mod graphql;
 pub mod media;
 mod merge_message;
@@ -17,6 +18,7 @@ pub mod stack_rebase;
 
 pub use api::{GitHubApi, GitHubError, RequestOptions, Response, RestRequest};
 pub use credentials::{Credential, CredentialError, Credentials, Identity};
+pub use forge::GitHub;
 pub use read_cache::Fresh;
 
 pub fn normalize_host(host: &str) -> Result<String, CredentialError> {

@@ -4,6 +4,7 @@ use super::{
     graphql::{self, AliasItem, Variables},
     repository::{BranchHead, Repository, pull_request_url},
 };
+use crate::forge::Summary;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -15,13 +16,6 @@ use tcode_core::pull_request::{
     PullRequestStack, PullRequestStackLayer, PullRequestStackState, PullRequestState,
     ReviewDecision,
 };
-
-#[derive(Debug, Clone)]
-pub struct Summary {
-    pub snapshot: PullRequestSnapshot,
-    /// Absent on hosts where native membership cannot be read.
-    pub stack_number: Option<Option<u64>>,
-}
 
 struct Job<K, V> {
     key: K,

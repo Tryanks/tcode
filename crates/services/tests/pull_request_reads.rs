@@ -1413,6 +1413,7 @@ fn reviewers_are_offered_without_the_author_and_requested_by_kind() {
         ]
     );
     let user = |login: &str| PullRequestReviewer {
+        id: login.into(),
         login: login.into(),
         kind: PullRequestReviewerKind::User,
     };
@@ -1424,6 +1425,7 @@ fn reviewers_are_offered_without_the_author_and_requested_by_kind() {
                 remove: vec![
                     user("monalisa"),
                     PullRequestReviewer {
+                        id: "core".into(),
                         login: "core".into(),
                         kind: PullRequestReviewerKind::Team,
                     },

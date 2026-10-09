@@ -77,7 +77,7 @@ impl PullRequestTools {
         Self {
             broker,
             session_id,
-            tool_router: Self::tool_router(),
+            tool_router: named_router(),
         }
     }
     async fn invoke(&self, operation: Operation) -> CallToolResult {
@@ -107,7 +107,7 @@ impl PullRequestTools {
         self.invoke(Operation::Unlink(target)).await
     }
     #[tool(
-        description = "List this thread's visible linked PRs, their source, last known state and stack position. This reads stored state without asking GitHub. Before finishing PR work, list and link anything missing."
+        description = "List this thread's visible linked PRs, their source, last known state and stack position. This reads stored state without asking {hosts}. Before finishing PR work, list and link anything missing."
     )]
     async fn list_thread_pull_requests(&self) -> CallToolResult {
         self.invoke(Operation::List).await
@@ -126,11 +126,23 @@ impl PullRequestTools {
     }
 }
 
+/// The tools, with each description naming the hosts where it says `{hosts}`.
+fn named_router() -> ToolRouter<PullRequestTools> {
+    let hosts = tcode_core::pull_request::host_names();
+    let mut router = PullRequestTools::tool_router();
+    for route in router.map.values_mut() {
+        if let Some(description) = &mut route.attr.description {
+            *description = description.replace("{hosts}", &hosts).into();
+        }
+    }
+    router
+}
+
 /// Every tool's name and the description its model reads, in the order they are listed.
 pub fn tool_descriptions() -> &'static [(String, String)] {
     static TOOLS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
     TOOLS.get_or_init(|| {
-        PullRequestTools::tool_router()
+        named_router()
             .list_all()
             .into_iter()
             .map(|tool| {

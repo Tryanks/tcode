@@ -903,7 +903,7 @@ impl AppState {
                 .pull_request_tools_offered(session.meta.provider)
                 .then(|| tcode_protocol::InjectedPullRequestTools {
                     tools: pull_request_mcp::tool_descriptions().to_vec(),
-                    instructions: tcode_core::pull_request::LINKING_INSTRUCTIONS.to_owned(),
+                    instructions: tcode_core::pull_request::linking_instructions().to_owned(),
                 }),
         })
     }

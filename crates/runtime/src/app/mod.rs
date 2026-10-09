@@ -75,7 +75,7 @@ use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
     self, CheckInput as ProviderCheckInput, Installation,
 };
-use tcode_services::version_check::{self as app_releases, fetch_latest_tcode_release_json};
+use tcode_services::version_check::{self as app_releases, ReleaseFeed};
 use tcode_services::workspace::list_workspace;
 use tcode_services::worktree::{
     MergeBackError, MergeBackOutcome, ProvisionError, cleanup_orphans, merge_back, provision,
@@ -332,7 +332,8 @@ pub struct AppState {
     store: SessionStore,
     user_directories: user_files::UserDirectories,
     settings_store: SettingsStore,
-    github: Arc<tcode_services::github::GitHubApi>,
+    forge: Arc<dyn tcode_services::forge::Forge>,
+    releases: Arc<ReleaseFeed>,
     github_generation: u64,
     pull_requests: pull_requests::PullRequestRuntime,
     pull_request_watches: pull_request_watch::WatchRuntime,
@@ -485,10 +486,9 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
-        let credentials =
-            tcode_services::github::Credentials::new(settings_store.clone(), std::env::vars());
-        credentials.configure(settings.github.hosts.clone());
-        let github = tcode_services::github::GitHubApi::host(credentials);
+        let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
+        forge.configure(settings.github.hosts.clone());
+        let releases = Arc::new(ReleaseFeed::new(settings_store.clone()));
         let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
@@ -529,10 +529,11 @@ impl AppState {
             store,
             user_directories,
             settings_store,
-            github: github.clone(),
+            forge: forge.clone(),
+            releases,
             github_generation: 0,
-            pull_requests: pull_requests::PullRequestRuntime::new(github.clone()),
-            pull_request_watches: pull_request_watch::WatchRuntime::new(github.clone()),
+            pull_requests: pull_requests::PullRequestRuntime::new(forge.clone()),
+            pull_request_watches: pull_request_watch::WatchRuntime::new(forge),
             store_writes,
             store_write_receiver: Some(store_write_receiver),
             store_write_failures,
