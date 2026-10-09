@@ -47,7 +47,7 @@ impl OrchestrateSettingsPanel {
                 store.clone(),
                 "orchestrate-add-decision-popover",
                 "orchestrate-add-decision",
-                crate::tr!("orchestrate.decisions.add"),
+                "orchestrate.decisions.add",
                 cx,
             )
         });
@@ -56,7 +56,7 @@ impl OrchestrateSettingsPanel {
                 store.clone(),
                 "orchestrate-add-child-popover",
                 "orchestrate-add-child",
-                crate::tr!("orchestrate.children.add"),
+                "orchestrate.children.add",
                 cx,
             )
         });
@@ -201,7 +201,6 @@ impl OrchestrateSettingsPanel {
             let description = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 9)
-                    .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
                     .default_value(guidance)
             });
             self.input_subscriptions
@@ -938,7 +937,25 @@ impl OrchestrateSettingsPanel {
 }
 
 impl Render for OrchestrateSettingsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The textarea state owns its placeholder, so it is refreshed here for
+        // a language switch to reach it.
+        let placeholder = crate::tr!("orchestrate.children.description_placeholder");
+        for row in &self.child_rows {
+            if row
+                .description
+                .read(cx)
+                .presentation()
+                .placeholder()
+                .as_ref()
+                != placeholder.as_ref()
+            {
+                let placeholder = placeholder.clone().into_owned();
+                row.description.update(cx, |input, cx| {
+                    input.set_placeholder(placeholder, window, cx)
+                });
+            }
+        }
         v_flex()
             .w_full()
             .gap_6()
@@ -955,5 +972,60 @@ impl Render for OrchestrateSettingsPanel {
             .child(self.render_child_worktrees(cx))
             .child(self.render_children(true, cx))
             .child(self.render_children(false, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{AppContext as _, TestAppContext};
+
+    use super::OrchestrateSettingsPanel;
+    use crate::store::{WorkspaceAttachment, WorkspaceStore};
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_description_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let mut panel = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
+            panel = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let panel = panel.unwrap();
+        let placeholder = |cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, cx| {
+                panel.child_rows[0]
+                    .description
+                    .read(cx)
+                    .presentation()
+                    .placeholder()
+                    .to_string()
+            })
+        };
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        let chinese = crate::tr!("orchestrate.children.description_placeholder").into_owned();
+        assert_eq!(placeholder(cx), chinese);
+
+        // The two calls the Settings language row makes.
+        cx.update(|window, cx| {
+            crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+            window.refresh();
+            _ = window.draw(cx);
+        });
+        let english = crate::tr!("orchestrate.children.description_placeholder").into_owned();
+        assert_ne!(english, chinese);
+        assert_eq!(placeholder(cx), english);
     }
 }
