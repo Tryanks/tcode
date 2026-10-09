@@ -40,6 +40,24 @@ pub struct HostServices {
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
 }
 
+impl HostServices {
+    /// Starts the MCP servers a host offers its agents on one loopback MCP host, computer use
+    /// only where `computer_use`. A host that cannot bind or start runs without any of them.
+    pub fn start_mcp_servers(&mut self, computer_use: bool) -> std::io::Result<()> {
+        let mut host = mcp_host::Host::bind()?;
+        let preview = preview_mcp::start(&mut host);
+        let pull_requests = pull_request_mcp::start(&mut host);
+        let orchestrate = orchestrate_mcp::start(&mut host);
+        let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
+        host.start()?;
+        self.preview = Some(preview);
+        self.pull_requests = Some(pull_requests);
+        self.orchestrate = Some(orchestrate);
+        self.computer_use = computer_use;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct SpawnedHost {
     pub to_host: async_channel::Sender<String>,

@@ -150,18 +150,10 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         drop_superseded_diffs: true,
         ..HostServices::default()
     };
-    if let Ok(mut mcp_host) = mcp_host::Host::bind() {
-        services.orchestrate = Some(orchestrate_mcp::start(&mut mcp_host));
-        // Preview requests travel to whichever client shows the session's
-        // preview panel, so the headless host serves it too.
-        services.preview = Some(preview_mcp::start(&mut mcp_host));
-        services.pull_requests = Some(pull_request_mcp::start(&mut mcp_host));
-        if let Err(error) = mcp_host.start() {
-            eprintln!("tcode-headless: MCP servers unavailable: {error}");
-            services.orchestrate = None;
-            services.preview = None;
-            services.pull_requests = None;
-        }
+    // Preview requests travel to whichever client shows the session's preview panel, so the
+    // headless host serves it too.
+    if let Err(error) = services.start_mcp_servers(false) {
+        eprintln!("tcode-headless: MCP servers unavailable: {error}");
     }
     let host =
         spawn_host(store, services).map_err(|error| format!("machine startup failed: {error}"))?;
