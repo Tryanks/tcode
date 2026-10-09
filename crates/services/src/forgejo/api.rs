@@ -648,7 +648,7 @@ fn nonempty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Api, Server, same_origin};
+    use super::{Server, same_origin};
 
     /// An upload's redirect keeps the token only on the server's own origin.
     #[test]
@@ -672,14 +672,14 @@ mod tests {
             &url("https://storage.acme.test/attachments/1")
         ));
     }
-    use tcode_core::settings::CredentialSource;
-
     /// `GITEA_TOKEN` goes only to the server `GITEA_INSTANCE_URL` names, and tea's token for one
     /// server never to another: tea is asked for each server by its own host.
     #[cfg(unix)]
     #[test]
     fn a_token_goes_only_to_the_server_it_is_for() {
+        use super::Api;
         use std::os::unix::fs::PermissionsExt as _;
+        use tcode_core::settings::CredentialSource;
         let root =
             std::env::temp_dir().join(format!("tcode-forgejo-token-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
