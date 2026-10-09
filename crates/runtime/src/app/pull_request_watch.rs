@@ -6,10 +6,7 @@ use tcode_core::pull_request_watch::{
     WatchNotice,
 };
 use tcode_protocol::{CommandResponse, ProtocolError};
-use tcode_services::github::{
-    GitHubApi, GitHubError,
-    pull_request_watch::{self as reads, Fingerprint, Tails},
-};
+use tcode_services::forge::{Fingerprint, Forge, ForgeError, ForgeErrorKind, Tails};
 
 /// Passes are this far apart, counted from the end of the previous one.
 const PASS_SPACING: Duration = Duration::from_secs(2 * 60);
@@ -39,7 +36,7 @@ pub(super) struct LastRead {
 }
 
 pub(super) struct WatchRuntime {
-    api: Arc<GitHubApi>,
+    forge: Arc<dyn Forge>,
     last_reads: HashMap<GroupKey, LastRead>,
     failures: HashMap<GroupKey, u32>,
     /// Review-thread replies past each thread's first page.
@@ -51,9 +48,9 @@ pub(super) struct WatchRuntime {
 }
 
 impl WatchRuntime {
-    pub(super) fn new(api: Arc<GitHubApi>) -> Self {
+    pub(super) fn new(forge: Arc<dyn Forge>) -> Self {
         Self {
-            api,
+            forge,
             last_reads: HashMap::new(),
             failures: HashMap::new(),
             tails: HashMap::new(),
@@ -86,8 +83,7 @@ struct Plan {
     reread_tails: bool,
 }
 
-type GroupRead =
-    Result<(PullRequestWatchRead, Option<Option<Vec<PullRequestRemark>>>), GitHubError>;
+type GroupRead = Result<(PullRequestWatchRead, Option<Option<Vec<PullRequestRemark>>>), ForgeError>;
 
 fn snapshot_fingerprint(link: &pull_request::ThreadPullRequestLink) -> String {
     link.snapshot.as_ref().map_or_else(String::new, |snapshot| {
@@ -103,10 +99,10 @@ fn snapshot_fingerprint(link: &pull_request::ThreadPullRequestLink) -> String {
     })
 }
 
-fn rate_limited(error: &GitHubError) -> bool {
+fn rate_limited(error: &ForgeError) -> bool {
     matches!(
-        error,
-        GitHubError::RateLimited { .. } | GitHubError::Paused { .. }
+        error.kind,
+        ForgeErrorKind::RateLimited { .. } | ForgeErrorKind::Paused { .. }
     )
 }
 
@@ -255,14 +251,28 @@ impl AppState {
         for (thread, key, wake) in undelivered {
             self.deliver_pull_request_wake(&thread, &key, &wake, cx);
         }
-        let api = self.pull_request_watches.api.clone();
+        let forge = self.pull_request_watches.forge.clone();
         let host = cx.clone();
         cx.spawn_background(async move {
-            let keys: Vec<_> = groups.iter().map(|group| group.key.1.clone()).collect();
-            let fingerprints = {
-                let api = api.clone();
-                host.unblock(move || reads::fingerprints(&api, &keys)).await
-            };
+            // A host without a fingerprint gives none, so each pull request takes the reads gated
+            // by its sync snapshot.
+            let keys: Vec<_> = groups
+                .iter()
+                .map(|group| group.key.1.clone())
+                .filter(|key| forge.capabilities(key).fingerprint)
+                .collect();
+            let mut printed = {
+                let forge = forge.clone();
+                host.unblock(move || forge.fingerprints(&keys)).await
+            }
+            .into_iter();
+            let fingerprints: Vec<_> = groups
+                .iter()
+                .map(|group| match forge.capabilities(&group.key.1).fingerprint {
+                    true => printed.next().unwrap_or(Ok(None)),
+                    false => Ok(None),
+                })
+                .collect();
             let mut fingerprinted = Vec::new();
             for (group, fingerprint) in groups.into_iter().zip(fingerprints) {
                 match fingerprint {
@@ -311,15 +321,15 @@ impl AppState {
                     .take(GROUP_CONCURRENCY)
                     .map(|(group, fingerprint, plan, tails)| {
                         let detail = {
-                            let api = api.clone();
+                            let forge = forge.clone();
                             let key = group.key.1.clone();
-                            host.unblock(move || reads::detail(&api, &key))
+                            host.unblock(move || forge.watch_detail(&key))
                         };
                         let activity = tails.map(|mut tails| {
-                            let api = api.clone();
+                            let forge = forge.clone();
                             let key = group.key.1.clone();
                             host.unblock(move || {
-                                let read = reads::activity(&api, &key, &mut tails);
+                                let read = forge.activity(&key, &mut tails);
                                 (read, tails)
                             })
                         });

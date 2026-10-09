@@ -1,24 +1,105 @@
 use serde::{Deserialize, Serialize};
 
-macro_rules! stacks_docs {
-    () => {
-        "https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests"
-    };
+/// GitHub's documentation of native stacks, which the instructions and the stack map both link.
+pub const STACKS_DOCS_URL: &str = "https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests";
+
+/// What Tcode's own text says about a pull request host: everything host-specific that the
+/// model reads, and the link menu's hint. Clients see these without asking the host, so each
+/// host Tcode implements has its terms here, in [`HOSTS`].
+#[derive(Debug)]
+pub struct HostTerms {
+    /// As the host names itself.
+    pub name: &'static str,
+    /// The host's CLIs, which create pull requests without linking them to a thread.
+    pub clis: &'static str,
+    /// The host's native stacks as the instructions name them, and their documentation.
+    pub stacks: Option<(&'static str, &'static str)>,
+    /// Each CLI's tool and noun before `merge` or `close` in a command that merges or closes a
+    /// pull request.
+    pub merge_commands: &'static [(&'static str, &'static str)],
+    /// Whether a web URL reads as one of the host's pull requests: a menu hint only, since the
+    /// host validates and canonicalizes the target.
+    pub pull_request_url: fn(&str) -> bool,
 }
 
-/// GitHub's documentation of native stacks, which the instructions and the stack map both link.
-pub const STACKS_DOCS_URL: &str = stacks_docs!();
+pub const GITHUB: HostTerms = HostTerms {
+    name: "GitHub",
+    clis: "gh, gh stack",
+    stacks: Some(("GitHub native stacks", STACKS_DOCS_URL)),
+    // Upstream's pattern, which names GitLab's CLI as well; it moves to GitLab's terms with it.
+    merge_commands: &[("gh", "pr"), ("glab", "mr")],
+    pull_request_url: |value| {
+        let value = value.split(['?', '#']).next().unwrap_or_default();
+        let Some(rest) = value
+            .strip_prefix("https://")
+            .or_else(|| value.strip_prefix("http://"))
+        else {
+            return false;
+        };
+        let parts: Vec<_> = rest.split('/').collect();
+        let [host, owner, repository, "pull", number, ..] = parts.as_slice() else {
+            return false;
+        };
+        !host.is_empty()
+            && !owner.is_empty()
+            && !repository.is_empty()
+            && number.parse::<u64>().is_ok_and(|number| number > 0)
+    },
+};
+
+/// Every host Tcode reads pull requests from.
+pub const HOSTS: &[&HostTerms] = &[&GITHUB];
+
+const LINKING_OPEN: &str = "<pull_request_linking>\n";
+const LINKING_CLOSE: &str = "\n</pull_request_linking>\n\n";
 
 /// Prepended to each turn while the pull request tools are registered; the transcript shows it.
-pub const LINKING_INSTRUCTIONS: &str = concat!(
-    "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see ",
-    stacks_docs!(),
-    " .\n</pull_request_linking>\n\n"
-);
+pub fn linking_instructions(terms: &HostTerms) -> String {
+    let mut text = format!(
+        "{LINKING_OPEN}When the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to {}, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.",
+        terms.clis
+    );
+    if let Some((stacks, docs)) = terms.stacks {
+        text.push_str(&format!(
+            "\nFor dependent changes, {stacks} preserve the full bottom-to-top topology and merge scope; see {docs} ."
+        ));
+    }
+    text.push_str(LINKING_CLOSE);
+    text
+}
 
-/// The rest of a turn's injected context when it leads with [`LINKING_INSTRUCTIONS`].
+/// The rest of a turn's injected context when it leads with the linking instructions, whichever
+/// host's they were.
 pub fn strip_linking_instructions(context: &str) -> Option<&str> {
-    context.strip_prefix(LINKING_INSTRUCTIONS)
+    let block = context.strip_prefix(LINKING_OPEN)?;
+    let end = block.find(LINKING_CLOSE)?;
+    Some(&block[end + LINKING_CLOSE.len()..])
+}
+
+/// Whether an agent's command merges or closes a pull request through one of the CLIs in
+/// `commands`: upstream's `\b(?:gh\s+pr|glab\s+mr)\s+(?:merge|close)\b` over the raw text.
+pub fn merges_or_closes(command: &str, commands: &[(&str, &str)]) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let spaced = |text: &str, rest: &str| -> Option<usize> {
+        let trimmed = rest.trim_start();
+        (trimmed.len() < rest.len() && trimmed.starts_with(text))
+            .then(|| rest.len() - trimmed.len() + text.len())
+    };
+    command.char_indices().any(|(start, _)| {
+        if command[..start].ends_with(word) {
+            return false;
+        }
+        let rest = &command[start..];
+        let Some(rest) = commands.iter().find_map(|(tool, noun)| {
+            let after = rest.strip_prefix(tool)?;
+            Some(&after[spaced(noun, after)?..])
+        }) else {
+            return false;
+        };
+        ["merge", "close"]
+            .into_iter()
+            .any(|verb| spaced(verb, rest).is_some_and(|end| !rest[end..].starts_with(word)))
+    })
 }
 
 /// `repository` is a canonical locator supplied by the forge adapter, opaque to core.
@@ -1054,28 +1135,41 @@ pub fn submitted_review(
     true
 }
 
-/// A menu visibility hint only; the host forge adapter validates and canonicalizes the target.
+/// A menu visibility hint only; the host validates and canonicalizes the target.
 pub fn is_pull_request_url(value: &str) -> bool {
-    let value = value.split(['?', '#']).next().unwrap_or_default();
-    let Some(rest) = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    let parts: Vec<_> = rest.split('/').collect();
-    let [host, owner, repository, "pull", number, ..] = parts.as_slice() else {
-        return false;
-    };
-    !host.is_empty()
-        && !owner.is_empty()
-        && !repository.is_empty()
-        && number.parse::<u64>().is_ok_and(|number| number > 0)
+    HOSTS.iter().any(|terms| (terms.pull_request_url)(value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn merge_or_close_detection_matches_words_in_the_raw_command() {
+        for command in [
+            "gh pr merge 12 --squash",
+            "cd repo && gh pr close 3",
+            "(gh  pr\tmerge)",
+            "glab mr merge 4",
+        ] {
+            assert!(
+                merges_or_closes(command, GITHUB.merge_commands),
+                "{command}"
+            );
+        }
+        for command in [
+            "gh pr view 12",
+            "ugh pr merge",
+            "gh pr merged",
+            "gh prmerge",
+            "echo gh pr",
+        ] {
+            assert!(
+                !merges_or_closes(command, GITHUB.merge_commands),
+                "{command}"
+            );
+        }
+    }
+
     fn link(number: u64, state: Option<PullRequestState>, draft: bool) -> ThreadPullRequestLink {
         ThreadPullRequestLink {
             key: PullRequestKey::new("github.com", "sample/project", number),

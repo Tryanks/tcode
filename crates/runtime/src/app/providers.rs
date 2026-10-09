@@ -664,12 +664,10 @@ impl AppState {
         }
         self.providers.tcode_update.checking = true;
         let current = self.providers.tcode_update.current.clone();
-        let github = self.github.clone();
+        let releases = self.releases.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let fetched = host_cx
-                .unblock(move || fetch_latest_tcode_release_json(&github))
-                .await;
+            let fetched = host_cx.unblock(move || releases.latest_json()).await;
             let fetched = match &fetched {
                 Ok(bytes) => Ok(bytes.as_slice()),
                 Err(error) => Err(*error),

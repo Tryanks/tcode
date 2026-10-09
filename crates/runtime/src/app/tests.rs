@@ -4318,14 +4318,14 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     active.push_queued("first".into(), Vec::new());
     active.push_queued("second".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let first_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
         }) if text == "first" => delivery_id,
         other => panic!("expected first SendTurn, got {other:?}"),
     };
-    assert_eq!(active.dispatch_next_pending(false), Ok(false));
+    assert_eq!(active.dispatch_next_pending(None), Ok(false));
     assert!(receiver.try_recv().is_err());
     assert_eq!(active.queue.len(), 2, "unaccepted head stays queued");
     assert_eq!(
@@ -4336,7 +4336,7 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     assert_eq!(active.queue[0].text, "second");
 
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let second_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
@@ -4358,7 +4358,7 @@ fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
     );
     let ordinary_id = active.push_queued("now".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn {
@@ -4730,7 +4730,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
             assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
         } else {
             active.push_queued("next turn".into(), Vec::new());
-            assert_eq!(active.dispatch_next_pending(false), Ok(true));
+            assert_eq!(active.dispatch_next_pending(None), Ok(true));
             let SessionCommand::SendTurn {
                 options: Some(options),
                 ..
@@ -5090,7 +5090,7 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     };
     active.push_queued(String::new(), vec![attachment.clone()]);
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let delivery_id = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id,
@@ -5119,7 +5119,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     active.queue[0].relay_transcript = Some("# prior work".into());
     active.push_queued("follow up".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let first = receiver.try_recv().unwrap();
     let SessionCommand::SendTurn {
         delivery_id, text, ..
@@ -5133,7 +5133,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
 
     active.accept_turn_delivery(delivery_id).unwrap();
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
@@ -11207,9 +11207,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     .unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, _| {
-        state.github = tcode_services::github::GitHubApi::host(
-            tcode_services::github::Credentials::new(SettingsStore::new(store.root().clone()), []),
-        );
+        state.forge = tcode_services::forge::connect(SettingsStore::new(store.root().clone()), []);
     });
     state.dispatch_command(
         cx,

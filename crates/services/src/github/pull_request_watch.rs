@@ -6,6 +6,7 @@ use super::{
     graphql::{self, AliasItem, Document, Variables},
     repository::Repository,
 };
+use crate::forge::{Fingerprint, Tail, Tails};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tcode_core::{
@@ -16,22 +17,6 @@ use tcode_core::{
 /// Past this many requests a list is reported incomplete rather than read on.
 const MAX_PAGES: usize = 10;
 const FINGERPRINT_BATCH: usize = 25;
-
-/// Two parts, so a watch reads only what moved: `status` needs the detail read, `remarks` the
-/// far costlier activity read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fingerprint {
-    pub status: String,
-    pub remarks: String,
-}
-
-/// Replies past one review thread's first page.
-#[derive(Debug, Clone)]
-pub struct Tail {
-    count: u64,
-    comments: Vec<PullRequestRemark>,
-}
-pub type Tails = HashMap<String, Tail>;
 
 /// What a watch must notice, priced by GitHub at one point for twenty-five pull requests.
 const FINGERPRINT_SELECTION: &str = "state mergeable headRefOid comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { totalCount nodes { lastEditedAt } } reviews(last: 100) { totalCount nodes { lastEditedAt } } reviewThreads { totalCount } commits(last: 1) { nodes { commit { statusCheckRollup { contexts { checkRunCountsByState { state count } statusContextCountsByState { state count } } } } } }";

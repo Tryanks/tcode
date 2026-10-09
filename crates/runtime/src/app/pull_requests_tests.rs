@@ -4,7 +4,10 @@ use serde_json::{Value, json};
 use std::sync::Mutex;
 use tcode_core::pull_request::{PullRequestReviewDraftEdit, PullRequestStack};
 use tcode_protocol::Command;
-use tcode_services::{github::Credentials, settings::SettingsStore};
+use tcode_services::{
+    github::{Credentials, GitHub, GitHubApi},
+    settings::SettingsStore,
+};
 
 use crate::app::test_support::github_fixture as fixture;
 
@@ -64,18 +67,18 @@ fn pr(number: u64, state: &str, stack: bool) -> Value {
         "stack": if stack { json!({"number": 7}) } else { Value::Null },
     })
 }
-fn client(store: &SessionStore, fixture: &fixture::Fixture) -> Arc<GitHubApi> {
+fn client(store: &SessionStore, fixture: &fixture::Fixture) -> Arc<dyn Forge> {
     client_as(store, fixture, "fixture")
 }
 /// The host reading GitHub with `token`, which names the account.
-fn client_as(store: &SessionStore, fixture: &fixture::Fixture, token: &str) -> Arc<GitHubApi> {
-    GitHubApi::new(
+fn client_as(store: &SessionStore, fixture: &fixture::Fixture, token: &str) -> Arc<dyn Forge> {
+    GitHub::new(GitHubApi::new(
         Credentials::new(
             SettingsStore::new(store.root().to_path_buf()),
             [("GH_TOKEN".into(), token.into())],
         ),
         fixture.builder(),
-    )
+    ))
 }
 fn linked_meta(id: &str, settled: bool) -> SessionMeta {
     let mut meta = SessionMeta::new(
@@ -252,27 +255,6 @@ fn shared_sync_changes_only_observations_and_honors_terminal_cadence() {
             .snapshot
             .is_none()
     }));
-}
-
-#[test]
-fn merge_or_close_detection_matches_words_in_the_raw_command() {
-    for command in [
-        "gh pr merge 12 --squash",
-        "cd repo && gh pr close 3",
-        "(gh  pr\tmerge)",
-        "glab mr merge 4",
-    ] {
-        assert!(merges_or_closes(command), "{command}");
-    }
-    for command in [
-        "gh pr view 12",
-        "ugh pr merge",
-        "gh pr merged",
-        "gh prmerge",
-        "echo gh pr",
-    ] {
-        assert!(!merges_or_closes(command), "{command}");
-    }
 }
 
 #[test]
@@ -509,7 +491,7 @@ fn rate_limit_keeps_requests_due_until_host_pause_expires() {
         for until in state.pull_requests.paused.values_mut() {
             *until = SystemTime::now() - Duration::from_secs(1);
         }
-        state.pull_requests.service = PullRequests::new(unpaused_api);
+        state.pull_requests.forge = unpaused_api;
     });
     sweep(&state, &mut cx);
     assert_eq!(*calls.lock().unwrap(), 2);
@@ -913,7 +895,10 @@ fn registered_tools_prefix_each_turn_except_a_native_command() {
         if instructed {
             assert_eq!(
                 text,
-                format!("{}{typed}", pull_request::LINKING_INSTRUCTIONS)
+                format!(
+                    "{}{typed}",
+                    pull_request::linking_instructions(&pull_request::GITHUB)
+                )
             );
         } else {
             assert_eq!(text, typed_wire, "a native command stays at byte zero");

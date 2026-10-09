@@ -12,16 +12,17 @@ mod query;
 pub use preview::{PreviewRequest, PreviewResponse};
 pub use pull_request::{
     MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult,
-    PullRequestActionState, PullRequestActor, PullRequestComment, PullRequestConversation,
-    PullRequestFile, PullRequestFileText, PullRequestFiles, PullRequestLabel,
-    PullRequestLabelCandidate, PullRequestLabelCandidates, PullRequestMedia, PullRequestMergeState,
-    PullRequestPatch, PullRequestPermissions, PullRequestReaction, PullRequestReactionContent,
-    PullRequestRead, PullRequestReadResponse, PullRequestRejection, PullRequestReviewAnchor,
-    PullRequestReviewState, PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
-    PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestReviewerKind,
-    PullRequestReviewerState, PullRequestStackActionState, PullRequestStackHead,
-    PullRequestStackLayerState, PullRequestStackPushAccess, PullRequestThreadReplies,
-    PullRequestViewedFiles, PullRequestViewedState,
+    PullRequestActionState, PullRequestActor, PullRequestCapabilities, PullRequestComment,
+    PullRequestConversation, PullRequestFile, PullRequestFileText, PullRequestFiles,
+    PullRequestLabel, PullRequestLabelCandidate, PullRequestLabelCandidates, PullRequestMedia,
+    PullRequestMergeState, PullRequestPatch, PullRequestPermissions, PullRequestReaction,
+    PullRequestReactionContent, PullRequestRead, PullRequestReadResponse, PullRequestRejection,
+    PullRequestReviewAnchor, PullRequestReviewState, PullRequestReviewThread,
+    PullRequestReviewVerdict, PullRequestReviewer, PullRequestReviewerCandidate,
+    PullRequestReviewerCandidates, PullRequestReviewerKind, PullRequestReviewerState,
+    PullRequestStackActionState, PullRequestStackHead, PullRequestStackLayerState,
+    PullRequestStackPushAccess, PullRequestThreadReplies, PullRequestViewedFiles,
+    PullRequestViewedState,
 };
 pub mod terminal;
 mod wire;
@@ -138,6 +139,10 @@ pub use wire::{
 // StackState; thread metadata carries pull_request_operations, the stack writes
 // running or unconfirmed and a rebase's end until the next full sync; the
 // PullRequestStack toast reports how one ended.
+// Unreleased: a files read names the page it asks for by an opaque cursor, which
+// PullRequestFiles.next_cursor carries in place of next_page; reviewers carry
+// an opaque id and labels an id that SetLabels names them by; the conversation
+// and the action state carry the host's capabilities.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

@@ -8,7 +8,10 @@ use rmcp::{
     },
 };
 use serde::Deserialize;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +41,9 @@ pub struct PullRequestMcpServer {
     pub url: String,
     pub tokens: TokenRegistry,
     pub requests: async_channel::Receiver<BrokerRequest>,
+    /// How the pull request host names itself, which the tool descriptions name; set once by
+    /// the runtime that answers the tools.
+    pub host_name: Arc<OnceLock<&'static str>>,
 }
 pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
     let (sender, requests) = async_channel::unbounded();
@@ -50,10 +56,19 @@ pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
             timed_out: "pull request operation timed out",
         },
     );
+    let host_name = Arc::new(OnceLock::new());
+    let named = host_name.clone();
     let tokens = TokenRegistry::new(move |session_id| {
-        let broker = broker.clone();
+        let (broker, named) = (broker.clone(), named.clone());
         StreamableHttpService::new(
-            move || Ok(PullRequestTools::new(broker.clone(), session_id.clone())),
+            move || {
+                let host = named.get().copied().unwrap_or("the host");
+                Ok(PullRequestTools::new(
+                    broker.clone(),
+                    session_id.clone(),
+                    host,
+                ))
+            },
             Arc::new(LocalSessionManager::default()),
             StreamableHttpServerConfig::default(),
         )
@@ -63,6 +78,7 @@ pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
         url: host.url("/pull-requests"),
         tokens,
         requests,
+        host_name,
     }
 }
 #[derive(Clone)]
@@ -73,11 +89,17 @@ pub struct PullRequestTools {
 }
 #[tool_router]
 impl PullRequestTools {
-    fn new(broker: Broker, session_id: String) -> Self {
+    fn new(broker: Broker, session_id: String, host: &str) -> Self {
+        let mut tool_router = Self::tool_router();
+        for route in tool_router.map.values_mut() {
+            if let Some(description) = &mut route.attr.description {
+                *description = description.replace(HOST, host).into();
+            }
+        }
         Self {
             broker,
             session_id,
-            tool_router: Self::tool_router(),
+            tool_router,
         }
     }
     async fn invoke(&self, operation: Operation) -> CallToolResult {
@@ -107,7 +129,7 @@ impl PullRequestTools {
         self.invoke(Operation::Unlink(target)).await
     }
     #[tool(
-        description = "List this thread's visible linked PRs, their source, last known state and stack position. This reads stored state without asking GitHub. Before finishing PR work, list and link anything missing."
+        description = "List this thread's visible linked PRs, their source, last known state and stack position. This reads stored state without asking {host}. Before finishing PR work, list and link anything missing."
     )]
     async fn list_thread_pull_requests(&self) -> CallToolResult {
         self.invoke(Operation::List).await
@@ -126,21 +148,25 @@ impl PullRequestTools {
     }
 }
 
-/// Every tool's name and the description its model reads, in the order they are listed.
-pub fn tool_descriptions() -> &'static [(String, String)] {
-    static TOOLS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
-    TOOLS.get_or_init(|| {
-        PullRequestTools::tool_router()
-            .list_all()
-            .into_iter()
-            .map(|tool| {
-                (
-                    tool.name.to_string(),
-                    tool.description.as_deref().unwrap_or_default().to_owned(),
-                )
-            })
-            .collect()
-    })
+/// Where a tool description names the pull request host.
+const HOST: &str = "{host}";
+
+/// Every tool's name and the description its model reads with `host` named, in the order they
+/// are listed.
+pub fn tool_descriptions(host: &str) -> Vec<(String, String)> {
+    PullRequestTools::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.to_string(),
+                tool.description
+                    .as_deref()
+                    .unwrap_or_default()
+                    .replace(HOST, host),
+            )
+        })
+        .collect()
 }
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PullRequestTools {

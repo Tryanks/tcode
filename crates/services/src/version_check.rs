@@ -2,10 +2,28 @@
 
 use std::time::Duration;
 
-use crate::github::{GitHubApi, GitHubError, RequestOptions, RestRequest, api::Authentication};
+use crate::{
+    github::{
+        Credentials, GitHubApi, GitHubError, RequestOptions, RestRequest, api::Authentication,
+    },
+    settings::SettingsStore,
+};
 use serde::Deserialize;
+use std::sync::Arc;
 
 pub mod provider_updates;
+
+/// Tcode's own releases, read without a credential from GitHub, where Tcode is published.
+pub struct ReleaseFeed(Arc<GitHubApi>);
+impl ReleaseFeed {
+    pub fn new(store: SettingsStore) -> Self {
+        Self(GitHubApi::host(Credentials::new(store, [])))
+    }
+
+    pub fn latest_json(&self) -> Result<Vec<u8>, FetchError> {
+        fetch_latest_tcode_release_json(&self.0)
+    }
+}
 
 pub fn fetch_latest_tcode_release_json(api: &GitHubApi) -> Result<Vec<u8>, FetchError> {
     api.rest(

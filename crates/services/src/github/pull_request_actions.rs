@@ -2,7 +2,7 @@
 //! whatever a write may have changed is dropped from the reads, so the next read sees it.
 
 use super::{
-    CredentialError, Fresh, GitHubError, RequestOptions, RestRequest,
+    Fresh, GitHubError, RequestOptions, RestRequest,
     graphql::Document,
     merge_message::remove_agent_credits,
     pull_request_reads::{
@@ -10,8 +10,9 @@ use super::{
     },
     pull_request_watch,
 };
+use crate::forge::{Anchoring, Moved};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::UNIX_EPOCH};
+use std::collections::BTreeMap;
 use tcode_core::{
     pull_request::{PullRequestKey, PullRequestMergeMethod, PullRequestReviewDraftComment},
     pull_request_watch::CheckStatus,
@@ -48,7 +49,10 @@ fn method_of(name: &str) -> Option<PullRequestMergeMethod> {
 }
 
 /// The pull request's node id and its action state.
-fn action_state(response: &Value) -> Result<(String, PullRequestActionState), GitHubError> {
+fn action_state(
+    host: &str,
+    response: &Value,
+) -> Result<(String, PullRequestActionState), GitHubError> {
     let repository = &response["data"]["repository"];
     let pr = &repository["pullRequest"];
     if pr.is_null() {
@@ -113,6 +117,7 @@ fn action_state(response: &Value) -> Result<(String, PullRequestActionState), Gi
         can_update: pr["viewerCanUpdate"].as_bool() == Some(true),
         can_update_branch: pr["viewerCanUpdateBranch"].as_bool() == Some(true),
         can_merge: writes,
+        capabilities: super::forge::capabilities(host),
     };
     Ok((id.to_owned(), state))
 }
@@ -135,17 +140,6 @@ fn merge_outcome(pr: &Value) -> Outcome {
     } else {
         Outcome::Uncertain
     }
-}
-
-/// A pending comment's id and the revision its lines now read at, if they still do.
-pub type Moved = (u64, Option<String>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Anchoring {
-    InDiff,
-    OutsideDiff,
-    /// The pull request is at another head now.
-    Moved,
 }
 
 /// Whether the lines fall inside one hunk of the file on that side; GitHub refuses a review
@@ -186,22 +180,7 @@ fn in_hunks(
 
 /// Why a write was not sent, or why GitHub refused it.
 pub fn rejection(error: GitHubError) -> Rejection {
-    match error {
-        GitHubError::Credential(CredentialError::Disabled) => Rejection::HostDisabled,
-        GitHubError::Credential(_) | GitHubError::Unauthorized => Rejection::NoCredential,
-        GitHubError::RateLimited { retry_at, .. } | GitHubError::Paused { retry_at } => {
-            Rejection::RateLimited {
-                retry_at: retry_at
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            }
-        }
-        GitHubError::NotFound => Rejection::NotFound,
-        GitHubError::Response { messages, .. } => Rejection::Refused { messages },
-        GitHubError::InvalidInput => Rejection::Invalid,
-        _ => Rejection::Failed,
-    }
+    crate::forge::ForgeError::from(error).rejection()
 }
 
 /// The answer to a write that was sent. Without an answer, or with a server failure, GitHub may
@@ -270,7 +249,7 @@ impl Reader<'_> {
                 json!(format!("refs/pull/{}/head", self.key.number)),
             )],
         )?;
-        action_state(&response)
+        action_state(&self.key.host, &response)
     }
 
     /// GitHub's merge or squash message without agents' credits, when that differs from it.
@@ -649,7 +628,7 @@ impl PullRequestReads {
                         reviewers
                             .iter()
                             .filter(|reviewer| reviewer.kind == kind)
-                            .map(|reviewer| reviewer.login.as_str())
+                            .map(|reviewer| reviewer.id.as_str())
                             .collect::<Vec<_>>()
                     };
                     // GitHub takes a request back from exactly whoever it was made of, so both

@@ -31,18 +31,7 @@ pub enum MergeStatus {
     Failed { message: Option<String> },
 }
 
-/// What became of a stack merge's submission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MergeSubmission {
-    /// Answered at once, or refused before anything was sent.
-    Done(Outcome),
-    /// GitHub works on operation `id`; `adopted` when it was already running.
-    Following {
-        id: String,
-        adopted: bool,
-        layers: Vec<u64>,
-    },
-}
+pub use crate::forge::MergeSubmission;
 
 /// A rebase the host may start: the stack's base, its unmerged layers bottom first with the
 /// heads that were reviewed, and where to fetch and push them.
@@ -101,24 +90,6 @@ pub fn merge_outcome(status: &MergeStatus) -> Option<Outcome> {
         }),
     })
 }
-
-/// The seconds after submission at which a pending merge is asked about again: 1, 2, 4, 8 and
-/// then 10 seconds apart, up to five minutes.
-pub fn poll_schedule() -> Vec<u64> {
-    let mut at = Vec::new();
-    let mut elapsed = 0;
-    for attempt in 0.. {
-        elapsed += (1u64 << attempt.min(4)).min(10);
-        if elapsed > MERGE_DEADLINE_SECS {
-            break;
-        }
-        at.push(elapsed);
-    }
-    at
-}
-
-/// How long the host follows a pending merge after submitting it.
-pub const MERGE_DEADLINE_SECS: u64 = 300;
 
 /// The layers a write goes ahead with must be exactly `expected`, each at its confirmed head:
 /// a layer added, removed or reordered, or a head moved, rejects it before anything is sent.
