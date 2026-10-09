@@ -443,6 +443,10 @@ impl Textarea {
         self.input = self.input.h(value);
         self
     }
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.input = self.input.aria_label(label);
+        self
+    }
 }
 impl Styled for Textarea {
     fn style(&mut self) -> &mut StyleRefinement {

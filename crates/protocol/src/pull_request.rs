@@ -34,6 +34,11 @@ pub enum PullRequestRead {
         url: String,
         validator: Option<String>,
     },
+    /// The repository's labels, with the ones on the pull request marked.
+    LabelCandidates,
+    /// Whoever the pull request may be sent to for review, with current requests marked. The
+    /// organization's teams are not listed: that needs `read:org`, which a token need not carry.
+    ReviewerCandidates,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,10 +95,35 @@ pub struct PullRequestActor {
     pub avatar_url: Option<String>,
 }
 
+/// The reactions GitHub offers, in the order its picker shows them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestReactionContent {
+    ThumbsUp,
+    ThumbsDown,
+    Laugh,
+    Hooray,
+    Confused,
+    Heart,
+    Rocket,
+    Eyes,
+}
+impl PullRequestReactionContent {
+    pub const ALL: [Self; 8] = [
+        Self::ThumbsUp,
+        Self::ThumbsDown,
+        Self::Laugh,
+        Self::Hooray,
+        Self::Confused,
+        Self::Heart,
+        Self::Rocket,
+        Self::Eyes,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestReaction {
-    /// GitHub's reaction name, such as `THUMBS_UP`.
-    pub content: String,
+    pub content: PullRequestReactionContent,
     pub count: u64,
     pub viewer_reacted: bool,
 }
@@ -120,6 +150,11 @@ pub struct PullRequestComment {
     /// Set for a review's own body.
     pub review_state: Option<PullRequestReviewState>,
     pub reactions: Vec<PullRequestReaction>,
+    /// GitHub lets the signed-in account change its text: its own, or a maintainer's right.
+    #[serde(default)]
+    pub viewer_can_update: bool,
+    #[serde(default)]
+    pub viewer_can_react: bool,
 }
 
 /// Where a review thread was left: lines of one side of a file at one commit.
@@ -147,6 +182,11 @@ pub struct PullRequestReviewThread {
     pub total_comments: u64,
     /// Where [`PullRequestRead::ThreadReplies`] carries on, while replies remain unread.
     pub replies_after: Option<String>,
+    #[serde(default)]
+    pub viewer_can_reply: bool,
+    /// Whether the signed-in account may resolve it, or unresolve it once resolved.
+    #[serde(default)]
+    pub viewer_can_resolve: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +200,41 @@ pub struct PullRequestConversation {
     /// Opaque, and different for each GitHub account the host reads as: a client keys the
     /// media this conversation shows by it, so no copy outlives an account change.
     pub account: String,
+    #[serde(default)]
+    pub permissions: PullRequestPermissions,
+    #[serde(default)]
+    pub labels: Vec<PullRequestLabel>,
+    /// Requested reviewers first, then whoever reviewed without a request outstanding.
+    #[serde(default)]
+    pub reviewers: Vec<PullRequestReviewerState>,
+}
+
+/// What the signed-in account may do to the pull request, as GitHub grants it. Per-comment and
+/// per-thread rights travel on the comment and thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestPermissions {
+    /// Edit the title and description.
+    pub update: bool,
+    /// Empty when the account may not review; the author may only comment.
+    pub verdicts: Vec<PullRequestReviewVerdict>,
+    pub label: bool,
+    pub request_reviewers: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestLabel {
+    pub name: String,
+    /// Hex without the `#`.
+    pub color: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReviewerState {
+    pub reviewer: PullRequestReviewer,
+    pub avatar_url: Option<String>,
+    /// `None` while a review is requested and not yet given.
+    pub verdict: Option<PullRequestReviewState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,12 +279,163 @@ pub enum PullRequestMedia {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestLabelCandidate {
+    pub name: String,
+    /// Hex without the `#`.
+    pub color: Option<String>,
+    pub description: Option<String>,
+    pub applied: bool,
+}
+
+/// Labels on the pull request lead, including any the repository no longer lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestLabelCandidates {
+    pub labels: Vec<PullRequestLabelCandidate>,
+    /// False when the repository has more labels than one page.
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestReviewerKind {
+    User,
+    /// Named by its slug.
+    Team,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReviewer {
+    pub login: String,
+    pub kind: PullRequestReviewerKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReviewerCandidate {
+    pub reviewer: PullRequestReviewer,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub requested: bool,
+}
+
+/// Current requests lead, even for someone GitHub no longer counts assignable; the author is
+/// left out, since GitHub refuses to ask them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReviewerCandidates {
+    pub reviewers: Vec<PullRequestReviewerCandidate>,
+    /// False when the repository has more assignable people than one page.
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum PullRequestReadResponse {
     Files(PullRequestFiles),
     FileText(PullRequestFileText),
-    Conversation(PullRequestConversation),
+    Conversation(Box<PullRequestConversation>),
     ThreadReplies(PullRequestThreadReplies),
     ViewedFiles(PullRequestViewedFiles),
     Media(PullRequestMedia),
+    LabelCandidates(PullRequestLabelCandidates),
+    ReviewerCandidates(PullRequestReviewerCandidates),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestReviewVerdict {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+/// A write to a linked pull request. Each is sent once: a result that cannot say whether GitHub
+/// applied it is reported as uncertain, never tried again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum PullRequestAction {
+    Comment {
+        body: String,
+    },
+    /// Sends the thread's review draft of the pull request in one submission. `head` is the
+    /// commit the reviewer read; a pull request whose head has moved since keeps the draft.
+    SubmitReview {
+        verdict: PullRequestReviewVerdict,
+        head: String,
+    },
+    ReplyToThread {
+        thread_id: String,
+        body: String,
+    },
+    ResolveThread {
+        thread_id: String,
+        resolved: bool,
+    },
+    /// `subject_id` names the pull request itself, a comment or a review.
+    React {
+        subject_id: String,
+        content: PullRequestReactionContent,
+        reacted: bool,
+    },
+    /// An issue comment or a review comment.
+    EditComment {
+        comment_id: String,
+        body: String,
+    },
+    /// A field left `None` is not sent, so GitHub keeps its text.
+    Edit {
+        title: Option<String>,
+        body: Option<String>,
+    },
+    /// The additions in one request, then one request per removal, in order, stopping at the
+    /// first that fails.
+    SetLabels {
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    /// The additions in one request, then the removals in another.
+    SetReviewers {
+        add: Vec<PullRequestReviewer>,
+        remove: Vec<PullRequestReviewer>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum PullRequestActionResult {
+    Applied,
+    /// Nothing was written.
+    Rejected(PullRequestRejection),
+    /// A write of several requests stopped: `applied` went through, `failure` is what became of
+    /// the first of `unapplied`, and the rest were not sent.
+    Partial {
+        applied: Vec<String>,
+        unapplied: Vec<String>,
+        failure: Box<PullRequestActionResult>,
+    },
+    /// The write was sent and no answer says whether GitHub applied it.
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum PullRequestRejection {
+    /// The pull request's head is `head`, not the commit the review was written against.
+    StaleHead {
+        head: String,
+    },
+    /// The named comment, review or thread belongs to another pull request.
+    ForeignSubject,
+    /// A review with nothing in it, an empty comment, or a subject of the wrong kind.
+    Invalid,
+    NoCredential,
+    HostDisabled,
+    RateLimited {
+        retry_at: u64,
+    },
+    NotFound,
+    /// GitHub refused the write, in its own words.
+    Refused {
+        messages: Vec<String>,
+    },
+    /// A read the write needed failed, so it was not sent.
+    Failed,
 }

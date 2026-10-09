@@ -246,6 +246,8 @@ impl AppState {
                 | Command::UnlinkPullRequest { session_id, .. }
                 | Command::SetPullRequestFilesViewed { session_id, .. }
                 | Command::RefreshPullRequest { session_id, .. }
+                | Command::RunPullRequestAction { session_id, .. }
+                | Command::EditPullRequestReviewDraft { session_id, .. }
                 | Command::WatchPullRequest { session_id, .. }
                 | Command::Interrupt { session_id }
                 | Command::SetActiveModel { session_id, .. }

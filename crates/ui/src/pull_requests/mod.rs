@@ -30,9 +30,12 @@ use tcode_core::{
 };
 use tcode_protocol::Command;
 
+mod compose;
 mod conversation;
 mod detail;
 mod files;
+mod meta;
+mod review;
 
 pub use detail::PullRequestView;
 

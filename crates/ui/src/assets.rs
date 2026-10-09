@@ -20,6 +20,12 @@ gpui_component_assets::icon_assets!(
         MessageSquareMore,
         MessageSquareWarning,
         Unlink,
+        Trash,
+        Sticker,
+        RotateCcw,
+        Users,
+        Tag,
+        CircleDot,
     ]
 );
 

@@ -3,10 +3,15 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tcode_core::{pull_request::PullRequestKey, session::ReviewSide};
+use tcode_core::{
+    pull_request::{PullRequestKey, PullRequestReviewDraftComment},
+    session::ReviewSide,
+};
 use tcode_protocol::{
-    PullRequestFileText, PullRequestMedia, PullRequestPatch, PullRequestReviewAnchor,
-    PullRequestViewedState,
+    PullRequestAction, PullRequestActionResult, PullRequestFileText, PullRequestMedia,
+    PullRequestPatch, PullRequestPermissions, PullRequestReactionContent, PullRequestRejection,
+    PullRequestReviewAnchor, PullRequestReviewState, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestReviewerKind, PullRequestViewedState,
 };
 use tcode_services::github::{GitHubApi, GitHubError, pull_request_reads::PullRequestReads};
 
@@ -68,7 +73,8 @@ impl Seen {
 
 type Log = Arc<Mutex<Vec<Seen>>>;
 
-/// Answers each request with `answer(seen)` and keeps what it saw.
+/// Answers each request with `answer(seen)` and keeps what it saw. A status of 0 closes the
+/// connection unanswered, as a request lost after it reached GitHub would leave it.
 fn serve(
     fixture: Fixture,
     answer: impl Fn(&Seen) -> (u16, String, Vec<u8>) + Send + 'static,
@@ -79,7 +85,9 @@ fn serve(
         let request = Seen::from(&exchange);
         let (status, headers, body) = answer(&request);
         seen.lock().unwrap().push(request);
-        exchange.reply(status, &headers, &body);
+        if status != 0 {
+            exchange.reply(status, &headers, &body);
+        }
     });
     (server, log)
 }
@@ -400,8 +408,19 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
         })
     };
     match seen.operation().as_deref() {
-        Some("PullRequestConversation") => {
-            json_reply(json!({"data": {"repository": {"pullRequest": {
+        Some("PullRequestConversation") => json_reply(
+            json!({"data": {"repository": {"viewerPermission": "TRIAGE", "pullRequest": {
+                "viewerCanUpdate": true, "viewerDidAuthor": true,
+                "labels": {"nodes": [{"name": "bug", "color": "d73a4a", "description": null}]},
+                "reviewRequests": {"nodes": [
+                    {"requestedReviewer": {"slug": "core"}},
+                    {"requestedReviewer": {"login": "monalisa", "avatarUrl": null}},
+                ]},
+                "latestReviews": {"nodes": [
+                    {"state": "CHANGES_REQUESTED", "author": {"login": "monalisa"}},
+                    {"state": "APPROVED", "author": {"login": "hubot", "avatarUrl": null}},
+                    {"state": "DISMISSED", "author": {"login": "octocat"}},
+                ]},
                 "id": "PR_7", "body": "Screenshot: ![shot](https://github.com/user-attachments/assets/abc-123)\n<video src=\"https://github.com/user-attachments/assets/vid-1\">\n![](https://github.com/user-attachments/assets/loop) ![](https://github.com/user-attachments/assets/huge) ![](https://github.com/user-attachments/assets/wide) ![](https://github.com/user-attachments/assets/page) ![](https://github.com/user-attachments/assets/dated) ![](https://github.com/user-attachments/assets/unsized) ![](https://user-images.githubusercontent.com/1/legacy.png) Not an avatar: https://avatars.githubusercontent.com/u/5",
                 "createdAt": "2026-10-01T00:00:00Z", "lastEditedAt": null,
                 "url": "https://github.com/octo/repo/pull/7", "author": author, "reactionGroups": [],
@@ -414,8 +433,8 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
                     {"id": "PRR_2", "body": "", "state": "APPROVED", "submittedAt": "2026-10-02T12:00:00Z",
                      "createdAt": "2026-10-02T12:00:00Z", "url": "", "author": author, "reactionGroups": []},
                 ]},
-            }}}}))
-        }
+            }}}}),
+        ),
         Some("PullRequestReviewThreads") => {
             let after = &seen.variables()["cursor"];
             if after.is_null() {
@@ -427,6 +446,7 @@ fn conversation_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
                             "path": "src/lib.rs", "line": null, "startLine": null,
                             "originalLine": 12, "originalStartLine": 10,
                             "diffSide": "RIGHT", "startDiffSide": "RIGHT",
+                            "viewerCanReply": true, "viewerCanResolve": false, "viewerCanUnresolve": true,
                             "comments": {"totalCount": 12,
                                 "pageInfo": {"hasNextPage": true, "endCursor": "C10"},
                                 "nodes": [comment("RC_1", "These three lines ![x](https://github.com/user-attachments/assets/in-thread)", "2026-10-02T01:00:00Z")]},
@@ -480,9 +500,45 @@ fn conversation_keeps_an_outdated_multiline_thread_and_pages_its_replies_within_
     );
     assert_eq!(conversation.comments[1].reactions.len(), 1);
     assert!(conversation.comments[1].reactions[0].viewer_reacted);
+    assert_eq!(
+        conversation.permissions,
+        PullRequestPermissions {
+            update: true,
+            verdicts: vec![PullRequestReviewVerdict::Comment],
+            label: true,
+            request_reviewers: false,
+        },
+        "the author may only comment, and triage labels without requesting reviews"
+    );
+    assert_eq!(
+        conversation
+            .reviewers
+            .iter()
+            .map(|state| (
+                state.reviewer.login.as_str(),
+                state.reviewer.kind,
+                state.verdict
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("core", PullRequestReviewerKind::Team, None),
+            ("monalisa", PullRequestReviewerKind::User, None),
+            (
+                "hubot",
+                PullRequestReviewerKind::User,
+                Some(PullRequestReviewState::Approved)
+            ),
+        ],
+        "a request outstanding outranks the reviewer's last verdict; a dismissed review is none"
+    );
+    assert_eq!(conversation.labels[0].name, "bug");
     let thread = &conversation.threads[0];
     assert_eq!(thread.id, "PRRT_outdated");
     assert!(thread.outdated && thread.resolved);
+    assert!(
+        thread.viewer_can_reply && thread.viewer_can_resolve,
+        "a resolved thread's right is to unresolve it"
+    );
     assert_eq!(
         thread.anchor,
         Some(PullRequestReviewAnchor {
@@ -1031,4 +1087,546 @@ fn media_is_read_only_from_github_hosts_the_conversation_names_and_keeps_the_tok
         "an image elsewhere is the client's to draw by its URL"
     );
     assert_eq!(log.lock().unwrap().len(), before);
+}
+
+/// Where a node id hangs, as `node(id:)` answers it: the conversation's comments, review, thread
+/// and the pull request itself are this one's; `IC_foreign` is another pull request's comment.
+fn subject_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
+    let subject = seen.variables()["subject"].as_str().unwrap().to_owned();
+    let node = match subject.as_str() {
+        "PR_node_7" => json!({"__typename": "PullRequest", "id": "PR_node_7"}),
+        "IC_foreign" => {
+            json!({"__typename": "IssueComment", "id": subject, "pullRequest": {"id": "PR_other"}})
+        }
+        _ => {
+            let kind = match &subject[..subject.find('_').unwrap()] {
+                "IC" => "IssueComment",
+                "RC" => "PullRequestReviewComment",
+                "PRR" => "PullRequestReview",
+                _ => "PullRequestReviewThread",
+            };
+            json!({"__typename": kind, "id": subject, "pullRequest": {"id": "PR_node_7"}})
+        }
+    };
+    json_reply(json!({"data": {
+        "repository": {"pullRequest": {"id": "PR_node_7"}},
+        "node": node,
+    }}))
+}
+
+fn writes_reply(seen: &Seen) -> (u16, String, Vec<u8>) {
+    match seen.operation().as_deref() {
+        Some("PullRequestSubject") => subject_reply(seen),
+        Some(_) if seen.body.contains("\"query\":\"mutation") => {
+            json_reply(json!({"data": {"ok": {"clientMutationId": null}}}))
+        }
+        None if seen.line.starts_with("GET /repos/octo/repo/pulls/7 ") => revisions(1),
+        _ => conversation_reply(seen),
+    }
+}
+
+fn mutations(log: &Log) -> Vec<(String, Value)> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|seen| seen.body.contains("\"query\":\"mutation"))
+        .map(|seen| (seen.operation().unwrap(), seen.variables()))
+        .collect()
+}
+
+#[test]
+fn conversation_writes_send_their_payloads_once_and_the_conversation_is_read_again() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let (_server, log) = serve(fixture, writes_reply);
+    let count = |operation: &str| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.operation().as_deref() == Some(operation))
+            .count()
+    };
+    reads.conversation(&key()).unwrap();
+
+    let actions = [
+        PullRequestAction::Comment {
+            body: "Looks good".into(),
+        },
+        PullRequestAction::Edit {
+            title: Some("Better title".into()),
+            body: None,
+        },
+        PullRequestAction::ReplyToThread {
+            thread_id: "PRRT_1".into(),
+            body: "Fixed".into(),
+        },
+        PullRequestAction::ResolveThread {
+            thread_id: "PRRT_1".into(),
+            resolved: true,
+        },
+        PullRequestAction::EditComment {
+            comment_id: "RC_1".into(),
+            body: "Reworded".into(),
+        },
+        PullRequestAction::React {
+            subject_id: "PRR_2".into(),
+            content: PullRequestReactionContent::Rocket,
+            reacted: true,
+        },
+        PullRequestAction::React {
+            subject_id: "PR_node_7".into(),
+            content: PullRequestReactionContent::ThumbsUp,
+            reacted: false,
+        },
+    ];
+    for action in &actions {
+        assert_eq!(reads.act(&key(), action), PullRequestActionResult::Applied);
+    }
+    assert_eq!(
+        mutations(&log),
+        vec![
+            (
+                "AddPullRequestComment".into(),
+                json!({"subjectId": "PR_node_7", "body": "Looks good"})
+            ),
+            (
+                "EditPullRequest".into(),
+                json!({"pullRequestId": "PR_node_7", "title": "Better title"}),
+            ),
+            (
+                "ReplyToPullRequestThread".into(),
+                json!({"threadId": "PRRT_1", "body": "Fixed"})
+            ),
+            (
+                "ResolvePullRequestThread".into(),
+                json!({"threadId": "PRRT_1"})
+            ),
+            (
+                "EditPullRequestReviewComment".into(),
+                json!({"commentId": "RC_1", "body": "Reworded"})
+            ),
+            (
+                "AddPullRequestReaction".into(),
+                json!({"subjectId": "PRR_2", "content": "ROCKET"})
+            ),
+            (
+                "RemovePullRequestReaction".into(),
+                json!({"subjectId": "PR_node_7", "content": "THUMBS_UP"})
+            ),
+        ],
+        "an edit naming only the title leaves the body out, so GitHub keeps it"
+    );
+    let rest_reads = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|seen| seen.line.starts_with("GET /repos/octo/repo/pulls/7 "))
+        .count();
+    assert_eq!(
+        rest_reads, 1,
+        "the node id comes from one REST read of the pull request"
+    );
+
+    reads.conversation(&key()).unwrap();
+    assert_eq!(
+        count("PullRequestConversation"),
+        2,
+        "a write drops the conversation it changed"
+    );
+}
+
+#[test]
+fn a_subject_of_another_pull_request_is_refused_before_any_mutation() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let (_server, log) = serve(fixture, writes_reply);
+
+    for action in [
+        PullRequestAction::React {
+            subject_id: "IC_foreign".into(),
+            content: PullRequestReactionContent::Heart,
+            reacted: true,
+        },
+        PullRequestAction::EditComment {
+            comment_id: "IC_foreign".into(),
+            body: "Not mine to change".into(),
+        },
+    ] {
+        assert_eq!(
+            reads.act(&key(), &action),
+            PullRequestActionResult::Rejected(PullRequestRejection::ForeignSubject)
+        );
+    }
+    assert!(mutations(&log).is_empty());
+}
+
+#[test]
+fn labels_are_added_in_one_request_and_removed_one_per_request_until_one_fails() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let (_server, log) = serve(fixture, |seen| {
+        if seen
+            .line
+            .starts_with("DELETE /repos/octo/repo/issues/7/labels/needs%2Freview ")
+        {
+            return (
+                422,
+                String::new(),
+                br#"{"message":"Label does not exist"}"#.to_vec(),
+            );
+        }
+        match seen.operation().as_deref() {
+            Some("PullRequestLabelCandidates") => json_reply(json!({"data": {"repository": {
+                "labels": {"pageInfo": {"hasNextPage": true}, "nodes": [
+                    {"name": "bug", "color": "d73a4a", "description": "Something is broken"},
+                    {"name": "docs", "color": "0075ca", "description": null},
+                ]},
+                "pullRequest": {"labels": {"nodes": [{"name": "docs"}, {"name": "retired"}]}},
+            }}})),
+            Some(_) => conversation_reply(seen),
+            None => json_reply(json!([])),
+        }
+    });
+    let lines = || {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.operation().is_none())
+            .map(|seen| {
+                let line = seen.line.rsplit_once(' ').unwrap().0.to_owned();
+                (line, seen.body.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let candidates = reads.label_candidates(&key()).unwrap().value;
+    assert_eq!(
+        candidates
+            .labels
+            .iter()
+            .map(|label| (label.name.as_str(), label.applied))
+            .collect::<Vec<_>>(),
+        vec![("retired", true), ("bug", false), ("docs", true)],
+        "a label the repository no longer lists leads, so it can still be taken off"
+    );
+    assert!(!candidates.complete);
+    reads.conversation(&key()).unwrap();
+
+    assert_eq!(
+        reads.act(
+            &key(),
+            &PullRequestAction::SetLabels {
+                add: vec!["bug".into(), "good first issue".into()],
+                remove: vec!["docs".into(), "needs/review".into(), "retired".into()],
+            }
+        ),
+        PullRequestActionResult::Partial {
+            applied: vec!["bug".into(), "good first issue".into(), "docs".into()],
+            unapplied: vec!["needs/review".into(), "retired".into()],
+            failure: Box::new(PullRequestActionResult::Rejected(
+                PullRequestRejection::Refused {
+                    messages: vec!["Label does not exist".into()]
+                }
+            )),
+        }
+    );
+    assert_eq!(
+        lines(),
+        vec![
+            (
+                "POST /repos/octo/repo/issues/7/labels".into(),
+                r#"{"labels":["bug","good first issue"]}"#.into()
+            ),
+            (
+                "DELETE /repos/octo/repo/issues/7/labels/docs".into(),
+                String::new()
+            ),
+            (
+                "DELETE /repos/octo/repo/issues/7/labels/needs%2Freview".into(),
+                String::new()
+            ),
+        ],
+        "nothing is sent after the label that failed"
+    );
+    reads.label_candidates(&key()).unwrap();
+    reads.conversation(&key()).unwrap();
+    let count = |operation: &str| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| seen.operation().as_deref() == Some(operation))
+            .count()
+    };
+    assert_eq!(
+        (
+            count("PullRequestLabelCandidates"),
+            count("PullRequestConversation")
+        ),
+        (2, 2),
+        "a label write drops the candidates and the conversation that shows the labels"
+    );
+}
+
+#[test]
+fn reviewers_are_offered_without_the_author_and_requested_by_kind() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let (_server, log) = serve(fixture, |seen| match seen.operation().as_deref() {
+        None if seen.line.starts_with("DELETE ") => (
+            422,
+            String::new(),
+            br#"{"message":"Reviews may only be requested from collaborators"}"#.to_vec(),
+        ),
+        Some("PullRequestReviewerCandidates") => json_reply(json!({"data": {"repository": {
+            "assignableUsers": {"pageInfo": {"hasNextPage": false}, "nodes": [
+                {"login": "octocat", "name": "The Author", "avatarUrl": null},
+                {"login": "hubot", "name": null, "avatarUrl": "https://avatars.githubusercontent.com/u/9"},
+                {"login": "monalisa", "name": "Mona", "avatarUrl": null},
+            ]},
+            "pullRequest": {"author": {"login": "octocat"}, "reviewRequests": {"nodes": [
+                {"requestedReviewer": {"slug": "core", "name": "Core", "avatarUrl": null}},
+                {"requestedReviewer": {"login": "monalisa", "name": "Mona", "avatarUrl": null}},
+            ]}},
+        }}})),
+        _ => json_reply(json!({})),
+    });
+
+    let candidates = reads.reviewer_candidates(&key()).unwrap().value;
+    assert_eq!(
+        candidates
+            .reviewers
+            .iter()
+            .map(|candidate| (
+                candidate.reviewer.login.as_str(),
+                candidate.reviewer.kind,
+                candidate.requested
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("core", PullRequestReviewerKind::Team, true),
+            ("monalisa", PullRequestReviewerKind::User, true),
+            ("hubot", PullRequestReviewerKind::User, false),
+        ]
+    );
+    let user = |login: &str| PullRequestReviewer {
+        login: login.into(),
+        kind: PullRequestReviewerKind::User,
+    };
+    assert_eq!(
+        reads.act(
+            &key(),
+            &PullRequestAction::SetReviewers {
+                add: vec![user("hubot")],
+                remove: vec![
+                    user("monalisa"),
+                    PullRequestReviewer {
+                        login: "core".into(),
+                        kind: PullRequestReviewerKind::Team,
+                    },
+                ],
+            }
+        ),
+        PullRequestActionResult::Partial {
+            applied: vec!["hubot".into()],
+            unapplied: vec!["monalisa".into(), "core".into()],
+            failure: Box::new(PullRequestActionResult::Rejected(
+                PullRequestRejection::Refused {
+                    messages: vec!["Reviews may only be requested from collaborators".into()]
+                }
+            )),
+        }
+    );
+    let sent: Vec<_> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|seen| seen.operation().is_none())
+        .map(|seen| (seen.line.clone(), seen.body.clone()))
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            (
+                "POST /repos/octo/repo/pulls/7/requested_reviewers HTTP/1.1".into(),
+                r#"{"reviewers":["hubot"],"team_reviewers":[]}"#.into()
+            ),
+            (
+                "DELETE /repos/octo/repo/pulls/7/requested_reviewers HTTP/1.1".into(),
+                r#"{"reviewers":["monalisa"],"team_reviewers":["core"]}"#.into()
+            ),
+        ],
+        "the additions go in one request and the removals in another"
+    );
+}
+
+fn draft_comment(
+    id: u64,
+    revision: &str,
+    lines: (u32, u32),
+    side: ReviewSide,
+) -> PullRequestReviewDraftComment {
+    PullRequestReviewDraftComment {
+        id,
+        revision: revision.into(),
+        path: "src/lib.rs".into(),
+        side,
+        start_line: lines.0,
+        end_line: lines.1,
+        body: format!("Comment {id}"),
+        placed: true,
+    }
+}
+
+#[test]
+fn a_review_is_one_submission_at_the_head_read_fresh_and_a_moved_head_sends_nothing() {
+    const MOVED: &str = "3333333333333333333333333333333333333333";
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let head = Arc::new(Mutex::new(HEAD));
+    let current = head.clone();
+    let (_server, log) = serve(fixture, move |seen| {
+        if seen.line.starts_with("GET /repos/octo/repo/pulls/7 ") {
+            let (status, headers, body) = revisions(1);
+            let body = String::from_utf8(body)
+                .unwrap()
+                .replace(HEAD, &current.lock().unwrap());
+            return (status, headers, body.into_bytes());
+        }
+        json_reply(json!({"id": 1}))
+    });
+    let reviews = || {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| {
+                seen.line
+                    .starts_with("POST /repos/octo/repo/pulls/7/reviews ")
+            })
+            .map(|seen| serde_json::from_str::<Value>(&seen.body).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let comments = [
+        draft_comment(1, HEAD, (4, 4), ReviewSide::New),
+        draft_comment(2, HEAD, (9, 12), ReviewSide::Old),
+    ];
+    // The files were read at HEAD, which the cached revisions still say.
+    reads.files(&key(), Some(1)).ok();
+    *head.lock().unwrap() = MOVED;
+
+    assert_eq!(
+        reads.submit_review(
+            &key(),
+            PullRequestReviewVerdict::RequestChanges,
+            HEAD,
+            "Two things",
+            &comments
+        ),
+        PullRequestActionResult::Rejected(PullRequestRejection::StaleHead { head: MOVED.into() }),
+        "a head that moved after the files were read is seen before anything is sent"
+    );
+    assert!(reviews().is_empty());
+
+    let mut unplaced = draft_comment(2, MOVED, (9, 12), ReviewSide::Old);
+    unplaced.placed = false;
+    assert_eq!(
+        reads.submit_review(
+            &key(),
+            PullRequestReviewVerdict::RequestChanges,
+            MOVED,
+            "Two things",
+            &[draft_comment(1, MOVED, (4, 4), ReviewSide::New), unplaced]
+        ),
+        PullRequestActionResult::Rejected(PullRequestRejection::Invalid),
+        "a comment whose lines changed is never sent"
+    );
+    assert!(reviews().is_empty());
+
+    let comments = [
+        draft_comment(1, MOVED, (4, 4), ReviewSide::New),
+        draft_comment(2, MOVED, (9, 12), ReviewSide::Old),
+    ];
+    assert_eq!(
+        reads.submit_review(
+            &key(),
+            PullRequestReviewVerdict::RequestChanges,
+            MOVED,
+            "Two things",
+            &comments
+        ),
+        PullRequestActionResult::Applied
+    );
+    assert_eq!(
+        reviews(),
+        vec![json!({
+            "commit_id": MOVED,
+            "event": "REQUEST_CHANGES",
+            "body": "Two things",
+            "comments": [
+                {"path": "src/lib.rs", "line": 4, "side": "RIGHT", "body": "Comment 1"},
+                {"path": "src/lib.rs", "start_line": 9, "start_side": "LEFT", "line": 12,
+                 "side": "LEFT", "body": "Comment 2"},
+            ],
+        })]
+    );
+}
+
+#[test]
+fn a_write_left_unanswered_is_uncertain_and_never_sent_again() {
+    let fixture = Fixture::new();
+    let store = Store::new();
+    let reads = reads(&fixture, &store);
+    let (_server, log) = serve(fixture, |seen| {
+        if seen
+            .line
+            .starts_with("POST /repos/octo/repo/issues/7/labels ")
+        {
+            return (502, String::new(), Vec::new());
+        }
+        match seen.operation().as_deref() {
+            Some("AddPullRequestComment") => (0, String::new(), Vec::new()),
+            _ => writes_reply(seen),
+        }
+    });
+    let sent = |prefix: &str| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| {
+                seen.line.starts_with(prefix) || seen.operation().as_deref() == Some(prefix)
+            })
+            .count()
+    };
+
+    assert_eq!(
+        reads.act(
+            &key(),
+            &PullRequestAction::Comment {
+                body: "Once".into()
+            }
+        ),
+        PullRequestActionResult::Uncertain
+    );
+    assert_eq!(
+        reads.act(
+            &key(),
+            &PullRequestAction::SetLabels {
+                add: vec!["bug".into()],
+                remove: Vec::new(),
+            }
+        ),
+        PullRequestActionResult::Uncertain,
+        "a server failure may have applied the write"
+    );
+    assert_eq!(
+        (
+            sent("AddPullRequestComment"),
+            sent("POST /repos/octo/repo/issues/7/labels ")
+        ),
+        (1, 1)
+    );
 }

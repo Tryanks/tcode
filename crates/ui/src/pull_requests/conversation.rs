@@ -3,17 +3,20 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    list, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Avatar, AvatarFallback, AvatarImage, h_flex, v_flex};
+use serde::Deserialize;
 use tcode_core::{pull_request::PullRequestState, session::ReviewSide};
 use tcode_protocol::{
-    PullRequestComment, PullRequestRead, PullRequestReadResponse, PullRequestReviewState,
+    PullRequestAction, PullRequestActionResult, PullRequestComment, PullRequestReaction,
+    PullRequestReactionContent, PullRequestRead, PullRequestReadResponse, PullRequestReviewState,
     PullRequestReviewThread,
 };
 
+use super::compose::{EditorSpec, Sheet, Slot, Write};
 use super::detail::{PullRequestView, Replies, Tab, ago_rfc3339, reason};
 use crate::{
     icon::{Icon, IconName},
@@ -23,21 +26,43 @@ use crate::{
     store::{MediaState, pull_request_media, pull_request_media_state},
     theme::ActiveTheme as _,
     widgets::{
+        Popover,
         button::{Button, ButtonVariants as _},
         menu::{CopyText, DropdownMenu as _, OpenUrl},
         tooltip::Tooltip,
     },
 };
 
+/// A comment's ⋯ menu item that writes.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = tcode_pull_requests, no_json)]
+pub(super) enum CommentMenu {
+    Edit {
+        id: String,
+    },
+    EditDescription,
+    /// Quotes the comment into the composer, or into its thread's reply.
+    Quote {
+        id: String,
+        thread: Option<String>,
+    },
+    React {
+        id: String,
+    },
+}
+
 /// One row of the conversation list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Item {
     Notice,
+    Meta,
     Description,
     Comment(usize),
     Thread(usize),
     /// Merged or closed, from the thread's snapshot of the pull request.
     Event(PullRequestState, String),
+    PendingReview,
+    Composer,
 }
 
 /// The body without HTML comments, which GitHub templates leave behind; `None` when nothing
@@ -56,18 +81,57 @@ pub(super) fn visible_body(body: &str) -> Option<String> {
     (!visible.is_empty()).then_some(visible)
 }
 
-fn reaction_emoji(content: &str) -> &'static str {
+fn reaction_name(content: PullRequestReactionContent) -> &'static str {
     match content {
-        "THUMBS_UP" => "👍",
-        "THUMBS_DOWN" => "👎",
-        "LAUGH" => "😄",
-        "HOORAY" => "🎉",
-        "CONFUSED" => "😕",
-        "HEART" => "❤️",
-        "ROCKET" => "🚀",
-        "EYES" => "👀",
-        _ => "·",
+        PullRequestReactionContent::ThumbsUp => "pull_requests.reactions.thumbs_up",
+        PullRequestReactionContent::ThumbsDown => "pull_requests.reactions.thumbs_down",
+        PullRequestReactionContent::Laugh => "pull_requests.reactions.laugh",
+        PullRequestReactionContent::Hooray => "pull_requests.reactions.hooray",
+        PullRequestReactionContent::Confused => "pull_requests.reactions.confused",
+        PullRequestReactionContent::Heart => "pull_requests.reactions.heart",
+        PullRequestReactionContent::Rocket => "pull_requests.reactions.rocket",
+        PullRequestReactionContent::Eyes => "pull_requests.reactions.eyes",
     }
+}
+
+fn reaction_emoji(content: PullRequestReactionContent) -> &'static str {
+    match content {
+        PullRequestReactionContent::ThumbsUp => "👍",
+        PullRequestReactionContent::ThumbsDown => "👎",
+        PullRequestReactionContent::Laugh => "😄",
+        PullRequestReactionContent::Hooray => "🎉",
+        PullRequestReactionContent::Confused => "😕",
+        PullRequestReactionContent::Heart => "❤️",
+        PullRequestReactionContent::Rocket => "🚀",
+        PullRequestReactionContent::Eyes => "👀",
+    }
+}
+
+/// A reaction chip's shape; the account's own reactions are tinted.
+fn reaction_chip(
+    id: SharedString,
+    label: String,
+    own: bool,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    material::accessible_clickable(h_flex(), id, gpui::Role::Button, label, cx)
+        .h(px(22.))
+        .px(px(6.))
+        .gap_1()
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(if own {
+            cx.theme().primary
+        } else {
+            cx.theme().border
+        })
+        .bg(if own {
+            cx.theme().primary.opacity(0.1)
+        } else {
+            cx.theme().secondary
+        })
+        .text_size(px(12.))
 }
 
 impl PullRequestView {
@@ -106,13 +170,193 @@ impl PullRequestView {
             }
         }
         timed.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut items = Vec::with_capacity(timed.len() + 2);
+        let mut items = Vec::with_capacity(timed.len() + 5);
         if !conversation.complete {
             items.push(Item::Notice);
         }
+        items.push(Item::Meta);
         items.push(Item::Description);
         items.extend(timed.into_iter().map(|(_, item)| item));
+        if self.draft(cx).is_some() {
+            items.push(Item::PendingReview);
+        }
+        items.push(Item::Composer);
         items
+    }
+
+    pub(super) fn scroll_conversation_to_end(&mut self, cx: &mut Context<Self>) {
+        let count = self.items(cx).len();
+        if let Some(page) = self.page_mut()
+            && count > 0
+        {
+            if page.conversation_view.list.item_count() != count {
+                page.conversation_view.list.reset(count);
+            }
+            page.conversation_view.list.scroll_to(gpui::ListOffset {
+                item_ix: count - 1,
+                offset_in_item: px(0.),
+            });
+        }
+    }
+
+    /// Whether this device may write here at all: not read-only, and not waiting for the read
+    /// after an unanswered write.
+    fn writable(&self, cx: &App) -> bool {
+        !self.read_only(cx) && !self.writes().is_some_and(|writes| writes.waiting)
+    }
+
+    pub(super) fn on_comment_menu(
+        &mut self,
+        action: &CommentMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            CommentMenu::Edit { id } => {
+                let body = self.comment_body(id).unwrap_or_default();
+                self.open_editor(
+                    Slot::Edit(id.clone()),
+                    crate::tr!("pull_requests.compose.comment_placeholder").into(),
+                    body.clone(),
+                    Some(body),
+                    window,
+                    cx,
+                );
+            }
+            CommentMenu::EditDescription => {
+                let body = self
+                    .page()
+                    .and_then(|page| page.conversation.data.as_ref())
+                    .map(|conversation| conversation.description.body.clone())
+                    .unwrap_or_default();
+                self.open_editor(
+                    Slot::Description,
+                    crate::tr!("pull_requests.compose.comment_placeholder").into(),
+                    body.clone(),
+                    Some(body),
+                    window,
+                    cx,
+                );
+            }
+            CommentMenu::Quote { id, thread } => {
+                let body = self.comment_body(id).unwrap_or_default();
+                let quote = body
+                    .lines()
+                    .map(|line| format!("> {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n\n";
+                let slot = thread.clone().map_or(Slot::Composer, Slot::Reply);
+                let held = self
+                    .writes()
+                    .and_then(|writes| writes.editors.get(&slot))
+                    .map(|editor| editor.input.clone());
+                match held {
+                    Some(input) => input.update(cx, |input, cx| {
+                        let text = input.value().to_string();
+                        let joined = if text.trim().is_empty() {
+                            quote.clone()
+                        } else {
+                            format!("{text}\n\n{quote}")
+                        };
+                        input.set_value(joined, window, cx);
+                        input.focus(window, cx);
+                    }),
+                    None => self.open_editor(
+                        slot.clone(),
+                        crate::tr!(if thread.is_some() {
+                            "pull_requests.compose.reply_placeholder"
+                        } else {
+                            "pull_requests.compose.comment_placeholder"
+                        })
+                        .into(),
+                        quote,
+                        None,
+                        window,
+                        cx,
+                    ),
+                }
+                if self.compact(cx) {
+                    self.open_sheet(Some(Sheet::Editor(slot)), cx);
+                } else if thread.is_none() {
+                    self.scroll_conversation_to_end(cx);
+                }
+            }
+            CommentMenu::React { id } => self.open_sheet(Some(Sheet::Reactions(id.clone())), cx),
+        }
+        if let Some(page) = self.page() {
+            page.conversation_view.list.remeasure();
+        }
+        cx.notify();
+    }
+
+    /// Adds or takes back the account's reaction, shown at once and corrected by the next read.
+    fn react(
+        &mut self,
+        subject: String,
+        content: PullRequestReactionContent,
+        reacted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(writes) = self.writes_mut() {
+            writes.reactions.insert((subject.clone(), content), reacted);
+            writes.sheet = None;
+        }
+        let key = (subject.clone(), content);
+        self.send_write(
+            PullRequestAction::React {
+                subject_id: subject.clone(),
+                content,
+                reacted,
+            },
+            Write::Reaction,
+            format!("react {subject} {content:?}"),
+            window,
+            cx,
+            move |this, result, _, cx| {
+                if matches!(result, PullRequestActionResult::Rejected(_))
+                    && let Some(writes) = this.writes_mut()
+                {
+                    writes.reactions.remove(&key);
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    fn resolve(
+        &mut self,
+        thread: String,
+        resolved: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = thread.clone();
+        self.send_write(
+            PullRequestAction::ResolveThread {
+                thread_id: thread.clone(),
+                resolved,
+            },
+            Write::Resolve(resolved),
+            format!("resolve {thread}"),
+            window,
+            cx,
+            move |this, result, _, cx| {
+                if *result == PullRequestActionResult::Applied
+                    && let Some(page) = this.page_mut()
+                {
+                    // A4's collapse rule: resolved folds away unless the reader opens it.
+                    if resolved {
+                        page.conversation_view.expanded.remove(&id);
+                    } else {
+                        page.conversation_view.expanded.insert(id.clone());
+                    }
+                    page.conversation_view.list.remeasure();
+                }
+                cx.notify();
+            },
+        );
     }
 
     /// Switches to the conversation at a thread.
@@ -189,7 +433,12 @@ impl PullRequestView {
 
     /// The comment's rendered body, kept per comment so its selection and layout survive
     /// re-reads; a conversation read as another account gets fresh ones.
-    fn markdown(&self, id: &str, body: &str, cx: &mut Context<Self>) -> Entity<MarkdownState> {
+    pub(super) fn markdown(
+        &self,
+        id: &str,
+        body: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<MarkdownState> {
         let resolver = self.resolver();
         let account = self
             .page()
@@ -284,6 +533,7 @@ impl PullRequestView {
         comment: &PullRequestComment,
         action: Option<AnyElement>,
         size: f32,
+        place: Place,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -304,7 +554,53 @@ impl PullRequestView {
         let created = comment.created_at.clone();
         let url = comment.url.clone();
         let body = comment.body.clone();
+        let writable = self.writable(cx);
+        let update = self
+            .page()
+            .and_then(|page| page.conversation.data.as_ref())
+            .is_some_and(|conversation| conversation.permissions.update);
+        let mut writes: Vec<(&'static str, CommentMenu)> = Vec::new();
+        if writable {
+            if place.description {
+                if update {
+                    writes.push((
+                        "pull_requests.compose.edit_description",
+                        CommentMenu::EditDescription,
+                    ));
+                }
+            } else if comment.viewer_can_update && comment.review_state.is_none() {
+                writes.push((
+                    "pull_requests.compose.edit",
+                    CommentMenu::Edit {
+                        id: comment.id.clone(),
+                    },
+                ));
+            }
+            writes.push((
+                "pull_requests.compose.quote_reply",
+                CommentMenu::Quote {
+                    id: comment.id.clone(),
+                    thread: place.thread.clone(),
+                },
+            ));
+            if comment.viewer_can_react {
+                writes.push((
+                    "pull_requests.reactions.add_menu",
+                    CommentMenu::React {
+                        id: comment.id.clone(),
+                    },
+                ));
+            }
+        }
+        // With no reactions yet, the add chip lives in the head row.
+        let add_reaction =
+            (writable && comment.viewer_can_react && self.shown_reactions(comment).is_empty())
+                .then(|| self.reaction_popover(comment, true, cx));
         h_flex()
+            .group(SharedString::from(format!(
+                "pr-comment-head-{}",
+                comment.id
+            )))
             .gap_2()
             .items_center()
             .text_size(px(12.))
@@ -336,6 +632,7 @@ impl PullRequestView {
                 )
             })
             .child(div().flex_1())
+            .children(add_reaction)
             .child(
                 Button::new(SharedString::from(format!(
                     "pr-comment-menu-{}",
@@ -345,7 +642,13 @@ impl PullRequestView {
                 .xsmall()
                 .compact()
                 .icon(IconName::Ellipsis)
-                .dropdown_menu(move |menu, _, _| {
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (label, action) in &writes {
+                        menu = menu.menu(crate::tr!(label).into_owned(), Box::new(action.clone()));
+                    }
+                    if !writes.is_empty() {
+                        menu = menu.separator();
+                    }
                     let menu = match &url {
                         Some(url) => menu
                             .menu(
@@ -368,38 +671,197 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    fn reactions(&self, comment: &PullRequestComment, cx: &App) -> Option<AnyElement> {
-        if comment.reactions.is_empty() {
+    /// The comment's reactions with this client's unconfirmed ones applied, in GitHub's order.
+    fn shown_reactions(&self, comment: &PullRequestComment) -> Vec<PullRequestReaction> {
+        let mut shown = comment.reactions.clone();
+        if let Some(writes) = self.writes() {
+            for ((subject, content), reacted) in &writes.reactions {
+                if *subject != comment.id {
+                    continue;
+                }
+                match shown
+                    .iter_mut()
+                    .find(|reaction| reaction.content == *content)
+                {
+                    Some(reaction) if reaction.viewer_reacted != *reacted => {
+                        reaction.viewer_reacted = *reacted;
+                        reaction.count = if *reacted {
+                            reaction.count + 1
+                        } else {
+                            reaction.count.saturating_sub(1)
+                        };
+                    }
+                    Some(_) => {}
+                    None if *reacted => shown.push(PullRequestReaction {
+                        content: *content,
+                        count: 1,
+                        viewer_reacted: true,
+                    }),
+                    None => {}
+                }
+            }
+        }
+        shown.retain(|reaction| reaction.count > 0);
+        shown.sort_by_key(|reaction| {
+            PullRequestReactionContent::ALL
+                .iter()
+                .position(|content| *content == reaction.content)
+        });
+        shown
+    }
+
+    /// The eight reactions behind an add chip. `Sticker` stands in for a smile-plus glyph,
+    /// which gpui-kit's icon set lacks.
+    fn reaction_popover(
+        &self,
+        comment: &PullRequestComment,
+        head: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let compact = self.compact(cx);
+        let id = comment.id.clone();
+        let sheet = Sheet::Reactions(id.clone());
+        let own: Vec<_> = self
+            .shown_reactions(comment)
+            .into_iter()
+            .filter(|reaction| reaction.viewer_reacted)
+            .map(|reaction| reaction.content)
+            .collect();
+        let view = cx.entity();
+        let open_id = id.clone();
+        // In the head row a pointer that can hover finds it on hover; a keyboard on focus.
+        let reveal = head && !compact && !crate::window_seam::is_mobile(cx);
+        let chip = reaction_chip(
+            SharedString::from(format!("pr-reaction-add-{id}-{head}")),
+            crate::tr!("pull_requests.reactions.add").into_owned(),
+            false,
+            cx,
+        )
+        .child(Icon::new(IconName::Sticker).size(px(14.)))
+        .cursor_pointer()
+        .tooltip(|window, cx| {
+            Tooltip::new(crate::tr!("pull_requests.reactions.add")).build(window, cx)
+        })
+        .when(reveal, |chip| {
+            chip.opacity(0.)
+                .group_hover(
+                    SharedString::from(format!("pr-comment-head-{id}")),
+                    |chip| chip.opacity(1.),
+                )
+                .focus_visible(|chip| chip.opacity(1.))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.open_sheet(Some(Sheet::Reactions(open_id.clone())), cx)
+        }));
+        let popover = Popover::new(SharedString::from(format!("pr-reactions-{id}-{head}")))
+            .open(self.sheet_open(&sheet))
+            .on_open_change({
+                let view = view.clone();
+                move |open, _, cx| {
+                    if !*open {
+                        view.update(cx, |view, cx| view.open_sheet(None, cx));
+                    }
+                }
+            })
+            .trigger_with(move |_, _, _| chip.into_any_element());
+        let popover = if compact {
+            popover.bottom_sheet(crate::tr!("pull_requests.reactions.add").into_owned())
+        } else {
+            popover
+        };
+        let size = if compact { material::TOUCH_TARGET } else { 28. };
+        popover
+            .content(move |_, _, cx| {
+                h_flex()
+                    .p_1()
+                    .gap_1()
+                    .children(PullRequestReactionContent::ALL.into_iter().map(|content| {
+                        let reacted = own.contains(&content);
+                        let (view, id) = (view.clone(), id.clone());
+                        material::accessible_clickable(
+                            div(),
+                            SharedString::from(format!("pr-reaction-{id}-{content:?}")),
+                            gpui::Role::Button,
+                            crate::tr!(reaction_name(content)).into_owned(),
+                            cx,
+                        )
+                        .aria_toggled(if reacted {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .size(px(size))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(cx.theme().tokens.radius.sm)
+                        .cursor_pointer()
+                        .hover(|button| button.bg(cx.theme().list_hover))
+                        .when(reacted, |button| button.bg(cx.theme().primary.opacity(0.1)))
+                        .text_size(px(16.))
+                        .child(reaction_emoji(content))
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |view, cx| {
+                                view.react(id.clone(), content, !reacted, window, cx)
+                            })
+                        })
+                    }))
+            })
+            .into_any_element()
+    }
+
+    fn reactions(
+        &self,
+        comment: &PullRequestComment,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let shown = self.shown_reactions(comment);
+        if shown.is_empty() {
             return None;
         }
+        let interactive = self.writable(cx) && comment.viewer_can_react;
+        let add = interactive.then(|| self.reaction_popover(comment, false, cx));
         Some(
             h_flex()
                 .flex_wrap()
                 .gap_1()
                 .pt_1()
-                .children(comment.reactions.iter().map(|reaction| {
+                .children(shown.into_iter().map(|reaction| {
                     let own = reaction.viewer_reacted;
-                    h_flex()
-                        .h(px(22.))
-                        .px(px(6.))
-                        .gap_1()
-                        .items_center()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(if own {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().border
-                        })
-                        .bg(if own {
-                            cx.theme().primary.opacity(0.1)
-                        } else {
-                            cx.theme().secondary
-                        })
-                        .text_size(px(12.))
-                        .child(reaction_emoji(&reaction.content))
-                        .child(reaction.count.to_string())
+                    let label = crate::tr!(
+                        "pull_requests.reactions.chip_label",
+                        name = crate::tr!(reaction_name(reaction.content)).into_owned(),
+                        count = reaction.count.to_string()
+                    )
+                    .into_owned();
+                    let chip = reaction_chip(
+                        SharedString::from(format!(
+                            "pr-reaction-chip-{}-{:?}",
+                            comment.id, reaction.content
+                        )),
+                        label,
+                        own,
+                        cx,
+                    )
+                    .aria_toggled(if own {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .child(reaction_emoji(reaction.content))
+                    .child(reaction.count.to_string());
+                    if interactive {
+                        let (id, content) = (comment.id.clone(), reaction.content);
+                        chip.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.react(id.clone(), content, !own, window, cx)
+                            }))
+                            .into_any_element()
+                    } else {
+                        chip.into_any_element()
+                    }
                 }))
+                .children(add)
                 .into_any_element(),
         )
     }
@@ -517,8 +979,24 @@ impl PullRequestView {
                     .into_any_element(),
             )
         });
-        let head = self.comment_head(comment, action, if compact { 24. } else { 20. }, cx);
-        let body = self.body(comment, true, cx);
+        let head = self.comment_head(
+            comment,
+            action,
+            if compact { 24. } else { 20. },
+            Place {
+                description,
+                thread: None,
+            },
+            cx,
+        );
+        let slot = if description {
+            Slot::Description
+        } else {
+            Slot::Edit(comment.id.clone())
+        };
+        let body = self
+            .editing_body(&slot, cx)
+            .or_else(|| self.body(comment, true, cx));
         let empty_description = description && body.is_none();
         v_flex()
             .w_full()
@@ -733,6 +1211,17 @@ impl PullRequestView {
             )
             .child(head);
         if collapsed {
+            if !inline && thread.viewer_can_resolve && self.writable(cx) {
+                let place = thread.path.clone();
+                card = card.child(
+                    h_flex()
+                        .px_3()
+                        .pb_1()
+                        .text_size(px(12.))
+                        .justify_end()
+                        .child(self.resolve_button(thread, &place, cx)),
+                );
+            }
             return card.into_any_element();
         }
         if !inline && let Some(hunk) = &thread.diff_hunk {
@@ -766,8 +1255,20 @@ impl PullRequestView {
         }
         let shown = if inline { 1 } else { comments.len() };
         for comment in comments.into_iter().take(shown) {
-            let head = self.comment_head(&comment, None, 16., cx);
-            let body = self.body(&comment, inline, cx);
+            let head = self.comment_head(
+                &comment,
+                None,
+                16.,
+                Place {
+                    description: false,
+                    thread: Some(thread.id.clone()),
+                },
+                cx,
+            );
+            let body = (!inline)
+                .then(|| self.editing_body(&Slot::Edit(comment.id.clone()), cx))
+                .flatten()
+                .or_else(|| self.body(&comment, inline, cx));
             card = card.child(
                 v_flex()
                     .px_3()
@@ -834,7 +1335,225 @@ impl PullRequestView {
                     .child(crate::tr!("pull_requests.conversation.replies_capped")),
             );
         }
-        card.into_any_element()
+        card.children(self.thread_footer(thread, cx))
+            .into_any_element()
+    }
+
+    /// Reply and Resolve under a whole thread, as the host says this account may.
+    fn thread_footer(
+        &self,
+        thread: &PullRequestReviewThread,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.writable(cx) || !(thread.viewer_can_reply || thread.viewer_can_resolve) {
+            return None;
+        }
+        let compact = self.compact(cx);
+        let slot = Slot::Reply(thread.id.clone());
+        let place = thread.anchor.as_ref().map_or_else(
+            || thread.path.clone(),
+            |anchor| format!("{}:{}", thread.path, anchor.end_line),
+        );
+        let line = thread
+            .anchor
+            .as_ref()
+            .map_or_else(String::new, |anchor| anchor.end_line.to_string());
+        let spec = EditorSpec {
+            context: Some(
+                crate::tr!(
+                    "pull_requests.compose.replying_to",
+                    path = thread.path.clone(),
+                    line = line.clone()
+                )
+                .into_owned(),
+            ),
+            submit: crate::tr!("pull_requests.compose.reply").into(),
+            aria: crate::tr!("pull_requests.compose.reply_placeholder").into(),
+            cancel: true,
+        };
+        let reply_slot = slot.clone();
+        let reply: Option<AnyElement> = thread.viewer_can_reply.then(|| {
+            if compact {
+                self.editor_sheet(
+                    slot.clone(),
+                    crate::tr!("pull_requests.compose.reply_row").into(),
+                    crate::tr!(
+                        "pull_requests.compose.reply_sheet",
+                        path = thread.path.clone(),
+                        line = line.clone()
+                    )
+                    .into(),
+                    spec.clone(),
+                    move |this, window, cx| {
+                        this.open_editor(
+                            reply_slot.clone(),
+                            crate::tr!("pull_requests.compose.reply_placeholder").into(),
+                            String::new(),
+                            None,
+                            window,
+                            cx,
+                        )
+                    },
+                    cx,
+                )
+            } else {
+                match self.editor_element(&cx.entity(), &slot, spec.clone(), cx) {
+                    Some(editor) => editor,
+                    None => div()
+                        .id(SharedString::from(format!("pr-reply-row-{}", thread.id)))
+                        .h(px(28.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded(material::radius_input(cx))
+                        .border_1()
+                        .border_color(cx.theme().input)
+                        .bg(cx.theme().background)
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .cursor_text()
+                        .child(crate::tr!("pull_requests.compose.reply_row"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_editor(
+                                reply_slot.clone(),
+                                crate::tr!("pull_requests.compose.reply_placeholder").into(),
+                                String::new(),
+                                None,
+                                window,
+                                cx,
+                            );
+                            if let Some(page) = this.page() {
+                                page.conversation_view.list.remeasure();
+                            }
+                        }))
+                        .into_any_element(),
+                }
+            }
+        });
+        let resolve = thread
+            .viewer_can_resolve
+            .then(|| self.resolve_button(thread, &place, cx));
+        Some(
+            h_flex()
+                .px_3()
+                .pb_2()
+                .pt_1()
+                .gap_2()
+                .items_center()
+                .text_size(px(12.))
+                .children(reply.map(|reply| div().flex_1().min_w_0().child(reply)))
+                .when(!thread.viewer_can_reply, |footer| {
+                    footer.child(div().flex_1())
+                })
+                .children(resolve)
+                .into_any_element(),
+        )
+    }
+
+    fn resolve_button(
+        &self,
+        thread: &PullRequestReviewThread,
+        place: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let resolved = thread.resolved;
+        let id = thread.id.clone();
+        let busy = self.busy(&format!("resolve {id}"));
+        Button::new(SharedString::from(format!("pr-thread-resolve-{id}")))
+            .ghost()
+            .xsmall()
+            .loading(busy)
+            .icon(if resolved {
+                IconName::RotateCcw
+            } else {
+                IconName::Check
+            })
+            .label(crate::tr!(if resolved {
+                "pull_requests.compose.unresolve"
+            } else {
+                "pull_requests.compose.resolve"
+            }))
+            .tooltip(
+                crate::tr!(
+                    "pull_requests.compose.resolve_label",
+                    path = thread.path.clone(),
+                    line = place.rsplit(':').next().unwrap_or_default().to_owned()
+                )
+                .into_owned(),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.resolve(id.clone(), !resolved, window, cx)
+            }))
+            .into_any_element()
+    }
+
+    /// The editor standing in for a body being edited.
+    fn editing_body(&self, slot: &Slot, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.editor_element(
+            &cx.entity(),
+            slot,
+            EditorSpec {
+                context: None,
+                submit: crate::tr!("pull_requests.compose.save").into(),
+                aria: crate::tr!("pull_requests.compose.edit").into(),
+                cancel: true,
+            },
+            cx,
+        )
+    }
+
+    /// The conversation's last row: the comment composer.
+    fn composer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number.to_string())
+            .unwrap_or_default();
+        let spec = EditorSpec {
+            context: None,
+            submit: crate::tr!("pull_requests.compose.comment").into(),
+            aria: crate::tr!(
+                "pull_requests.compose.comment_label",
+                number = number.clone()
+            )
+            .into(),
+            cancel: false,
+        };
+        let editor = if self.compact(cx) {
+            self.editor_sheet(
+                Slot::Composer,
+                crate::tr!("pull_requests.compose.add_comment_row").into(),
+                crate::tr!("pull_requests.compose.comment_label", number = number).into(),
+                spec,
+                |this, window, cx| {
+                    this.open_editor(
+                        Slot::Composer,
+                        crate::tr!("pull_requests.compose.comment_placeholder").into(),
+                        String::new(),
+                        None,
+                        window,
+                        cx,
+                    )
+                },
+                cx,
+            )
+        } else if self.read_only(cx) {
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::tr!("pull_requests.compose.read_only"))
+                .into_any_element()
+        } else {
+            self.editor_element(&cx.entity(), &Slot::Composer, spec, cx)
+                .unwrap_or_else(|| div().into_any_element())
+        };
+        v_flex()
+            .py_3()
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(editor)
+            .into_any_element()
     }
 
     fn render_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -865,6 +1584,15 @@ impl PullRequestView {
                     }))
                     .into_any_element()
             }
+            Item::Meta => match self.meta_block(cx) {
+                Some(block) => block,
+                None => div().into_any_element(),
+            },
+            Item::PendingReview => match self.pending_review_line(cx) {
+                Some(line) => line,
+                None => div().into_any_element(),
+            },
+            Item::Composer => self.composer(cx),
             Item::Description => self.comment_card(&conversation.description, true, cx),
             Item::Comment(index) => match conversation.comments.get(index) {
                 Some(comment) => self.comment_card(comment, false, cx),
@@ -913,9 +1641,21 @@ impl PullRequestView {
 
     pub(super) fn render_conversation(
         &mut self,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The desktop composer is always open at the end of the list.
+        if !self.compact(cx)
+            && !self.read_only(cx)
+            && self
+                .page()
+                .is_some_and(|page| page.conversation.data.is_some())
+            && self
+                .writes()
+                .is_some_and(|writes| !writes.editors.contains_key(&Slot::Composer))
+        {
+            self.open_composer(window, cx);
+        }
         let Some(page) = self.page() else {
             return div().into_any_element();
         };
@@ -936,13 +1676,40 @@ impl PullRequestView {
             && conversation.comments.is_empty()
             && conversation.threads.is_empty();
         if empty {
-            return material::empty_state(
-                Icon::new(IconName::MessageSquare),
-                crate::tr!("pull_requests.conversation.empty_title").into_owned(),
-                crate::tr!("pull_requests.conversation.empty_desc").into_owned(),
-                cx,
-            )
-            .into_any_element();
+            // The first comment can still be written under the empty state.
+            let compact = self.compact(cx);
+            return v_flex()
+                .id("pr-conversation-empty")
+                .size_full()
+                .overflow_y_scroll()
+                .children(self.meta_block(cx).map(|block| {
+                    div()
+                        .px(px(if compact {
+                            material::COMPACT_PAGE_INSET
+                        } else {
+                            12.
+                        }))
+                        .child(block)
+                }))
+                .child(
+                    material::empty_state(
+                        Icon::new(IconName::MessageSquare),
+                        crate::tr!("pull_requests.conversation.empty_title").into_owned(),
+                        crate::tr!("pull_requests.conversation.empty_desc").into_owned(),
+                        cx,
+                    )
+                    .flex_1(),
+                )
+                .child(
+                    div()
+                        .px(px(if compact {
+                            material::COMPACT_PAGE_INSET
+                        } else {
+                            12.
+                        }))
+                        .child(self.composer(cx)),
+                )
+                .into_any_element();
         }
         let count = self.items(cx).len();
         let Some(page) = self.page() else {
@@ -965,6 +1732,31 @@ impl PullRequestView {
                 .size_full(),
             )
             .into_any_element()
+    }
+}
+
+/// Where a comment sits, which decides what its menu offers.
+struct Place {
+    description: bool,
+    thread: Option<String>,
+}
+
+impl PullRequestView {
+    fn open_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = window.focused(cx);
+        self.open_editor(
+            Slot::Composer,
+            crate::tr!("pull_requests.compose.comment_placeholder").into(),
+            String::new(),
+            None,
+            window,
+            cx,
+        );
+        // Opening the standing composer does not take the focus from where the reader is.
+        match focus {
+            Some(focus) => window.focus(&focus, cx),
+            None => window.blur(cx),
+        }
     }
 }
 
