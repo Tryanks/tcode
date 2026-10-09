@@ -345,7 +345,9 @@ fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -
         PullRequestAction::Reopen => capabilities.reopen,
         PullRequestAction::Revert => capabilities.revert,
         PullRequestAction::UpdateBranch { .. } => capabilities.update_branch,
-        PullRequestAction::DisableAutoMerge => capabilities.auto_merge,
+        PullRequestAction::DisableAutoMerge | PullRequestAction::Merge { auto: true, .. } => {
+            capabilities.auto_merge
+        }
         _ => true,
     }
 }
@@ -368,13 +370,7 @@ impl Hosts {
     }
 
     fn kind(&self, host: &str) -> HostKind {
-        self.kinds
-            .read()
-            .unwrap()
-            .get(host)
-            .copied()
-            .or_else(|| HostKind::detect(host))
-            .unwrap_or(HostKind::Github)
+        HostKind::of(self.kinds.read().unwrap().get(host).copied(), host)
     }
 
     fn of(&self, kind: HostKind) -> &dyn Forge {
@@ -505,7 +501,7 @@ impl Forge for Hosts {
     fn act(&self, key: &PullRequestKey, action: &PullRequestAction) -> Outcome {
         let host = self.host(&key.host);
         if !offered(&host.capabilities(key), action) {
-            return Outcome::Rejected(Rejection::Invalid);
+            return Outcome::Rejected(Rejection::Unsupported);
         }
         host.act(key, action)
     }
@@ -522,7 +518,7 @@ impl Forge for Hosts {
         if verdict == PullRequestReviewVerdict::RequestChanges
             && !host.capabilities(key).request_changes
         {
-            return Outcome::Rejected(Rejection::Invalid);
+            return Outcome::Rejected(Rejection::Unsupported);
         }
         host.submit_review(key, verdict, head, body, comments)
     }
@@ -602,5 +598,45 @@ impl Forge for Hosts {
         tails: &mut Tails,
     ) -> Result<Option<Vec<PullRequestRemark>>, ForgeError> {
         self.host(&key.host).activity(key, tails)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host is served by the kind settings give it; otherwise its name decides, and a host
+    /// whose name says nothing is GitHub's, as every host was before hosts had kinds.
+    #[test]
+    fn each_host_goes_to_its_kinds_implementation() {
+        let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let forge = connect(SettingsStore::new(root.clone()), []);
+        forge.configure(BTreeMap::from([(
+            "gitea.acme.test".to_owned(),
+            HostSettings::new(HostKind::Github),
+        )]));
+        let name = |host: &str| forge.terms(&PullRequestKey::new(host, "a/b", 1)).name;
+        assert_eq!(name("gitea.acme.test"), "GitHub");
+        assert_eq!(name("codeberg.org"), "Forgejo");
+        assert_eq!(name("gitea.com"), "Gitea");
+        assert_eq!(name("git.example.com"), "GitHub");
+        assert_eq!(
+            forge
+                .pull_request_url("https://codeberg.org/a/b/pulls/2")
+                .map(|(key, _)| key),
+            Some(PullRequestKey::new("codeberg.org", "a/b", 2))
+        );
+        assert_eq!(
+            forge
+                .pull_request_url("https://git.example.com/a/b/pull/3")
+                .map(|(key, _)| key),
+            Some(PullRequestKey::new("git.example.com", "a/b", 3))
+        );
+        assert_eq!(
+            forge.pull_request_url("https://git.example.com/a/b/pulls/3"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

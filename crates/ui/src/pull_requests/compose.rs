@@ -107,26 +107,49 @@ pub(super) enum Write {
 pub(super) struct PullRequestWrite;
 
 /// The host's reason a write was not done, in words.
-pub(super) fn rejection_reason(rejection: &PullRequestRejection) -> String {
+pub(super) fn rejection_reason(rejection: &PullRequestRejection, host_name: &str) -> String {
     match rejection {
         PullRequestRejection::StaleHead { .. } => crate::tr!("pull_requests.result.reason_stale"),
         PullRequestRejection::ForeignSubject => crate::tr!("pull_requests.result.reason_foreign"),
-        PullRequestRejection::Invalid => crate::tr!("pull_requests.result.reason_invalid"),
+        PullRequestRejection::Invalid => {
+            crate::tr!("pull_requests.result.reason_invalid", host_name = host_name)
+        }
+        PullRequestRejection::Unsupported => {
+            crate::tr!(
+                "pull_requests.result.reason_unsupported",
+                host_name = host_name
+            )
+        }
         PullRequestRejection::NoCredential => {
-            crate::tr!("pull_requests.result.reason_no_credential")
+            crate::tr!(
+                "pull_requests.result.reason_no_credential",
+                host_name = host_name
+            )
         }
         PullRequestRejection::HostDisabled => {
             crate::tr!("pull_requests.result.reason_host_disabled")
         }
         PullRequestRejection::RateLimited { .. } => {
-            crate::tr!("pull_requests.result.reason_rate_limited")
+            crate::tr!(
+                "pull_requests.result.reason_rate_limited",
+                host_name = host_name
+            )
         }
-        PullRequestRejection::NotFound => crate::tr!("pull_requests.result.reason_not_found"),
+        PullRequestRejection::NotFound => {
+            crate::tr!(
+                "pull_requests.result.reason_not_found",
+                host_name = host_name
+            )
+        }
         PullRequestRejection::Refused { messages } if !messages.is_empty() => {
             return messages.join(" ");
         }
-        PullRequestRejection::Refused { .. } => crate::tr!("pull_requests.result.reason_invalid"),
-        PullRequestRejection::Failed => crate::tr!("pull_requests.result.reason_failed"),
+        PullRequestRejection::Refused { .. } => {
+            crate::tr!("pull_requests.result.reason_invalid", host_name = host_name)
+        }
+        PullRequestRejection::Failed => {
+            crate::tr!("pull_requests.result.reason_failed", host_name = host_name)
+        }
         PullRequestRejection::StackUnknown => {
             crate::tr!("pull_requests.result.reason_stack_unknown")
         }
@@ -159,7 +182,12 @@ pub(super) fn rejection_reason(rejection: &PullRequestRejection) -> String {
 }
 
 /// The toast an answer gets, or none where its effect shows in place.
-fn toast(write: Write, result: &PullRequestActionResult, number: u64) -> Option<Notification> {
+fn toast(
+    write: Write,
+    result: &PullRequestActionResult,
+    number: u64,
+    host_name: &str,
+) -> Option<Notification> {
     let number = number.to_string();
     let note = match result {
         PullRequestActionResult::Applied => match write {
@@ -180,7 +208,7 @@ fn toast(write: Write, result: &PullRequestActionResult, number: u64) -> Option<
             _ => return None,
         },
         PullRequestActionResult::Rejected(rejection) => {
-            let reason = rejection_reason(rejection);
+            let reason = rejection_reason(rejection, host_name);
             let message = match write {
                 Write::Comment => {
                     crate::tr!("pull_requests.result.comment_failed", reason = reason)
@@ -212,7 +240,9 @@ fn toast(write: Write, result: &PullRequestActionResult, number: u64) -> Option<
             unapplied, failure, ..
         } => {
             let reason = match &**failure {
-                PullRequestActionResult::Rejected(rejection) => rejection_reason(rejection),
+                PullRequestActionResult::Rejected(rejection) => {
+                    rejection_reason(rejection, host_name)
+                }
                 _ => crate::tr!("pull_requests.result.connection_lost").into_owned(),
             };
             Notification::warning(
@@ -257,7 +287,8 @@ fn toast(write: Write, result: &PullRequestActionResult, number: u64) -> Option<
             Write::Resolve(_) | Write::Labels | Write::Reviewers => Notification::warning(
                 crate::tr!(
                     "pull_requests.result.uncertain_body",
-                    message = crate::tr!("pull_requests.result.connection_lost").into_owned()
+                    message = crate::tr!("pull_requests.result.connection_lost").into_owned(),
+                    host_name = host_name
                 )
                 .into_owned(),
             )
@@ -427,7 +458,8 @@ impl PullRequestView {
                 page.writes.waiting = true;
             }
         }
-        if let Some(note) = toast(write, result, key.number) {
+        let host_name = super::host_name(self.store.read(cx), &key.host);
+        if let Some(note) = toast(write, result, key.number, &host_name) {
             window.push_notification(
                 note.id1::<PullRequestWrite>(SharedString::from(format!(
                     "{}/{}#{}",
@@ -727,9 +759,13 @@ impl PullRequestView {
             }
             Err(error) => {
                 let notice = match error.code.as_str() {
-                    "pull_request_not_in_diff" => {
-                        Some(crate::tr!("pull_requests.review.not_in_diff").into_owned())
-                    }
+                    "pull_request_not_in_diff" => Some(
+                        crate::tr!(
+                            "pull_requests.review.not_in_diff",
+                            host_name = self.host_name(cx)
+                        )
+                        .into_owned(),
+                    ),
                     "pull_request_head_changed" => Some(
                         crate::tr!("pull_requests.review.head_changed").into_owned()
                             + " · "
@@ -826,7 +862,10 @@ impl PullRequestView {
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().warning)
-                            .child(crate::tr!("pull_requests.compose.edit_conflict")),
+                            .child(crate::tr!(
+                                "pull_requests.compose.edit_conflict",
+                                host_name = this.host_name(cx)
+                            )),
                     )
                 })
                 .children(notice.map(|notice| {

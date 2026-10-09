@@ -136,11 +136,17 @@ impl AppState {
         &mut self,
         meta: &SessionMeta,
     ) -> Option<agent::McpRegistration> {
-        if let Some(registration) = self.mcp.pull_request_registrations.get(&meta.id) {
+        if let Some((registration, _)) = self.mcp.pull_request_registrations.get(&meta.id) {
             return Some(registration.clone());
         }
         let url = self.mcp.pull_request_url.clone()?;
         let bearer_token = self.mcp.pull_request_tokens.as_ref()?.register(&meta.id);
+        let names = self
+            .mcp
+            .pull_request_hosts
+            .as_ref()
+            .map(|names| names.get())
+            .unwrap_or_default();
         let registration = agent::McpRegistration {
             name: "tcode_pull_requests".into(),
             url,
@@ -148,7 +154,7 @@ impl AppState {
         };
         self.mcp
             .pull_request_registrations
-            .insert(meta.id.clone(), registration.clone());
+            .insert(meta.id.clone(), (registration.clone(), names));
         Some(registration)
     }
     /// Whether a provider of this kind receives the pull request tools when it starts.
@@ -162,6 +168,15 @@ impl AppState {
             .contains_key(session_id)
             .then(|| pull_request::linking_instructions(&self.pull_request_hosts()))
     }
+    /// The host names the thread's pull request tools are described with: its registration's,
+    /// else the ones a registration made now would have.
+    pub(super) fn pull_request_tool_hosts(&self, session_id: &str) -> String {
+        self.mcp
+            .pull_request_registrations
+            .get(session_id)
+            .map(|(_, names)| names.clone())
+            .unwrap_or_else(|| pull_request::host_names(&self.pull_request_hosts()))
+    }
     /// The hosts whose terms Tcode's text to the model names: GitHub's, and every configured
     /// host's kind.
     pub(super) fn pull_request_hosts(&self) -> Vec<&'static pull_request::HostTerms> {
@@ -174,7 +189,7 @@ impl AppState {
         )
     }
     pub(super) fn revoke_pull_request_registration(&mut self, session_id: &str) {
-        if let Some(registration) = self.mcp.pull_request_registrations.remove(session_id)
+        if let Some((registration, _)) = self.mcp.pull_request_registrations.remove(session_id)
             && let Some(tokens) = &self.mcp.pull_request_tokens
         {
             tokens.revoke(&registration.bearer_token);

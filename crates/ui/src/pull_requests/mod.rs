@@ -22,8 +22,9 @@ use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::{
     pull_request::{
-        self, ChecksState, Mergeability, PullRequestBadgeState, PullRequestKey, PullRequestSource,
-        PullRequestState, PullRequestSyncError, ReviewDecision, ThreadPullRequestLink,
+        self, ChecksState, HostTerms, Mergeability, PullRequestBadgeState, PullRequestKey,
+        PullRequestSource, PullRequestState, PullRequestSyncError, ReviewDecision,
+        ThreadPullRequestLink,
     },
     pull_request_watch::{WatchChangeKind, WatchNotice},
     ui::RightTab,
@@ -381,7 +382,7 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
         None => "pull_requests.source_not_linked",
     }
 }
-fn sync_error(link: &ThreadPullRequestLink) -> String {
+fn sync_error(link: &ThreadPullRequestLink, host_name: &str) -> String {
     match link.sync_error.as_ref() {
         Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled) => {
             crate::tr!(
@@ -392,6 +393,7 @@ fn sync_error(link: &ThreadPullRequestLink) -> String {
         }
         Some(PullRequestSyncError::RateLimited { retry_at }) => crate::tr!(
             "pull_requests.notice_rate_limited",
+            host_name = host_name,
             ago =
                 crate::time::humanize_ago(retry_at.saturating_sub(tcode_core::project::now_secs()))
         )
@@ -498,16 +500,14 @@ fn change_link<T: 'static>(
     .detach();
 }
 
-/// The pull request host at `host` as a person reads it, by the kind settings give the server.
+/// What Tcode says about the pull request host at `host`, by the kind settings give it.
+pub(crate) fn host_terms(store: &WorkspaceStore, host: &str) -> &'static HostTerms {
+    store.settings().source_control.kind(host).terms()
+}
+
+/// The pull request host at `host` as a person reads it.
 pub(crate) fn host_name(store: &WorkspaceStore, host: &str) -> String {
-    store
-        .settings()
-        .source_control
-        .kind(host)
-        .or_else(|| tcode_core::pull_request::HostKind::detect(host))
-        .unwrap_or(tcode_core::pull_request::HostKind::Github)
-        .terms()
-        .display_name(host)
+    host_terms(store, host).display_name(host)
 }
 
 /// The row's menu: Open on the host, Copy link, the watch, what can become of the pull request,
@@ -821,7 +821,10 @@ impl PullRequestsPanel {
             }
         } else {
             if let Some(link) = link.filter(|_| visible) {
-                detail.insert(0, sync_error(link));
+                detail.insert(
+                    0,
+                    sync_error(link, &host_name(self.store.read(cx), &key.host)),
+                );
             } else {
                 detail.push(crate::tr!(&format!("{state_label}_lower")).into_owned());
                 detail.extend(layer.clone());
@@ -1338,7 +1341,10 @@ impl Render for PullRequestsPanel {
                     .rounded_md()
                     .bg(cx.theme().muted)
                     .text_size(px(12.))
-                    .child(div().flex_1().child(sync_error(link)))
+                    .child(div().flex_1().child(sync_error(
+                        link,
+                        &host_name(self.store.read(cx), &link.key.host),
+                    )))
                     .when(credential, |notice| {
                         notice.child(
                             Button::new(SharedString::from(format!(

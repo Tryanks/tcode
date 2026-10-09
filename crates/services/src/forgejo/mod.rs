@@ -30,7 +30,7 @@ use tcode_core::{
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{CredentialSource, HostOrigin, HostProblem, HostSettings, HostStatus},
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
@@ -45,7 +45,6 @@ const READ_TTL: Duration = Duration::from_secs(60);
 /// Text at a commit never changes; the bound is only on how long it holds memory.
 const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
-const FILES_PER_PAGE: u32 = 50;
 /// Issue comments whose reactions a conversation read asks for, one request each.
 const REACTION_READS: usize = 100;
 const ANONYMOUS: &str = "anonymous";
@@ -61,6 +60,7 @@ pub struct Forgejo {
     known: RwLock<BTreeMap<String, HostKind>>,
     reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
     branches: Mutex<Branches>,
+    verdicts: reads::Verdicts,
 }
 
 impl Forgejo {
@@ -74,6 +74,7 @@ impl Forgejo {
             known: RwLock::default(),
             reads: Mutex::default(),
             branches: Mutex::default(),
+            verdicts: reads::Verdicts::default(),
         })
     }
 
@@ -133,10 +134,12 @@ impl Forgejo {
         Ok((!response.truncated).then(|| String::from_utf8_lossy(&response.body).into_owned()))
     }
 
+    /// `page` is the page and the size the first page came back with, which a later one is
+    /// full at.
     fn files(
         &self,
         key: &PullRequestKey,
-        page: Option<u32>,
+        page: Option<(u32, usize)>,
     ) -> Result<PullRequestFiles, ForgeError> {
         let pull = self.pull(key);
         let pr = pull.pull()?;
@@ -159,20 +162,23 @@ impl Forgejo {
             });
         }
         // Past the read limit the files listing pages the changes, without their hunks.
-        let page = page.unwrap_or(1);
+        let page_number = page.map_or(1, |(page, _)| page);
         let rows: Vec<Value> = pull
             .get(
                 &format!(
-                    "pulls/{}/files?limit={FILES_PER_PAGE}&page={page}",
-                    key.number
+                    "pulls/{}/files?limit={}&page={page_number}",
+                    key.number,
+                    api::PAGE_LIMIT
                 ),
                 "Files",
             )?
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let listed = (page - 1) as u64 * FILES_PER_PAGE as u64 + rows.len() as u64;
-        let next = (rows.len() as u32 >= FILES_PER_PAGE).then_some(page + 1);
+        let size = page.map_or(rows.len(), |(_, size)| size);
+        let listed = (page_number as u64 - 1) * size as u64 + rows.len() as u64;
+        let next = (api::page_full(rows.len(), &size) && listed < changed_files)
+            .then_some((page_number + 1, size));
         Ok(PullRequestFiles {
             base,
             head,
@@ -196,7 +202,7 @@ impl Forgejo {
                     })
                 })
                 .collect(),
-            next_cursor: next.map(|page| page.to_string()),
+            next_cursor: next.map(|(page, size)| format!("{page}:{size}")),
             complete: next.is_none() && listed >= changed_files,
             changed_files,
         })
@@ -350,9 +356,19 @@ impl Forgejo {
             viewer_can_update: signed_in && (is_author || writes),
             viewer_can_react: signed_in,
         };
+        // Line comments are neither reacted to nor edited through the issue-comment endpoints,
+        // and their reactions are not read.
+        let line_comment = |raw: &Value| {
+            comment(raw).map(|comment| PullRequestComment {
+                reactions: Vec::new(),
+                viewer_can_update: false,
+                viewer_can_react: false,
+                ..comment
+            })
+        };
         let threads = reads::threads(
             &line_comments,
-            comment,
+            line_comment,
             signed_in && capabilities.reply,
             signed_in && capabilities.resolve && (is_author || writes),
         );
@@ -515,7 +531,7 @@ impl Forgejo {
         let merge_state = if pr["draft"].as_bool() == Some(true) {
             PullRequestMergeState::Draft
         } else {
-            match reads::mergeability(&pr) {
+            match self.verdicts.read(key, &pr) {
                 tcode_core::pull_request::Mergeability::Conflicting => PullRequestMergeState::Dirty,
                 tcode_core::pull_request::Mergeability::Unknown => PullRequestMergeState::Unknown,
                 tcode_core::pull_request::Mergeability::Clean
@@ -552,7 +568,7 @@ impl Forgejo {
             behind_by,
             merge_queue: false,
             merge_methods,
-            auto_merge_allowed: true,
+            auto_merge_allowed: false,
             // The servers never say whether a merge is scheduled.
             auto_merge: None,
             queued: false,
@@ -619,7 +635,7 @@ impl Forgejo {
                 "media not in the conversation",
             ));
         }
-        self.api.media(&parsed, validator)
+        self.api.media(&key.host, &parsed, validator)
     }
 
     fn conversation_read(
@@ -675,9 +691,10 @@ impl Forge for Forgejo {
     fn credential_status(&self) -> BTreeMap<String, HostStatus> {
         let configured = self.api.configured();
         let tea = self.api.tea_program().is_some();
-        let mut hosts: BTreeMap<String, (HostKind, HostOrigin)> = configured
+        // Each host's kind, and whether only settings name it.
+        let mut hosts: BTreeMap<String, (HostKind, bool)> = configured
             .iter()
-            .map(|(host, choice)| (host.clone(), (choice.kind, HostOrigin::Added)))
+            .map(|(host, choice)| (host.clone(), (choice.kind, true)))
             .collect();
         let detected = self
             .api
@@ -691,8 +708,8 @@ impl Forge for Forgejo {
                 .unwrap_or(HostKind::Gitea);
             hosts
                 .entry(host)
-                .and_modify(|(_, origin)| *origin = HostOrigin::Detected)
-                .or_insert((kind, HostOrigin::Detected));
+                .and_modify(|(_, added)| *added = false)
+                .or_insert((kind, false));
         }
         {
             let mut known = self.known.write().unwrap();
@@ -702,7 +719,7 @@ impl Forge for Forgejo {
         }
         hosts
             .into_iter()
-            .map(|(host, (kind, origin))| {
+            .map(|(host, (kind, added))| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
                 let source = self
                     .api
@@ -726,7 +743,7 @@ impl Forge for Forgejo {
                     host.clone(),
                     HostStatus {
                         kind,
-                        origin,
+                        added,
                         token_set: self.api.token_saved(kind, &host),
                         source,
                         accounts: Vec::new(),
@@ -817,9 +834,10 @@ impl Forge for Forgejo {
         let head = text(&pr["head"], "sha").unwrap_or_default();
         let checks = reads::checks_state(&pull.checks(&head)?);
         Ok(Summary {
-            snapshot: reads::snapshot(&pr, checks, Self::now()).ok_or_else(|| {
-                error(ForgeErrorKind::Uncertain, "Forgejo pull request unreadable")
-            })?,
+            snapshot: reads::snapshot(&pr, checks, self.verdicts.read(key, &pr), Self::now())
+                .ok_or_else(|| {
+                    error(ForgeErrorKind::Uncertain, "Forgejo pull request unreadable")
+                })?,
             stack_number: None,
         })
     }
@@ -838,9 +856,11 @@ impl Forge for Forgejo {
                 let page = cursor
                     .map(|cursor| {
                         cursor
-                            .parse::<u32>()
-                            .ok()
-                            .filter(|page| *page > 1)
+                            .split_once(':')
+                            .and_then(|(page, size)| {
+                                Some((page.parse::<u32>().ok()?, size.parse::<usize>().ok()?))
+                            })
+                            .filter(|(page, size)| *page > 1 && *size > 0)
                             .ok_or_else(|| error(ForgeErrorKind::InvalidInput, "invalid cursor"))
                     })
                     .transpose()?;
@@ -1024,7 +1044,7 @@ impl Forge for Forgejo {
             head_sha: head,
             base_branch: text(&pr["base"], "ref").unwrap_or_default(),
             checks,
-            mergeability: reads::mergeability(&pr),
+            mergeability: self.verdicts.read(key, &pr),
             viewer: pull.viewer()?,
             author: text(&pr["user"], "login"),
         })

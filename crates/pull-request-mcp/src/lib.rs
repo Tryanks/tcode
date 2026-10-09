@@ -44,8 +44,8 @@ pub struct PullRequestMcpServer {
     pub hosts: HostNames,
 }
 
-/// The hosts the tool descriptions name, as the host's settings have them now; a thread's tools
-/// are described with the names current when it connects.
+/// The hosts the tool descriptions name, as the host's settings have them now; a registration's
+/// tools are described with the names current when it is made.
 #[derive(Clone)]
 pub struct HostNames(Arc<RwLock<String>>);
 
@@ -62,7 +62,7 @@ impl HostNames {
     pub fn set(&self, names: String) {
         *self.0.write().unwrap() = names;
     }
-    fn get(&self) -> String {
+    pub fn get(&self) -> String {
         self.0.read().unwrap().clone()
     }
 }
@@ -79,15 +79,17 @@ pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
     );
     let hosts = HostNames::default();
     let named = hosts.clone();
+    // A registration's tools name the hosts current when it was made, however settings change
+    // while its thread runs.
     let tokens = TokenRegistry::new(move |session_id| {
         let broker = broker.clone();
-        let hosts = named.clone();
+        let hosts = named.get();
         StreamableHttpService::new(
             move || {
                 Ok(PullRequestTools::new(
                     broker.clone(),
                     session_id.clone(),
-                    &hosts.get(),
+                    &hosts,
                 ))
             },
             Arc::new(LocalSessionManager::default()),

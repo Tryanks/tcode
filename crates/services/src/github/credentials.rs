@@ -8,7 +8,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::HostKind,
-    settings::{CredentialSource, HostOrigin, HostProblem, HostSettings, HostStatus},
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,24 +293,20 @@ impl Credentials {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         let configured = self.hosts.read().unwrap().clone();
-        let mut hosts: BTreeMap<String, HostOrigin> = configured
-            .keys()
-            .map(|host| (host.clone(), HostOrigin::Added))
-            .collect();
-        hosts.insert("github.com".into(), HostOrigin::Default);
+        // Whether only settings name the host.
+        let mut hosts: BTreeMap<String, bool> =
+            configured.keys().map(|host| (host.clone(), true)).collect();
+        hosts.insert("github.com".into(), false);
         if let Some(logins) = accounts.get("hosts").and_then(|hosts| hosts.as_object()) {
             for host in logins.keys() {
                 if let Ok(host) = normalize_host(host) {
-                    let origin = hosts.entry(host).or_insert(HostOrigin::Detected);
-                    if *origin == HostOrigin::Added {
-                        *origin = HostOrigin::Detected;
-                    }
+                    hosts.insert(host, false);
                 }
             }
         }
         hosts
             .into_iter()
-            .map(|(host, origin)| {
+            .map(|(host, added)| {
                 let choice = configured
                     .get(&host)
                     .cloned()
@@ -361,7 +357,7 @@ impl Credentials {
                     host,
                     HostStatus {
                         kind: HostKind::Github,
-                        origin,
+                        added,
                         token_set,
                         source,
                         accounts,

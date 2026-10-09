@@ -1270,7 +1270,8 @@ impl PullRequestView {
                 crate::tr!(
                     "pull_requests.files.partial",
                     shown = listed.to_string(),
-                    total = files.changed_files.to_string()
+                    total = files.changed_files.to_string(),
+                    host_name = self.host_name(cx)
                 )
             } else {
                 crate::tr!("pull_requests.files.partial_unknown")
@@ -1373,7 +1374,11 @@ impl PullRequestView {
             ),
             PullRequestPatch::Withheld => (
                 IconName::FileX,
-                crate::tr!("pull_requests.files.withheld").into_owned(),
+                crate::tr!(
+                    "pull_requests.files.withheld",
+                    host_name = self.host_name(cx)
+                )
+                .into_owned(),
             ),
             PullRequestPatch::Hunks(_) => return div().into_any_element(),
         };

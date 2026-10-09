@@ -133,12 +133,7 @@ impl Pull<'_> {
         Err(Rejection::ForeignSubject)
     }
 
-    fn merge(
-        &self,
-        head: &str,
-        method: PullRequestMergeMethod,
-        auto: bool,
-    ) -> Result<Outcome, Rejection> {
+    fn merge(&self, head: &str, method: PullRequestMergeMethod) -> Result<Outcome, Rejection> {
         self.at_head(head)?;
         let style = match method {
             PullRequestMergeMethod::Merge => "merge",
@@ -151,23 +146,13 @@ impl Pull<'_> {
         } else {
             "Do"
         };
-        let body = json!({
-            field: style,
-            "head_commit_id": head,
-            "merge_when_checks_succeed": auto,
-        });
-        Ok(
-            match self.write(
-                "POST",
-                &format!("pulls/{}/merge", self.key.number),
-                Some(body),
-                "Merge",
-            ) {
-                // 201 is a merge scheduled for when the checks succeed.
-                Ok(response) if response.status == 201 => Outcome::AutoMergeEnabled { method },
-                other => answered(other),
-            },
-        )
+        let body = json!({ field: style, "head_commit_id": head });
+        Ok(answered(self.write(
+            "POST",
+            &format!("pulls/{}/merge", self.key.number),
+            Some(body),
+            "Merge",
+        )))
     }
 
     fn update_branch(&self, head: &str, rebase: bool) -> Result<Outcome, Rejection> {
@@ -373,18 +358,11 @@ pub(super) fn act(pull: &Pull<'_>, action: &PullRequestAction) -> Outcome {
             PullRequestAction::UpdateBranch { head, rebase } => {
                 pull.update_branch(head, *rebase)?
             }
-            // An agent-credit-free message would have to be composed here: the API reads no
-            // default merge message to clean, so the server writes its own.
-            PullRequestAction::Merge {
-                head, method, auto, ..
-            } => pull.merge(head, *method, *auto)?,
-            PullRequestAction::DisableAutoMerge => answered(pull.write(
-                "DELETE",
-                &format!("pulls/{number}/merge"),
-                None,
-                "CancelAutoMerge",
-            )),
+            // Auto-merge and a cleaned message are not capabilities here, so the dispatcher sends
+            // neither.
+            PullRequestAction::Merge { head, method, .. } => pull.merge(head, *method)?,
             PullRequestAction::SubmitReview { .. }
+            | PullRequestAction::DisableAutoMerge
             | PullRequestAction::ReadyForReview
             | PullRequestAction::ConvertToDraft
             | PullRequestAction::Revert

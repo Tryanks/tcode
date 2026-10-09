@@ -1078,7 +1078,8 @@ impl PullRequestView {
         let tooltip = crate::tr!(
             "pull_requests.actions.update_tooltip",
             base = base,
-            head = snapshot.head_branch.clone()
+            head = snapshot.head_branch.clone(),
+            host_name = self.host_name(cx)
         )
         .into_owned();
         let updates =
@@ -1694,12 +1695,18 @@ impl PullRequestView {
             notices.push(notice(
                 crate::tr!(
                     "pull_requests.notice_rate_limited",
-                    host = self
-                        .current
-                        .as_ref()
-                        .map(|(_, key)| key.host.clone())
-                        .unwrap_or_default(),
-                    time = String::new()
+                    host_name = self.host_name(cx),
+                    ago = self
+                        .link(cx)
+                        .and_then(|link| match link.sync_error {
+                            Some(tcode_core::pull_request::PullRequestSyncError::RateLimited {
+                                retry_at,
+                            }) => Some(crate::time::humanize_ago(
+                                retry_at.saturating_sub(tcode_core::project::now_secs())
+                            )),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| crate::tr!("pull_requests.notice_soon").into_owned())
                 )
                 .into_owned(),
                 None,

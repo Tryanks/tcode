@@ -25,6 +25,10 @@ pub struct HostTerms {
     pub named_by_host: bool,
     /// The host's monochrome mark among the UI's icon assets.
     pub mark: &'static str,
+    /// The pull request's own pages for its conflicts and its checks, below its URL, where the
+    /// host has them.
+    pub conflicts_page: Option<&'static str>,
+    pub checks_page: Option<&'static str>,
 }
 
 impl HostTerms {
@@ -69,6 +73,8 @@ pub const GITHUB: HostTerms = HostTerms {
     },
     named_by_host: false,
     mark: "icons/github.svg",
+    conflicts_page: Some("/conflicts"),
+    checks_page: Some("/checks"),
 };
 
 pub const FORGEJO: HostTerms = HostTerms {
@@ -79,6 +85,8 @@ pub const FORGEJO: HostTerms = HostTerms {
     pull_request_url: forgejo_pull_request_url,
     named_by_host: true,
     mark: "icons/forgejo.svg",
+    conflicts_page: None,
+    checks_page: None,
 };
 
 /// Gitea and Forgejo share an API and a CLI, so they differ only in name.
@@ -168,6 +176,23 @@ impl HostKind {
         })
     }
 
+    /// The kind a host is read as: the one `known` from settings, else the one its name says,
+    /// else GitHub, as every host was before hosts had kinds.
+    pub fn of(known: Option<Self>, host: &str) -> Self {
+        known.or_else(|| Self::detect(host)).unwrap_or(Self::Github)
+    }
+
+    /// What an authority of the kind looks like, for one [`Self::authority`] refused.
+    pub fn rule(self) -> String {
+        match self {
+            Self::Github => "Use a GitHub hostname without a URL or path.".into(),
+            Self::Forgejo | Self::Gitea => format!(
+                "Use a {} host name in lowercase, with its port and path if the server has them, without a URL scheme.",
+                self.terms().name
+            ),
+        }
+    }
+
     /// An authority as settings keep it: lowercase, without a scheme or trailing slashes. Only
     /// Forgejo and Gitea servers take a port and a mount path.
     pub fn authority(self, raw: &str) -> Result<String, HostRefusal> {
@@ -227,16 +252,13 @@ pub fn dns_name(host: &str) -> bool {
 }
 
 /// The hosts whose terms Tcode's text names: GitHub's, and those of every other kind in
-/// `kinds`, in [`HOSTS`] order.
+/// `kinds`, in [`HostKind::ALL`] order.
 pub fn hosts_in(kinds: impl IntoIterator<Item = HostKind>) -> Vec<&'static HostTerms> {
     let kinds: Vec<_> = kinds.into_iter().collect();
-    HOSTS
-        .iter()
-        .copied()
-        .filter(|terms| {
-            std::ptr::eq(*terms, &GITHUB)
-                || kinds.iter().any(|kind| std::ptr::eq(kind.terms(), *terms))
-        })
+    HostKind::ALL
+        .into_iter()
+        .filter(|kind| *kind == HostKind::Github || kinds.contains(kind))
+        .map(HostKind::terms)
         .collect()
 }
 

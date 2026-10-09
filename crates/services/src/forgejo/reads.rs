@@ -34,10 +34,14 @@ pub(super) fn capabilities(server: Server) -> PullRequestCapabilities {
         // Draft is a title prefix on these servers; no API field marks it.
         draft: false,
         reopen: true,
-        auto_merge: true,
+        // A merge can be scheduled for when checks pass, but nothing reads whether one is, so it
+        // could never be shown or cancelled.
+        auto_merge: false,
         update_branch: true,
         revert: false,
         host_viewed_marks: false,
+        // No read of the server's default merge message exists to send back cleaned.
+        merge_message: false,
     }
 }
 
@@ -171,8 +175,9 @@ pub(super) fn state(pr: &Value) -> Option<PullRequestState> {
     }
 }
 
-/// `mergeable` is false while the server checks the branch, when it conflicts, and for every
-/// draft. A draft's is never worked out, so it stays unknown; otherwise false is a conflict.
+/// What `mergeable` alone says: false while the server checks the branch, when the check
+/// failed, when it conflicts, and for every draft. A draft's is never worked out, so it stays
+/// unknown; otherwise false may be a conflict.
 pub(super) fn mergeability(pr: &Value) -> Mergeability {
     match (
         pr["mergeable"].as_bool(),
@@ -184,9 +189,44 @@ pub(super) fn mergeability(pr: &Value) -> Mergeability {
     }
 }
 
+/// The last head and `mergeable` read of each pull request. A server still checking a new head
+/// answers false as a conflict does, so a false is a conflict only when an earlier read at the
+/// same head said so too.
+#[derive(Default)]
+pub(super) struct Verdicts(
+    std::sync::Mutex<std::collections::HashMap<PullRequestKey, (String, bool)>>,
+);
+
+impl Verdicts {
+    pub(super) fn read(&self, key: &PullRequestKey, pr: &Value) -> Mergeability {
+        let read = mergeability(pr);
+        let Some(head) = text(&pr["head"], "sha") else {
+            return read;
+        };
+        let mut verdicts = self.0.lock().unwrap();
+        let confirmed = verdicts.get(key) == Some(&(head.clone(), false));
+        match read {
+            Mergeability::Clean => {
+                verdicts.insert(key.clone(), (head, true));
+                read
+            }
+            Mergeability::Conflicting => {
+                verdicts.insert(key.clone(), (head, false));
+                if confirmed {
+                    read
+                } else {
+                    Mergeability::Unknown
+                }
+            }
+            Mergeability::Unknown => read,
+        }
+    }
+}
+
 pub(super) fn snapshot(
     pr: &Value,
     checks: Option<ChecksState>,
+    mergeability: Mergeability,
     synced_at: u64,
 ) -> Option<PullRequestSnapshot> {
     Some(PullRequestSnapshot {
@@ -208,7 +248,7 @@ pub(super) fn snapshot(
         changed_files: pr["changed_files"].as_u64().unwrap_or(0),
         review_decision: None,
         checks_state: checks,
-        mergeability: mergeability(pr),
+        mergeability,
     })
 }
 
@@ -527,6 +567,32 @@ mod tests {
         assert_eq!(
             mergeability(&json!({"mergeable": true, "draft": true})),
             Mergeability::Clean
+        );
+    }
+
+    /// A false read just after a push is the server still checking; the same false at the same
+    /// head again is a conflict, and a new head starts over.
+    #[test]
+    fn a_conflict_is_one_seen_twice_at_one_head() {
+        let key = PullRequestKey::new("gitea.test", "a/b", 1);
+        let read = |head: &str, mergeable: bool| json!({"mergeable": mergeable, "draft": false, "head": {"sha": head}});
+        let verdicts = Verdicts::default();
+        assert_eq!(
+            verdicts.read(&key, &read("h1", false)),
+            Mergeability::Unknown
+        );
+        assert_eq!(
+            verdicts.read(&key, &read("h1", false)),
+            Mergeability::Conflicting
+        );
+        assert_eq!(
+            verdicts.read(&key, &read("h2", false)),
+            Mergeability::Unknown
+        );
+        assert_eq!(verdicts.read(&key, &read("h2", true)), Mergeability::Clean);
+        assert_eq!(
+            verdicts.read(&key, &read("h2", false)),
+            Mergeability::Unknown
         );
     }
 

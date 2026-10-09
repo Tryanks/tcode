@@ -65,23 +65,18 @@ impl AppState {
                 .map_err(|message| error("invalid_settings", message))?;
         }
         let host_kind = match command {
-            Command::SetHostToken { host, .. } => Some((
-                host,
-                self.settings
-                    .source_control
-                    .kind(host)
-                    .or_else(|| tcode_core::pull_request::HostKind::detect(host)),
-            )),
+            Command::SetHostToken { host, .. } => {
+                Some((host, self.settings.source_control.kind(host)))
+            }
             Command::PatchSettings {
                 patch: SettingsPatch::SourceControlHost { host, kind, .. },
-            } => Some((host, Some(*kind))),
+            } => Some((host, *kind)),
             _ => None,
         };
         if let Some((host, kind)) = host_kind {
-            let kind = kind.unwrap_or(tcode_core::pull_request::HostKind::Github);
             // Settings and the token store lowercase and trim; a scheme or slash is not theirs to drop.
             if kind.authority(host).ok() != Some(host.trim().to_ascii_lowercase()) {
-                return Err(error("invalid_host", &host_rule(kind)));
+                return Err(error("invalid_host", &kind.rule()));
             }
         }
         match command {
@@ -443,18 +438,6 @@ impl AppState {
             }
         }
         Ok(())
-    }
-}
-
-/// What an authority of `kind` looks like, for a host that refused one.
-fn host_rule(kind: tcode_core::pull_request::HostKind) -> String {
-    use tcode_core::pull_request::HostKind;
-    match kind {
-        HostKind::Github => "Use a GitHub hostname without a URL or path.".into(),
-        HostKind::Forgejo | HostKind::Gitea => format!(
-            "Use a {} host name in lowercase, with its port and path if the server has them, without a URL scheme.",
-            kind.terms().name
-        ),
     }
 }
 

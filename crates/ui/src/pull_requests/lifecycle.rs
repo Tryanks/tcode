@@ -474,7 +474,7 @@ pub(super) struct Target {
     pub(super) session: String,
     pub(super) offer: Offer,
     /// The pull request's host as a person reads it.
-    host_name: String,
+    pub(super) host_name: String,
     pub(super) title: String,
     pub(super) head_branch: String,
     pub(super) base_branch: String,
@@ -625,7 +625,8 @@ impl Target {
                 );
                 let description = crate::tr!(
                     "pull_requests.actions.rebase_desc",
-                    head = self.head_branch.clone()
+                    head = self.head_branch.clone(),
+                    host_name = self.host_name.clone()
                 );
                 self.confirm(
                     title,
@@ -852,7 +853,8 @@ impl Target {
             PullRequestActionResult::AutoMergeEnabled { method } => Notification::info(
                 crate::tr!(
                     "pull_requests.result.auto_merge_on_body",
-                    method = method_label(*method)
+                    method = method_label(*method),
+                    host_name = self.host_name.clone()
                 )
                 .into_owned(),
             )
@@ -905,7 +907,7 @@ impl Target {
                 ))
             }
             PullRequestActionResult::Rejected(rejection) => {
-                let reason = rejection_reason(rejection);
+                let reason = rejection_reason(rejection, &self.host_name);
                 if merging {
                     return Some(Notification::error(reason).title(crate::tr!(
                         "pull_requests.result.merge_failed",
@@ -940,7 +942,8 @@ impl Target {
             PullRequestActionResult::Uncertain => {
                 let message = crate::tr!(
                     "pull_requests.result.uncertain_body",
-                    message = crate::tr!("pull_requests.result.connection_lost").into_owned()
+                    message = crate::tr!("pull_requests.result.connection_lost").into_owned(),
+                    host_name = self.host_name.clone()
                 )
                 .into_owned();
                 let title = if merging {
@@ -1072,8 +1075,10 @@ impl MergeDialog {
     }
 
     /// GitHub writes a merge queue's message itself, and a rebase keeps each commit's.
+    /// Only a host that takes the message Tcode sends can have credits left out of it.
     fn credits_shown(&self) -> bool {
-        matches!(&self.state, Some(Ok(state)) if !state.merge_queue)
+        matches!(&self.state, Some(Ok(state))
+            if !state.merge_queue && state.capabilities.merge_message)
             && self.method != Some(PullRequestMergeMethod::Rebase)
     }
 
@@ -1271,7 +1276,8 @@ impl Render for MergeDialog {
                     crate::tr!(
                         "pull_requests.merge.auto_note",
                         number = number.clone(),
-                        method = method_label(method)
+                        method = method_label(method),
+                        host_name = self.target.host_name.clone()
                     )
                     .into_owned(),
                 ));
@@ -1507,25 +1513,47 @@ pub(super) fn primary_element(
     use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
     match primary {
         Primary::ResolveConflicts | Primary::FixChecks => {
-            let (icon, label, ask, github) = if primary == Primary::ResolveConflicts {
+            let terms = super::host_terms(target.store.read(cx), &key.host);
+            let host_name = target.host_name.clone();
+            // The host's own page for what blocks the merge, where it has one. Without a
+            // conflicts page the pull request itself is where they are resolved; without a
+            // checks page there is nothing to open.
+            let (icon, label, ask, page) = if primary == Primary::ResolveConflicts {
                 (
                     IconName::GitMergeConflict,
                     crate::tr!("pull_requests.actions.resolve_conflicts").into_owned(),
                     Lifecycle::AskConflicts,
-                    (
-                        "pull_requests.actions.resolve_on_github",
-                        format!("{url}/conflicts"),
-                    ),
+                    Some(match terms.conflicts_page {
+                        Some(page) => (
+                            crate::tr!(
+                                "pull_requests.actions.resolve_on_host",
+                                host_name = host_name
+                            )
+                            .into_owned(),
+                            format!("{url}{page}"),
+                        ),
+                        None => (
+                            crate::tr!("pull_requests.open_on_host", host_name = host_name)
+                                .into_owned(),
+                            url.clone(),
+                        ),
+                    }),
                 )
             } else {
                 (
                     IconName::CircleX,
                     crate::tr!("pull_requests.actions.fix_checks").into_owned(),
                     Lifecycle::AskChecks,
-                    (
-                        "pull_requests.actions.checks_on_github",
-                        format!("{url}/checks"),
-                    ),
+                    terms.checks_page.map(|page| {
+                        (
+                            crate::tr!(
+                                "pull_requests.actions.checks_on_host",
+                                host_name = host_name
+                            )
+                            .into_owned(),
+                            format!("{url}{page}"),
+                        )
+                    }),
                 )
             };
             let can_ask = target.takes_messages(cx);
@@ -1545,10 +1573,9 @@ pub(super) fn primary_element(
                         }),
                         can_ask,
                     )
-                    .menu(
-                        crate::tr!(github.0).into_owned(),
-                        Box::new(OpenUrl(github.1.clone())),
-                    )
+                    .when_some(page.clone(), |menu, (label, url)| {
+                        menu.menu(label, Box::new(OpenUrl(url)))
+                    })
                 })
                 .into_any_element()
         }
@@ -1566,7 +1593,13 @@ pub(super) fn primary_element(
                 method = method_label(method)
             )
             .into_owned(),
-            Some(crate::tr!("pull_requests.actions.auto_merge_tooltip").into_owned()),
+            Some(
+                crate::tr!(
+                    "pull_requests.actions.auto_merge_tooltip",
+                    host_name = target.host_name.clone()
+                )
+                .into_owned(),
+            ),
         ),
         Primary::Queued(position) => chip(
             IconName::ListOrdered,
@@ -1630,7 +1663,8 @@ pub(super) fn primary_element(
             crate::tr!(
                 "pull_requests.actions.update_tooltip",
                 base = target.base_branch.clone(),
-                head = target.head_branch.clone()
+                head = target.head_branch.clone(),
+                host_name = target.host_name.clone()
             )
             .into_owned(),
         )

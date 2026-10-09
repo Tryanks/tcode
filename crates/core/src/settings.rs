@@ -25,12 +25,15 @@ pub struct SourceControlSettings {
 }
 
 impl SourceControlSettings {
-    /// The kind of a host the settings list, configured or found.
-    pub fn kind(&self, host: &str) -> Option<HostKind> {
-        self.hosts
-            .get(host)
-            .map(|choice| choice.kind)
-            .or_else(|| self.status.get(host).map(|status| status.kind))
+    /// The kind a host is read as: the one settings give it, configured or found.
+    pub fn kind(&self, host: &str) -> HostKind {
+        HostKind::of(
+            self.hosts
+                .get(host)
+                .map(|choice| choice.kind)
+                .or_else(|| self.status.get(host).map(|status| status.kind)),
+            host,
+        )
     }
 }
 
@@ -85,18 +88,6 @@ pub enum CredentialSource {
     },
 }
 
-/// Why a host listed in Settings is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostOrigin {
-    /// The kind's public host Tcode always lists.
-    Default,
-    /// A CLI login or an environment variable names it.
-    Detected,
-    /// Only the user's settings name it.
-    Added,
-}
-
 /// What keeps a host from being read, when something does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -113,7 +104,8 @@ pub enum HostProblem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostStatus {
     pub kind: HostKind,
-    pub origin: HostOrigin,
+    /// Only the user's settings name it: no CLI login, environment variable or default does.
+    pub added: bool,
     pub token_set: bool,
     /// The source in use now; `None` when nothing resolved.
     pub source: Option<CredentialSource>,

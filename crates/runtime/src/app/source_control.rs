@@ -33,13 +33,7 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<CommandResponse, ProtocolError>> {
         let host = host.trim().to_ascii_lowercase();
-        // A host settings do not list yet is GitHub's, as every host was before hosts had kinds.
-        let kind = self
-            .settings
-            .source_control
-            .kind(&host)
-            .or_else(|| tcode_core::pull_request::HostKind::detect(&host))
-            .unwrap_or(tcode_core::pull_request::HostKind::Github);
+        let kind = self.settings.source_control.kind(&host);
         let (completion, receiver) = smol::channel::bounded(1);
         self.enqueue_store_write(
             StoreWrite::SetHostToken {

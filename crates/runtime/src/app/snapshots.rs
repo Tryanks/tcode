@@ -901,14 +901,13 @@ impl AppState {
             options_pending_restart: session.options_changed_while_live(),
             pull_request_tools: self
                 .pull_request_tools_offered(session.meta.provider)
-                .then(|| {
-                    let hosts = self.pull_request_hosts();
-                    tcode_protocol::InjectedPullRequestTools {
-                        tools: pull_request_mcp::tool_descriptions(
-                            &tcode_core::pull_request::host_names(&hosts),
-                        ),
-                        instructions: tcode_core::pull_request::linking_instructions(&hosts),
-                    }
+                .then(|| tcode_protocol::InjectedPullRequestTools {
+                    tools: pull_request_mcp::tool_descriptions(
+                        &self.pull_request_tool_hosts(session_id),
+                    ),
+                    instructions: tcode_core::pull_request::linking_instructions(
+                        &self.pull_request_hosts(),
+                    ),
                 }),
         })
     }

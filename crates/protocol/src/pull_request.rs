@@ -243,6 +243,8 @@ pub struct PullRequestCapabilities {
     pub revert: bool,
     /// The host keeps the account's viewed marks; without them Tcode keeps the marks.
     pub host_viewed_marks: bool,
+    /// A merge takes the commit message Tcode sends, such as one without agents' credits.
+    pub merge_message: bool,
 }
 impl PullRequestCapabilities {
     pub const ALL: Self = Self {
@@ -256,6 +258,7 @@ impl PullRequestCapabilities {
         update_branch: true,
         revert: true,
         host_viewed_marks: true,
+        merge_message: true,
     };
 }
 
@@ -668,6 +671,8 @@ pub enum PullRequestRejection {
     },
     /// A read the write needed failed, so it was not sent.
     Failed,
+    /// The host offers no such action.
+    Unsupported,
     /// Whether the pull request is in a native stack is not known yet.
     StackUnknown,
     /// The stack's number or its layers are not what the write was confirmed against.

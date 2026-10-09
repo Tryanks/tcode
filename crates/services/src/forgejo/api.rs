@@ -75,7 +75,6 @@ pub(super) struct Credential {
 
 #[derive(Debug)]
 pub(super) struct Response {
-    pub(super) status: u16,
     pub(super) body: Vec<u8>,
     pub(super) truncated: bool,
 }
@@ -463,11 +462,7 @@ impl Api {
             ));
         }
         if (200..300).contains(&status) {
-            return Ok(Response {
-                status,
-                body,
-                truncated,
-            });
+            return Ok(Response { body, truncated });
         }
         let message = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
@@ -514,10 +509,13 @@ impl Api {
             let batch: Vec<serde_json::Value> = self
                 .send(
                     authority,
-                    Request::get(format!("{path}{separator}limit=50&page={page}"), operation),
+                    Request::get(
+                        format!("{path}{separator}limit={PAGE_LIMIT}&page={page}"),
+                        operation,
+                    ),
                 )?
                 .json()?;
-            let full = !batch.is_empty() && batch.len() >= *size.get_or_insert(batch.len());
+            let full = page_full(batch.len(), size.get_or_insert(batch.len()));
             rows.extend(batch);
             if !full {
                 return Ok((rows, true));
@@ -530,21 +528,19 @@ impl Api {
 impl Api {
     /// An upload or avatar on the server, read with its token. A redirect may lead to object
     /// storage that authorizes with its own signature, which never sees the token.
+    /// `authority` is the server the pull request is on, mount path included, whose credential
+    /// the URL's host is sent.
     pub(super) fn media(
         &self,
+        authority: &str,
         url: &url::Url,
         validator: Option<&str>,
     ) -> Result<tcode_protocol::PullRequestMedia, ForgeError> {
         use crate::github::media;
         use tcode_protocol::{MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestMedia};
         let failed = || error(ForgeErrorKind::Uncertain, "Forgejo media unreadable");
-        let origin = url.host_str().unwrap_or_default().to_ascii_lowercase();
-        let authority = match url.port() {
-            Some(port) => format!("{origin}:{port}"),
-            None => origin.clone(),
-        };
         let token = self
-            .credential(&authority)
+            .credential(authority)
             .ok()
             .flatten()
             .map(|credential| credential.token);
@@ -631,6 +627,15 @@ impl Api {
     }
 }
 
+/// The page size asked for; a server may answer fewer.
+pub(super) const PAGE_LIMIT: usize = 50;
+
+/// Whether a page of `rows` was full, so another may follow: a server may cap a page below
+/// [`PAGE_LIMIT`], so a page is full at the size the first page came back with.
+pub(super) fn page_full(rows: usize, first: &usize) -> bool {
+    rows > 0 && rows >= *first
+}
+
 fn nonempty(value: String) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
@@ -638,7 +643,61 @@ fn nonempty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Server;
+    use super::{Api, Server};
+    use tcode_core::settings::CredentialSource;
+
+    /// `GITEA_TOKEN` goes only to the server `GITEA_INSTANCE_URL` names, and tea's token for one
+    /// server never to another: tea is asked for each server by its own host.
+    #[cfg(unix)]
+    #[test]
+    fn a_token_goes_only_to_the_server_it_is_for() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root =
+            std::env::temp_dir().join(format!("tcode-forgejo-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tea = root.join("tea");
+        std::fs::write(
+            &tea,
+            "#!/bin/sh\nwhile read -r line; do\n  [ \"$line\" = host=tea.test ] && echo password=tea-secret\ndone\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tea, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let api = Api::new(
+            crate::settings::SettingsStore::new(root.clone()),
+            [
+                ("PATH".to_owned(), root.to_string_lossy().into_owned()),
+                (
+                    "GITEA_INSTANCE_URL".to_owned(),
+                    "https://env.test/".to_owned(),
+                ),
+                ("GITEA_TOKEN".to_owned(), "env-secret".to_owned()),
+            ],
+        );
+        let source = |authority: &str| {
+            api.credential(authority)
+                .unwrap()
+                .map(|credential| (credential.source, credential.token))
+        };
+        assert_eq!(
+            source("env.test"),
+            Some((
+                CredentialSource::Env {
+                    name: "GITEA_TOKEN".into()
+                },
+                "env-secret".into()
+            ))
+        );
+        assert_eq!(
+            source("tea.test"),
+            Some((
+                CredentialSource::Cli { tool: "tea".into() },
+                "tea-secret".into()
+            ))
+        );
+        assert_eq!(source("other.test"), None);
+        assert_eq!(source("tea.test.evil"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// Forgejo reports its own numbering with the Gitea it forked from, and has neither of
     /// Gitea's newer review endpoints; Gitea gains resolve in 1.26 and replies in 1.27.

@@ -15,7 +15,8 @@ pub(super) struct McpWiring {
     pub(super) pull_request_tokens: Option<pull_request_mcp::TokenRegistry>,
     /// The hosts the pull request tools' descriptions name.
     pub(super) pull_request_hosts: Option<pull_request_mcp::HostNames>,
-    pub(super) pull_request_registrations: HashMap<String, agent::McpRegistration>,
+    /// Each thread's registration, with the host names its tools were described with.
+    pub(super) pull_request_registrations: HashMap<String, (agent::McpRegistration, String)>,
     pub(super) preview_url: Option<String>,
     pub(super) preview_tokens: Option<preview_mcp::TokenRegistry>,
     pub(super) preview_registrations: HashMap<String, agent::McpRegistration>,

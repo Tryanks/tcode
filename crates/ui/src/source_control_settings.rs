@@ -25,7 +25,7 @@ use gpui_base::{h_flex, v_flex};
 use std::collections::{BTreeMap, BTreeSet};
 use tcode_core::{
     pull_request::{HostKind, HostRefusal},
-    settings::{CredentialSource, HostOrigin, HostProblem, HostSettings, HostStatus},
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus, SourceControlSettings},
 };
 
 #[derive(Action, Clone, PartialEq, serde::Deserialize)]
@@ -53,25 +53,18 @@ fn mark(kind: HostKind, size: f32) -> Icon {
 
 /// The hosts to list, each with its kind: configured, reported by the host, and github.com;
 /// by kind, then the kind's public host, then by name.
-fn listed(
-    hosts: &BTreeMap<String, HostSettings>,
-    status: &BTreeMap<String, HostStatus>,
-) -> Vec<(String, HostKind)> {
-    let names: BTreeSet<_> = hosts
+fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
+    let names: BTreeSet<_> = settings
+        .hosts
         .keys()
-        .chain(status.keys())
+        .chain(settings.status.keys())
         .cloned()
         .chain(std::iter::once("github.com".to_owned()))
         .collect();
     let mut listed: Vec<_> = names
         .into_iter()
         .map(|host| {
-            let kind = hosts
-                .get(&host)
-                .map(|choice| choice.kind)
-                .or_else(|| status.get(&host).map(|status| status.kind))
-                .or_else(|| HostKind::detect(&host))
-                .unwrap_or(HostKind::Github);
+            let kind = settings.kind(&host);
             (host, kind)
         })
         .collect();
@@ -159,7 +152,16 @@ impl SourceControlPanel {
             }
             HostProblem::NoCredential { tools_missing } => crate::tr!(
                 "source_control.notice_no_credential",
-                tools = tools_missing.join(" / ")
+                tools = tools_missing
+                    .iter()
+                    .cloned()
+                    .reduce(|first, second| crate::tr!(
+                        "source_control.tools_or",
+                        first = first,
+                        second = second
+                    )
+                    .into_owned())
+                    .unwrap_or_default()
             ),
         };
         let command = match problem {
@@ -195,14 +197,22 @@ impl SourceControlPanel {
                         .w_full()
                         .gap_2()
                         .items_center()
+                        // Wraps between words only, so a URL in the command stays whole.
                         .child(
-                            div()
+                            h_flex()
+                                .flex_1()
                                 .min_w_0()
+                                .flex_wrap()
+                                .gap_x(px(6.))
                                 .px_1()
                                 .rounded_sm()
                                 .bg(theme.secondary)
                                 .font_family(theme.mono_font_family.clone())
-                                .child(command),
+                                .children(
+                                    command.split(' ').map(|word| {
+                                        div().whitespace_nowrap().child(word.to_owned())
+                                    }),
+                                ),
                         )
                         .child(crate::widgets::copy::copy_button(
                             &format!("source-control-command-{host}"),
@@ -253,9 +263,7 @@ impl SourceControlPanel {
             });
         let added = status
             .as_ref()
-            .map_or(settings.hosts.contains_key(host), |status| {
-                status.origin == HostOrigin::Added
-            })
+            .map_or(settings.hosts.contains_key(host), |status| status.added)
             && host != kind.public_host();
         let mut kind_line = kind.terms().name.to_owned();
         if added {
@@ -502,7 +510,7 @@ fn confirm_remove(store: Entity<WorkspaceStore>, host: String, window: &mut Wind
 impl Render for SourceControlPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.store.read(cx).settings().source_control.clone();
-        let hosts = listed(&settings.hosts, &settings.status);
+        let hosts = listed(&settings);
         let mut rows = Vec::new();
         for (index, (host, kind)) in hosts.iter().enumerate() {
             let row = self.row(host, *kind, window, cx);
@@ -642,7 +650,7 @@ impl AddHostDialog {
                                 .rounded(crate::material::radius_button(cx))
                                 .primary()
                                 .small()
-                                .label(crate::tr!("source_control.add_host"))
+                                .label(crate::tr!("source_control.add"))
                                 .on_click(move |_, window, cx| {
                                     add.update(cx, |dialog, cx| dialog.add(window, cx))
                                 }),

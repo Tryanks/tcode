@@ -892,6 +892,7 @@ impl PullRequestView {
             .draft(cx)
             .map_or(0, |draft| draft.comments.len())
             .to_string();
+        let host_name = self.host_name(cx);
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let view = view.clone();
@@ -900,7 +901,8 @@ impl PullRequestView {
                 .title(crate::tr!("pull_requests.review.discard_title"))
                 .description(crate::tr!(
                     "pull_requests.review.discard_desc",
-                    count = count.clone()
+                    count = count.clone(),
+                    host_name = host_name.clone()
                 ))
                 .button_props(
                     crate::overlay::DialogButtons::default()
@@ -1145,7 +1147,7 @@ impl PullRequestView {
                 div()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(crate::tr!(caption)),
+                    .child(crate::tr!(caption, host_name = host_name.clone())),
             )
             .when(unplaced > 0, |sheet| {
                 sheet.child(
