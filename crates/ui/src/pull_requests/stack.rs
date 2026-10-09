@@ -36,13 +36,13 @@ use crate::{
     sizing::Sizable as _,
     store::WorkspaceStore,
     theme::ActiveTheme as _,
+    widgets::Popover,
     widgets::{
         button::{Button, ButtonVariants as _},
         checkbox::Checkbox,
         spinner::Spinner,
         tooltip::Tooltip,
     },
-    widgets::Popover,
 };
 
 /// Whether a stack write is offered, and why not when it is shown disabled.
@@ -212,10 +212,9 @@ pub(super) fn list(numbers: &[u64]) -> String {
         1 => format!("#{}", numbers[0]),
         2 => tr_with("list_two", &[("a", n(0)), ("b", n(1))]),
         3 => tr_with("list_three", &[("a", n(0)), ("b", n(1)), ("c", n(2))]),
-        count if numbers.windows(2).all(|pair| pair[1] == pair[0] + 1) => tr_with(
-            "list_range",
-            &[("first", n(0)), ("last", n(count - 1))],
-        ),
+        count if numbers.windows(2).all(|pair| pair[1] == pair[0] + 1) => {
+            tr_with("list_range", &[("first", n(0)), ("last", n(count - 1))])
+        }
         count => tr_with("list_count", &[("count", count.to_string())]),
     }
 }
@@ -385,7 +384,11 @@ pub(super) fn operation_chip(
     let operation = operation.clone();
     let url = core_pr::stack_map(
         links,
-        &PullRequestKey::new(&operation.host, &operation.repository, chip_target(&operation)),
+        &PullRequestKey::new(
+            &operation.host,
+            &operation.repository,
+            chip_target(&operation),
+        ),
     )
     .map(|map| map.stack.url.clone());
     let titles: Vec<(u64, String)> = chip_layers(&operation)
@@ -415,7 +418,10 @@ pub(super) fn operation_chip(
         )))
         .ghost()
         .compact()
-        .aria_label(format!("{label}, {}", tr_with("operation_id", &[("id", operation_id(&operation))])))
+        .aria_label(format!(
+            "{label}, {}",
+            tr_with("operation_id", &[("id", operation_id(&operation))])
+        ))
         .tooltip(tooltip.clone())
         .child(chip()),
     );
@@ -435,12 +441,16 @@ pub(super) fn operation_chip(
                 .gap_2()
                 .text_size(px(12.))
                 .child(div().child(tooltip.clone()))
-                .child(v_flex().gap_0p5().children(titles.iter().map(|(number, title)| {
-                    h_flex()
-                        .gap_2()
-                        .child(div().font_family(mono.clone()).child(format!("#{number}")))
-                        .child(div().flex_1().min_w_0().truncate().child(title.clone()))
-                })))
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .children(titles.iter().map(|(number, title)| {
+                            h_flex()
+                                .gap_2()
+                                .child(div().font_family(mono.clone()).child(format!("#{number}")))
+                                .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                        })),
+                )
                 .child(
                     h_flex()
                         .gap_1()
@@ -488,9 +498,8 @@ pub(super) fn operation_chip(
 
 fn operation_id(operation: &PullRequestStackOperation) -> String {
     match &operation.kind {
-        StackOperationKind::Merging { id, .. } | StackOperationKind::MergeUnconfirmed { id, .. } => {
-            id.clone()
-        }
+        StackOperationKind::Merging { id, .. }
+        | StackOperationKind::MergeUnconfirmed { id, .. } => id.clone(),
         StackOperationKind::Rebasing { .. } => String::new(),
     }
 }
@@ -592,19 +601,22 @@ pub(super) fn map_selector(
             ("count", count.to_string()),
         ],
     );
-    let status = offer.operation.as_ref().map(|operation| match operation.kind {
-        StackOperationKind::Merging { .. } => {
-            (IconName::Hourglass, cx.theme().warning, "trigger_merging")
-        }
-        StackOperationKind::MergeUnconfirmed { .. } => (
-            IconName::CircleQuestionMark,
-            cx.theme().warning,
-            "trigger_unconfirmed",
-        ),
-        StackOperationKind::Rebasing { .. } => {
-            (IconName::RefreshCw, cx.theme().info, "trigger_rebasing")
-        }
-    });
+    let status = offer
+        .operation
+        .as_ref()
+        .map(|operation| match operation.kind {
+            StackOperationKind::Merging { .. } => {
+                (IconName::Hourglass, cx.theme().warning, "trigger_merging")
+            }
+            StackOperationKind::MergeUnconfirmed { .. } => (
+                IconName::CircleQuestionMark,
+                cx.theme().warning,
+                "trigger_unconfirmed",
+            ),
+            StackOperationKind::Rebasing { .. } => {
+                (IconName::RefreshCw, cx.theme().info, "trigger_rebasing")
+            }
+        });
     if let Some((_, _, suffix)) = status {
         accessible.push_str(&tr(suffix));
     }
@@ -684,16 +696,14 @@ fn map_content(
         .text_size(px(11.))
         .text_color(muted)
         .child(Icon::new(IconName::Layers).size(px(12.)))
-        .child(
-            div().flex_1().min_w_0().truncate().child(tr_with(
-                "head",
-                &[
-                    ("stack", map.stack.number.to_string()),
-                    ("count", map.rows.len().to_string()),
-                    ("base", map.stack.base.clone()),
-                ],
-            )),
-        )
+        .child(div().flex_1().min_w_0().truncate().child(tr_with(
+            "head",
+            &[
+                ("stack", map.stack.number.to_string()),
+                ("count", map.rows.len().to_string()),
+                ("base", map.stack.base.clone()),
+            ],
+        )))
         .child(
             Button::new("pr-stack-about")
                 .ghost()
@@ -730,16 +740,13 @@ fn map_content(
             )
     });
     let operation = offer.operation.as_ref().map(|operation| {
-        h_flex()
-            .px_2()
-            .py_1()
-            .child(operation_chip(
-                target.cloned(),
-                operation,
-                &offer.links,
-                compact,
-                cx,
-            ))
+        h_flex().px_2().py_1().child(operation_chip(
+            target.cloned(),
+            operation,
+            &offer.links,
+            compact,
+            cx,
+        ))
     });
     let rows = map.rows.iter().rev().map(|row| {
         let number = row.layer.number;
@@ -849,14 +856,17 @@ fn map_content(
         .hover(|row| row.bg(theme.list_hover))
         .when(selected, |row| row.bg(theme.list_active))
         // The merge scope reads as one bar down the rows that land together.
-        .child(div().w(px(2.)).h_full().when(rail, |bar| {
-            bar.bg(theme.primary.opacity(0.6))
-        }))
-        .child(Icon::new(glyph).size(px(14.)).text_color(if linked {
-            color
-        } else {
-            muted
-        }))
+        .child(
+            div()
+                .w(px(2.))
+                .h_full()
+                .when(rail, |bar| bar.bg(theme.primary.opacity(0.6))),
+        )
+        .child(
+            Icon::new(glyph)
+                .size(px(14.))
+                .text_color(if linked { color } else { muted }),
+        )
         .child(
             div()
                 .font_family(mono.clone())
@@ -875,9 +885,7 @@ fn map_content(
                 .child(name),
         )
         .child(trailing)
-        .children(
-            condition.map(|condition| div().text_color(muted).child(condition.into_owned())),
-        )
+        .children(condition.map(|condition| div().text_color(muted).child(condition.into_owned())))
         .on_click(move |_, window, cx| {
             view.update(cx, |view, cx| view.select_layer(layer_key.clone(), cx));
             popover.update(cx, |state, cx| state.dismiss(window, cx));
@@ -1049,10 +1057,7 @@ pub(super) fn caption(
 }
 
 /// A linked layer's blocked signal: a draft or closed layer below it that it would merge with.
-pub(super) fn row_blocker(
-    links: &[ThreadPullRequestLink],
-    key: &PullRequestKey,
-) -> Option<String> {
+pub(super) fn row_blocker(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> Option<String> {
     let map = core_pr::stack_map(links, key)?;
     let selected = map.selected();
     if selected.condition != StackLayerCondition::Linked
@@ -1087,7 +1092,10 @@ pub(super) struct Answer<'a> {
 
 /// The words of a stack write's answer. A success goes by itself; anything else stays until
 /// it is read.
-pub(super) fn answer_toast(answer: &Answer<'_>, result: &PullRequestActionResult) -> Option<Notification> {
+pub(super) fn answer_toast(
+    answer: &Answer<'_>,
+    result: &PullRequestActionResult,
+) -> Option<Notification> {
     let number = answer.target.to_string();
     let count = answer.layers.len().max(1);
     let open = |note: Notification| match answer.url.clone() {
@@ -1105,12 +1113,18 @@ pub(super) fn answer_toast(answer: &Answer<'_>, result: &PullRequestActionResult
     let note = match result {
         PullRequestActionResult::Applied if answer.late => Notification::success(tr_with(
             "result_finished_late_body",
-            &[("list", list(answer.layers)), ("base", answer.base.to_owned())],
+            &[
+                ("list", list(answer.layers)),
+                ("base", answer.base.to_owned()),
+            ],
         ))
         .title(tr("result_finished_late")),
         PullRequestActionResult::Applied => Notification::success(tr_with(
             "result_merged_body",
-            &[("list", list(answer.layers)), ("base", answer.base.to_owned())],
+            &[
+                ("list", list(answer.layers)),
+                ("base", answer.base.to_owned()),
+            ],
         ))
         .title(if count == 1 {
             tr_with("result_merged_one", &[("number", number)])
@@ -1122,16 +1136,17 @@ pub(super) fn answer_toast(answer: &Answer<'_>, result: &PullRequestActionResult
         }),
         PullRequestActionResult::Queued { .. } => Notification::info(tr("result_queued_body"))
             .title(tr_with("result_queued", &[("number", number)])),
-        PullRequestActionResult::Pending { adopted: false, .. } => {
-            Notification::info(tr_with("result_submitted_body", &[("list", list(answer.layers))]))
-                .title(tr("result_submitted"))
-        }
+        PullRequestActionResult::Pending { adopted: false, .. } => Notification::info(tr_with(
+            "result_submitted_body",
+            &[("list", list(answer.layers))],
+        ))
+        .title(tr("result_submitted")),
         PullRequestActionResult::Pending { adopted: true, .. } => {
             Notification::info(tr("result_adopted_body")).title(tr("result_adopted"))
         }
-        PullRequestActionResult::MergeUnconfirmed { .. } => open(
-            Notification::warning(tr("result_deadline_body")).title(tr("result_deadline")),
-        ),
+        PullRequestActionResult::MergeUnconfirmed { .. } => {
+            open(Notification::warning(tr("result_deadline_body")).title(tr("result_deadline")))
+        }
         PullRequestActionResult::RebaseStarted => return None,
         PullRequestActionResult::Rebased { pushed, current } => Notification::success(tr_with(
             "result_rebased_body",
@@ -1204,12 +1219,10 @@ pub(super) fn answer_toast(answer: &Answer<'_>, result: &PullRequestActionResult
                         ),
                         StackRebaseFailure::PushUnconfirmed => unreachable!(),
                     };
-                    open(
-                        Notification::error(body.trim().to_owned()).title(tr_with(
-                            "result_rebase_stopped",
-                            &[("number", failed_number)],
-                        )),
-                    )
+                    open(Notification::error(body.trim().to_owned()).title(tr_with(
+                        "result_rebase_stopped",
+                        &[("number", failed_number)],
+                    )))
                 }
             }
         }
@@ -1241,10 +1254,9 @@ pub(super) fn answer_toast(answer: &Answer<'_>, result: &PullRequestActionResult
                         &[("expected", short(expected)), ("actual", short(actual))],
                     ),
                 ),
-                PullRequestRejection::StackChanged => titled(
-                    tr("result_stack_changed"),
-                    tr("result_stack_changed_body"),
-                ),
+                PullRequestRejection::StackChanged => {
+                    titled(tr("result_stack_changed"), tr("result_stack_changed_body"))
+                }
                 PullRequestRejection::LayerNotOpen { number, state } => titled(
                     tr_with(
                         "result_not_open",
@@ -1268,25 +1280,29 @@ pub(super) fn answer_toast(answer: &Answer<'_>, result: &PullRequestActionResult
                 PullRequestRejection::OperationRunning => {
                     Notification::info(tr("waiting_state")).title(tr("result_running"))
                 }
-                PullRequestRejection::MergeRunning => open(not(
-                    tr("result_409_no_id"),
-                    tr("result_409_no_id_body"),
-                )),
+                PullRequestRejection::MergeRunning => {
+                    open(not(tr("result_409_no_id"), tr("result_409_no_id_body")))
+                }
                 PullRequestRejection::NoPushAccess { numbers } => not(
                     tr_with(
                         "result_not_rebased",
-                        &[("reason", tr_with("result_no_push", &[("list", list(numbers))]))],
+                        &[(
+                            "reason",
+                            tr_with("result_no_push", &[("list", list(numbers))]),
+                        )],
                     ),
                     tr("nothing_changed"),
                 ),
                 PullRequestRejection::NoGitIdentity => not(
-                    tr_with("result_not_rebased", &[("reason", tr("result_no_identity"))]),
+                    tr_with(
+                        "result_not_rebased",
+                        &[("reason", tr("result_no_identity"))],
+                    ),
                     tr("nothing_changed"),
                 ),
-                PullRequestRejection::NotLinked => titled(
-                    tr("result_refused"),
-                    tr("result_not_linked"),
-                ),
+                PullRequestRejection::NotLinked => {
+                    titled(tr("result_refused"), tr("result_not_linked"))
+                }
                 PullRequestRejection::Refused { messages } if !answer.rebase => {
                     let body = if messages.is_empty() {
                         tr("result_refused_body")
@@ -1321,7 +1337,10 @@ pub(super) fn answer_toast(answer: &Answer<'_>, result: &PullRequestActionResult
             | PullRequestActionResult::Queued { .. }
             | PullRequestActionResult::Rebased { .. }
     );
-    Some(note.autohide(settled).id1::<StackWrite>(slot(&answer.stack)))
+    Some(
+        note.autohide(settled)
+            .id1::<StackWrite>(slot(&answer.stack)),
+    )
 }
 
 fn branch_of(answer: &Answer<'_>, number: u64) -> String {
@@ -1371,7 +1390,9 @@ pub fn present_result(
     cx: &mut App,
 ) {
     let id = (target.host.clone(), target.repository.clone(), stack);
-    store.update(cx, |store, cx| store.set_stack_result(id.clone(), result.clone(), cx));
+    store.update(cx, |store, cx| {
+        store.set_stack_result(id.clone(), result.clone(), cx)
+    });
     let rebase = matches!(
         result,
         PullRequestActionResult::Rebased { .. } | PullRequestActionResult::RebaseStopped { .. }
@@ -1450,9 +1471,10 @@ fn notice_text(result: &PullRequestActionResult) -> Option<String> {
         PullRequestRejection::NoPushAccess { numbers } => {
             tr_with("rebase_blocked_access", &[("layers", list(numbers))])
         }
-        PullRequestRejection::NoGitIdentity => {
-            tr_with("rebase_blocked_identity", &[("machine", machine_label(None))])
-        }
+        PullRequestRejection::NoGitIdentity => tr_with(
+            "rebase_blocked_identity",
+            &[("machine", machine_label(None))],
+        ),
         _ => return None,
     })
 }
@@ -1493,7 +1515,11 @@ fn line(icon: IconName, color: Hsla, text: String) -> AnyElement {
         .gap_1p5()
         .items_start()
         .text_size(px(12.))
-        .child(div().pt(px(2.)).child(Icon::new(icon).size(px(12.)).text_color(color)))
+        .child(
+            div()
+                .pt(px(2.))
+                .child(Icon::new(icon).size(px(12.)).text_color(color)),
+        )
         .child(div().flex_1().min_w_0().child(text))
         .into_any_element()
 }
@@ -1528,7 +1554,10 @@ fn layer_row(
     );
     let head = layer.head.clone();
     h_flex()
-        .id(SharedString::from(format!("pr-stack-layer-{}", layer.number)))
+        .id(SharedString::from(format!(
+            "pr-stack-layer-{}",
+            layer.number
+        )))
         .min_h(px(40.))
         .px_2()
         .gap_2()
@@ -1556,7 +1585,12 @@ fn layer_row(
             v_flex()
                 .flex_1()
                 .min_w_0()
-                .child(div().truncate().text_size(px(13.)).child(layer.title.clone()))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(13.))
+                        .child(layer.title.clone()),
+                )
                 .when(branch, |text| {
                     text.child(
                         div()
@@ -1571,7 +1605,10 @@ fn layer_row(
         .when(index.is_some(), |row| {
             row.child(
                 div()
-                    .id(SharedString::from(format!("pr-stack-head-{}", layer.number)))
+                    .id(SharedString::from(format!(
+                        "pr-stack-head-{}",
+                        layer.number
+                    )))
                     .font_family(theme.mono_font_family.clone())
                     .text_size(px(12.))
                     .text_color(theme.muted_foreground)
@@ -1614,9 +1651,7 @@ fn stored_change(
     }
     map.rows
         .iter()
-        .find(|row| {
-            scope.contains(&row.layer.number) && row.layer.state != PullRequestState::Open
-        })
+        .find(|row| scope.contains(&row.layer.number) && row.layer.state != PullRequestState::Open)
         .map(|row| tr_with("changed_state", &[("number", row.layer.number.to_string())]))
 }
 
@@ -1669,7 +1704,10 @@ impl MergeStackDialog {
     }
 
     /// The fresh scope: the unmerged layers from the bottom through the selected one.
-    fn scope(state: &PullRequestStackActionState, number: u64) -> Vec<&tcode_protocol::PullRequestStackLayerState> {
+    fn scope(
+        state: &PullRequestStackActionState,
+        number: u64,
+    ) -> Vec<&tcode_protocol::PullRequestStackLayerState> {
         let Some(target) = state.layers.iter().position(|layer| layer.number == number) else {
             return Vec::new();
         };
@@ -1753,7 +1791,11 @@ impl MergeStackDialog {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.sending = false;
                 let answer = Answer {
-                    stack: (target.offer.key.host.clone(), target.offer.key.repository.clone(), stack),
+                    stack: (
+                        target.offer.key.host.clone(),
+                        target.offer.key.repository.clone(),
+                        stack,
+                    ),
                     target: target.offer.key.number,
                     layers: &layers,
                     base: &base,
@@ -1789,7 +1831,11 @@ impl Render for MergeStackDialog {
         let muted = theme.muted_foreground;
         let state = self.state.as_ref().and_then(|state| state.as_ref().ok());
         let view = cx.entity();
-        let stored = target.offer.stack.as_ref().map(|offer| offer.map().stack.clone());
+        let stored = target
+            .offer
+            .stack
+            .as_ref()
+            .map(|offer| offer.map().stack.clone());
         let base = state
             .map(|state| state.base.clone())
             .or_else(|| stored.as_ref().map(|stack| stack.base.clone()))
@@ -1975,7 +2021,10 @@ impl Render for MergeStackDialog {
                                 }))
                                 .into_any_element()
                         } else {
-                            div().text_color(muted).child(tr("tag_ready")).into_any_element()
+                            div()
+                                .text_color(muted)
+                                .child(tr("tag_ready"))
+                                .into_any_element()
                         };
                         layer_row(Some(index), layer, tag, false, false, cx)
                     })
@@ -1983,20 +2032,15 @@ impl Render for MergeStackDialog {
                 body = body.child(
                     v_flex()
                         .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(muted)
-                                .child(tr_with(
-                                    "scope_label",
-                                    &[("count", scope.len().to_string())],
-                                )),
-                        )
+                        .child(div().text_size(px(12.)).text_color(muted).child(tr_with(
+                            "scope_label",
+                            &[("count", scope.len().to_string())],
+                        )))
                         .children(merged_below.iter().map(|number| {
-                            div().text_size(px(11.)).text_color(muted).child(tr_with(
-                                "already_merged",
-                                &[("number", number.to_string())],
-                            ))
+                            div()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(tr_with("already_merged", &[("number", number.to_string())]))
                         }))
                         .child(scope_box(rows, cx)),
                 );
@@ -2017,7 +2061,10 @@ impl Render for MergeStackDialog {
                                     None,
                                     layer,
                                     div()
-                                        .child(tr_with("above_tag", &[("base", state.base.clone())]))
+                                        .child(tr_with(
+                                            "above_tag",
+                                            &[("base", state.base.clone())],
+                                        ))
                                         .into_any_element(),
                                     false,
                                     true,
@@ -2031,7 +2078,10 @@ impl Render for MergeStackDialog {
                     theme.info,
                     tr_with(
                         "note_merge",
-                        &[("count", scope.len().to_string()), ("base", state.base.clone())],
+                        &[
+                            ("count", scope.len().to_string()),
+                            ("base", state.base.clone()),
+                        ],
                     ),
                 )];
                 if state.merge_queue {
@@ -2069,10 +2119,15 @@ impl Render for MergeStackDialog {
                     ));
                 }
                 if failing.len() > 3 {
-                    notes.push(div().text_size(px(12.)).child(tr_with(
-                        "summary_more",
-                        &[("count", (failing.len() - 3).to_string())],
-                    )).into_any_element());
+                    notes.push(
+                        div()
+                            .text_size(px(12.))
+                            .child(tr_with(
+                                "summary_more",
+                                &[("count", (failing.len() - 3).to_string())],
+                            ))
+                            .into_any_element(),
+                    );
                 }
                 for number in &numbers {
                     if snapshot(*number).is_some_and(|snapshot| {
@@ -2089,7 +2144,11 @@ impl Render for MergeStackDialog {
                     started_at,
                     kind: StackOperationKind::MergeUnconfirmed { .. },
                     ..
-                }) = target.offer.stack.as_ref().and_then(|offer| offer.operation.as_ref())
+                }) = target
+                    .offer
+                    .stack
+                    .as_ref()
+                    .and_then(|offer| offer.operation.as_ref())
                 {
                     notes.push(line(
                         IconName::CircleQuestionMark,
@@ -2101,9 +2160,10 @@ impl Render for MergeStackDialog {
                     ));
                 }
                 body = body.child(v_flex().gap_1().children(notes));
-                let changed = self.notice.clone().or_else(|| {
-                    stored_change(target.store.read(cx), target, state, &numbers)
-                });
+                let changed = self
+                    .notice
+                    .clone()
+                    .or_else(|| stored_change(target.store.read(cx), target, state, &numbers));
                 if let Some(changed) = &changed {
                     body = body.child(
                         warning_wash(cx)
@@ -2254,7 +2314,9 @@ impl RebaseStackDialog {
         .detach();
     }
 
-    fn unmerged(state: &PullRequestStackActionState) -> Vec<&tcode_protocol::PullRequestStackLayerState> {
+    fn unmerged(
+        state: &PullRequestStackActionState,
+    ) -> Vec<&tcode_protocol::PullRequestStackLayerState> {
         state
             .layers
             .iter()
@@ -2274,7 +2336,10 @@ impl RebaseStackDialog {
             .map(|layer| layer.number)
             .collect();
         if !denied.is_empty() {
-            blockers.push(tr_with("rebase_blocked_access", &[("layers", list(&denied))]));
+            blockers.push(tr_with(
+                "rebase_blocked_access",
+                &[("layers", list(&denied))],
+            ));
         }
         for layer in &layers {
             if layer.state == PullRequestState::Closed {
@@ -2327,14 +2392,22 @@ impl RebaseStackDialog {
                 this.sending = false;
                 if result == PullRequestActionResult::RebaseStarted {
                     this.started = true;
-                    let id = (target.offer.key.host.clone(), target.offer.key.repository.clone(), stack);
+                    let id = (
+                        target.offer.key.host.clone(),
+                        target.offer.key.repository.clone(),
+                        stack,
+                    );
                     // The end this view shows is the one the host reports from now on.
                     target.store.update(cx, |store, cx| {
                         store.set_stack_result(id, PullRequestActionResult::RebaseStarted, cx)
                     });
                 } else {
                     let answer = Answer {
-                        stack: (target.offer.key.host.clone(), target.offer.key.repository.clone(), stack),
+                        stack: (
+                            target.offer.key.host.clone(),
+                            target.offer.key.repository.clone(),
+                            stack,
+                        ),
                         target: target.offer.key.number,
                         layers: &layers,
                         base: &base,
@@ -2367,7 +2440,12 @@ impl RebaseStackDialog {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let machine = machine_label(Some(target.store.read(cx)));
-        let base = target.offer.stack.as_ref().map(StackOffer::base).unwrap_or_default();
+        let base = target
+            .offer
+            .stack
+            .as_ref()
+            .map(StackOffer::base)
+            .unwrap_or_default();
         let mut body = v_flex().gap_3().child(
             v_flex()
                 .gap_1p5()
@@ -2380,15 +2458,13 @@ impl RebaseStackDialog {
                 ))
                 .child(fact(
                     tr("fact_onto"),
-                    div()
-                        .font_family(theme.mono_font_family.clone())
-                        .child(
-                            self.state
-                                .as_ref()
-                                .and_then(|state| state.as_ref().ok())
-                                .map(|state| state.base.clone())
-                                .unwrap_or(base),
-                        ),
+                    div().font_family(theme.mono_font_family.clone()).child(
+                        self.state
+                            .as_ref()
+                            .and_then(|state| state.as_ref().ok())
+                            .map(|state| state.base.clone())
+                            .unwrap_or(base),
+                    ),
                     cx,
                 ))
                 .child(fact(
@@ -2465,10 +2541,10 @@ impl RebaseStackDialog {
                             &[("count", count.to_string())],
                         )))
                         .children(merged.iter().map(|number| {
-                            div().text_size(px(11.)).text_color(muted).child(tr_with(
-                                "merged_skipped",
-                                &[("number", number.to_string())],
-                            ))
+                            div()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(tr_with("merged_skipped", &[("number", number.to_string())]))
                         }))
                         .child(scope_box(rows, cx)),
                 );
@@ -2478,7 +2554,11 @@ impl RebaseStackDialog {
                             .gap_1()
                             .child(line(IconName::RefreshCw, muted, tr("rebase_step_own")))
                             .child(line(IconName::Upload, muted, tr("rebase_step_lease")))
-                            .child(line(IconName::CircleDashed, muted, tr("rebase_step_checks")))
+                            .child(line(
+                                IconName::CircleDashed,
+                                muted,
+                                tr("rebase_step_checks"),
+                            ))
                             .child(line(IconName::GitBranch, muted, tr("rebase_step_local"))),
                     )
                     .child(div().text_size(px(11.)).text_color(muted).child(tr_with(
@@ -2487,13 +2567,12 @@ impl RebaseStackDialog {
                     )));
                 let blockers = self.blockers(state, &machine);
                 if !blockers.is_empty() {
-                    body = body.child(
-                        v_flex().gap_1().children(
-                            blockers
-                                .iter()
-                                .map(|blocker| line(IconName::Lock, theme.danger, blocker.clone())),
-                        ),
-                    );
+                    body =
+                        body.child(
+                            v_flex().gap_1().children(blockers.iter().map(|blocker| {
+                                line(IconName::Lock, theme.danger, blocker.clone())
+                            })),
+                        );
                 }
                 let numbers: Vec<_> = layers.iter().map(|layer| layer.number).collect();
                 let changed = self
@@ -2628,7 +2707,9 @@ fn progress_view(
                         StackRebaseStep::AlreadyCurrent
                     }
                 }
-                PullRequestActionResult::Rebased { pushed, .. } if pushed.contains(&layer.number) => {
+                PullRequestActionResult::Rebased { pushed, .. }
+                    if pushed.contains(&layer.number) =>
+                {
                     match &layer.step {
                         step @ StackRebaseStep::Pushed { .. } => step.clone(),
                         _ => StackRebaseStep::Pushed {
@@ -2651,7 +2732,10 @@ fn progress_view(
                 .map(|below| below.number);
             let (icon, text): (AnyElement, String) = match &layer.step {
                 StackRebaseStep::Waiting => (
-                    Icon::new(IconName::CircleDashed).size(px(14.)).text_color(muted).into_any_element(),
+                    Icon::new(IconName::CircleDashed)
+                        .size(px(14.))
+                        .text_color(muted)
+                        .into_any_element(),
                     tr("step_waiting"),
                 ),
                 StackRebaseStep::Rebasing => (
@@ -2661,11 +2745,15 @@ fn progress_view(
                         None => tr_with("step_rebasing_base", &[("base", base.clone())]),
                     },
                 ),
-                StackRebaseStep::Pushing => {
-                    (Spinner::new().xsmall().into_any_element(), tr("step_pushing"))
-                }
+                StackRebaseStep::Pushing => (
+                    Spinner::new().xsmall().into_any_element(),
+                    tr("step_pushing"),
+                ),
                 StackRebaseStep::Pushed { from, to } => (
-                    Icon::new(IconName::CircleCheck).size(px(14.)).text_color(theme.success).into_any_element(),
+                    Icon::new(IconName::CircleCheck)
+                        .size(px(14.))
+                        .text_color(theme.success)
+                        .into_any_element(),
                     if from.is_empty() {
                         tr("step_pushing").replace('…', "")
                     } else {
@@ -2673,7 +2761,10 @@ fn progress_view(
                     },
                 ),
                 StackRebaseStep::AlreadyCurrent => (
-                    Icon::new(IconName::Check).size(px(14.)).text_color(muted).into_any_element(),
+                    Icon::new(IconName::Check)
+                        .size(px(14.))
+                        .text_color(muted)
+                        .into_any_element(),
                     tr("step_current"),
                 ),
                 StackRebaseStep::Failed { reason } => (
@@ -2697,20 +2788,36 @@ fn progress_view(
                     },
                 ),
                 StackRebaseStep::NotStarted => (
-                    Icon::new(IconName::Minus).size(px(14.)).text_color(muted).into_any_element(),
+                    Icon::new(IconName::Minus)
+                        .size(px(14.))
+                        .text_color(muted)
+                        .into_any_element(),
                     tr("step_not_started"),
                 ),
             };
             h_flex()
-                .id(SharedString::from(format!("pr-stack-progress-{}", layer.number)))
+                .id(SharedString::from(format!(
+                    "pr-stack-progress-{}",
+                    layer.number
+                )))
                 .h(px(36.))
                 .px_2()
                 .gap_2()
                 .items_center()
                 .text_size(px(12.))
-                .child(div().w(px(14.)).text_size(px(11.)).text_color(muted).child((index + 1).to_string()))
+                .child(
+                    div()
+                        .w(px(14.))
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child((index + 1).to_string()),
+                )
                 .child(icon)
-                .child(div().font_family(theme.mono_font_family.clone()).child(format!("#{}", layer.number)))
+                .child(
+                    div()
+                        .font_family(theme.mono_font_family.clone())
+                        .child(format!("#{}", layer.number)),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -2751,7 +2858,9 @@ fn progress_view(
             )
         };
         let layer = last.iter().position(|layer| layer.number == *failed);
-        let branch = layer.map(|index| last[index].branch.clone()).unwrap_or_default();
+        let branch = layer
+            .map(|index| last[index].branch.clone())
+            .unwrap_or_default();
         let below = layer
             .and_then(|index| index.checked_sub(1))
             .map(|index| last[index].branch.clone())
@@ -2817,18 +2926,14 @@ fn progress_view(
                 .child(div().child(state))
                 .child(div().child(advice))
                 .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .children(ask)
-                        .child(
-                            Button::new("pr-stack-open-failed")
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::ExternalLink)
-                                .label(tr_with("open_layer", &[("number", failed.to_string())]))
-                                .on_click(move |_, _, cx| cx.open_url(&url)),
-                        ),
+                    h_flex().gap_2().items_center().children(ask).child(
+                        Button::new("pr-stack-open-failed")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .label(tr_with("open_layer", &[("number", failed.to_string())]))
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
                 ),
         );
     } else if ended.is_some() && started_at.is_none() {

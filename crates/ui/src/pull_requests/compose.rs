@@ -104,7 +104,7 @@ pub(super) enum Write {
 }
 
 /// One toast slot per pull request: a newer answer replaces the older one.
-struct PullRequestWrite;
+pub(super) struct PullRequestWrite;
 
 /// The host's reason a write was not done, in words.
 pub(super) fn rejection_reason(rejection: &PullRequestRejection) -> String {

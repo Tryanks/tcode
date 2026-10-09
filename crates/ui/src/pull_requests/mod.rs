@@ -507,7 +507,7 @@ fn row_menu(
     url: String,
     link: Option<&ThreadPullRequestLink>,
     watchable: bool,
-    offer: Option<lifecycle::Offer>,
+    offer: impl Fn(&App) -> Option<lifecycle::Offer> + 'static,
 ) -> RowMenu {
     let visible = link.is_some_and(|link| link.visible());
     let watched = link.is_some_and(|link| link.visible() && link.watch.is_some());
@@ -525,7 +525,7 @@ fn row_menu(
     };
     let source_is_stack = link.is_some_and(|link| link.source == PullRequestSource::Stack);
     std::rc::Rc::new(
-        move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+        move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
             menu.menu(
                 crate::tr!("pull_requests.open_on_github").into_owned(),
                 Box::new(OpenUrl(url.clone())),
@@ -548,7 +548,7 @@ fn row_menu(
                     }),
                 )
             })
-            .when_some(offer.as_ref(), |menu, offer| offer.menu(menu))
+            .when_some(offer(cx), |menu, offer| offer.menu(menu))
             .separator()
             .menu(
                 crate::tr!(if action.linking {
@@ -663,27 +663,33 @@ impl PullRequestsPanel {
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
         change_link(&self.store, action, window, cx);
     }
-    /// A list row offers what its link shows; the host reads the rest before it writes.
-    fn offer(&self, key: &PullRequestKey, cx: &App) -> Option<lifecycle::Offer> {
-        let store = self.store.read(cx);
-        if store
-            .session_status()
-            .is_none_or(|status| status.conversation_read_only)
-        {
-            return None;
+    /// A list row offers what its link shows, as its menu opens; the host reads the rest
+    /// before it writes.
+    fn offer(&self, key: &PullRequestKey) -> impl Fn(&App) -> Option<lifecycle::Offer> + 'static {
+        let (store, detail, key) = (self.store.clone(), self.detail.clone(), key.clone());
+        move |cx| {
+            let store = store.read(cx);
+            if store
+                .session_status()
+                .is_none_or(|status| status.conversation_read_only)
+            {
+                return None;
+            }
+            let session = store.active_session_id()?;
+            let busy = detail.read(cx).lifecycle_busy(&session, &key);
+            let operations = store
+                .thread_meta(&session)
+                .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
+            lifecycle::Offer::new(
+                &key,
+                store.pull_requests(&session),
+                operations,
+                None,
+                None,
+                None,
+                busy,
+            )
         }
-        let session = store.active_session_id()?;
-        let operations = store
-            .thread_meta(&session)
-            .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
-        lifecycle::Offer::new(
-            key,
-            store.pull_requests(&session),
-            operations,
-            None,
-            None,
-            None,
-        )
     }
     fn run_lifecycle(
         &mut self,
@@ -694,15 +700,10 @@ impl PullRequestsPanel {
         let Some(session) = self.store.read(cx).active_session_id() else {
             return;
         };
-        if let Some(target) = lifecycle::Target::new(
-            &self.store,
-            &self.window_state,
-            &session,
-            &action.key,
-            None,
-            None,
-            cx,
-        ) {
+        let target = self.detail.update(cx, |detail, cx| {
+            detail.lifecycle_target(&session, &action.key, false, cx)
+        });
+        if let Some(target) = target {
             target.run(action.kind, window, cx);
         }
     }
@@ -824,13 +825,7 @@ impl PullRequestsPanel {
                 .into_any_element()
         };
         let detail = detail.join(" · ");
-        let menu = row_menu(
-            key.clone(),
-            url.clone(),
-            link,
-            watchable,
-            self.offer(&key, cx),
-        );
+        let menu = row_menu(key.clone(), url.clone(), link, watchable, self.offer(&key));
         let mut signals = h_flex().gap_1().flex_none().items_center();
         // The eye leads while the pull request is open or not yet read; the host ends the watch
         // once it merges or closes.
@@ -1135,18 +1130,21 @@ impl PullRequestsPanel {
                 .flex_none()
                 .min_w(px(if compact { 44. } else { 36. }))
                 .min_h(px(if compact { 44. } else { 24. }))
-                .when_some(running.clone().filter(|_| !compact), |slot, (icon, color, _, tooltip)| {
-                    slot.child(
-                        div()
-                            .id("pr-signal-operation")
-                            .group_hover(row_id.clone(), |signal| signal.invisible())
-                            .child(Icon::new(icon).size(px(14.)).text_color(color))
-                            .tooltip(move |window, cx| {
-                                crate::widgets::tooltip::Tooltip::new(tooltip.clone())
-                                    .build(window, cx)
-                            }),
-                    )
-                })
+                .when_some(
+                    running.clone().filter(|_| !compact),
+                    |slot, (icon, color, _, tooltip)| {
+                        slot.child(
+                            div()
+                                .id("pr-signal-operation")
+                                .group_hover(row_id.clone(), |signal| signal.invisible())
+                                .child(Icon::new(icon).size(px(14.)).text_color(color))
+                                .tooltip(move |window, cx| {
+                                    crate::widgets::tooltip::Tooltip::new(tooltip.clone())
+                                        .build(window, cx)
+                                }),
+                        )
+                    },
+                )
                 .when(!compact && running.is_none(), |slot| {
                     slot.child(
                         div()
@@ -1351,11 +1349,8 @@ impl Render for PullRequestsPanel {
         for group in pull_request::groups(&links) {
             if let Some(stack) = group.stack {
                 let anchor = group.links[0];
-                let operation = tcode_core::pull_request::stack_operation(
-                    &operations,
-                    &links,
-                    &anchor.key,
-                );
+                let operation =
+                    tcode_core::pull_request::stack_operation(&operations, &links, &anchor.key);
                 rows = rows.child(stack::caption(stack, operation, &links, compact, cx));
                 for (index, layer) in stack.layers.iter().enumerate() {
                     let key =

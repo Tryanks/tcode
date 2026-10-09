@@ -75,7 +75,11 @@ impl Stack {
 
 /// Submits a merge of #3 at `heads` to a GitHub listing `stack` that answers the submission with
 /// `put`, and returns what came of it with the body of every submission GitHub saw.
-fn merge(stack: Stack, put: (u16, Value), heads: &[(u64, String)]) -> (MergeSubmission, Vec<Value>) {
+fn merge(
+    stack: Stack,
+    put: (u16, Value),
+    heads: &[(u64, String)],
+) -> (MergeSubmission, Vec<Value>) {
     let store = Store::new();
     let fixture = Fixture::new();
     let reads = PullRequestReads::new(GitHubApi::new(
@@ -163,7 +167,10 @@ fn a_stack_merge_is_one_submission_at_the_target_head_and_merged_queued_and_pend
 fn a_conflict_naming_a_running_merge_is_followed_and_one_naming_none_is_refused() {
     let (adopted, submitted) = merge(
         Stack::default(),
-        (409, json!({"message": "A merge request already exists", "details": {"uuid": "op-0"}})),
+        (
+            409,
+            json!({"message": "A merge request already exists", "details": {"uuid": "op-0"}}),
+        ),
         &scope(),
     );
     assert_eq!(
@@ -301,10 +308,18 @@ impl Remote {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("remote.git");
         let work = root.join("work");
-        git(&root, &["init", "--quiet", "--bare", path.to_str().unwrap()]);
         git(
             &root,
-            &["clone", "--quiet", path.to_str().unwrap(), work.to_str().unwrap()],
+            &["init", "--quiet", "--bare", path.to_str().unwrap()],
+        );
+        git(
+            &root,
+            &[
+                "clone",
+                "--quiet",
+                path.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
         );
         let remote = Self {
             _root: tempdir::Dir(root),
@@ -313,7 +328,11 @@ impl Remote {
         };
         remote.commit("README.md", "start\n", "Initial");
         git(&remote.work, &["push", "--quiet", "origin", "HEAD:main"]);
-        for (layer, parent) in [("layer-1", "main"), ("layer-2", "layer-1"), ("layer-3", "layer-2")] {
+        for (layer, parent) in [
+            ("layer-1", "main"),
+            ("layer-2", "layer-1"),
+            ("layer-3", "layer-2"),
+        ] {
             git(&remote.work, &["switch", "--quiet", "-c", layer, parent]);
             remote.commit(&format!("{layer}.txt"), "one\n", &format!("{layer}: add"));
         }
@@ -321,7 +340,9 @@ impl Remote {
         remote.commit("README.md", "main moved ahead\n", "Docs");
         git(
             &remote.work,
-            &["push", "--quiet", "origin", "main", "layer-1", "layer-2", "layer-3"],
+            &[
+                "push", "--quiet", "origin", "main", "layer-1", "layer-2", "layer-3",
+            ],
         );
         remote
     }
@@ -364,7 +385,9 @@ fn each_layer_moves_only_its_own_commits_onto_the_rebased_layer_below() {
     let layers = remote.layers();
     let steps = remote.rebase(&layers);
     let main = remote.head("main");
-    let heads: Vec<_> = (1..=3).map(|n| remote.head(&format!("layer-{n}"))).collect();
+    let heads: Vec<_> = (1..=3)
+        .map(|n| remote.head(&format!("layer-{n}")))
+        .collect();
     assert_eq!(
         steps,
         layers
@@ -378,9 +401,15 @@ fn each_layer_moves_only_its_own_commits_onto_the_rebased_layer_below() {
     );
     let parents = [&main, &heads[0], &heads[1]];
     for (index, head) in heads.iter().enumerate() {
-        assert_eq!(&git(&remote.path, &["rev-parse", &format!("{head}~1")]), parents[index]);
         assert_eq!(
-            git(&remote.path, &["log", "--format=%s", &format!("{}..{head}", parents[index])]),
+            &git(&remote.path, &["rev-parse", &format!("{head}~1")]),
+            parents[index]
+        );
+        assert_eq!(
+            git(
+                &remote.path,
+                &["log", "--format=%s", &format!("{}..{head}", parents[index])]
+            ),
             format!("layer-{}: add", index + 1)
         );
         assert_eq!(
@@ -415,7 +444,10 @@ fn the_lease_keeps_a_branch_pushed_to_since_review_and_the_layer_below_stays_pus
     assert_eq!(remote.head("layer-2"), concurrent);
     assert_eq!(remote.head("layer-3"), reviewed[2].head);
     assert_eq!(
-        git(&remote.path, &["rev-parse", &format!("{}~1", remote.head("layer-1"))]),
+        git(
+            &remote.path,
+            &["rev-parse", &format!("{}~1", remote.head("layer-1"))]
+        ),
         remote.head("main")
     );
 }

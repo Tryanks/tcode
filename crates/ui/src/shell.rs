@@ -1222,8 +1222,7 @@ impl AppShell {
             }) => {
                 if let Some(store) = self.store() {
                     crate::pull_requests::present_stack_result(
-                        &store, session_id, target, *stack, layers, base, result, *late, window,
-                        cx,
+                        &store, session_id, target, *stack, layers, base, result, *late, window, cx,
                     );
                 }
                 return;

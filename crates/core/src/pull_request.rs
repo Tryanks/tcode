@@ -222,7 +222,11 @@ pub enum PullRequestStackRoute {
     Unknown,
 }
 
-pub fn stack_route(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> PullRequestStackRoute {
+/// The route, and the native stack layer the pull request is when it is one.
+pub fn stack_route<'a>(
+    links: &'a [ThreadPullRequestLink],
+    key: &PullRequestKey,
+) -> (PullRequestStackRoute, Option<&'a PullRequestStackLayer>) {
     let visible = || links.iter().filter(|link| link.visible());
     let layer = visible().find_map(|link| match &link.stack {
         PullRequestStackState::Native(stack)
@@ -232,19 +236,22 @@ pub fn stack_route(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> Pul
                 .layers
                 .iter()
                 .position(|layer| layer.number == key.number)?;
-            Some(PullRequestStackRoute::Layer {
-                index: index as u32 + 1,
-                layers: stack.layers.len() as u32,
-            })
+            Some((
+                PullRequestStackRoute::Layer {
+                    index: index as u32 + 1,
+                    layers: stack.layers.len() as u32,
+                },
+                &stack.layers[index],
+            ))
         }
         _ => None,
     });
     match (layer, visible().find(|link| link.key == *key)) {
-        (Some(layer), _) => layer,
+        (Some((route, layer)), _) => (route, Some(layer)),
         (None, Some(link)) if link.stack == PullRequestStackState::None => {
-            PullRequestStackRoute::Single
+            (PullRequestStackRoute::Single, None)
         }
-        _ => PullRequestStackRoute::Unknown,
+        _ => (PullRequestStackRoute::Unknown, None),
     }
 }
 
@@ -470,9 +477,14 @@ pub enum StackRebaseStep {
     Waiting,
     Rebasing,
     Pushing,
-    Pushed { from: String, to: String },
+    Pushed {
+        from: String,
+        to: String,
+    },
     AlreadyCurrent,
-    Failed { reason: StackRebaseFailure },
+    Failed {
+        reason: StackRebaseFailure,
+    },
     /// Above the layer the rebase stopped at.
     NotStarted,
 }

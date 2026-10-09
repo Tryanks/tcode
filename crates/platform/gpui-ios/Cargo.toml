@@ -21,6 +21,9 @@ core-foundation = "0.10"
 core-graphics = "0.24"
 core-text = "21"
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
-libc = "0.2"
+# libc 0.2.190 gates AF_SYS_CONTROL, SYSPROTO_* and the _dyld_* image functions to
+# macOS, but backtrace 0.3.76 (via gpui) still calls them on every Apple target, so
+# the iOS check fails. Held below 0.2.190 until backtrace gates them too (#668).
+libc = ">=0.2, <0.2.190"
 pathfinder_geometry = "0.5"
 uuid = { version = "1", features = ["v5"] }

@@ -172,9 +172,12 @@ impl Reader<'_> {
         let Some(listed) = raw.as_array().ok_or(GitHubError::InvalidResponse)?.first() else {
             return Ok(None);
         };
-        let number = listed["number"].as_u64().ok_or(GitHubError::InvalidResponse)?;
+        let number = listed["number"]
+            .as_u64()
+            .ok_or(GitHubError::InvalidResponse)?;
         let stack: Value = read(format!("stacks/{number}"))?.json()?;
-        let topology = decode_stack(&stack, &self.repository).ok_or(GitHubError::InvalidResponse)?;
+        let topology =
+            decode_stack(&stack, &self.repository).ok_or(GitHubError::InvalidResponse)?;
         let rows = stack["pull_requests"]
             .as_array()
             .ok_or(GitHubError::InvalidResponse)?;
@@ -429,7 +432,9 @@ impl PullRequestReads {
                 adopted: false,
                 layers,
             },
-            Some(status) => MergeSubmission::Done(merge_outcome(&status).unwrap_or(Outcome::Uncertain)),
+            Some(status) => {
+                MergeSubmission::Done(merge_outcome(&status).unwrap_or(Outcome::Uncertain))
+            }
             // Something answered, and the merge may be under way.
             None => MergeSubmission::Done(Outcome::Uncertain),
         })
@@ -494,7 +499,9 @@ impl PullRequestReads {
             .iter()
             .copied()
             .filter(|number| {
-                access.get(number).is_none_or(|access| *access == PullRequestStackPushAccess::Denied)
+                access
+                    .get(number)
+                    .is_none_or(|access| *access == PullRequestStackPushAccess::Denied)
             })
             .collect();
         if !denied.is_empty() {
@@ -547,10 +554,13 @@ pub fn rebase_outcome(layers: &[RebaseLayer], steps: &[StackRebaseStep]) -> Outc
             .collect()
     };
     let pushed = numbers(|step| matches!(step, StackRebaseStep::Pushed { .. }));
-    match layers.iter().zip(steps).find_map(|(layer, step)| match step {
-        StackRebaseStep::Failed { reason } => Some((layer.number, reason.clone())),
-        _ => None,
-    }) {
+    match layers
+        .iter()
+        .zip(steps)
+        .find_map(|(layer, step)| match step {
+            StackRebaseStep::Failed { reason } => Some((layer.number, reason.clone())),
+            _ => None,
+        }) {
         Some((failed, reason)) => Outcome::RebaseStopped {
             pushed,
             failed,

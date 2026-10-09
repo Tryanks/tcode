@@ -154,7 +154,9 @@ pub fn cascade(
     let git_failure = |step: StackRebaseGitStep, run: Run| StackRebaseFailure::Git {
         step,
         message: match run {
-            Run::Exited { stderr, .. } => stderr.trim().lines().last().unwrap_or_default().to_owned(),
+            Run::Exited { stderr, .. } => {
+                stderr.trim().lines().last().unwrap_or_default().to_owned()
+            }
             Run::TimedOut => "timed out".to_owned(),
             Run::Failed(message) => message,
         },
@@ -185,8 +187,8 @@ pub fn cascade(
     ];
     if let Some(token) = token {
         use base64::Engine as _;
-        let basic = base64::engine::general_purpose::STANDARD
-            .encode(format!("x-access-token:{token}"));
+        let basic =
+            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
         config.push((
             format!("http.{remote}.extraheader"),
             format!("AUTHORIZATION: basic {basic}"),
@@ -303,7 +305,10 @@ pub fn cascade(
             set(&mut steps, index, StackRebaseStep::AlreadyCurrent);
         } else {
             set(&mut steps, index, StackRebaseStep::Pushing);
-            let lease = format!("--force-with-lease=refs/heads/{}:{}", layer.branch, layer.head);
+            let lease = format!(
+                "--force-with-lease=refs/heads/{}:{}",
+                layer.branch, layer.head
+            );
             let target = format!("{rebased}:refs/heads/{}", layer.branch);
             match run(&["push", "--quiet", &lease, "origin", &target]) {
                 Run::Exited { ok: true, .. } => set(
@@ -315,7 +320,12 @@ pub fn cascade(
                     },
                 ),
                 Run::Exited { stderr, .. } if stderr.contains("stale info") => {
-                    fail(&mut steps, &mut set, index, StackRebaseFailure::LeaseRefused);
+                    fail(
+                        &mut steps,
+                        &mut set,
+                        index,
+                        StackRebaseFailure::LeaseRefused,
+                    );
                     return steps;
                 }
                 Run::TimedOut => {

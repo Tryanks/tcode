@@ -504,7 +504,7 @@ impl AppState {
                 .find_meta(session_id)
                 .map(|meta| meta.pull_requests)
                 .unwrap_or_default();
-            let rejection = match pull_request::stack_route(&links, &key) {
+            let rejection = match pull_request::stack_route(&links, &key).0 {
                 pull_request::PullRequestStackRoute::Single => None,
                 pull_request::PullRequestStackRoute::Layer { .. } => {
                     Some(tcode_protocol::PullRequestRejection::Invalid)

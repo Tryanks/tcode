@@ -85,17 +85,19 @@ impl AppState {
     fn stack_context(&self, stack: &StackKey) -> Option<(String, String)> {
         self.sessions.iter().find_map(|meta| {
             let meta = self.find_meta(&meta.id)?;
-            meta.pull_requests.iter().find_map(|link| match &link.stack {
-                PullRequestStackState::Native(native)
-                    if link.visible()
-                        && link.key.host == stack.0
-                        && link.key.repository == stack.1
-                        && native.number == stack.2 =>
-                {
-                    Some((meta.id.clone(), native.base.clone()))
-                }
-                _ => None,
-            })
+            meta.pull_requests
+                .iter()
+                .find_map(|link| match &link.stack {
+                    PullRequestStackState::Native(native)
+                        if link.visible()
+                            && link.key.host == stack.0
+                            && link.key.repository == stack.1
+                            && native.number == stack.2 =>
+                    {
+                        Some((meta.id.clone(), native.base.clone()))
+                    }
+                    _ => None,
+                })
         })
     }
 
@@ -140,9 +142,8 @@ impl AppState {
         action: PullRequestAction,
         cx: &mut HostCx,
     ) -> HostTask<Result<CommandResponse, ProtocolError>> {
-        let refuse = |rejection| {
-            cx.spawn_background(async move { answer(Outcome::Rejected(rejection)) })
-        };
+        let refuse =
+            |rejection| cx.spawn_background(async move { answer(Outcome::Rejected(rejection)) });
         let links = self
             .find_meta(session_id)
             .map(|meta| meta.pull_requests)
@@ -153,8 +154,8 @@ impl AppState {
         let Some(native) = pull_request::native_stack(&links, &key) else {
             return refuse(PullRequestRejection::StackUnknown);
         };
-        let (PullRequestAction::MergeStack { stack, .. } | PullRequestAction::RebaseStack { stack, .. }) =
-            &action
+        let (PullRequestAction::MergeStack { stack, .. }
+        | PullRequestAction::RebaseStack { stack, .. }) = &action
         else {
             return refuse(PullRequestRejection::Invalid);
         };
@@ -247,7 +248,11 @@ impl AppState {
         };
         let (id, started_at) = (id.clone(), operation.started_at);
         let key = PullRequestKey::new(&operation.host, &operation.repository, *target);
-        let stack = (operation.host.clone(), operation.repository.clone(), operation.stack);
+        let stack = (
+            operation.host.clone(),
+            operation.repository.clone(),
+            operation.stack,
+        );
         let reads = self.pull_requests.reads.clone();
         let host = cx.clone();
         let task = cx.spawn_background(async move {
