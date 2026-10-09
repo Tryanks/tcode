@@ -471,7 +471,7 @@ fn decode_summary(raw: &Value, key: &PullRequestKey) -> Option<Summary> {
         stack_number: raw.get("stack").map(|stack| stack["number"].as_u64()),
     })
 }
-fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullRequestStack> {
+pub(super) fn decode_stack(raw: &Value, repository: &Repository) -> Option<PullRequestStack> {
     let number = raw["number"].as_u64()?;
     let id = raw["id"]
         .as_str()

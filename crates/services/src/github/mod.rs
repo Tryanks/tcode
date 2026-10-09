@@ -12,6 +12,8 @@ pub mod pull_requests;
 mod quota;
 mod read_cache;
 pub mod repository;
+pub mod stack_actions;
+pub mod stack_rebase;
 
 pub use api::{GitHubApi, GitHubError, RequestOptions, Response, RestRequest};
 pub use credentials::{Credential, CredentialError, Credentials, Identity};

@@ -104,6 +104,9 @@ pub struct RestRequest<'a> {
     pub if_none_match: Option<&'a str>,
     /// Replaces the JSON media type, for representations such as a raw diff or file.
     pub accept: Option<&'a str>,
+    /// Error statuses whose body the caller reads as an answer, such as a conflict naming what it
+    /// conflicts with.
+    pub answers: &'a [u16],
 }
 impl<'a> RestRequest<'a> {
     pub fn get(path: &'a str) -> Self {
@@ -113,6 +116,7 @@ impl<'a> RestRequest<'a> {
             body: None,
             if_none_match: None,
             accept: None,
+            answers: &[],
         }
     }
 }
@@ -215,6 +219,7 @@ impl GitHubApi {
                 body: Some(&body),
                 if_none_match: None,
                 accept: None,
+                answers: &[],
             },
             Some(&document.query),
             options,
@@ -445,7 +450,10 @@ impl GitHubApi {
         if errors.is_some() {
             return Err(GitHubError::Response { status, messages });
         }
-        if (200..300).contains(&status) || (status == 304 && input.if_none_match.is_some()) {
+        if (200..300).contains(&status)
+            || (status == 304 && input.if_none_match.is_some())
+            || input.answers.contains(&status)
+        {
             self.ledger.lock().unwrap().succeeded(host, scope, lease);
             if graphql.is_some() && truncated {
                 return Err(GitHubError::BodyTooLarge);

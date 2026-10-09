@@ -261,7 +261,7 @@ impl Reader<'_> {
     }
 
     /// Read now, not from the cache: a merge or a branch update acts on the head as it stands.
-    fn action_state(&self) -> Result<(String, PullRequestActionState), GitHubError> {
+    pub(super) fn action_state(&self) -> Result<(String, PullRequestActionState), GitHubError> {
         let response = self.query(
             "PullRequestActionState",
             ACTION_STATE.to_owned(),
@@ -380,6 +380,7 @@ impl Reader<'_> {
                 body,
                 if_none_match: None,
                 accept: None,
+                answers: &[],
             },
             &RequestOptions {
                 operation,
@@ -491,7 +492,10 @@ impl PullRequestReads {
                     json!({"subjectId": subject, "body": body}),
                 )
             }
-            PullRequestAction::SubmitReview { .. } => return Err(Rejection::Invalid),
+            // A review takes the runtime's draft, and a stack write the stack's own route.
+            PullRequestAction::SubmitReview { .. }
+            | PullRequestAction::MergeStack { .. }
+            | PullRequestAction::RebaseStack { .. } => return Err(Rejection::Invalid),
             PullRequestAction::ReplyToThread { thread_id, body } => {
                 if blank(body) {
                     return Err(Rejection::Invalid);

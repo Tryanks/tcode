@@ -16,7 +16,7 @@ use tcode_services::github::{
 
 pub(super) struct PullRequestRuntime {
     service: Arc<PullRequests>,
-    reads: Arc<PullRequestReads>,
+    pub(super) reads: Arc<PullRequestReads>,
     last_synced: HashMap<PullRequestKey, u64>,
     requested: HashMap<PullRequestKey, u64>,
     generation: u64,
@@ -27,7 +27,9 @@ pub(super) struct PullRequestRuntime {
     /// Threads triggered during a discovery pass, each with the refresh its triggers asked for.
     discover_again: HashMap<String, bool>,
     merge_commands: HashSet<String>,
-    workers: Vec<HostTask<()>>,
+    pub(super) workers: Vec<HostTask<()>>,
+    /// Stacks with a write submitted and not yet answered.
+    pub(super) stack_writes: HashSet<super::pull_request_stacks::StackKey>,
     /// Counts the review submissions that have landed, so a conversation read clears an
     /// unanswered one only when it began after it.
     submissions: u64,
@@ -47,6 +49,7 @@ impl PullRequestRuntime {
             discover_again: HashMap::new(),
             merge_commands: HashSet::new(),
             workers: Vec::new(),
+            stack_writes: HashSet::new(),
             submissions: 0,
         }
     }
@@ -59,7 +62,7 @@ struct SyncGroup {
     request: Option<u64>,
 }
 
-fn failure(message: impl Into<String>) -> ProtocolError {
+pub(super) fn failure(message: impl Into<String>) -> ProtocolError {
     ProtocolError {
         code: "pull_request_failed".into(),
         message: message.into(),
@@ -371,6 +374,11 @@ impl AppState {
                     reads.action_state(&key)?,
                     PullRequestReadResponse::ActionState,
                 ),
+                // Read for one confirmation and never kept: the write reads it again.
+                PullRequestRead::StackState { rebase } => (
+                    PullRequestReadResponse::StackState(reads.stack_state(&key, rebase)?),
+                    SystemTime::now(),
+                ),
                 PullRequestRead::Media { url, validator } => {
                     let media = reads.media(&key, &url, validator.as_deref())?;
                     let expires_at = match &media {
@@ -479,8 +487,14 @@ impl AppState {
         if let Err(error) = self.linked_pull_request(session_id, &key) {
             return cx.spawn_background(async move { Err(error) });
         }
-        // A native stack merges a layer with the layers below it, which is not one pull request's
-        // merge; until that route exists, nothing is sent for one, nor for a pull request whose
+        if matches!(
+            action,
+            PullRequestAction::MergeStack { .. } | PullRequestAction::RebaseStack { .. }
+        ) {
+            return self.run_stack_action(session_id, key, action, cx);
+        }
+        // A native stack merges a layer with the layers below it only through its own route, so
+        // nothing of one pull request's merge is sent for a layer, nor for a pull request whose
         // stack is not known yet.
         if matches!(
             action,
@@ -492,8 +506,8 @@ impl AppState {
                 .unwrap_or_default();
             let rejection = match pull_request::stack_route(&links, &key).0 {
                 pull_request::PullRequestStackRoute::Single => None,
-                pull_request::PullRequestStackRoute::Layer { index, layers } => {
-                    Some(tcode_protocol::PullRequestRejection::InStack { index, layers })
+                pull_request::PullRequestStackRoute::Layer { .. } => {
+                    Some(tcode_protocol::PullRequestRejection::Invalid)
                 }
                 pull_request::PullRequestStackRoute::Unknown => {
                     Some(tcode_protocol::PullRequestRejection::StackUnknown)
@@ -763,6 +777,9 @@ impl AppState {
             resident
                 .pull_request_reviews
                 .clone_from(&meta.pull_request_reviews);
+            resident
+                .pull_request_operations
+                .clone_from(&meta.pull_request_operations);
         }
         self.persist_meta(&meta, cx);
     }
@@ -863,6 +880,7 @@ impl AppState {
             });
             self.pull_requests.workers.push(task);
         }
+        self.resume_stack_operations(cx);
         self.start_pull_request_watch_worker(cx);
     }
     pub(super) fn sweep_pull_requests(
@@ -874,6 +892,10 @@ impl AppState {
             return cx.spawn_background(async {});
         }
         self.pull_requests.syncing = true;
+        self.reconcile_unconfirmed_merges(None, cx);
+        if !requested_only {
+            self.drop_ended_rebases(cx);
+        }
         let sweep_generation = self.pull_requests.generation;
         let now = now_secs();
         let mut groups: HashMap<PullRequestKey, SyncGroup> = HashMap::new();
@@ -1084,6 +1106,7 @@ impl AppState {
         self.pull_requests
             .last_synced
             .insert(key.clone(), now_secs());
+        self.reconcile_unconfirmed_merges(Some((&key, summary.snapshot.state)), cx);
         if self.pull_requests.requested.get(&key).copied() == generation {
             self.pull_requests.requested.remove(&key);
         }

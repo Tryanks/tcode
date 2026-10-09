@@ -29,6 +29,10 @@ gpui_component_assets::icon_assets!(
         ListOrdered,
         Hourglass,
         ArrowUpDown,
+        CircleQuestionMark,
+        CornerDownRight,
+        GitBranch,
+        Upload,
     ]
 );
 
