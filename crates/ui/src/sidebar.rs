@@ -5222,8 +5222,14 @@ mod tests {
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        let model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
-        assert_eq!(model.rows.len(), 301);
+        // Only the address is kept: a second strong reference, which the app never
+        // holds, would turn the wall-clock minute refresh of relative times into a
+        // copy of the whole model.
+        let model = sidebar.read_with(cx, |sidebar, _| {
+            let model = sidebar.compact_model.as_ref().unwrap();
+            assert_eq!(model.rows.len(), 301);
+            Rc::as_ptr(model)
+        });
         for (index, selector) in [
             (0, "compact-row-virtual-0"),
             (100, "compact-row-virtual-100"),
@@ -5245,7 +5251,7 @@ mod tests {
             sidebar.read_with(cx, |sidebar, _| {
                 let current = sidebar.compact_model.as_ref().unwrap();
                 assert!(
-                    Rc::ptr_eq(&model, current),
+                    std::ptr::eq(model, Rc::as_ptr(current)),
                     "scrolling must not rebuild families or labels"
                 );
                 assert!(
@@ -5264,7 +5270,7 @@ mod tests {
         draw(cx);
         sidebar.read_with(cx, |sidebar, _| {
             assert!(
-                !Rc::ptr_eq(&model, sidebar.compact_model.as_ref().unwrap()),
+                !std::ptr::eq(model, Rc::as_ptr(sidebar.compact_model.as_ref().unwrap())),
                 "Index updates invalidate cached row state"
             );
             assert_eq!(
