@@ -53,6 +53,17 @@ pub enum TraverseMode {
     Off,
 }
 
+impl TraverseMode {
+    /// What invitations list for this mode; see [`PairInvite::traverse`].
+    pub fn invite_traverse(&self) -> Vec<String> {
+        match self {
+            Self::Official => Vec::new(),
+            Self::Custom(url) => vec![url.to_string()],
+            Self::Off => vec![TRAVERSE_OFF.to_owned()],
+        }
+    }
+}
+
 pub struct HostConfig {
     pub host_name: String,
     pub data_dir: PathBuf,
@@ -60,8 +71,8 @@ pub struct HostConfig {
     /// Whether this host may pair devices at all. The user's persisted
     /// pairing switch applies on top of it.
     pub pairing_enabled: bool,
-    /// A fixed UDP port instead of a random one, so invite addresses and
-    /// firewall rules survive restarts.
+    /// A fixed UDP port instead of a random one, so the invitation's port
+    /// and firewall rules survive restarts.
     pub bind_port: Option<u16>,
 }
 
@@ -95,12 +106,15 @@ pub struct DeviceInfo {
     pub live: Option<PathInfo>,
 }
 
-/// This machine's addresses at one moment, for invites.
+/// What invitations say about where this machine is at one moment. No IP
+/// address: see `docs/pair-link.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointAddrSnapshot {
     pub id: String,
-    pub relays: Vec<String>,
-    pub addrs: Vec<String>,
+    /// The home relay, once the endpoint has one.
+    pub relay: Option<String>,
+    /// The bound UDP port.
+    pub port: u16,
 }
 
 struct ActiveInvitation {
@@ -129,9 +143,9 @@ struct Shared {
     listeners: Mutex<Vec<async_channel::Sender<Option<Invitation>>>>,
     /// Ends the active invitation when its lifetime runs out.
     expiry: Mutex<Option<tokio::task::AbortHandle>>,
-    /// What invitations say about this machine's Traverse instance; see
+    /// What invitations say about this machine's Traverse instances; see
     /// [`PairInvite::traverse`].
-    traverse: Option<String>,
+    traverse: Vec<String>,
     allow_pairing: bool,
 }
 
@@ -151,11 +165,7 @@ impl TraverseHost {
     pub fn start(mux: HostMux, config: HostConfig) -> io::Result<TraverseHost> {
         let identity = HostIdentity::load_or_create(&config.data_dir, &config.host_name)?;
         let secret_key = identity.secret_key().clone();
-        let traverse = match &config.traverse {
-            TraverseMode::Official => None,
-            TraverseMode::Custom(url) => Some(url.to_string()),
-            TraverseMode::Off => Some(TRAVERSE_OFF.to_owned()),
-        };
+        let traverse = config.traverse.invite_traverse();
         block_on(async move {
             let loader = match &config.traverse {
                 TraverseMode::Official => Some(ManifestLoader::new(
@@ -285,11 +295,16 @@ impl TraverseHost {
         });
     }
 
-    /// Relay URLs and direct addresses right now. The loopback address of
-    /// each bound socket is included so a client on this machine can dial
-    /// without any lookup.
+    /// The id, home relay and port invitations carry right now.
     pub fn addr(&self) -> EndpointAddrSnapshot {
         self.shared.snapshot()
+    }
+
+    /// The direct addresses the endpoint knows for itself right now, for a
+    /// person to read off this machine and type on a device that found no
+    /// path; invitations never carry them.
+    pub fn direct_addrs(&self) -> Vec<std::net::SocketAddr> {
+        self.shared.endpoint.addr().ip_addrs().copied().collect()
     }
 
     /// Mint an invitation, replacing any active one.
@@ -429,21 +444,24 @@ impl TraverseHost {
     }
 }
 
+/// The endpoint's UDP port: the IPv4 socket's, else the IPv6 one's. With
+/// [`HostConfig::bind_port`] both families share it.
+fn bound_port(endpoint: &Endpoint) -> Option<u16> {
+    let bound = endpoint.bound_sockets();
+    let v4 = bound.iter().find(|addr| addr.is_ipv4());
+    let v6 = bound.iter().find(|addr| addr.is_ipv6());
+    v4.or(v6).map(|addr| addr.port())
+}
+
 /// Advertise the endpoint's UDP port on the LAN; see [`lan`]. Without a
 /// port shared by both address families only IPv4 is advertised, since one
 /// SRV record carries one port. Unavailable mDNS is logged, not fatal.
 fn advertise(endpoint: &Endpoint, host_name: &str) -> Option<lan::Advertisement> {
-    let bound = endpoint.bound_sockets();
-    let v4 = bound
+    let port = bound_port(endpoint)?;
+    let ipv6 = endpoint
+        .bound_sockets()
         .iter()
-        .find(|addr| addr.is_ipv4())
-        .map(|addr| addr.port());
-    let v6 = bound
-        .iter()
-        .find(|addr| addr.is_ipv6())
-        .map(|addr| addr.port());
-    let port = v4.or(v6)?;
-    let ipv6 = v6 == Some(port);
+        .any(|addr| addr.is_ipv6() && addr.port() == port);
     match lan::Advertisement::start(&endpoint.id(), host_name, port, ipv6) {
         Ok(advertisement) => Some(advertisement),
         Err(error) => {
@@ -471,12 +489,11 @@ impl Shared {
         let invitation = Invitation {
             invite: PairInvite {
                 host_id: addr.id,
-                name: state.identity.host_name.clone(),
                 secret: encode_secret(&random),
                 space: None,
                 traverse: self.traverse.clone(),
-                relay: addr.relays.first().cloned(),
-                addrs: addr.addrs,
+                relay: addr.relay,
+                port: addr.port,
             },
             expires_at: Instant::now() + INVITATION_LIFETIME,
         };
@@ -524,7 +541,7 @@ impl Shared {
     }
 
     /// The unexpired invitation with `addr` as its routing hints. The
-    /// secret never changes; only where the link says to dial does.
+    /// secret never changes; only the relay the link names does.
     fn current_invitation(
         &self,
         state: &State,
@@ -540,8 +557,8 @@ impl Shared {
         }
         let invitation = Invitation {
             invite: PairInvite {
-                relay: addr.relays.first().cloned(),
-                addrs: addr.addrs.clone(),
+                relay: addr.relay.clone(),
+                port: addr.port,
                 ..active.invitation.invite.clone()
             },
             expires_at: active.invitation.expires_at,
@@ -551,28 +568,10 @@ impl Shared {
 
     fn snapshot(&self) -> EndpointAddrSnapshot {
         let endpoint = &self.endpoint;
-        let addr = endpoint.addr();
-        let mut addrs: Vec<String> = addr.ip_addrs().map(ToString::to_string).collect();
-        for bound in endpoint.bound_sockets() {
-            let loopback = match bound.ip() {
-                std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-                }
-                std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
-                    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
-                }
-                ip => ip,
-            };
-            let loopback = std::net::SocketAddr::new(loopback, bound.port()).to_string();
-            if !addrs.contains(&loopback) {
-                addrs.push(loopback);
-            }
-        }
-        addrs.truncate(tcode_client::pairing::MAX_ADDRS);
         EndpointAddrSnapshot {
             id: endpoint.id().to_string(),
-            relays: addr.relay_urls().map(ToString::to_string).collect(),
-            addrs,
+            relay: endpoint.addr().relay_urls().next().map(ToString::to_string),
+            port: bound_port(endpoint).unwrap_or_default(),
         }
     }
 
@@ -634,12 +633,11 @@ impl Shared {
                     .then(|| {
                         pair_url(&PairInvite {
                             host_id: addr.id.clone(),
-                            name: state.identity.host_name.clone(),
                             secret: space.secret.clone(),
                             space: Some(space.id.clone()),
                             traverse: self.traverse.clone(),
-                            relay: addr.relays.first().cloned(),
-                            addrs: addr.addrs.clone(),
+                            relay: addr.relay.clone(),
+                            port: addr.port,
                         })
                     }),
                 link_enabled: space.link_enabled,
@@ -1633,8 +1631,8 @@ mod tests {
         assert!(host.shared.relays.is_empty(), "no relay to dial yet");
         assert_eq!(endpoint.address_lookup().unwrap().len(), 0, "no lookup yet");
         assert_eq!(
-            host.new_invitation().invite.traverse.as_deref(),
-            Some(Url::from_file_path(&manifest_path).unwrap().as_str())
+            host.new_invitation().invite.traverse,
+            [Url::from_file_path(&manifest_path).unwrap().to_string()]
         );
 
         std::fs::write(

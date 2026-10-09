@@ -178,24 +178,38 @@ impl RemotePanel {
         let form = PairForm::new(window, cx);
         // A link that parses is the whole request, so it is sent as soon as
         // it lands in the field; Enter and the button only cover a retry.
-        let subscriptions = vec![cx.subscribe_in(
-            &form.invitation,
-            window,
-            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
-                    this.form.error = None;
-                    if this.form.should_submit(cx) {
-                        this.submit(window, cx);
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &form.invitation,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => {
+                        this.form.error = None;
+                        if this.form.should_submit(cx) {
+                            this.submit(window, cx);
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-                InputEvent::PressEnter {
-                    shift: false,
-                    secondary: false,
-                } => this.submit(window, cx),
-                _ => {}
-            },
-        )];
+                    InputEvent::PressEnter {
+                        shift: false,
+                        secondary: false,
+                    } => this.submit(window, cx),
+                    _ => {}
+                },
+            ),
+            cx.subscribe_in(
+                &form.address,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter {
+                        shift: false,
+                        secondary: false,
+                    } => this.submit(window, cx),
+                    _ => {}
+                },
+            ),
+        ];
         Self {
             store,
             window_state,
@@ -263,15 +277,14 @@ impl RemotePanel {
         let Some(client) = self.client(cx) else {
             return;
         };
-        let Some((request, generation)) = self.form.begin_pair(cx) else {
+        let Some((request, address, generation)) = self.form.begin_pair(cx) else {
             return;
         };
-        let address = request.name.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = client.pair(request).await;
+            let result = client.pair(request, address).await;
             let _ = this.update_in(cx, |panel, window, cx| {
-                panel.finish_pair(generation, result, &address, window, cx);
+                panel.finish_pair(generation, result, window, cx);
             });
         })
         .detach();
@@ -281,11 +294,10 @@ impl RemotePanel {
         &mut self,
         generation: u64,
         result: Result<PairedHost, String>,
-        address: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(host) = self.form.finish_pair(generation, result, address) {
+        if let Some(host) = self.form.finish_pair(generation, result) {
             if let Some(message) = crate::pairing::joined_message(&host) {
                 window.push_notification(Notification::success(message), cx);
             }
@@ -720,6 +732,7 @@ impl RemotePanel {
             ))
             .child(plain_list(rows, cx))
             .children(self.attempt_status(cx))
+            .children(self.address_prompt(true, cx))
             .into_any_element()
     }
 
@@ -727,11 +740,6 @@ impl RemotePanel {
     /// line at both the Hosts page and the paste page.
     fn attempt_status(&self, cx: &App) -> Option<AnyElement> {
         if self.form.busy {
-            let name = self
-                .form
-                .request(cx)
-                .map(|invite| invite.name)
-                .unwrap_or_default();
             return Some(
                 h_flex()
                     .w_full()
@@ -746,7 +754,7 @@ impl RemotePanel {
                             .min_w_0()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("hosts.pair.connecting", name = name)),
+                            .child(crate::tr!("hosts.pair.connecting")),
                     )
                     .into_any_element(),
             );
@@ -769,6 +777,63 @@ impl RemotePanel {
         )
     }
 
+    /// The machine's IP address, asked for under the failure of an attempt
+    /// that found no path to it. `retry` adds the button that sends it,
+    /// where no Connect button is pinned to the page.
+    fn address_prompt(&self, retry: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.form.needs_address(cx) {
+            return None;
+        }
+        let invalid = self.form.typed_address(cx).is_err();
+        let busy = self.form.busy;
+        Some(
+            v_flex()
+                .w_full()
+                .px(px(PAGE_PADDING))
+                .gap_1p5()
+                .debug_selector(|| "hosts-pair-address".into())
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_medium()
+                        .child(crate::tr!("hosts.pair.address")),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .min_w_0()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::tr!("hosts.pair.address_description")),
+                )
+                .child(
+                    Input::new(&self.form.address)
+                        .large()
+                        .rounded(crate::material::radius_input(cx)),
+                )
+                .when(invalid, |column| {
+                    column.child(
+                        div()
+                            .text_size(px(13.))
+                            .min_w_0()
+                            .text_color(cx.theme().danger_foreground)
+                            .child(crate::tr!("hosts.pair.bad_address")),
+                    )
+                })
+                .when(retry, |column| {
+                    column.child(
+                        Button::new("hosts-pair-retry")
+                            .primary()
+                            .w_full()
+                            .loading(busy)
+                            .disabled(busy || invalid)
+                            .label(crate::tr!("hosts.pair.retry"))
+                            .on_click(cx.listener(|panel, _, window, cx| panel.submit(window, cx))),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     /// The paste page: the field above, the attempt's state under it, and a
     /// Connect button pinned to the foot of the page for a retry — above the
     /// software keyboard, which the window seam already accounts for. A link
@@ -779,7 +844,7 @@ impl RemotePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let busy = self.form.busy;
-        let ready = !busy && self.form.request(cx).is_some();
+        let ready = !busy && self.form.request(cx).is_some() && self.form.typed_address(cx).is_ok();
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr());
         let body = v_flex()
             .w_full()
@@ -812,6 +877,7 @@ impl RemotePanel {
                     ),
             )
             .children(self.attempt_status(cx))
+            .children(self.address_prompt(false, cx))
             .when(scannable, |column| {
                 column.child(
                     div().px(px(PAGE_PADDING)).child(
@@ -1129,7 +1195,7 @@ mod tests {
                 vec![PairedHost {
                     host_id: "served-by".into(),
                     name: "Build server".into(),
-                    traverse: None,
+                    traverse: Vec::new(),
                     relay: None,
                     addrs: Vec::new(),
                     last_connected_unix: None,
@@ -1181,6 +1247,132 @@ mod tests {
             cx.debug_bounds("hosts-add-machine").is_none(),
             "a browser has no way to add a machine"
         );
+    }
+
+    /// A scanned link that opens no path to the machine: the Hosts page asks
+    /// for the machine's address under the failure, and the retry sends the
+    /// same invitation with it.
+    #[gpui::test]
+    fn a_link_that_found_no_path_asks_for_the_address_and_retries_with_it(cx: &mut TestAppContext) {
+        use std::cell::RefCell;
+        use std::net::IpAddr;
+        use tcode_client::pairing::PairInvite;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        #[derive(Default)]
+        struct Phone {
+            attempts: RefCell<Vec<(PairInvite, Option<IpAddr>)>>,
+            hosts: RefCell<Vec<PairedHost>>,
+        }
+        impl ClientHost for Phone {
+            fn device_name(&self) -> String {
+                "phone".into()
+            }
+            fn device_id(&self) -> String {
+                "phone".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_hosts(&self) -> Vec<PairedHost> {
+                self.hosts.borrow().clone()
+            }
+            fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+                Default::default()
+            }
+            fn save_preferences(&self, _: &tcode_client::host::ClientPreferences) {}
+            fn save_hosts(&self, hosts: &[PairedHost]) {
+                *self.hosts.borrow_mut() = hosts.to_vec();
+            }
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn supports_qr(&self) -> bool {
+                true
+            }
+            fn pair(
+                &self,
+                invite: PairInvite,
+                address: Option<IpAddr>,
+            ) -> tcode_client::host::HostFuture<'_, Result<PairedHost, String>> {
+                self.attempts.borrow_mut().push((invite.clone(), address));
+                Box::pin(async move {
+                    match address {
+                        None => {
+                            Err("could not connect to the machine: connection timed out".into())
+                        }
+                        Some(_) => Ok(invite.paired("Studio".into())),
+                    }
+                })
+            }
+            fn connect(&self, _: &PairedHost) -> tcode_client::host::Transport {
+                unreachable!("the switch is the attachment owner's")
+            }
+        }
+        struct HostsProbe(Entity<RemotePanel>);
+        impl Render for HostsProbe {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                v_flex().size_full().child(
+                    self.0
+                        .update(cx, |panel, cx| panel.render_hosts(window, cx)),
+                )
+            }
+        }
+        let phone = Rc::new(Phone::default());
+        cx.update(crate::theme::init);
+        cx.update(|cx| cx.set_global(ClientAttachment::new(phone.clone(), false, |_, _, _| {})));
+        let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
+            let state = cx.new(|_| WindowState::new(true));
+            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+        });
+        let panel = window.update(cx, |probe, _, _| probe.0.clone()).unwrap();
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                _ = window.draw(cx);
+            });
+        };
+        let invite = PairInvite {
+            host_id: "ab".repeat(32),
+            secret: "AAECAwQFBgcICQoLDA0ODw".into(),
+            space: None,
+            traverse: Vec::new(),
+            relay: None,
+            port: 47420,
+        };
+        let link = tcode_client::pairing::pair_url(&invite);
+        // What a scan does with the link it read.
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                assert!(panel.form.fill_invite(&link, window, cx));
+                panel.submit(window, cx);
+            });
+        });
+        draw(cx);
+        assert_eq!(*phone.attempts.borrow(), [(invite.clone(), None)]);
+        assert!(
+            cx.debug_bounds("hosts-pair-address").is_some(),
+            "no path: the page asks for the address"
+        );
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel
+                    .form
+                    .address
+                    .update(cx, |state, cx| state.set_value("192.168.1.20", window, cx));
+                panel.submit(window, cx);
+            });
+        });
+        draw(cx);
+        assert_eq!(
+            phone.attempts.borrow()[1],
+            (invite.clone(), Some("192.168.1.20".parse().unwrap())),
+            "the same invitation, with the typed address"
+        );
+        assert_eq!(phone.load_hosts(), [invite.paired("Studio".into())]);
+        assert!(cx.debug_bounds("hosts-pair-address").is_none());
     }
 
     /// The Hosts page is where this machine offers a connection: with hosting
@@ -1324,7 +1516,7 @@ mod tests {
         let host = |name: &str| PairedHost {
             host_id: "machine".into(),
             name: name.into(),
-            traverse: None,
+            traverse: Vec::new(),
             relay: None,
             addrs: vec!["192.168.1.10:47420".into()],
             last_connected_unix: None,
@@ -1335,19 +1527,12 @@ mod tests {
             probe.0.update(cx, |panel, cx| {
                 let old = panel.form.restart();
                 let current = panel.form.restart();
-                panel.finish_pair(
-                    old,
-                    Err("invalid or expired invitation".into()),
-                    "machine",
-                    window,
-                    cx,
-                );
+                panel.finish_pair(old, Err("invalid or expired invitation".into()), window, cx);
                 assert!(panel.form.error.is_none());
                 assert!(client.load_hosts().is_empty());
                 panel.finish_pair(
                     current,
                     Err("invalid or expired invitation".into()),
-                    "machine",
                     window,
                     cx,
                 );
@@ -1357,8 +1542,8 @@ mod tests {
                 );
                 assert!(client.load_hosts().is_empty());
                 let current = panel.form.restart();
-                panel.finish_pair(current, Ok(host("current pairing")), "machine", window, cx);
-                panel.finish_pair(old, Ok(host("superseded pairing")), "machine", window, cx);
+                panel.finish_pair(current, Ok(host("current pairing")), window, cx);
+                panel.finish_pair(old, Ok(host("superseded pairing")), window, cx);
             });
         });
         assert_eq!(client.load_hosts(), vec![host("current pairing")]);

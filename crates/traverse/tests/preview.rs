@@ -65,7 +65,12 @@ impl Machine {
         let device = DeviceIdentity::load_or_create(&device_dir.0).unwrap();
         device.set_details("laptop".into(), None);
         let minted = host.new_invitation();
-        let paired = tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();
+        let paired = tcode_traverse::pair_blocking(
+            &minted.invite,
+            Some(std::net::Ipv4Addr::LOCALHOST.into()),
+            &device,
+        )
+        .unwrap();
         let transport = tcode_traverse::connect(&paired, &device);
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {

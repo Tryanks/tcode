@@ -1,16 +1,22 @@
 //! Shared pairing form; generation stamps discard superseded pairing results.
+use std::net::IpAddr;
+
 use gpui::{App, AppContext as _, Entity, Window};
 use tcode_client::pairing::{PairInvite, PairedHost, parse_pair_url};
 
 use crate::widgets::input::InputState;
 
-/// The form holds one thing: the invitation link a machine shows, scanned or
-/// pasted. The link is the whole secret, so there is nothing else to type, and
-/// a link that parses is submitted the moment it lands: pairing and
-/// connecting are one step, not a form and a confirmation.
+/// The form holds the invitation link a machine shows, scanned or pasted.
+/// The link is the whole secret, so there is nothing else to type, and a link
+/// that parses is submitted the moment it lands: pairing and connecting are
+/// one step, not a form and a confirmation. Only when an attempt found no
+/// path to the machine does the form ask for one more thing: the machine's
+/// IP address, dialed at the port the link names.
 pub struct PairForm {
     /// The `tcode://pair?…` link.
     pub invitation: Entity<InputState>,
+    /// The machine's IP address, asked for once a link found no path.
+    pub address: Entity<InputState>,
     pub busy: bool,
     pub error: Option<String>,
     /// Bumped whenever the form is retargeted; stamps in-flight results.
@@ -18,6 +24,9 @@ pub struct PairForm {
     /// The link of the attempt in flight or the one that last failed. A field
     /// that still holds it is not submitted again on every keystroke.
     attempted: Option<String>,
+    /// The link whose last attempt opened no path to the machine. Its
+    /// secret was never sent, so it may be tried again at a typed address.
+    unreachable: Option<String>,
 }
 
 impl PairForm {
@@ -27,10 +36,15 @@ impl PairForm {
                 InputState::new(window, cx)
                     .placeholder(crate::tr!("hosts.pair.invitation_placeholder").into_owned())
             }),
+            address: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(crate::tr!("hosts.pair.address_placeholder").into_owned())
+            }),
             busy: false,
             error: None,
             generation: 0,
             attempted: None,
+            unreachable: None,
         }
     }
 
@@ -56,27 +70,54 @@ impl PairForm {
         parse_pair_url(&value).is_some() && self.attempted.as_deref() != Some(value.trim())
     }
 
+    /// Whether to ask for the machine's address: the link in the field is
+    /// the one whose last attempt found no path to the machine.
+    pub fn needs_address(&self, cx: &App) -> bool {
+        self.unreachable
+            .as_deref()
+            .is_some_and(|link| link == self.invitation.read(cx).value().trim())
+    }
+
+    /// The address to dial besides what the link names: `Ok(None)` when none
+    /// is asked for or the field is empty, `Err` when it is not an IPv4 or
+    /// IPv6 address.
+    pub fn typed_address(&self, cx: &App) -> Result<Option<IpAddr>, std::net::AddrParseError> {
+        if !self.needs_address(cx) {
+            return Ok(None);
+        }
+        let value = self.address.read(cx).value();
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        value.parse().map(Some)
+    }
+
     /// Reset for a fresh attempt and stamp it. Any in-flight pairing result
     /// from the previous generation is discarded when it lands.
     pub fn restart(&mut self) -> u64 {
         self.error = None;
         self.busy = false;
         self.attempted = None;
+        self.unreachable = None;
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
 
-    /// Mark a submission in flight. Returns the request and its stamp.
-    pub fn begin_pair(&mut self, cx: &App) -> Option<(PairInvite, u64)> {
+    /// Mark a submission in flight. Returns the request, the typed address
+    /// to dial with it and the attempt's stamp; nothing while the typed
+    /// address is not one.
+    pub fn begin_pair(&mut self, cx: &App) -> Option<(PairInvite, Option<IpAddr>, u64)> {
         if self.busy {
             return None;
         }
         let value = self.invitation.read(cx).value();
         let request = parse_pair_url(&value)?;
+        let address = self.typed_address(cx).ok()?;
         self.attempted = Some(value.trim().to_owned());
         self.busy = true;
         self.error = None;
-        Some((request, self.generation))
+        Some((request, address, self.generation))
     }
 
     /// Apply a pairing result. The paired machine is returned so the caller
@@ -86,16 +127,21 @@ impl PairForm {
         &mut self,
         generation: u64,
         result: Result<PairedHost, String>,
-        address: &str,
     ) -> Option<PairedHost> {
         if generation != self.generation {
             return None;
         }
         self.busy = false;
         match result {
-            Ok(host) => Some(host),
+            Ok(host) => {
+                self.unreachable = None;
+                Some(host)
+            }
             Err(error) => {
-                self.error = Some(pair_error(&error, address));
+                if no_path(&error) {
+                    self.unreachable = self.attempted.clone();
+                }
+                self.error = Some(pair_error(&error));
                 None
             }
         }
@@ -113,10 +159,13 @@ impl PairForm {
         true
     }
 
-    /// Empty the field for a fresh invitation.
+    /// Empty the fields for a fresh invitation.
     pub fn clear(&mut self, window: &mut Window, cx: &mut App) {
         self.error = None;
         self.attempted = None;
+        self.unreachable = None;
+        self.address
+            .update(cx, |state, cx| state.set_value("", window, cx));
         self.invitation.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
@@ -130,11 +179,18 @@ pub fn joined_message(host: &PairedHost) -> Option<String> {
         .map(|space| crate::tr!("member.joined", space = space, machine = &host.name).into_owned())
 }
 
+/// `PairError::Unreachable`'s `Display` in `crates/traverse/src/client.rs`:
+/// no path to the machine opened, and the secret was never sent.
+const UNREACHABLE: &str = "could not connect to the machine";
+
+fn no_path(error: &str) -> bool {
+    error.to_ascii_lowercase().starts_with(UNREACHABLE)
+}
+
 /// Interpret the transport's pairing failures here, where the recovery
 /// advice can be localized. The wording is `PairError`'s `Display` in
 /// `crates/traverse/src/client.rs`; anything else is shown as it is.
-pub fn pair_error(error: &str, address: &str) -> String {
-    const UNREACHABLE: &str = "could not connect to the machine";
+pub fn pair_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     match lower.trim() {
         "invalid or expired invitation" => crate::tr!("hosts.pair.rejected").into_owned(),
@@ -146,12 +202,7 @@ pub fn pair_error(error: &str, address: &str) -> String {
         }
         _ if lower.starts_with(UNREACHABLE) => {
             let reason = error[UNREACHABLE.len()..].trim_start_matches(':').trim();
-            crate::tr!(
-                "hosts.pair.network_error",
-                address = address,
-                reason = reason
-            )
-            .into_owned()
+            crate::tr!("hosts.pair.network_error", reason = reason).into_owned()
         }
         _ => crate::tr!("hosts.pair.failed", reason = error).into_owned(),
     }
@@ -174,7 +225,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                pair_error(error, "ab12cd34"),
+                pair_error(error),
                 crate::tr!(key).into_owned(),
                 "wrong recovery advice for {error}",
             );
@@ -182,22 +233,17 @@ mod tests {
         assert_eq!(
             pair_error(
                 "could not connect to the machine: No addressing information available: \
-                 Address lookup failed",
-                "Studio"
+                 Address lookup failed"
             ),
             crate::tr!(
                 "hosts.pair.network_error",
-                address = "Studio",
                 reason = "No addressing information available: Address lookup failed"
             )
             .into_owned(),
             "an unreachable machine keeps the transport's cause"
         );
         assert_eq!(
-            pair_error(
-                "the machine could not record the pairing; try again",
-                "ab12cd34"
-            ),
+            pair_error("the machine could not record the pairing; try again"),
             crate::tr!(
                 "hosts.pair.failed",
                 reason = "the machine could not record the pairing; try again"
@@ -210,13 +256,98 @@ mod tests {
     fn invite() -> PairInvite {
         PairInvite {
             host_id: "ab".repeat(32),
-            name: "Studio".into(),
             secret: "AAECAwQFBgcICQoLDA0ODw".into(),
-            traverse: Some("https://traverse.example/".into()),
+            traverse: vec!["https://traverse.example/".into()],
             relay: Some("https://relay.example/".into()),
-            addrs: vec!["10.0.0.4:47420".into()],
+            port: 47420,
             space: None,
         }
+    }
+
+    fn type_into(
+        form: &Entity<Holder>,
+        field: fn(&PairForm) -> &Entity<InputState>,
+        value: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            form.update(cx, |holder, cx| {
+                field(&holder.0).update(cx, |state, cx| state.set_value(value, window, cx));
+            });
+        });
+    }
+
+    /// A link whose attempt opened no path asks for the machine's address,
+    /// and the same invitation is retried with it; any other failure, or
+    /// another link, asks for nothing.
+    #[gpui::test]
+    fn a_link_that_found_no_path_is_retried_at_a_typed_address(cx: &mut TestAppContext) {
+        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(window, cx)));
+        let url = tcode_client::pairing::pair_url(&invite());
+        type_into(&form, |form| &form.invitation, &url, cx);
+        form.update(cx, |holder, cx| {
+            let (_, address, generation) = holder.0.begin_pair(cx).expect("a request");
+            assert_eq!(address, None);
+            holder
+                .0
+                .finish_pair(generation, Err("invalid or expired invitation".into()));
+            assert!(!holder.0.needs_address(cx), "the machine answered");
+            let (_, _, generation) = holder.0.begin_pair(cx).expect("a retry");
+            holder.0.finish_pair(
+                generation,
+                Err("could not connect to the machine: connection timed out".into()),
+            );
+            assert!(holder.0.needs_address(cx));
+            assert!(!holder.0.should_submit(cx), "a retry waits for the address");
+        });
+        for (typed, expected) in [
+            ("", Some(None)),
+            ("192.168.1.20:47420", None),
+            ("192.168.1", None),
+            ("studio.local", None),
+            (" 192.168.1.20 ", Some(Some("192.168.1.20".parse().unwrap()))),
+            ("fd00::2", Some(Some("fd00::2".parse().unwrap()))),
+        ] {
+            type_into(&form, |form| &form.address, typed, cx);
+            form.update(cx, |holder, cx| {
+                assert_eq!(holder.0.typed_address(cx).ok(), expected, "{typed:?}");
+                if expected.is_none() {
+                    assert!(holder.0.begin_pair(cx).is_none(), "{typed:?} is not sent");
+                }
+            });
+        }
+        form.update(cx, |holder, cx| {
+            let (request, address, generation) = holder.0.begin_pair(cx).expect("a retry");
+            assert_eq!(request, invite(), "the same invitation");
+            assert_eq!(address, Some("fd00::2".parse().unwrap()));
+            assert!(
+                holder
+                    .0
+                    .finish_pair(generation, Ok(request.paired("Studio".into())))
+                    .is_some()
+            );
+            assert!(!holder.0.needs_address(cx));
+        });
+        // Another link starts over: its port is not the one the address was
+        // typed for.
+        form.update(cx, |holder, cx| {
+            let (_, _, generation) = holder.0.begin_pair(cx).unwrap();
+            holder.0.finish_pair(
+                generation,
+                Err("could not connect to the machine: x".into()),
+            );
+            assert!(holder.0.needs_address(cx));
+        });
+        let other = tcode_client::pairing::pair_url(&PairInvite {
+            port: 5000,
+            ..invite()
+        });
+        type_into(&form, |form| &form.invitation, &other, cx);
+        form.update(cx, |holder, cx| {
+            assert!(!holder.0.needs_address(cx));
+            let (_, address, _) = holder.0.begin_pair(cx).unwrap();
+            assert_eq!(address, None);
+        });
     }
 
     /// The link a machine shows is the whole request, however it arrived;
@@ -243,12 +374,12 @@ mod tests {
         // Once tried, the same link is not sent again while it sits in the
         // field: not while the attempt is in flight, and not after it failed.
         form.update(cx, |holder, cx| {
-            let (_, generation) = holder.0.begin_pair(cx).expect("a request");
+            let (_, _, generation) = holder.0.begin_pair(cx).expect("a request");
             assert!(!holder.0.should_submit(cx));
             assert!(
                 holder
                     .0
-                    .finish_pair(generation, Err("pairing_disabled".into()), "Studio")
+                    .finish_pair(generation, Err("pairing_disabled".into()))
                     .is_none()
             );
             assert!(!holder.0.busy);
@@ -257,8 +388,9 @@ mod tests {
         });
         for rejected in [
             "tcode://pair?v=1&id=abc&code=123456",
+            // The previous release's link.
             &format!(
-                "tcode://pair?v=2&id={}&code=123456&name=Studio",
+                "tcode://pair?v=2&id={}&secret=AAECAwQFBgcICQoLDA0ODw&name=Studio&addr=10.0.0.4%3A47420",
                 "ab".repeat(32)
             ),
             &"ab".repeat(32),

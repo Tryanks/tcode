@@ -92,7 +92,12 @@ fn relaunched_device(
     let pairing = DeviceIdentity::load_or_create(&dir.0).unwrap();
     pairing.set_details("device".into(), None);
     let minted = host.new_invitation();
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &pairing).unwrap();
+    let paired = tcode_traverse::pair_blocking(
+        &minted.invite,
+        Some(std::net::Ipv4Addr::LOCALHOST.into()),
+        &pairing,
+    )
+    .unwrap();
     drop(pairing);
     let device = DeviceIdentity::load_or_create(&dir.0).unwrap();
     device.set_lan_options(LanOptions {

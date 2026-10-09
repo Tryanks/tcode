@@ -15,7 +15,7 @@ The plan behind this model is [#376](https://github.com/Tryanks/tcode/issues/376
 | --- | --- |
 | Machine | The computer where Tcode runs providers and terminals and stores projects and threads. It is the desktop app with **Let other devices connect to this machine** on, or `tcode-headless serve`. A machine is identified by a key it generates once and keeps in `traverse.json` in its data directory; the public half is its **machine id** (64 hex characters). |
 | Device | A desktop, phone or tablet running the Tcode app that opens a machine. A device also has its own key, kept in `device.json` in its data directory. The machine keeps an allow list of device ids; every connection is authenticated by that key, so a device that is not on the list is refused before any application data flows. |
-| Invitation | A `tcode://pair?…` link, shown as a QR code and copyable as text. It carries the machine id, its name, where it is reachable right now and a random 16-byte secret. Scanning or pasting the link is the whole pairing: an invitation lasts five minutes, admits one device, is replaced by the next one and is invalidated after five wrong secrets. The machine enforces all of this; Traverse never sees an invitation. |
+| Invitation | A `tcode://pair?…` link, shown as a QR code and copyable as text. It carries the machine id, a random 16-byte secret, the Traverse instances the machine publishes to, its current relay and its UDP port — never an IP address or the machine's name; the format is [The invitation link](pair-link.md). Scanning or pasting the link is the whole pairing: an invitation lasts five minutes, admits one device, is replaced by the next one and is invalidated after five wrong secrets. The machine enforces all of this; Traverse never sees an invitation. |
 | Space | A named set of projects on one machine, with a reusable pairing link. A device paired through that link becomes a member and sees only the space's projects and threads. The owner manages the projects and members. |
 | Traverse | The relay and lookup service a machine publishes to so devices off its network can find and reach it. **Official** (the default) uses the relays and lookup service listed in the manifest bundled with Tcode; **Self-hosted** uses your own `tcode-traverse` instance; **Off** uses no service at all. Traverse sees only encrypted traffic; the machine authenticates devices itself. |
 | Direct / Relay | How one live connection is carried. Direct means the two ends exchange UDP packets with each other; Relay means the packets go through a Traverse relay because no direct path was found. The connection banner and the machine's device list show which one is in use, and it can change while connected. |
@@ -70,7 +70,9 @@ owner.** A paused, dead or missing space link says **This space link is paused
 or no longer valid. Ask the owner to turn it back on or send a new one.** A
 wrong secret says **The machine rejected this invitation.
 Check that Accept new devices is on and use a new invitation.** A connection
-failure says **Could not reach ‹address›.** A malformed link says **That is not
+failure says **Could not reach the machine** and asks for the machine's IP
+address (see [When nothing finds the machine](#when-nothing-finds-the-machine)).
+A malformed link says **That is not
 a Tcode invitation link.** Pairing errors leave the device without new access.
 
 ### Link lifecycle and stored access
@@ -97,7 +99,7 @@ the migration.
    field is left, restarting the endpoint if hosting is already on.
 3. Turn on **Let other devices connect to this machine**. The desktop binds its
    Traverse endpoint to UDP port `47420` on all IPv4 and IPv6 interfaces (IPv4
-   only where IPv6 is unavailable), so invitation addresses, firewall rules
+   only where IPv6 is unavailable), so the invitation's port, firewall rules
    and the LAN lookup of paired devices survive restarts, and advertises the
    port on the local network as `_tcode._udp` (see
    [Finding the machine again](#finding-the-machine-again)). Allow that UDP
@@ -106,8 +108,8 @@ the migration.
 4. Open **Machines** (the sidebar entry under the search field). Under **Let
    other devices connect**, scan the QR code with the phone, or use **Copy
    invitation link** and paste the link into Tcode on the other device. The QR
-   is redrawn with the machine's current relay and addresses while the
-   invitation is valid, so a link copied a minute later still works. Use **New
+   is redrawn with the machine's current relay while the invitation is valid,
+   so a link copied a minute later still works. Use **New
    invitation** when one expires or you need to add another device. While
    hosting is off, or **Accept new devices** is off, this section says so and
    leads to **Settings → Remote**.
@@ -154,8 +156,11 @@ devices only; it does not serve the browser app.
    Startup prints `Machine id: …`, then the invitation: its remaining
    lifetime, `Relay: …` (or `Relay: none (LAN only)` with Traverse off), the
    machine's current `Addresses:`, the `tcode://pair?…` link and its QR code.
+   The addresses are for you to read, not part of the link: type one on a
+   device that cannot find the machine (see
+   [When nothing finds the machine](#when-nothing-finds-the-machine)).
    With Traverse on, `serve` waits up to five seconds for a relay before
-   printing the invitation, so the link works off the LAN. It then prints
+   printing the invitation, so the link names one and works off the LAN. It then prints
    **Set a password on first open** or **Password protected** and
    `Browser: http://127.0.0.1:47420/`, the browser page (see
    [From a browser](#from-a-browser)).
@@ -172,7 +177,7 @@ devices only; it does not serve the browser app.
 5. The headless machine binds its Traverse endpoint to UDP port `47420`
    (`serve --port PORT` binds another; `serve` fails at startup when the port
    is taken, for example by the desktop app hosting on the same machine) and
-   prints it as `UDP port:`. The port is fixed so that invitation addresses,
+   prints it as `UDP port:`. The port is fixed so that the invitation's port,
    firewall rules and the LAN lookup of paired devices survive restarts, and
    the machine advertises it on the local network as `_tcode._udp` (see
    [Finding the machine again](#finding-the-machine-again)). For direct LAN
@@ -332,9 +337,11 @@ tab gets the desktop split and a narrow one gets the compact stack.
    or the opening screen when no machine has been added yet.
 2. Under **Add a machine**, choose **Paste an invitation link** and paste the
    machine's invitation link (`tcode://pair?…`). A link that parses is sent at
-   once: the page shows **Connecting to ‹machine›…**, and when the machine
+   once: the page shows **Connecting to the machine…**, and when the machine
    admits this device the window opens that machine's projects and threads.
-   A failure is shown under the field, and **Connect** retries.
+   A failure is shown under the field, and **Connect** retries. When nothing
+   found the machine, the page also asks for its IP address (see
+   [When nothing finds the machine](#when-nothing-finds-the-machine)).
 3. Choose another machine under **Your machines** to switch again;
    **This machine** restores the local workspace, and a machine row's
    **⋯ → Disconnect** leaves without removing it. Switching closes only this
@@ -345,7 +352,7 @@ You can also pair from the desktop executable. Replace the link with the
 machine's current invitation:
 
 ```sh
-tcode --pair 'tcode://pair?v=2&id=…&secret=…&name=…'
+tcode --pair 'tcode://pair?v=3&id=…&secret=…&relay=…&port=47420'
 ```
 
 This saves the machine in this device's `hosts.json` and prints its machine
@@ -368,8 +375,9 @@ data directory for `--pair` and `--connect`.
    a simulator's permission and cancel flows do not prove that real camera
    recognition works.
 3. A scanned or pasted invitation pairs and connects in one step: the page
-   shows **Connecting to ‹machine›…** and then opens the machine's threads. A
-   failure is shown under the rows that started the attempt.
+   shows **Connecting to the machine…** and then opens the machine's threads.
+   A failure is shown under the rows that started the attempt; when nothing
+   found the machine it asks for the machine's IP address there.
 4. Open a thread from the list, or use **+** to start one. Read replies, send or
    queue a message, steer a running turn, stop it, and answer approvals — the
    same views the desktop shows, laid out for the width.
@@ -452,9 +460,10 @@ device list follows them.
 A machine has one Traverse setting: **Official**, **Self-hosted** (a base
 URL) or **Off**. On the desktop it is in **Settings → Remote →
 Traverse**; headless uses `serve --traverse official|off|<url>`. Devices need
-no Traverse setting: the invitation carries the machine's Traverse URL (absent
-for the official service, `off` for none), and each saved machine keeps its
-own, so one phone can use an official-Traverse machine and a self-hosted one
+no Traverse setting: the invitation lists the machine's Traverse instances
+(no entry for the official service only, `off` for none; see
+[The invitation link](pair-link.md)), and each saved machine keeps its
+own list, so one phone can use an official-Traverse machine and a self-hosted one
 at the same time. A device's own endpoint uses the relays and lookups of the
 instances its saved machines publish to, and of a machine it is pairing with:
 a device whose machines are all Off has no relay and contacts no service, and
@@ -473,12 +482,12 @@ disappeared are removed, new ones added, lookup services rebuilt.
 | Mode | Machine | Devices | The service sees |
 | --- | --- | --- | --- |
 | **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's pkarr relay (`https://dns.iroh.link/pkarr`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device with a machine on the official service uses the same relay list for its own home relay and the same lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
-| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch; if the instance is unreachable it starts anyway with no relay and no lookup — the LAN still works, the invitation carries direct addresses only — and applies the manifest to the running endpoint once a background refresh (every five minutes) fetches it. It never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Until that manifest loads the device has no relay and no resolver for that instance, only the saved addresses and the LAN lookup. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
-| **Off** | No relay and no lookup service: the endpoint publishes nothing beyond its LAN advertisement and dials nothing but direct addresses. The invitation carries only the machine's current addresses (`Relay: none (LAN only)`). | The device dials the addresses from the invitation and the ones it learned on later connections, and finds the machine again on the same network through the LAN lookup. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
+| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch; if the instance is unreachable it starts anyway with no relay and no lookup — the LAN still works, the invitation names no relay — and applies the manifest to the running endpoint once a background refresh (every five minutes) fetches it. It never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Until that manifest loads the device has no relay and no resolver for that instance, only the saved addresses and the LAN lookup. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
+| **Off** | No relay and no lookup service: the endpoint publishes nothing beyond its LAN advertisement and dials nothing but direct addresses. The invitation names no relay (`Relay: none (LAN only)`). | The device finds the machine through the LAN lookup, or at the IP address typed when nothing found it, and dials the addresses it learned on later connections. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
 
 A device that connected successfully saves how it reached the machine —
 the direct addresses that worked, newest first, up to 16, and the relay —
-ahead of what the invitation said, so the next launch starts from what worked
+from the pairing connection on, so the next launch starts from what worked
 last. On the same network a machine whose address changed is found again
 without any service; see [Finding the machine again](#finding-the-machine-again).
 
@@ -491,8 +500,8 @@ without any service; see [Finding the machine again](#finding-the-machine-again)
   timeout on every check. A bundled manifest newer than the cache wins. A
   self-hosted machine keeps its cached copy; with no cache it hosts without
   a relay until the manifest arrives, see the table.
-- **No route to a relay.** The machine still hosts; the invitation carries
-  direct addresses only, and devices on the same network connect directly.
+- **No route to a relay.** The machine still hosts; the invitation names no
+  relay, and devices on the same network connect directly.
 - **A relay is rate-limited or refuses a connection.** Connections fall back
   to whatever path remains: a direct path if one exists, another relay from
   the manifest otherwise. Tcode does not show a separate error for this; the
@@ -701,10 +710,10 @@ list in memory and writes it back.
 
 | Symptom | Action |
 | --- | --- |
-| **That is not a Tcode invitation link** | The pasted text is not a complete `tcode://pair?v=2&…` link with a valid machine id and secret. Copy the link again from the machine or scan the QR. |
+| **That is not a Tcode invitation link** | The pasted text is not a complete `tcode://pair?v=3&…` link (see [The invitation link](pair-link.md)). A link from an older Tcode is not accepted either. Copy the link again from the machine or scan the QR. |
 | **The machine rejected this invitation** | The invitation expired (five minutes), was already used, was replaced by a newer one, or five wrong secrets invalidated it. Create **New invitation** on the machine or restart `serve`; get a separate invitation for each device. |
 | **This machine is not accepting new device pairings** | Turn on **Accept new devices** on the machine (desktop **Settings → Remote**, or the logged-in browser of a headless machine). |
-| **Could not reach ‹machine›** while pairing | The device reached none of the invitation's addresses or its relay within 20 seconds. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN. With Traverse off, only the printed addresses and the LAN lookup work. |
+| **Could not reach the machine** while pairing | No path to the machine opened within 20 seconds: not through its relay, its Traverse lookup or the LAN lookup. The invitation is still valid. Check that Tcode is running, that the two are on the same network or the machine has a relay (`Relay:` in the `serve` output), and that the machine's UDP port is not blocked on the LAN; then type the machine's IP address in the field that appears (see [When nothing finds the machine](#when-nothing-finds-the-machine)). |
 | **Reconnecting to ‹machine›… (attempt N)** stays up | The device keeps trying the saved relay and addresses with growing delays, and on every attempt looks for the machine on its own network (see [Finding the machine again](#finding-the-machine-again)). If the machine moved to another network with Traverse off and the device did not move with it, pair again with a new invitation. Direct paths need UDP between the two ends; a relayed connection reaches the relay over HTTPS (TCP), so it still works where UDP is blocked, as long as the machine publishes to a relay. |
 | **Access rejected · Pair again** | The machine no longer lists this device (removed, or the machine's data directory was replaced). Pair again with a new invitation if access is intended. |
 | **Protocol mismatch · Update the app** | The machine and the device run different protocol versions. Update both. |
@@ -873,8 +882,8 @@ Transient reconnects belong in the connection banner, not failure toasts.
 A pairing identifies the machine by its key, independently of its address.
 After every successful connection the device saves the relay and the direct
 addresses that actually carried it — including a direct path found later by
-hole punching — so the next attempt starts from what worked last, and the
-invitation's hints come after. Between attempts the lookup service (when the
+hole punching — so the next attempt starts from what worked last. Between
+attempts the lookup service (when the
 machine publishes to one) supplies the machine's current relay and addresses;
 a home relay lets the two ends learn each other's direct addresses and try
 hole punching, and the connection can move from **Relay** to **Direct** — or
@@ -891,8 +900,7 @@ nothing else:
 
 - The addresses saved for that machine, handed over at once and dialled
   together, in the order `hosts.json` keeps them: the address that carried
-  the last successful connection first, older ones after it, the
-  invitation's hints last.
+  the last successful connection first, older ones after it.
 - A DNS-SD browse for `_tcode._udp` (multicast DNS, UDP 5353) that runs at
   the same time for about 2.5 seconds and adds every address it finds for
   the machine as it resolves. A machine advertises one instance of that
@@ -912,8 +920,25 @@ as the connection is up, and a change of the device's own interface addresses
 starts it again at once. There is no subnet scan and no other fallback: where
 the saved addresses are stale and multicast is blocked, the machine is not
 found. Both the desktop app and `tcode-headless` bind UDP `47420` unless told
-otherwise so that firewall rules and invitation addresses survive restarts.
+otherwise so that firewall rules and the invitation's port survive restarts.
 
 With Traverse off there is no relay and no lookup service: the device has the
 addresses it saved and the LAN lookup. A machine that moved to a network the
 device is not on needs a new invitation.
+
+### When nothing finds the machine
+
+An invitation names no address ([The invitation link](pair-link.md)): a first
+pairing reaches the machine through its relay, its Traverse lookup or the
+DNS-SD browse above. Where none of them works — a LAN that blocks multicast
+and has no internet, say — the first attempt opens no path within 20 seconds
+and says **Could not reach the machine**. The secret has not been sent, so the
+invitation is still valid, and the pairing page asks for the machine's IP
+address. Read it off the machine (`Addresses:` in the `tcode-headless serve`
+output, or the machine's network settings) and type the address only, IPv4 or
+IPv6: the port comes from the invitation. **Try again** (under the failure on
+the Machines page) or **Connect** (on the paste page) sends the same invitation
+again, dialling that address together with everything the first attempt
+tried. The address that carried the pairing is saved like any other, so the
+machine is reached there again later. The machine's UDP port must accept
+inbound traffic on the LAN for this to work.

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// A pairing is bound to the machine identity (`host_id`), never to an
-/// address. The hints are what the invite carried, refreshed after each
-/// authenticated connection so the next launch starts from what worked last.
+/// address. The relay and addresses are the ones authenticated connections
+/// actually used, refreshed after each so the next launch starts from what
+/// worked last.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairedHost {
     /// The machine's `EndpointId`.
@@ -19,10 +20,15 @@ pub struct PairedHost {
     pub space_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_name: Option<String>,
-    /// Base URL of the Traverse instance the machine publishes to: `None`
-    /// for the official service, [`TRAVERSE_OFF`] for none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub traverse: Option<String>,
+    /// The Traverse instances the machine publishes to, as its invitation
+    /// listed them; see [`PairInvite::traverse`]. Records written while this
+    /// was one optional value read as the same list.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "traverse_list"
+    )]
+    pub traverse: Vec<String>,
     /// The machine's home relay, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
@@ -33,12 +39,35 @@ pub struct PairedHost {
     pub last_connected_unix: Option<u64>,
 }
 
+/// `traverse` as a list, or as the single optional value older records
+/// hold: `null` is the official instance, a string that one entry.
+fn traverse_list<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        List(Vec<String>),
+        One(Option<String>),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::List(list) => list,
+        Stored::One(one) => one.into_iter().collect(),
+    })
+}
+
 /// Direct addresses kept per machine.
 pub const MAX_ADDRS: usize = 16;
-/// The `traverse` value of a machine that publishes to no service, so a
-/// device tells it apart from one on the official service and loads no
+/// The `traverse` entry naming the official instance.
+pub const TRAVERSE_OFFICIAL: &str = "official";
+/// The single `traverse` entry of a machine that publishes to no service,
+/// so a device tells it apart from one on the official service and loads no
 /// manifest for it.
 pub const TRAVERSE_OFF: &str = "off";
+/// `traverse` entries a link may carry.
+pub const MAX_TRAVERSE: usize = 8;
+/// The longest link accepted.
+pub const MAX_LINK_LEN: usize = 1024;
 
 /// Record a host in the saved list. A host is identified by `host_id`, so
 /// pairing again or stamping a reconnection replaces its record instead of
@@ -48,22 +77,27 @@ pub fn remember_host(hosts: &mut Vec<PairedHost>, host: PairedHost) {
     hosts.push(host);
 }
 
-/// What a `tcode://pair` link carries: the machine identity, where to reach
-/// it, and the secret that admits the device. Space links are reusable. First contact is
-/// always by scanning or pasting the link, so the link itself is the secret;
-/// there is no separate code. A browser leaves `host_id` empty and pairs with
-/// the origin that served it.
+/// What a `tcode://pair` link carries; the format's contract is
+/// `docs/pair-link.md`. First contact is always by scanning or pasting the
+/// link, so the link itself is the secret; there is no separate code. It
+/// names no address and no machine name: the name comes from the machine's
+/// reply, addresses from lookups and the connection. Space links are
+/// reusable. A browser leaves `host_id` empty and pairs with the origin that
+/// served it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairInvite {
     pub host_id: String,
-    pub name: String,
     /// [`SECRET_BYTES`] random bytes as unpadded base64url.
     pub secret: String,
     pub space: Option<String>,
-    /// See [`PairedHost::traverse`].
-    pub traverse: Option<String>,
+    /// Every Traverse instance the machine publishes to:
+    /// [`TRAVERSE_OFFICIAL`] or an instance's base URL. Empty is the official
+    /// instance only; the single entry [`TRAVERSE_OFF`] is none at all.
+    pub traverse: Vec<String>,
     pub relay: Option<String>,
-    pub addrs: Vec<String>,
+    /// The machine's bound UDP port, dialed only at an address the user
+    /// types.
+    pub port: u16,
 }
 
 impl PairInvite {
@@ -77,7 +111,7 @@ impl PairInvite {
             space_name: None,
             traverse: self.traverse.clone(),
             relay: self.relay.clone(),
-            addrs: self.addrs.clone(),
+            addrs: Vec::new(),
             last_connected_unix: None,
         }
     }
@@ -110,72 +144,88 @@ pub fn valid_space_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && !id.chars().any(char::is_control)
 }
 
-fn valid_addr(addr: &str) -> bool {
-    addr.parse::<std::net::SocketAddr>()
-        .is_ok_and(|addr| addr.port() != 0)
+fn valid_url(value: &str) -> bool {
+    Url::parse(value).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some_and(|host| !host.is_empty())
+    })
 }
 
-fn valid_url(value: &str) -> bool {
-    Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+/// A port as a link writes it: canonical decimal, never zero.
+fn parse_port(value: &str) -> Option<u16> {
+    let port: u16 = value.parse().ok()?;
+    (port != 0 && port.to_string() == value).then_some(port)
 }
 
 pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
-    if value.len() > 4096 {
+    let value = value.trim();
+    if value.len() > MAX_LINK_LEN {
         return None;
     }
-    let url = Url::parse(value.trim()).ok()?;
+    let url = Url::parse(value).ok()?;
     if url.scheme() != "tcode" || url.host_str() != Some("pair") {
         return None;
     }
-    let field = |name: &str| {
-        url.query_pairs()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.into_owned())
+    let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+    let all = |name: &'static str| {
+        pairs
+            .iter()
+            .filter(move |(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
     };
-    if field("v")? != "2" {
+    // A single-valued parameter: `Err` when repeated.
+    let field = |name: &'static str| -> Result<Option<String>, ()> {
+        let mut values = all(name);
+        let first = values.next().map(str::to_owned);
+        match values.next() {
+            Some(_) => Err(()),
+            None => Ok(first),
+        }
+    };
+    if field("v").ok()?? != "3" {
         return None;
     }
-    let host_id = field("id")?;
+    let host_id = field("id").ok()??;
     if !valid_host_id(&host_id) {
         return None;
     }
-    let secret = field("secret")?;
+    let secret = field("secret").ok()??;
     if !valid_invitation_secret(&secret) {
         return None;
     }
-    let space = field("space");
+    let space = field("space").ok()?;
     if space.as_deref().is_some_and(|id| !valid_space_id(id)) {
         return None;
     }
-    let traverse = field("traverse");
-    let relay = field("relay");
-    if traverse
-        .as_deref()
-        .is_some_and(|url| url != TRAVERSE_OFF && !valid_url(url))
-        || relay.as_deref().is_some_and(|url| !valid_url(url))
+    let entries: Vec<&str> = all("traverse").collect();
+    let off_alone = entries == [TRAVERSE_OFF];
+    if entries.len() > MAX_TRAVERSE
+        || entries.iter().any(|value| {
+            !(*value == TRAVERSE_OFFICIAL
+                || valid_url(value)
+                || (*value == TRAVERSE_OFF && off_alone))
+        })
     {
         return None;
     }
-    let mut addrs: Vec<String> = Vec::new();
-    for (_, addr) in url.query_pairs().filter(|(key, _)| key == "addr") {
-        if !valid_addr(&addr) {
-            return None;
-        }
-        if !addrs.iter().any(|known| *known == addr) {
-            addrs.push(addr.into_owned());
-        }
-        if addrs.len() > MAX_ADDRS {
-            return None;
+    let mut traverse: Vec<String> = Vec::new();
+    for value in entries {
+        if !traverse.iter().any(|known| known == value) {
+            traverse.push(value.to_owned());
         }
     }
+    let relay = field("relay").ok()?;
+    if relay.as_deref().is_some_and(|url| !valid_url(url)) {
+        return None;
+    }
+    let port = parse_port(&field("port").ok()??)?;
     Some(PairInvite {
         host_id,
-        name: field("name")?,
         secret,
         space,
         traverse,
         relay,
-        addrs,
+        port,
     })
 }
 
@@ -183,22 +233,19 @@ pub fn pair_url(invite: &PairInvite) -> String {
     let mut url = Url::parse("tcode://pair").expect("static pairing URL is valid");
     let mut query = url.query_pairs_mut();
     query
-        .append_pair("v", "2")
+        .append_pair("v", "3")
         .append_pair("id", &invite.host_id)
-        .append_pair("secret", &invite.secret)
-        .append_pair("name", &invite.name);
+        .append_pair("secret", &invite.secret);
     if let Some(space) = &invite.space {
         query.append_pair("space", space);
     }
-    if let Some(traverse) = &invite.traverse {
+    for traverse in invite.traverse.iter().take(MAX_TRAVERSE) {
         query.append_pair("traverse", traverse);
     }
     if let Some(relay) = &invite.relay {
         query.append_pair("relay", relay);
     }
-    for addr in invite.addrs.iter().take(MAX_ADDRS) {
-        query.append_pair("addr", addr);
-    }
+    query.append_pair("port", &invite.port.to_string());
     drop(query);
     url.into()
 }
@@ -216,7 +263,7 @@ mod tests {
             name: name.into(),
             space_id: None,
             space_name: None,
-            traverse: None,
+            traverse: Vec::new(),
             relay: None,
             addrs: vec!["192.168.1.2:47420".into()],
             last_connected_unix: None,
@@ -235,7 +282,7 @@ mod tests {
             r#"{{"host_id":"{ID}","name":"Desk","relay":"https://euw1-1.relay.iroh.network./","addrs":["192.168.1.2:47420"],"last_connected_unix":42}}"#
         ))
         .unwrap();
-        assert_eq!(host.traverse, None);
+        assert!(host.traverse.is_empty());
         assert_eq!(
             host.relay.as_deref(),
             Some("https://euw1-1.relay.iroh.network./")
@@ -250,27 +297,83 @@ mod tests {
         assert_eq!(minimal.last_connected_unix, None);
     }
 
+    /// `hosts.json` written while `traverse` held one optional value still
+    /// loads, meaning what it meant then, and is written back as a list.
+    #[test]
+    fn saved_hosts_from_the_single_traverse_value_load_as_the_list() {
+        let load = |traverse: &str| -> PairedHost {
+            serde_json::from_str(&format!(
+                r#"{{"host_id":"{ID}","name":"Desk","traverse":{traverse}}}"#
+            ))
+            .unwrap()
+        };
+        assert!(load("null").traverse.is_empty());
+        assert_eq!(load(r#""off""#).traverse, [TRAVERSE_OFF]);
+        let custom = load(r#""https://traverse.example/""#);
+        assert_eq!(custom.traverse, ["https://traverse.example/"]);
+        assert_eq!(
+            serde_json::to_value(&custom).unwrap()["traverse"],
+            serde_json::json!(["https://traverse.example/"])
+        );
+        assert_eq!(
+            load(r#"["official","https://traverse.example/"]"#).traverse,
+            [TRAVERSE_OFFICIAL, "https://traverse.example/"]
+        );
+    }
+
     const SECRET: &str = "AAECAwQFBgcICQoLDA0ODw";
 
     #[test]
     fn invitations_round_trip_and_reject_malformed_fields() {
+        // The example in docs/pair-link.md: official only, no space.
+        let official = format!(
+            "tcode://pair?v=3&id={ID}&secret={SECRET}&relay=https%3A%2F%2Fuse1-1.relay.n0.iroh.link.%2F&port=47420"
+        );
+        let invite = parse_pair_url(&official).unwrap();
+        assert_eq!(
+            invite,
+            PairInvite {
+                host_id: ID.into(),
+                secret: encode_secret(&std::array::from_fn(|i| i as u8)),
+                space: None,
+                traverse: Vec::new(),
+                relay: Some("https://use1-1.relay.n0.iroh.link./".into()),
+                port: 47420,
+            }
+        );
+        assert_eq!(pair_url(&invite), official);
+        assert!(official.len() < 200, "{}", official.len());
+
         let wire = format!(
-            "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&traverse=https%3A%2F%2Ftraverse.example%2F&relay=https%3A%2F%2Frelay.example%2F&addr=192.168.1.2%3A47420&addr=%5Bfd00%3A%3A2%5D%3A47420"
+            "tcode://pair?v=3&id={ID}&secret={SECRET}&space=shared&traverse=official&traverse=https%3A%2F%2Ftraverse.example%2F&relay=https%3A%2F%2Frelay.example%2F&port=5000"
         );
         let invite = parse_pair_url(&wire).unwrap();
         assert_eq!(
             invite,
             PairInvite {
                 host_id: ID.into(),
-                name: "Desk".into(),
-                space: None,
-                secret: encode_secret(&std::array::from_fn(|i| i as u8)),
-                traverse: Some("https://traverse.example/".into()),
+                secret: SECRET.into(),
+                space: Some("shared".into()),
+                traverse: vec![TRAVERSE_OFFICIAL.into(), "https://traverse.example/".into()],
                 relay: Some("https://relay.example/".into()),
-                addrs: vec!["192.168.1.2:47420".into(), "[fd00::2]:47420".into()],
+                port: 5000,
             }
         );
         assert_eq!(pair_url(&invite), wire);
+        // Any order parses.
+        assert_eq!(
+            parse_pair_url(&format!(
+                "tcode://pair?port=5000&relay=https%3A%2F%2Frelay.example%2F&traverse=official&space=shared&secret={SECRET}&traverse=https%3A%2F%2Ftraverse.example%2F&id={ID}&v=3"
+            )),
+            Some(invite)
+        );
+
+        let lan_only = format!("tcode://pair?v=3&id={ID}&secret={SECRET}&traverse=off&port=47420");
+        let off = parse_pair_url(&lan_only).unwrap();
+        assert_eq!(off.traverse, [TRAVERSE_OFF]);
+        assert_eq!(off.relay, None);
+        assert_eq!(pair_url(&off), lan_only);
+
         let url_safe_secret = "__-_AAAAAAAAAAAAAAAAAA";
         assert_eq!(
             parse_pair_url(&wire.replace(SECRET, url_safe_secret))
@@ -292,26 +395,22 @@ mod tests {
                 "{bad:?}"
             );
         }
-        let lan_only = parse_pair_url(&format!(
-            "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&addr=10.0.0.4%3A5000&addr=10.0.0.4%3A5000"
-        ))
-        .unwrap();
-        assert_eq!(lan_only.addrs, ["10.0.0.4:5000"]);
-        assert_eq!(lan_only.relay, None);
-        let off = parse_pair_url(&format!(
-            "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&traverse=off&addr=10.0.0.4%3A5000"
-        ))
-        .unwrap();
-        assert_eq!(off.traverse.as_deref(), Some(TRAVERSE_OFF));
-        assert!(pair_url(&off).contains("&traverse=off&"));
         for (field, replacement) in [
-            ("v=2", "v=1"),
+            ("v=3", "v=2"),
+            ("v=3", "v=4"),
+            ("v=3&", ""),
             ("tcode://", "https://"),
+            ("tcode://pair", "tcode://join"),
             // A link from before the secret carried a six-digit code.
             (&format!("secret={SECRET}"), "code=123456"),
             (&format!("id={ID}"), "id=desk"),
-            ("addr=192.168.1.2%3A47420", "addr=192.168.1.2"),
-            ("addr=192.168.1.2%3A47420", "addr=192.168.1.2%3A0"),
+            (&format!("id={ID}&"), ""),
+            ("port=5000", "port=0"),
+            ("port=5000", "port=65536"),
+            ("port=5000", "port=05000"),
+            ("port=5000", "port=%2B5000"),
+            ("port=5000", "port=desk"),
+            ("&port=5000", ""),
             (
                 "relay=https%3A%2F%2Frelay.example%2F",
                 "relay=ftp%3A%2F%2Frelay",
@@ -320,28 +419,58 @@ mod tests {
                 "traverse=https%3A%2F%2Ftraverse.example%2F",
                 "traverse=disabled",
             ),
+            (
+                "traverse=https%3A%2F%2Ftraverse.example%2F",
+                "traverse=file%3A%2F%2F%2Ftmp%2Frelays.json",
+            ),
+            // `off` stands alone.
+            ("traverse=official", "traverse=off"),
+            // Single-valued parameters appear once.
+            ("port=5000", "port=5000&port=5000"),
+            ("v=3", "v=3&v=3"),
+            ("space=shared", "space=shared&space=other"),
+            (
+                "relay=https%3A%2F%2Frelay.example%2F",
+                "relay=https%3A%2F%2Frelay.example%2F&relay=https%3A%2F%2Frelay.example%2F",
+            ),
         ] {
             assert!(
                 parse_pair_url(&wire.replace(field, replacement)).is_none(),
-                "{replacement}"
+                "{field} -> {replacement}"
             );
         }
-        let scoped = parse_pair_url(&format!("{wire}&space=shared")).unwrap();
-        assert_eq!(scoped.space.as_deref(), Some("shared"));
-        assert!(pair_url(&scoped).contains("&space=shared&"));
-        assert!(parse_pair_url(&format!("{wire}&space={}", "s".repeat(64))).is_some());
-        for space in ["".to_owned(), "s".repeat(65), "%00".into(), "%0A".into()] {
-            assert!(parse_pair_url(&format!("{wire}&space={space}")).is_none());
-        }
-        assert!(parse_pair_url(&format!("{wire}&padding={}", "x".repeat(4096))).is_none());
-        let many: String = (0..MAX_ADDRS + 1)
-            .map(|n| format!("&addr=10.0.0.{n}%3A1"))
-            .collect();
+        // A version 2 link, as the previous release printed it.
         assert!(
             parse_pair_url(&format!(
-                "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk{many}"
+                "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&addr=192.168.1.2%3A47420"
             ))
             .is_none()
         );
+        let traverse_entries = |count: usize| {
+            let entries: String = (0..count)
+                .map(|n| format!("&traverse=https%3A%2F%2Ft{n}.example%2F"))
+                .collect();
+            format!("tcode://pair?v=3&id={ID}&secret={SECRET}{entries}&port=1")
+        };
+        assert_eq!(
+            parse_pair_url(&traverse_entries(MAX_TRAVERSE))
+                .unwrap()
+                .traverse
+                .len(),
+            MAX_TRAVERSE
+        );
+        assert!(parse_pair_url(&traverse_entries(MAX_TRAVERSE + 1)).is_none());
+        assert!(parse_pair_url(&format!("{wire}&padding={}", "x".repeat(4096))).is_none());
+        let at_limit = format!(
+            "{official}&padding={}",
+            "x".repeat(MAX_LINK_LEN - official.len() - "&padding=".len())
+        );
+        assert!(parse_pair_url(&at_limit).is_some());
+        assert!(parse_pair_url(&format!("{at_limit}x")).is_none());
+        for space in ["".to_owned(), "s".repeat(65), "%00".into(), "%0A".into()] {
+            assert!(
+                parse_pair_url(&wire.replace("space=shared", &format!("space={space}"))).is_none()
+            );
+        }
     }
 }
