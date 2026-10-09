@@ -42,7 +42,8 @@ pub struct HostConfig {
     pub data_dir: PathBuf,
     /// Every Traverse instance this machine publishes to: the union of their
     /// relays, and every one's lookup. Empty is none: no relay and no
-    /// wide-area lookup, only the LAN and the addresses an invite carries.
+    /// wide-area lookup: devices reach the machine on the LAN (DNS-SD) or at
+    /// an address the user types.
     pub traverse: Vec<ManifestSource>,
     /// Whether this host may pair devices at all. The user's persisted
     /// pairing switch applies on top of it.

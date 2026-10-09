@@ -144,7 +144,7 @@ impl RemoteController {
                 data_dir: self.data_dir.clone(),
                 traverse: traverse_sources(traverse)?,
                 pairing_enabled: true,
-                // Fixed, so invite addresses, firewall rules and LAN probes
+                // Fixed, so the invitation's port, firewall rules and LAN probes
                 // survive restarts.
                 bind_port: Some(tcode_traverse::lan::DEFAULT_PORT),
             },
@@ -319,6 +319,25 @@ fn switch_row() -> gpui::Div {
         .py_2p5()
         .gap_3()
         .items_center()
+}
+
+/// A row whose control is a text field beside the label. The label keeps
+/// [`FIELD_LABEL_BASIS`] of the width, so where the field does not fit
+/// beside it the field wraps under the label instead of squeezing it.
+fn field_row(compact: bool) -> gpui::Div {
+    if compact {
+        row(true)
+    } else {
+        switch_row().flex_wrap()
+    }
+}
+
+/// The width a [`field_row`]'s label keeps before its field wraps under it.
+const FIELD_LABEL_BASIS: f32 = 200.;
+
+/// [`labels`] for a [`field_row`].
+fn field_labels(title: SharedString, description: Option<SharedString>, cx: &App) -> gpui::Div {
+    labels(title, description, cx).flex_basis(px(FIELD_LABEL_BASIS))
 }
 
 /// A row's title, with a description only where it says something the
@@ -722,8 +741,8 @@ impl HostingPanel {
                 )
                 .into_any_element()
         });
-        let name_row = row(compact)
-            .child(labels(
+        let name_row = field_row(compact)
+            .child(field_labels(
                 crate::tr!("remote.host_name.title").into_owned().into(),
                 Some(
                     crate::tr!("remote.host_name.description")
@@ -735,7 +754,9 @@ impl HostingPanel {
             .child(
                 div()
                     .when(compact, |field| field.w_full())
-                    .when(!compact, |field| field.w(px(240.)))
+                    .when(!compact, |field| {
+                        field.w(px(240.)).min_w_0().flex_shrink(1.)
+                    })
                     .child(
                         Input::new(&self.host_name_input)
                             .small()
@@ -772,7 +793,9 @@ impl HostingPanel {
         let field = |compact: bool| {
             div()
                 .when(compact, |field| field.flex_1().min_w_0())
-                .when(!compact, |field| field.w(px(240.)))
+                .when(!compact, |field| {
+                    field.w(px(240.)).min_w_0().flex_shrink(1.)
+                })
         };
         let mut rows = vec![
             div()
@@ -815,14 +838,15 @@ impl HostingPanel {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.remove_traverse(index, window, cx);
                     }));
-                    row(compact)
-                        .child(labels(
+                    field_row(compact)
+                        .child(field_labels(
                             crate::tr!("remote.traverse.custom").into_owned().into(),
                             Some(description),
                             cx,
                         ))
                         .child(
                             h_flex()
+                                .min_w_0()
                                 .gap_3()
                                 .items_center()
                                 .when(compact, |controls| controls.w_full())
@@ -855,14 +879,15 @@ impl HostingPanel {
                 .into(),
         };
         rows.push(
-            row(compact)
-                .child(labels(
+            field_row(compact)
+                .child(field_labels(
                     crate::tr!("remote.traverse.add_title").into_owned().into(),
                     Some(add_description),
                     cx,
                 ))
                 .child(
                     h_flex()
+                        .min_w_0()
                         .gap_3()
                         .items_center()
                         .when(compact, |controls| controls.w_full())

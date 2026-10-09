@@ -1269,7 +1269,7 @@ remote:
     description: "显示给其他设备。"
   traverse:
     title: "Traverse"
-    description: "让设备在其他网络中也能连接到这台机器的中继与查找服务。全部关闭时，设备只能在局域网内或通过邀请中的地址连接。"
+    description: "让设备在其他网络中也能连接到这台机器的中继与查找服务。全部关闭时，设备只能在局域网内或通过在设备上输入的地址连接。"
     official: "官方 Traverse"
     custom: "自建 Traverse"
     url_description: "你的实例提供清单的基础 URL。"

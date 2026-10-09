@@ -816,8 +816,8 @@ pub enum SettingsPatch {
 /// fallback and wide-area discovery for devices off the LAN. The official
 /// service is always the first source and is only ever disabled, never
 /// removed; with every source disabled the machine uses no relay and no
-/// wide-area discovery, and devices reach it on the LAN or at the addresses
-/// an invite carries.
+/// wide-area discovery, and devices reach it on the LAN (DNS-SD) or at an
+/// address the user types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "TraverseSettingFile")]
 pub struct TraverseSetting {

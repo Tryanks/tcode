@@ -97,8 +97,8 @@ the migration.
    choose the **Traverse** sources: switch **Official Traverse** on or off,
    and add a **Self-hosted Traverse** by its base URL with **Add self-hosted
    Traverse**; each added instance has its own switch and can be edited or
-   removed. Turning every source off leaves only the LAN and the addresses an
-   invitation carries. A switch, addition or removal applies at once and an
+   removed. Turning every source off leaves only the LAN and an address typed on
+   the device. A switch, addition or removal applies at once and an
    edited URL when its field is left, restarting the endpoint if hosting is
    already on.
 3. Turn on **Let other devices connect to this machine**. The desktop binds its

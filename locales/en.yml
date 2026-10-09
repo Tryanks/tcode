@@ -1276,7 +1276,7 @@ remote:
     description: "Shown to other devices."
   traverse:
     title: "Traverse"
-    description: "Relay and lookup services that let devices reach this machine off its network. With all of them off, devices connect on the LAN or at the addresses an invitation carries."
+    description: "Relay and lookup services that let devices reach this machine off its network. With all of them off, devices reach it on the LAN or at an address entered on the device."
     official: "Official Traverse"
     custom: "Self-hosted Traverse"
     url_description: "The base URL your instance serves its manifest from."
