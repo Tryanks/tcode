@@ -11,7 +11,7 @@ use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity,
     GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, LineFragment as WrapLineFragment, MouseButton, ObjectFit,
-    ParentElement as _, Pixels, Role, ShapedLine, SharedString, SharedUri, Size,
+    ParentElement as _, Pixels, Role, SharedString, SharedUri, Size,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, TextRun, TextStyle, WhiteSpace,
     Window, div, img, point, prelude::FluentBuilder as _, px, relative, size,
 };
@@ -462,7 +462,15 @@ impl From<&InlineFlowItem> for MeasureItem {
                 code_style,
                 ..
             } => Self::Text {
-                text: text.clone(),
+                // The flow places every row itself, so a break inside the paragraph is a
+                // space of the same byte length: the wrapper, the shaper (which panics on a
+                // break) and the painted fragment (which would start a row of its own) all
+                // see one row, and ranges keep their offsets.
+                text: if text.contains(['\n', '\r']) {
+                    text.replace(['\n', '\r'], " ").into()
+                } else {
+                    text.clone()
+                },
                 links: links.clone(),
                 highlights: highlights.clone(),
                 font_overrides: font_overrides.clone(),
@@ -555,7 +563,12 @@ fn layout_flow(
                                 (text_style.clone(), font_size, Pixels::ZERO, line_height)
                             });
                         let runs = runs_for_highlights(&subtext, &fragment_style, &highlights);
-                        let shaped = shape_line(subtext.clone(), fragment_font_size, &runs, window);
+                        let shaped = window.text_system().shape_line(
+                            subtext.clone(),
+                            fragment_font_size,
+                            &runs,
+                            None,
+                        );
                         let width = shaped.width() + padding;
                         line_width += width;
                         actual_line_height = actual_line_height.max(height);
@@ -654,7 +667,10 @@ fn line_ranges(
                 code_text_style.font_family = code.font_family.clone();
                 code_text_style.font_size = AbsoluteLength::Pixels(code.font_size);
                 let runs = runs_for_highlights(text, &code_text_style, highlights);
-                let width = shape_line(text.clone(), code.font_size, &runs, window).width()
+                let width = window
+                    .text_system()
+                    .shape_line(text.clone(), code.font_size, &runs, None)
+                    .width()
                     + INLINE_CODE_PADDING_X * 2.;
                 WrapLineFragment::element(width, text.len())
             }
@@ -731,22 +747,6 @@ fn runs_for_highlights(
         runs.push(style.to_run(text.len() - ix));
     }
     runs
-}
-
-fn shape_line(
-    text: SharedString,
-    font_size: Pixels,
-    runs: &[TextRun],
-    window: &mut Window,
-) -> ShapedLine {
-    // GPUI shapes one line and panics on a break; a break inside a flowed paragraph is a
-    // space of the same byte length, so the runs keep their offsets.
-    let text = if text.contains(['\n', '\r']) {
-        text.replace(['\n', '\r'], " ").into()
-    } else {
-        text
-    };
-    window.text_system().shape_line(text, font_size, runs, None)
 }
 
 fn slice_ranges<T, U>(
