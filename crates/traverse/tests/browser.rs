@@ -345,6 +345,7 @@ fn hello_takes_the_current_protocol_only_and_a_revoked_token_closes_the_socket()
                 platform: None,
                 path: None,
             }],
+            traverse: Vec::new(),
         })
     }));
     let server = serve(mux, config).unwrap();
