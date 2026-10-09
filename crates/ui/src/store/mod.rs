@@ -3934,6 +3934,7 @@ pub(crate) mod tests {
                                             host_name: "Studio".into(),
                                             invite: None,
                                             devices: vec![],
+                                            traverse: vec![],
                                         },
                                     )),
                                 }

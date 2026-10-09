@@ -33,6 +33,7 @@ use iroh::{RelayConfig, RelayMap, RelayUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tcode_client::pairing::{TRAVERSE_OFF, TRAVERSE_OFFICIAL};
+use tcode_protocol::{TraverseManifestState, TraverseManifestStatus};
 use url::Url;
 
 pub const OFFICIAL_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Tryanks/tcode/main/crates/traverse/src/traverse_manifest.json";
@@ -246,6 +247,10 @@ pub struct ManifestState {
     /// the bundle. Persisted with the disk cache so a restart does not
     /// refetch.
     fetched_at_ms: Option<u64>,
+    /// `manifest` was fetched by this process rather than read from disk.
+    fetched_live: bool,
+    /// Why the last fetch failed, until one succeeds.
+    last_error: Option<String>,
     pub(crate) last_attempt_ms: Option<u64>,
     disk_loaded: bool,
 }
@@ -259,6 +264,8 @@ impl ManifestState {
         Self {
             manifest,
             fetched_at_ms: None,
+            fetched_live: false,
+            last_error: None,
             last_attempt_ms: None,
             disk_loaded: false,
         }
@@ -317,7 +324,27 @@ impl ManifestState {
             Arc::new(Manifest::from_value(value.clone()).map_err(|error| error.to_string())?);
         self.manifest = Some(manifest.clone());
         self.fetched_at_ms = Some(now_ms);
+        self.fetched_live = true;
         Ok((manifest, value))
+    }
+
+    /// Where the copy in effect came from, as a hosting machine reports it.
+    pub fn status(&self) -> TraverseManifestStatus {
+        let state = match (&self.manifest, self.fetched_at_ms) {
+            (None, _) => TraverseManifestState::Failed,
+            (Some(_), None) => TraverseManifestState::Bundled,
+            (Some(_), Some(_)) if self.fetched_live => TraverseManifestState::Live,
+            (Some(_), Some(_)) => TraverseManifestState::Cached,
+        };
+        TraverseManifestStatus {
+            state,
+            fetched_unix: self
+                .manifest
+                .as_ref()
+                .and(self.fetched_at_ms)
+                .map(|ms| ms / 1000),
+            error: self.last_error.clone(),
+        }
     }
 }
 
@@ -389,6 +416,12 @@ impl ManifestLoader {
         &self.inner.source
     }
 
+    /// The manifest in effect and where it came from.
+    pub fn status(&self) -> (Option<Arc<Manifest>>, TraverseManifestStatus) {
+        let state = self.state();
+        (state.current(), state.status())
+    }
+
     pub(crate) fn state(&self) -> std::sync::MutexGuard<'_, ManifestState> {
         self.inner
             .state
@@ -439,7 +472,12 @@ impl ManifestLoader {
         let fetched = tokio::task::spawn_blocking(move || fetch(&url))
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
-        let installed = fetched.and_then(|body| self.state().install(now, &body));
+        let installed = {
+            let mut state = self.state();
+            let installed = fetched.and_then(|body| state.install(now, &body));
+            state.last_error = installed.as_ref().err().cloned();
+            installed
+        };
         match installed {
             Ok((manifest, value)) => {
                 let cache = CacheFile {
@@ -470,20 +508,19 @@ impl ManifestLoader {
     }
 
     /// Keep refreshing every [`RETRY_MS`] (the TTL paces actual fetches);
-    /// `apply` runs with each manifest a fetch changed. Aborted when the
-    /// returned handle is dropped by its owner.
+    /// `apply` runs after each pass, with the manifest when a fetch changed
+    /// it. Aborted when the returned handle is dropped by its owner.
     pub fn spawn_refresh<F, Fut>(&self, apply: F) -> tokio::task::AbortHandle
     where
-        F: Fn(Arc<Manifest>) -> Fut + Send + 'static,
+        F: Fn(Option<Arc<Manifest>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let loader = self.clone();
         crate::runtime::runtime()
             .spawn(async move {
                 loop {
-                    if let Some(manifest) = loader.refresh().await {
-                        apply(manifest).await;
-                    }
+                    let manifest = loader.refresh().await;
+                    apply(manifest).await;
                     tokio::time::sleep(Duration::from_millis(RETRY_MS)).await;
                 }
             })
@@ -493,12 +530,23 @@ impl ManifestLoader {
 
 /// Live application of a manifest to a bound endpoint.
 pub(crate) mod live {
-    use std::sync::Arc;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use iroh::{
-        Endpoint, RelayMap,
-        address_lookup::{AddressLookupBuilder as _, PkarrPublisher, PkarrResolver},
+        Endpoint, EndpointId, RelayMap, RelayUrl,
+        address_lookup::{
+            AddressLookup, AddressLookupBuilder as _, DEFAULT_REPUBLISH_INTERVAL, EndpointData,
+            PkarrPublisher, PkarrRelayClient, PkarrResolver,
+        },
+        endpoint_info::EndpointInfo,
     };
+    use tcode_protocol::{TraverseLookupState, TraverseLookupStatus};
+    use tokio::sync::Notify;
+    use url::Url;
 
     use super::Manifest;
 
@@ -518,12 +566,13 @@ pub(crate) mod live {
     }
 
     /// Replace every address-lookup service with those of `manifests`: a
-    /// pkarr publisher (machines only) and resolver per pkarr URL. A device
-    /// keeps its `lan` lookup through the replacement.
+    /// pkarr resolver per pkarr URL and, on a machine (`publish`), a
+    /// publisher whose record is read back into `publish`. A device keeps
+    /// its `lan` lookup through the replacement.
     pub(crate) fn install_lookups<'a>(
         endpoint: &Endpoint,
         manifests: impl IntoIterator<Item = &'a Manifest>,
-        publish: bool,
+        publish: Option<&Arc<LookupChecks>>,
         lan: Option<crate::lan::LanLookup>,
     ) {
         let Ok(services) = endpoint.address_lookup() else {
@@ -535,9 +584,17 @@ pub(crate) mod live {
         }
         for manifest in manifests {
             for pkarr in manifest.pkarr_urls() {
-                if publish {
+                if let Some(checks) = publish {
                     match PkarrPublisher::builder(pkarr.clone()).into_address_lookup(endpoint) {
-                        Ok(publisher) => services.add(publisher),
+                        Ok(publisher) => match CheckedPublisher::new(
+                            publisher,
+                            endpoint,
+                            pkarr.clone(),
+                            checks.clone(),
+                        ) {
+                            Some(publisher) => services.add(publisher),
+                            None => log::warn!("could not add pkarr publisher {pkarr}"),
+                        },
                         Err(error) => log::warn!("could not add pkarr publisher {pkarr}: {error}"),
                     }
                 }
@@ -547,6 +604,188 @@ pub(crate) mod live {
                 }
             }
         }
+    }
+
+    /// The last read-back of this machine's record from each pkarr URL it
+    /// publishes to.
+    pub(crate) struct LookupChecks {
+        outcomes: Mutex<HashMap<Url, TraverseLookupStatus>>,
+        /// Told after every check.
+        changed: Arc<Notify>,
+    }
+
+    impl LookupChecks {
+        pub(crate) fn new(changed: Arc<Notify>) -> Self {
+            Self {
+                outcomes: Mutex::new(HashMap::new()),
+                changed,
+            }
+        }
+
+        pub(crate) fn status(&self, url: &Url) -> TraverseLookupStatus {
+            self.outcomes
+                .lock()
+                .unwrap()
+                .get(url)
+                .cloned()
+                .unwrap_or_else(|| TraverseLookupStatus {
+                    url: url.to_string(),
+                    state: TraverseLookupState::Pending,
+                    checked_unix: None,
+                    error: None,
+                })
+        }
+
+        fn record(&self, url: &Url, result: Result<(), String>) {
+            if let Err(error) = &result {
+                log::warn!("this machine's record does not read back from {url}: {error}");
+            }
+            let status = TraverseLookupStatus {
+                url: url.to_string(),
+                state: match result {
+                    Ok(()) => TraverseLookupState::Ok,
+                    Err(_) => TraverseLookupState::Failed,
+                },
+                checked_unix: Some(now_unix()),
+                error: result.err(),
+            };
+            self.outcomes.lock().unwrap().insert(url.clone(), status);
+            self.changed.notify_one();
+        }
+    }
+
+    /// The first read-back waits this long for a publish to prompt it.
+    const FIRST_CHECK: Duration = Duration::from_secs(30);
+    /// Time for the publisher's PUT, which it sends in the background, to
+    /// land before the record is read back.
+    const PUBLISH_SETTLE: Duration = Duration::from_secs(5);
+    /// How old a record may be: the publisher rewrites it every
+    /// [`DEFAULT_REPUBLISH_INTERVAL`], so an older one means its writes are
+    /// failing.
+    const MAX_RECORD_AGE: Duration = Duration::from_secs(DEFAULT_REPUBLISH_INTERVAL.as_secs() + 60);
+
+    /// iroh's pkarr publisher only logs whether its writes land, so each one
+    /// is paired with a read-back of the record through the same pkarr URL:
+    /// shortly after every publish and once per republish interval.
+    #[derive(Debug)]
+    struct CheckedPublisher<P> {
+        inner: P,
+        /// The relays the last publish named.
+        published: Arc<Mutex<Vec<RelayUrl>>>,
+        nudge: Arc<Notify>,
+        check: tokio::task::AbortHandle,
+    }
+
+    impl<P: AddressLookup> CheckedPublisher<P> {
+        fn new(inner: P, endpoint: &Endpoint, url: Url, checks: Arc<LookupChecks>) -> Option<Self> {
+            let client = PkarrRelayClient::new(
+                url.clone(),
+                endpoint.tls_config().clone(),
+                endpoint.dns_resolver().ok()?.clone(),
+            );
+            let published = Arc::new(Mutex::new(Vec::new()));
+            let nudge = Arc::new(Notify::new());
+            let check = crate::runtime::runtime()
+                .spawn(read_back(
+                    client,
+                    endpoint.id(),
+                    url,
+                    published.clone(),
+                    nudge.clone(),
+                    checks,
+                ))
+                .abort_handle();
+            Some(Self {
+                inner,
+                published,
+                nudge,
+                check,
+            })
+        }
+    }
+
+    impl<P> Drop for CheckedPublisher<P> {
+        fn drop(&mut self) {
+            self.check.abort();
+        }
+    }
+
+    impl<P: AddressLookup> AddressLookup for CheckedPublisher<P> {
+        fn publish(&self, data: &EndpointData) {
+            self.inner.publish(data);
+            *self.published.lock().unwrap() = data.relay_urls().cloned().collect();
+            self.nudge.notify_one();
+        }
+    }
+
+    async fn read_back(
+        client: PkarrRelayClient,
+        id: EndpointId,
+        url: Url,
+        published: Arc<Mutex<Vec<RelayUrl>>>,
+        nudge: Arc<Notify>,
+        checks: Arc<LookupChecks>,
+    ) {
+        let mut wait = FIRST_CHECK;
+        loop {
+            tokio::select! {
+                _ = nudge.notified() => {}
+                _ = tokio::time::sleep(wait) => {}
+            }
+            wait = DEFAULT_REPUBLISH_INTERVAL;
+            tokio::time::sleep(PUBLISH_SETTLE).await;
+            let expected = published.lock().unwrap().clone();
+            let result = match client.resolve(id).await {
+                Ok(packet) => {
+                    let age = Duration::from_micros(
+                        now_micros().saturating_sub(packet.timestamp().as_micros()),
+                    );
+                    match EndpointInfo::from_pkarr_signed_packet(&packet) {
+                        Err(error) => Err(error.to_string()),
+                        Ok(_) if age > MAX_RECORD_AGE => Err(format!(
+                            "the record was last written {} min ago",
+                            age.as_secs() / 60
+                        )),
+                        Ok(info)
+                            if !expected
+                                .iter()
+                                .all(|relay| info.relay_urls().any(|named| named == relay)) =>
+                        {
+                            Err("the record names another relay".into())
+                        }
+                        Ok(_) => Ok(()),
+                    }
+                }
+                Err(error) => Err(error_chain(&error)),
+            };
+            checks.record(&url, result);
+        }
+    }
+
+    /// An error and its causes on one line; iroh's lookup error names only
+    /// the service at the top.
+    fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+        let mut text = Vec::new();
+        let mut next = error.source();
+        while let Some(cause) = next {
+            text.push(cause.to_string());
+            next = cause.source();
+        }
+        if text.is_empty() {
+            error.to_string()
+        } else {
+            text.join(": ")
+        }
+    }
+
+    fn now_micros() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_micros() as u64)
+    }
+
+    fn now_unix() -> u64 {
+        now_micros() / 1_000_000
     }
 }
 

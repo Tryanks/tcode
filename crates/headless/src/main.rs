@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use tcode_client::pairing::{PairInvite, pair_url, parse_pair_url};
+use tcode_protocol::{TraverseLookupState, TraverseManifestState, TraverseSourceStatus};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::{Migration, MigrationPhase, MigrationProgress, SessionStore};
 use tcode_traverse::browser::{BrowserConfig, StaticBundle, check_bind, serve, set_password};
@@ -196,6 +197,10 @@ fn serve_command(args: &[String]) -> Result<(), String> {
                 eprintln!("tcode-headless: {error}");
             }
         }
+    });
+    let traverse_events = traverse_host.traverse_events();
+    std::thread::spawn(move || {
+        log_traverse_status(std::iter::from_fn(|| traverse_events.recv_blocking().ok()))
     });
     let hosting = traverse_host.clone();
     let server = serve(
@@ -387,6 +392,116 @@ struct InvitationFile {
     invite: String,
     #[serde(default)]
     addrs: Vec<String>,
+}
+
+/// How long the sources may take to settle before their first summary is
+/// printed anyway.
+const TRAVERSE_SETTLE: Duration = Duration::from_secs(30);
+
+/// Print each Traverse source's summary once the sources settle — every
+/// lookup checked and a home relay chosen — and again whenever it changes.
+/// Latencies and check times alone are not a change.
+fn log_traverse_status(events: impl IntoIterator<Item = Vec<TraverseSourceStatus>>) {
+    let started = Instant::now();
+    let mut printed = None;
+    for status in events {
+        let settled = status.iter().all(|source| {
+            source
+                .lookups
+                .iter()
+                .all(|lookup| lookup.state != TraverseLookupState::Pending)
+        }) && (status.iter().all(|source| source.relays.is_empty())
+            || status
+                .iter()
+                .any(|source| source.relays.iter().any(|relay| relay.home)));
+        if !settled && started.elapsed() < TRAVERSE_SETTLE {
+            continue;
+        }
+        let shape: Vec<_> = status.iter().map(traverse_shape).collect();
+        if printed.as_ref() == Some(&shape) {
+            continue;
+        }
+        for source in &status {
+            println!("{}", traverse_summary(source));
+        }
+        printed = Some(shape);
+    }
+}
+
+/// What a summary line says, less the numbers that move on their own.
+fn traverse_shape(source: &TraverseSourceStatus) -> TraverseSourceStatus {
+    let mut shape = source.clone();
+    shape.manifest.fetched_unix = None;
+    for relay in &mut shape.relays {
+        relay.latency_ms = None;
+    }
+    for lookup in &mut shape.lookups {
+        lookup.checked_unix = None;
+    }
+    shape
+}
+
+/// `Traverse official: manifest live · 3 relays · best 42 ms (eu) · home eu · lookup ok`.
+fn traverse_summary(source: &TraverseSourceStatus) -> String {
+    let mut parts = vec![match &source.manifest.error {
+        Some(error) => format!(
+            "manifest {} (last fetch failed: {error})",
+            manifest_word(source.manifest.state)
+        ),
+        None => format!("manifest {}", manifest_word(source.manifest.state)),
+    }];
+    if !source.relays.is_empty() {
+        parts.push(format!("{} relays", source.relays.len()));
+        if let Some(best) = source
+            .relays
+            .iter()
+            .filter(|relay| relay.latency_ms.is_some())
+            .min_by_key(|relay| relay.latency_ms)
+        {
+            parts.push(format!(
+                "best {} ms ({})",
+                best.latency_ms.unwrap_or_default(),
+                relay_label(best)
+            ));
+        }
+        for relay in source.relays.iter().filter(|relay| relay.home) {
+            parts.push(match &relay.error {
+                Some(error) => format!("home {} failing: {error}", relay_label(relay)),
+                None => format!("home {}", relay_label(relay)),
+            });
+        }
+    }
+    for lookup in &source.lookups {
+        parts.push(match (lookup.state, &lookup.error) {
+            (TraverseLookupState::Pending, _) => "lookup unchecked".to_owned(),
+            (TraverseLookupState::Ok, _) => "lookup ok".to_owned(),
+            (TraverseLookupState::Failed, error) => format!(
+                "lookup {} failed: {}",
+                lookup.url,
+                error.as_deref().unwrap_or_default()
+            ),
+        });
+    }
+    format!("Traverse {}: {}", source.source, parts.join(" · "))
+}
+
+fn manifest_word(state: TraverseManifestState) -> &'static str {
+    match state {
+        TraverseManifestState::Live => "live",
+        TraverseManifestState::Cached => "cached",
+        TraverseManifestState::Bundled => "bundled",
+        TraverseManifestState::Failed => "failed",
+    }
+}
+
+/// The manifest's region for a relay, else its host.
+fn relay_label(relay: &tcode_protocol::TraverseRelayStatus) -> String {
+    relay.region.clone().unwrap_or_else(|| {
+        url::Url::parse(&relay.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| relay.url.clone())
+    })
 }
 
 fn direct_addrs(host: &TraverseHost) -> Vec<String> {

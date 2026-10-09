@@ -150,7 +150,7 @@ impl Lookups {
         live::install_lookups(
             &self.endpoint,
             manifests.iter().map(Arc::as_ref),
-            false,
+            None,
             Some(self.lan.clone()),
         );
         live::sync_relays(&self.endpoint, &relays, &wanted).await;
@@ -227,6 +227,9 @@ impl Lookups {
                 let lookups = lookups.clone();
                 let source = refreshed.clone();
                 async move {
+                    let Some(manifest) = manifest else {
+                        return;
+                    };
                     log::info!("applying the refreshed Traverse manifest for {source:?}");
                     let installed = match lookups.sources.lock().unwrap().get_mut(&source) {
                         Some(known) => {

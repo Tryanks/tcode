@@ -1107,7 +1107,8 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
 /// newer than the machine: a machine from the six-digit-code era (its
 /// `code` field is ignored) or without device paths must still be
 /// understood, and a machine that has the link sends it whole so a scanner
-/// needs nothing else to reach it off the LAN.
+/// needs nothing else to reach it off the LAN. Each Traverse source's status
+/// is spelled out for the settings page that draws it.
 #[test]
 fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     let older: HostingState = serde_json::from_value(json!({
@@ -1132,6 +1133,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     );
 
     assert!(older.spaces.is_empty());
+    assert!(older.traverse.is_empty());
     assert_eq!(older.devices[0].access, DeviceAccess::Full);
     for (action, wire) in [
         (
@@ -1225,6 +1227,48 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
                 path: None,
             },
         ],
+        traverse: vec![
+            TraverseSourceStatus {
+                source: "official".into(),
+                manifest: TraverseManifestStatus {
+                    state: TraverseManifestState::Cached,
+                    fetched_unix: Some(1_760_000_000),
+                    error: Some("timed out".into()),
+                },
+                relays: vec![
+                    TraverseRelayStatus {
+                        url: "https://euc1-1.relay.n0.iroh.link./".into(),
+                        region: Some("eu".into()),
+                        latency_ms: Some(42),
+                        home: true,
+                        error: None,
+                    },
+                    TraverseRelayStatus {
+                        url: "https://use1-1.relay.n0.iroh.link./".into(),
+                        region: None,
+                        latency_ms: None,
+                        home: false,
+                        error: None,
+                    },
+                ],
+                lookups: vec![TraverseLookupStatus {
+                    url: "https://dns.iroh.link/pkarr".into(),
+                    state: TraverseLookupState::Ok,
+                    checked_unix: Some(1_760_000_100),
+                    error: None,
+                }],
+            },
+            TraverseSourceStatus {
+                source: "https://traverse.example/".into(),
+                manifest: TraverseManifestStatus {
+                    state: TraverseManifestState::Failed,
+                    fetched_unix: None,
+                    error: Some("connection refused".into()),
+                },
+                relays: Vec::new(),
+                lookups: Vec::new(),
+            },
+        ],
     };
     state.spaces.push(SpaceInfo {
         id: "s".into(),
@@ -1257,7 +1301,26 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
             ],
             "spaces": [{"id":"s","name":"Shared","created_unix":3,"project_ids":["p"],
                 "link":"tcode://pair?v=2&id=abab&space=s","link_enabled":true,"link_dead":false,
-                "members":[{"id":"ef".repeat(32),"name":"Laptop","created_unix":2,"access":{"type":"space","content":{"space_id":"s"}}}]}]
+                "members":[{"id":"ef".repeat(32),"name":"Laptop","created_unix":2,"access":{"type":"space","content":{"space_id":"s"}}}]}],
+            "traverse": [
+                {
+                    "source": "official",
+                    "manifest": {"state": "cached", "fetched_unix": 1_760_000_000_u64, "error": "timed out"},
+                    "relays": [
+                        {"url": "https://euc1-1.relay.n0.iroh.link./", "region": "eu", "latency_ms": 42, "home": true},
+                        {"url": "https://use1-1.relay.n0.iroh.link./"}
+                    ],
+                    "lookups": [
+                        {"url": "https://dns.iroh.link/pkarr", "state": "ok", "checked_unix": 1_760_000_100_u64}
+                    ]
+                },
+                {
+                    "source": "https://traverse.example/",
+                    "manifest": {"state": "failed", "error": "connection refused"},
+                    "relays": [],
+                    "lookups": []
+                }
+            ]
         })
     );
 }
