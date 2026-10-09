@@ -302,8 +302,8 @@ impl AppState {
                 | Command::ToggleProjectCollapsed { .. }
                 | Command::PreviewReply { .. }
                 | Command::ReloadProvider
-                | Command::SetGitHubToken { .. }
-                | Command::RefreshGitHubCredentials
+                | Command::SetHostToken { .. }
+                | Command::RefreshHostCredentials
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
                 | Command::CreateThirdPartyProfile { .. }

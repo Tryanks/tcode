@@ -6,7 +6,10 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
-use tcode_core::settings::{GitHubCredentialSource, GitHubCredentialStatus, GitHubHostSettings};
+use tcode_core::{
+    pull_request::HostKind,
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialError {
@@ -30,7 +33,7 @@ pub struct Credential {
     pub(super) host: String,
     pub(super) token: String,
     pub(super) fingerprint: String,
-    pub(super) source: GitHubCredentialSource,
+    pub(super) source: CredentialSource,
 }
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -41,7 +44,7 @@ impl std::fmt::Debug for Credential {
     }
 }
 impl Credential {
-    fn new(host: String, token: String, source: GitHubCredentialSource) -> Self {
+    fn new(host: String, token: String, source: CredentialSource) -> Self {
         let fingerprint = format!("{host}:{}", super::digest(&token));
         Self {
             host,
@@ -66,7 +69,7 @@ struct Cached {
 pub struct Credentials {
     store: SettingsStore,
     environment: BTreeMap<String, String>,
-    hosts: RwLock<BTreeMap<String, GitHubHostSettings>>,
+    hosts: RwLock<BTreeMap<String, HostSettings>>,
     cache: Mutex<HashMap<(String, Option<String>), Cached>>,
 }
 
@@ -84,8 +87,12 @@ impl Credentials {
         })
     }
 
-    pub fn configure(&self, hosts: BTreeMap<String, GitHubHostSettings>) {
-        *self.hosts.write().unwrap() = hosts;
+    /// The GitHub hosts among `hosts` are the ones read.
+    pub fn configure(&self, hosts: BTreeMap<String, HostSettings>) {
+        *self.hosts.write().unwrap() = hosts
+            .into_iter()
+            .filter(|(_, choice)| choice.kind == HostKind::Github)
+            .collect();
     }
 
     pub(super) fn check_enabled(&self, host: &str) -> Result<(), CredentialError> {
@@ -110,15 +117,19 @@ impl Credentials {
             .unwrap()
             .get(&host)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| HostSettings::new(HostKind::Github));
         if !choice.enabled {
             return Err(CredentialError::Disabled);
         }
-        if let Some(token) = self.store.github_token(&host).and_then(nonempty) {
-            return Ok(Credential::new(host, token, GitHubCredentialSource::Saved));
+        if let Some(token) = self.store.token(HostKind::Github, &host).and_then(nonempty) {
+            return Ok(Credential::new(host, token, CredentialSource::Saved));
         }
-        if let Some(token) = self.environment_token(&host) {
-            return Ok(Credential::new(host, token, GitHubCredentialSource::Env));
+        if let Some((name, token)) = self.environment_token(&host) {
+            return Ok(Credential::new(
+                host,
+                token,
+                CredentialSource::Env { name: name.into() },
+            ));
         }
         let key = (host.clone(), choice.account.clone());
         // Holding the lock coalesces keyring lookups; no HTTP runs under this lock.
@@ -131,7 +142,8 @@ impl Credentials {
         if result == Err(CredentialError::NotSignedIn) && choice.account.is_some() {
             result = self.gh_token(&host, None);
         }
-        let value = result.map(|token| Credential::new(host, token, GitHubCredentialSource::Gh));
+        let value = result
+            .map(|token| Credential::new(host, token, CredentialSource::Cli { tool: "gh".into() }));
         let ttl = match &value {
             Ok(_) => 300,
             Err(CredentialError::CliFailed) => 0,
@@ -166,9 +178,10 @@ impl Credentials {
         }
     }
 
-    fn environment_token(&self, host: &str) -> Option<String> {
-        let keys = if host == "github.com" || host.ends_with(".ghe.com") {
-            ["GH_TOKEN", "GITHUB_TOKEN"]
+    /// The variables the host's environment token is read from, in order.
+    fn environment_keys(&self, host: &str) -> Option<[&'static str; 2]> {
+        if host == "github.com" || host.ends_with(".ghe.com") {
+            Some(["GH_TOKEN", "GITHUB_TOKEN"])
         } else if self
             .environment
             .get("GH_HOST")
@@ -176,12 +189,20 @@ impl Credentials {
             .as_deref()
             == Some(host)
         {
-            ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+            Some(["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"])
         } else {
-            return None;
-        };
-        keys.iter()
-            .find_map(|key| self.environment.get(*key).cloned().and_then(nonempty))
+            None
+        }
+    }
+
+    fn environment_token(&self, host: &str) -> Option<(&'static str, String)> {
+        self.environment_keys(host)?.into_iter().find_map(|key| {
+            self.environment
+                .get(key)
+                .cloned()
+                .and_then(nonempty)
+                .map(|token| (key, token))
+        })
     }
 
     fn gh_program(&self) -> Result<PathBuf, CredentialError> {
@@ -260,30 +281,46 @@ impl Credentials {
     }
 
     /// Discovery is safe to replicate: login names and source only, never a token or fingerprint.
-    pub fn discover(&self) -> BTreeMap<String, GitHubCredentialStatus> {
-        let accounts: serde_json::Value = self
-            .run_gh(&["auth", "status", "--json", "hosts"])
+    pub fn discover(&self) -> BTreeMap<String, HostStatus> {
+        let gh = self.run_gh(&["auth", "status", "--json", "hosts"]);
+        let tools_missing = if gh == Err(CredentialError::CliMissing) {
+            vec!["gh".to_owned()]
+        } else {
+            Vec::new()
+        };
+        let accounts: serde_json::Value = gh
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        let mut hosts = self.hosts.read().unwrap().clone();
-        hosts.entry("github.com".into()).or_default();
+        let configured = self.hosts.read().unwrap().clone();
+        // Whether only settings name the host.
+        let mut hosts: BTreeMap<String, bool> =
+            configured.keys().map(|host| (host.clone(), true)).collect();
+        hosts.insert("github.com".into(), false);
         if let Some(logins) = accounts.get("hosts").and_then(|hosts| hosts.as_object()) {
             for host in logins.keys() {
                 if let Ok(host) = normalize_host(host) {
-                    hosts.entry(host).or_default();
+                    hosts.insert(host, false);
                 }
             }
         }
         hosts
             .into_iter()
-            .map(|(host, choice)| {
-                let token_set = self.store.github_token(&host).and_then(nonempty).is_some();
+            .map(|(host, added)| {
+                let choice = configured
+                    .get(&host)
+                    .cloned()
+                    .unwrap_or_else(|| HostSettings::new(HostKind::Github));
+                let token_set = self
+                    .store
+                    .token(HostKind::Github, &host)
+                    .and_then(nonempty)
+                    .is_some();
                 let logins = accounts
                     .get("hosts")
                     .and_then(|hosts| hosts.get(&host))
                     .and_then(|logins| logins.as_array());
-                let accounts = logins
+                let accounts: Vec<String> = logins
                     .into_iter()
                     .flatten()
                     .filter_map(|login| {
@@ -294,15 +331,39 @@ impl Credentials {
                     })
                     .collect();
                 let source = self.get(&host).ok().map(|credential| credential.source);
-                let env_overrides_account =
-                    source == Some(GitHubCredentialSource::Env) && choice.account.is_some();
+                let env_overrides_account = matches!(source, Some(CredentialSource::Env { .. }))
+                    && choice.account.is_some();
+                let mut order = vec![CredentialSource::Saved];
+                order.extend(
+                    self.environment_keys(&host)
+                        .into_iter()
+                        .flatten()
+                        .map(|name| CredentialSource::Env { name: name.into() }),
+                );
+                order.push(CredentialSource::Cli { tool: "gh".into() });
+                let problem = (source.is_none() && choice.enabled).then(|| {
+                    if tools_missing.is_empty() {
+                        HostProblem::NotSignedIn {
+                            tool: "gh".into(),
+                            command: Some(format!("gh auth login --hostname {host}")),
+                        }
+                    } else {
+                        HostProblem::NoCredential {
+                            tools_missing: tools_missing.clone(),
+                        }
+                    }
+                });
                 (
                     host,
-                    GitHubCredentialStatus {
+                    HostStatus {
+                        kind: HostKind::Github,
+                        added,
                         token_set,
                         source,
                         accounts,
                         env_overrides_account,
+                        order,
+                        problem,
                     },
                 )
             })

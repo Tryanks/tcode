@@ -149,6 +149,14 @@ pub use wire::{
 // PullRequestFiles.next_cursor carries in place of next_page; reviewers carry
 // an opaque id and labels an id that SetLabels names them by; the conversation
 // and the action state carry the host's capabilities.
+// Unreleased: Settings.github becomes Settings.source_control, whose hosts carry
+// a kind (github, forgejo, gitea) and whose status is per host with its kind,
+// whether only settings name it (added), credential source, resolution order
+// and problem; SettingsPatch's GitHubHost becomes SourceControlHost and
+// RemoveSourceControlHost is added;
+// SetGitHubToken and RefreshGitHubCredentials become SetHostToken and
+// RefreshHostCredentials; capabilities carry host_viewed_marks and
+// merge_message; the rejection Unsupported is added.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

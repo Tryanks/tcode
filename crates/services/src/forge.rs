@@ -1,28 +1,28 @@
 //! The pull request host boundary: everything the runtime asks of a host that keeps pull
 //! requests. A host's ids, cursors, query language, credentials and error shapes stay behind
-//! it; what crosses is Tcode's own model. GitHub is the one host behind it. Call blocking
-//! entries via HostCx::unblock.
+//! it; what crosses is Tcode's own model. Each host of a kind is served by that kind's
+//! implementation. Call blocking entries via HostCx::unblock.
 
 use crate::settings::SettingsStore;
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tcode_core::{
     pull_request::{
-        HostTerms, PullRequestKey, PullRequestMergeMethod, PullRequestReviewDraftComment,
+        HostKind, HostTerms, PullRequestKey, PullRequestMergeMethod, PullRequestReviewDraftComment,
         PullRequestSnapshot, PullRequestStackState, StackRebaseStep,
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{GitHubCredentialStatus, GitHubHostSettings},
+    settings::{HostSettings, HostStatus},
 };
 use tcode_protocol::{
-    PullRequestAction, PullRequestActionResult as Outcome, PullRequestRead,
-    PullRequestReadResponse, PullRequestRejection as Rejection, PullRequestReviewVerdict,
-    PullRequestStackHead,
+    PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
+    PullRequestRead, PullRequestReadResponse, PullRequestRejection as Rejection,
+    PullRequestReviewVerdict, PullRequestStackHead,
 };
 
 /// The hosts Tcode reads pull requests from, with credentials from `store` and the launch
@@ -31,21 +31,26 @@ pub fn connect(
     store: SettingsStore,
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> Arc<dyn Forge> {
-    crate::github::GitHub::new(crate::github::GitHubApi::host(
-        crate::github::Credentials::new(store, environment),
-    ))
+    let environment: Vec<_> = environment.into_iter().collect();
+    let github = crate::github::GitHub::new(crate::github::GitHubApi::host(
+        crate::github::Credentials::new(store.clone(), environment.clone()),
+    ));
+    let forgejo = crate::forgejo::Forgejo::new(store, environment);
+    Hosts::new(github, forgejo)
 }
 
 /// A pull request host. Each entry answers for the host the key names.
 pub trait Forge: Send + Sync {
     /// What Tcode's text says about the host of the pull request.
     fn terms(&self, key: &PullRequestKey) -> &'static HostTerms;
+    /// What the host offers on the pull request at all, whoever reads it.
+    fn capabilities(&self, key: &PullRequestKey) -> PullRequestCapabilities;
 
-    /// A host name as settings keep it, or `None` for one the host cannot be.
-    fn normalize_host(&self, host: &str) -> Option<String>;
-    fn configure(&self, hosts: BTreeMap<String, GitHubHostSettings>);
-    /// Where each configured host's credential comes from, read now.
-    fn credential_status(&self) -> BTreeMap<String, GitHubCredentialStatus>;
+    /// Every host Tcode reads, with each kind's own read of the ones it serves.
+    fn configure(&self, hosts: BTreeMap<String, HostSettings>);
+    /// Where each host's credential comes from, read now: configured hosts, those a CLI login
+    /// or the environment names, and the public host.
+    fn credential_status(&self) -> BTreeMap<String, HostStatus>;
     /// Drops what is held of the host's credential, so the next request resolves it again.
     fn forget_credential(&self, host: &str);
 
@@ -328,3 +333,310 @@ pub struct Tail {
     pub(crate) comments: Vec<PullRequestRemark>,
 }
 pub type Tails = HashMap<String, Tail>;
+
+/// Whether the host offers what `action` asks for. One the host lacks is refused before any
+/// request, so a stale client never reaches the host with it.
+fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -> bool {
+    match action {
+        PullRequestAction::ReplyToThread { .. } => capabilities.reply,
+        PullRequestAction::ResolveThread { .. } => capabilities.resolve,
+        PullRequestAction::React { .. } => capabilities.reactions,
+        PullRequestAction::ReadyForReview | PullRequestAction::ConvertToDraft => capabilities.draft,
+        PullRequestAction::Reopen => capabilities.reopen,
+        PullRequestAction::Revert => capabilities.revert,
+        PullRequestAction::UpdateBranch { .. } => capabilities.update_branch,
+        PullRequestAction::DisableAutoMerge | PullRequestAction::Merge { auto: true, .. } => {
+            capabilities.auto_merge
+        }
+        _ => true,
+    }
+}
+
+/// Routes each key and host to the implementation of its kind: the kind settings give it, else
+/// the one its name says, else GitHub, as every host was before hosts had kinds.
+struct Hosts {
+    github: Arc<dyn Forge>,
+    forgejo: Arc<dyn Forge>,
+    kinds: RwLock<BTreeMap<String, HostKind>>,
+}
+
+impl Hosts {
+    fn new(github: Arc<dyn Forge>, forgejo: Arc<dyn Forge>) -> Arc<Self> {
+        Arc::new(Self {
+            github,
+            forgejo,
+            kinds: RwLock::default(),
+        })
+    }
+
+    fn kind(&self, host: &str) -> HostKind {
+        HostKind::of(self.kinds.read().unwrap().get(host).copied(), host)
+    }
+
+    fn of(&self, kind: HostKind) -> &dyn Forge {
+        match kind {
+            HostKind::Github => self.github.as_ref(),
+            HostKind::Forgejo | HostKind::Gitea => self.forgejo.as_ref(),
+        }
+    }
+
+    fn host(&self, host: &str) -> &dyn Forge {
+        self.of(self.kind(host))
+    }
+
+    /// Whether `host`'s kind is served by `forge`.
+    fn serves(&self, forge: &dyn Forge, host: &str) -> bool {
+        std::ptr::addr_eq(self.host(host), forge)
+    }
+}
+
+impl Forge for Hosts {
+    fn terms(&self, key: &PullRequestKey) -> &'static HostTerms {
+        self.host(&key.host).terms(key)
+    }
+
+    fn capabilities(&self, key: &PullRequestKey) -> PullRequestCapabilities {
+        self.host(&key.host).capabilities(key)
+    }
+
+    fn configure(&self, hosts: BTreeMap<String, HostSettings>) {
+        {
+            let mut kinds = self.kinds.write().unwrap();
+            kinds.retain(|host, _| !hosts.contains_key(host));
+            kinds.extend(
+                hosts
+                    .iter()
+                    .map(|(host, choice)| (host.clone(), choice.kind)),
+            );
+        }
+        self.github.configure(hosts.clone());
+        self.forgejo.configure(hosts);
+    }
+
+    fn credential_status(&self) -> BTreeMap<String, HostStatus> {
+        let mut status = self.forgejo.credential_status();
+        // A host GitHub also lists, such as one a gh login names, stays the kind settings say.
+        for (host, github) in self.github.credential_status() {
+            if self.kind(&host) == HostKind::Github {
+                status.insert(host, github);
+            }
+        }
+        let mut kinds = self.kinds.write().unwrap();
+        for (host, found) in &status {
+            kinds.entry(host.clone()).or_insert(found.kind);
+        }
+        status
+    }
+
+    fn forget_credential(&self, host: &str) {
+        self.host(host).forget_credential(host);
+    }
+
+    fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
+        [self.github.as_ref(), self.forgejo.as_ref()]
+            .into_iter()
+            .find_map(|forge| {
+                forge
+                    .pull_request_url(url)
+                    .filter(|(key, _)| self.serves(forge, &key.host))
+            })
+    }
+
+    fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
+        [self.github.as_ref(), self.forgejo.as_ref()]
+            .into_iter()
+            .find_map(|forge| {
+                forge
+                    .checkout_repository(cwd)
+                    .filter(|repository| self.serves(forge, &repository.host))
+            })
+    }
+
+    fn repository(&self, name: &str, host: &str) -> Option<Repository> {
+        self.host(host.trim()).repository(name, host)
+    }
+
+    fn url(&self, key: &PullRequestKey) -> Option<String> {
+        self.host(&key.host).url(key)
+    }
+
+    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered> {
+        let repository = self.checkout_repository(root)?;
+        self.host(&repository.host).discover(cwd, root, refresh)
+    }
+
+    fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
+        self.host(&key.host).summary(key)
+    }
+
+    fn stack(&self, key: &PullRequestKey) -> Result<PullRequestStackState, ForgeError> {
+        self.host(&key.host).stack(key)
+    }
+
+    fn read(
+        &self,
+        key: &PullRequestKey,
+        read: PullRequestRead,
+    ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
+        self.host(&key.host).read(key, read)
+    }
+
+    fn invalidate(&self, key: &PullRequestKey) {
+        self.host(&key.host).invalidate(key);
+    }
+
+    fn account(&self, key: &PullRequestKey) -> Result<String, ForgeError> {
+        self.host(&key.host).account(key)
+    }
+
+    fn set_viewed(
+        &self,
+        key: &PullRequestKey,
+        paths: &[String],
+        viewed: bool,
+    ) -> Result<(), ForgeError> {
+        self.host(&key.host).set_viewed(key, paths, viewed)
+    }
+
+    fn act(&self, key: &PullRequestKey, action: &PullRequestAction) -> Outcome {
+        let host = self.host(&key.host);
+        if !offered(&host.capabilities(key), action) {
+            return Outcome::Rejected(Rejection::Unsupported);
+        }
+        host.act(key, action)
+    }
+
+    fn submit_review(
+        &self,
+        key: &PullRequestKey,
+        verdict: PullRequestReviewVerdict,
+        head: &str,
+        body: &str,
+        comments: &[PullRequestReviewDraftComment],
+    ) -> Outcome {
+        let host = self.host(&key.host);
+        if verdict == PullRequestReviewVerdict::RequestChanges
+            && !host.capabilities(key).request_changes
+        {
+            return Outcome::Rejected(Rejection::Unsupported);
+        }
+        host.submit_review(key, verdict, head, body, comments)
+    }
+
+    fn commentable(
+        &self,
+        key: &PullRequestKey,
+        head: &str,
+        path: &str,
+        side: ReviewSide,
+        lines: (u32, u32),
+    ) -> Result<Anchoring, ForgeError> {
+        self.host(&key.host)
+            .commentable(key, head, path, side, lines)
+    }
+
+    fn reanchor(
+        &self,
+        key: &PullRequestKey,
+        comments: &[PullRequestReviewDraftComment],
+    ) -> Result<(String, Vec<Moved>), ForgeError> {
+        self.host(&key.host).reanchor(key, comments)
+    }
+
+    fn merge_stack(
+        &self,
+        key: &PullRequestKey,
+        stack: u64,
+        heads: &[PullRequestStackHead],
+        method: PullRequestMergeMethod,
+    ) -> MergeSubmission {
+        self.host(&key.host).merge_stack(key, stack, heads, method)
+    }
+
+    fn merge_status(&self, key: &PullRequestKey, id: &str) -> Result<Option<Outcome>, ForgeError> {
+        self.host(&key.host).merge_status(key, id)
+    }
+
+    fn plan_stack_rebase(
+        &self,
+        key: &PullRequestKey,
+        stack: u64,
+        heads: &[PullRequestStackHead],
+    ) -> Result<StackRebase, Rejection> {
+        self.host(&key.host).plan_stack_rebase(key, stack, heads)
+    }
+
+    fn fingerprints(
+        &self,
+        keys: &[PullRequestKey],
+    ) -> Vec<Result<Option<Fingerprint>, ForgeError>> {
+        let mut answers: Vec<_> = keys.iter().map(|_| Ok(None)).collect();
+        for forge in [self.github.as_ref(), self.forgejo.as_ref()] {
+            let (indices, own): (Vec<_>, Vec<_>) = keys
+                .iter()
+                .enumerate()
+                .filter(|(_, key)| self.serves(forge, &key.host))
+                .map(|(index, key)| (index, key.clone()))
+                .unzip();
+            if own.is_empty() {
+                continue;
+            }
+            for (index, answer) in indices.into_iter().zip(forge.fingerprints(&own)) {
+                answers[index] = answer;
+            }
+        }
+        answers
+    }
+
+    fn watch_detail(&self, key: &PullRequestKey) -> Result<PullRequestWatchRead, ForgeError> {
+        self.host(&key.host).watch_detail(key)
+    }
+
+    fn activity(
+        &self,
+        key: &PullRequestKey,
+        tails: &mut Tails,
+    ) -> Result<Option<Vec<PullRequestRemark>>, ForgeError> {
+        self.host(&key.host).activity(key, tails)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host is served by the kind settings give it; otherwise its name decides, and a host
+    /// whose name says nothing is GitHub's, as every host was before hosts had kinds.
+    #[test]
+    fn each_host_goes_to_its_kinds_implementation() {
+        let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let forge = connect(SettingsStore::new(root.clone()), []);
+        forge.configure(BTreeMap::from([(
+            "gitea.acme.test".to_owned(),
+            HostSettings::new(HostKind::Github),
+        )]));
+        let name = |host: &str| forge.terms(&PullRequestKey::new(host, "a/b", 1)).name;
+        assert_eq!(name("gitea.acme.test"), "GitHub");
+        assert_eq!(name("codeberg.org"), "Forgejo");
+        assert_eq!(name("gitea.com"), "Gitea");
+        assert_eq!(name("git.example.com"), "GitHub");
+        assert_eq!(
+            forge
+                .pull_request_url("https://codeberg.org/a/b/pulls/2")
+                .map(|(key, _)| key),
+            Some(PullRequestKey::new("codeberg.org", "a/b", 2))
+        );
+        assert_eq!(
+            forge
+                .pull_request_url("https://git.example.com/a/b/pull/3")
+                .map(|(key, _)| key),
+            Some(PullRequestKey::new("git.example.com", "a/b", 3))
+        );
+        assert_eq!(
+            forge.pull_request_url("https://git.example.com/a/b/pulls/3"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acp::InstalledAcpAgent;
 pub use crate::provider_colors::{PROVIDER_COLOR_PALETTE, builtin_provider_color};
+use crate::pull_request::HostKind;
 use orchestrate_fleet::Role;
 use orchestrate_legacy::LegacyOrchestrateModel;
 
@@ -15,45 +16,105 @@ mod orchestrate_fleet;
 mod orchestrate_legacy;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitHubSettings {
+pub struct SourceControlSettings {
     #[serde(default)]
-    pub hosts: BTreeMap<String, GitHubHostSettings>,
+    pub hosts: BTreeMap<String, HostSettings>,
     /// Host-authored discovery; never persisted in settings.json.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub status: BTreeMap<String, GitHubCredentialStatus>,
+    pub status: BTreeMap<String, HostStatus>,
+}
+
+impl SourceControlSettings {
+    /// The kind a host is read as: the one settings give it, configured or found.
+    pub fn kind(&self, host: &str) -> HostKind {
+        HostKind::of(
+            self.hosts
+                .get(host)
+                .map(|choice| choice.kind)
+                .or_else(|| self.status.get(host).map(|status| status.kind)),
+            host,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitHubHostSettings {
+pub struct HostSettings {
+    pub kind: HostKind,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// The chosen account when the host's CLI has several.
     #[serde(default)]
     pub account: Option<String>,
 }
 
-impl Default for GitHubHostSettings {
-    fn default() -> Self {
+impl HostSettings {
+    pub fn new(kind: HostKind) -> Self {
         Self {
+            kind,
             enabled: true,
             account: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GitHubCredentialSource {
-    Saved,
-    Env,
-    Gh,
+/// `github.hosts` as settings.json held it before hosts had kinds; read once and moved into
+/// `source_control.hosts`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyGitHubSettings {
+    #[serde(default)]
+    pub hosts: BTreeMap<String, LegacyGitHubHost>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitHubCredentialStatus {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyGitHubHost {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+/// Where the token Tcode uses for a host comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CredentialSource {
+    Saved,
+    /// The environment variable's name.
+    Env {
+        name: String,
+    },
+    /// The CLI whose stored login supplies it.
+    Cli {
+        tool: String,
+    },
+}
+
+/// What keeps a host from being read, when something does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HostProblem {
+    /// Nothing resolved: no token saved or in the environment, and these CLIs were not found.
+    NoCredential { tools_missing: Vec<String> },
+    /// The CLI exists and has no login for the host; `command` signs it in.
+    NotSignedIn {
+        tool: String,
+        command: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostStatus {
+    pub kind: HostKind,
+    /// Only the user's settings name it: no CLI login, environment variable or default does.
+    pub added: bool,
     pub token_set: bool,
-    pub source: Option<GitHubCredentialSource>,
+    /// The source in use now; `None` when nothing resolved.
+    pub source: Option<CredentialSource>,
+    /// The CLI's accounts for the host, for choosing one.
     pub accounts: Vec<String>,
     pub env_overrides_account: bool,
+    /// The host's resolution order: the first that works is used.
+    pub order: Vec<CredentialSource>,
+    pub problem: Option<HostProblem>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,10 +815,16 @@ impl PluginManagementSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum SettingsPatch {
-    GitHubHost {
+    /// Adds the host with `kind` when the settings do not list it yet; the kind of a listed host
+    /// never changes.
+    SourceControlHost {
         host: String,
+        kind: HostKind,
         enabled: Option<bool>,
         account: Option<Option<String>>,
+    },
+    RemoveSourceControlHost {
+        host: String,
     },
     Language(Option<String>),
     ThemeMode(ThemeMode),
@@ -953,7 +1020,10 @@ impl BrowserSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
-    pub github: GitHubSettings,
+    pub source_control: SourceControlSettings,
+    /// Legacy input: moved into `source_control` on load; never written back.
+    #[serde(default, skip_serializing)]
+    pub github: Option<LegacyGitHubSettings>,
     /// None follows the operating-system language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
@@ -1133,7 +1203,8 @@ fn deserialize_days_override<'de, D: serde::Deserializer<'de>>(
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            github: GitHubSettings::default(),
+            source_control: SourceControlSettings::default(),
+            github: None,
             language: None,
             providers: BTreeMap::new(),
             profiles: BTreeMap::new(),
@@ -1182,22 +1253,31 @@ impl Settings {
     /// value outside its field's range is refused and changes nothing.
     pub fn apply(&mut self, patch: SettingsPatch) -> Result<(), &'static str> {
         match patch {
-            SettingsPatch::GitHubHost {
+            SettingsPatch::SourceControlHost {
                 host,
+                kind,
                 enabled,
                 account,
             } => {
                 let entry = self
-                    .github
+                    .source_control
                     .hosts
                     .entry(host.trim().to_ascii_lowercase())
-                    .or_default();
+                    .or_insert_with(|| HostSettings::new(kind));
+                if entry.kind != kind {
+                    return Err("A host's kind does not change.");
+                }
                 if let Some(enabled) = enabled {
                     entry.enabled = enabled;
                 }
                 if let Some(account) = account {
                     entry.account = account.filter(|value| !value.trim().is_empty());
                 }
+            }
+            SettingsPatch::RemoveSourceControlHost { host } => {
+                self.source_control
+                    .hosts
+                    .remove(&host.trim().to_ascii_lowercase());
             }
             SettingsPatch::Language(value) => self.language = value,
             SettingsPatch::ThemeMode(value) => self.theme_mode = value,
@@ -1481,6 +1561,16 @@ impl Settings {
     /// and drop the port of the retired HTTP listener, which no build reads.
     pub fn migrate_legacy(&mut self) {
         self.unknown.remove("remote_port");
+        for (host, legacy) in self.github.take().unwrap_or_default().hosts {
+            self.source_control
+                .hosts
+                .entry(host.trim().to_ascii_lowercase())
+                .or_insert(HostSettings {
+                    kind: HostKind::Github,
+                    enabled: legacy.enabled,
+                    account: legacy.account,
+                });
+        }
         for (provider, legacy) in [
             (ProviderKind::Codex, self.codex_binary.take()),
             (ProviderKind::ClaudeCode, self.claude_binary.take()),

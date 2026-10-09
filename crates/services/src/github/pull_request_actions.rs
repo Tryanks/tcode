@@ -141,7 +141,7 @@ fn merge_outcome(pr: &Value) -> Outcome {
 
 /// Whether the lines fall inside one hunk of the file on that side; GitHub refuses a review
 /// comment anywhere else.
-fn in_hunks(
+pub(crate) fn in_hunks(
     files: &[PullRequestFile],
     path: &str,
     side: ReviewSide,

@@ -22,8 +22,9 @@ use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::{
     pull_request::{
-        self, ChecksState, Mergeability, PullRequestBadgeState, PullRequestKey, PullRequestSource,
-        PullRequestState, PullRequestSyncError, ReviewDecision, ThreadPullRequestLink,
+        self, ChecksState, HostTerms, Mergeability, PullRequestBadgeState, PullRequestKey,
+        PullRequestSource, PullRequestState, PullRequestSyncError, ReviewDecision,
+        ThreadPullRequestLink,
     },
     pull_request_watch::{WatchChangeKind, WatchNotice},
     ui::RightTab,
@@ -381,7 +382,17 @@ fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
         None => "pull_requests.source_not_linked",
     }
 }
-fn sync_error(link: &ThreadPullRequestLink) -> String {
+/// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed.
+pub(super) fn resumes(retry_at: u64) -> String {
+    let now = tcode_core::project::now_secs();
+    if retry_at <= now {
+        crate::tr!("pull_requests.notice_soon").into_owned()
+    } else {
+        crate::time::humanize_in(retry_at - now)
+    }
+}
+
+fn sync_error(link: &ThreadPullRequestLink, host_name: &str) -> String {
     match link.sync_error.as_ref() {
         Some(PullRequestSyncError::NoCredential | PullRequestSyncError::HostDisabled) => {
             crate::tr!(
@@ -392,8 +403,8 @@ fn sync_error(link: &ThreadPullRequestLink) -> String {
         }
         Some(PullRequestSyncError::RateLimited { retry_at }) => crate::tr!(
             "pull_requests.notice_rate_limited",
-            ago =
-                crate::time::humanize_ago(retry_at.saturating_sub(tcode_core::project::now_secs()))
+            host_name = host_name,
+            when = resumes(*retry_at)
         )
         .into_owned(),
         Some(PullRequestSyncError::NotFound) => crate::tr!(
@@ -498,13 +509,24 @@ fn change_link<T: 'static>(
     .detach();
 }
 
-/// The row's menu: Open on GitHub, Copy link, the watch, what can become of the pull request,
+/// What Tcode says about the pull request host at `host`, by the kind settings give it.
+pub(crate) fn host_terms(store: &WorkspaceStore, host: &str) -> &'static HostTerms {
+    store.settings().source_control.kind(host).terms()
+}
+
+/// The pull request host at `host` as a person reads it.
+pub(crate) fn host_name(store: &WorkspaceStore, host: &str) -> String {
+    host_terms(store, host).display_name(host)
+}
+
+/// The row's menu: Open on the host, Copy link, the watch, what can become of the pull request,
 /// and the link condition.
 type RowMenu = std::rc::Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 
 fn row_menu(
     key: PullRequestKey,
     url: String,
+    host_name: String,
     link: Option<&ThreadPullRequestLink>,
     watchable: bool,
     offer: impl Fn(&App) -> Option<lifecycle::Offer> + 'static,
@@ -527,7 +549,7 @@ fn row_menu(
     std::rc::Rc::new(
         move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
             menu.menu(
-                crate::tr!("pull_requests.open_on_github").into_owned(),
+                crate::tr!("pull_requests.open_on_host", host_name = &host_name).into_owned(),
                 Box::new(OpenUrl(url.clone())),
             )
             .menu(
@@ -808,7 +830,10 @@ impl PullRequestsPanel {
             }
         } else {
             if let Some(link) = link.filter(|_| visible) {
-                detail.insert(0, sync_error(link));
+                detail.insert(
+                    0,
+                    sync_error(link, &host_name(self.store.read(cx), &key.host)),
+                );
             } else {
                 detail.push(crate::tr!(&format!("{state_label}_lower")).into_owned());
                 detail.extend(layer.clone());
@@ -825,7 +850,14 @@ impl PullRequestsPanel {
                 .into_any_element()
         };
         let detail = detail.join(" · ");
-        let menu = row_menu(key.clone(), url.clone(), link, watchable, self.offer(&key));
+        let menu = row_menu(
+            key.clone(),
+            url.clone(),
+            host_name(self.store.read(cx), &key.host),
+            link,
+            watchable,
+            self.offer(&key),
+        );
         let mut signals = h_flex().gap_1().flex_none().items_center();
         // The eye leads while the pull request is open or not yet read; the host ends the watch
         // once it merges or closes.
@@ -1318,7 +1350,10 @@ impl Render for PullRequestsPanel {
                     .rounded_md()
                     .bg(cx.theme().muted)
                     .text_size(px(12.))
-                    .child(div().flex_1().child(sync_error(link)))
+                    .child(div().flex_1().child(sync_error(
+                        link,
+                        &host_name(self.store.read(cx), &link.key.host),
+                    )))
                     .when(credential, |notice| {
                         notice.child(
                             Button::new(SharedString::from(format!(

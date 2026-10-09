@@ -4318,14 +4318,14 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     active.push_queued("first".into(), Vec::new());
     active.push_queued("second".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let first_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
         }) if text == "first" => delivery_id,
         other => panic!("expected first SendTurn, got {other:?}"),
     };
-    assert_eq!(active.dispatch_next_pending(false), Ok(false));
+    assert_eq!(active.dispatch_next_pending(None), Ok(false));
     assert!(receiver.try_recv().is_err());
     assert_eq!(active.queue.len(), 2, "unaccepted head stays queued");
     assert_eq!(
@@ -4336,7 +4336,7 @@ fn queued_sends_dispatch_one_per_completed_turn() {
     assert_eq!(active.queue[0].text, "second");
 
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let second_delivery = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
@@ -4358,7 +4358,7 @@ fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
     );
     let ordinary_id = active.push_queued("now".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn {
@@ -4730,7 +4730,7 @@ fn effort_changes_use_per_turn_overrides_or_require_provider_restart() {
             assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
         } else {
             active.push_queued("next turn".into(), Vec::new());
-            assert_eq!(active.dispatch_next_pending(false), Ok(true));
+            assert_eq!(active.dispatch_next_pending(None), Ok(true));
             let SessionCommand::SendTurn {
                 options: Some(options),
                 ..
@@ -5090,7 +5090,7 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
     };
     active.push_queued(String::new(), vec![attachment.clone()]);
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let delivery_id = match receiver.try_recv() {
         Ok(SessionCommand::SendTurn {
             delivery_id,
@@ -5119,7 +5119,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
     active.queue[0].relay_transcript = Some("# prior work".into());
     active.push_queued("follow up".into(), Vec::new());
 
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     let first = receiver.try_recv().unwrap();
     let SessionCommand::SendTurn {
         delivery_id, text, ..
@@ -5133,7 +5133,7 @@ fn relay_context_rides_only_with_the_first_handoff_message() {
 
     active.accept_turn_delivery(delivery_id).unwrap();
     active.turn_in_flight = false;
-    assert_eq!(active.dispatch_next_pending(false), Ok(true));
+    assert_eq!(active.dispatch_next_pending(None), Ok(true));
     assert!(matches!(
         receiver.try_recv(),
         Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
@@ -11212,7 +11212,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     state.dispatch_command(
         cx,
         638,
-        Command::SetGitHubToken {
+        Command::SetHostToken {
             host: "GITHUB.COM".into(),
             token: Some("github-writer-secret".into()),
         },
@@ -11248,8 +11248,9 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         cx,
         639,
         Command::PatchSettings {
-            patch: SettingsPatch::GitHubHost {
+            patch: SettingsPatch::SourceControlHost {
                 host: "github.com".into(),
+                kind: tcode_core::pull_request::HostKind::Github,
                 enabled: Some(false),
                 account: Some(Some("sample".into())),
             },
@@ -11259,8 +11260,9 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         cx,
         640,
         Command::PatchSettings {
-            patch: SettingsPatch::GitHubHost {
+            patch: SettingsPatch::SourceControlHost {
                 host: "git.example.com".into(),
+                kind: tcode_core::pull_request::HostKind::Github,
                 enabled: Some(true),
                 account: None,
             },
@@ -11269,12 +11271,14 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     cx.run_until_parked();
     state.update(cx, |state, _| {
         let snapshot = state.settings_snapshot();
-        assert!(!snapshot.github.hosts["github.com"].enabled);
+        assert!(!snapshot.source_control.hosts["github.com"].enabled);
         assert_eq!(
-            snapshot.github.hosts["github.com"].account.as_deref(),
+            snapshot.source_control.hosts["github.com"]
+                .account
+                .as_deref(),
             Some("sample")
         );
-        assert!(snapshot.github.hosts["git.example.com"].enabled);
+        assert!(snapshot.source_control.hosts["git.example.com"].enabled);
         assert!(
             !serde_json::to_string(&snapshot)
                 .unwrap()
@@ -11284,7 +11288,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     state.dispatch_command(
         cx,
         641,
-        Command::SetGitHubToken {
+        Command::SetHostToken {
             host: "github.com".into(),
             token: None,
         },
@@ -11320,7 +11324,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     state.dispatch_command(
         cx,
         644,
-        Command::SetGitHubToken {
+        Command::SetHostToken {
             host: "github.com".into(),
             token: Some("replacement".into()),
         },

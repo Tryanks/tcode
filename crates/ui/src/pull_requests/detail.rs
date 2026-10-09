@@ -204,6 +204,14 @@ pub(super) fn reason(error: &ProtocolError) -> String {
 }
 
 impl PullRequestView {
+    /// The open pull request's host as a person reads it.
+    pub(super) fn host_name(&self, cx: &App) -> String {
+        self.current
+            .as_ref()
+            .map(|(_, key)| super::host_name(self.store.read(cx), &key.host))
+            .unwrap_or_default()
+    }
+
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
@@ -1070,7 +1078,8 @@ impl PullRequestView {
         let tooltip = crate::tr!(
             "pull_requests.actions.update_tooltip",
             base = base,
-            head = snapshot.head_branch.clone()
+            head = snapshot.head_branch.clone(),
+            host_name = self.host_name(cx)
         )
         .into_owned();
         let updates =
@@ -1345,6 +1354,7 @@ impl PullRequestView {
         Some(row_menu(
             key.clone(),
             self.url(cx).unwrap_or_default(),
+            self.host_name(cx),
             link.as_ref(),
             watchable,
             move |_| offer.clone(),
@@ -1390,7 +1400,10 @@ impl PullRequestView {
                         .small()
                         .compact()
                         .icon(IconName::ExternalLink)
-                        .tooltip(crate::tr!("pull_requests.open_on_github"))
+                        .tooltip(crate::tr!(
+                            "pull_requests.open_on_host",
+                            host_name = self.host_name(cx)
+                        ))
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
             })
@@ -1682,12 +1695,16 @@ impl PullRequestView {
             notices.push(notice(
                 crate::tr!(
                     "pull_requests.notice_rate_limited",
-                    host = self
-                        .current
-                        .as_ref()
-                        .map(|(_, key)| key.host.clone())
-                        .unwrap_or_default(),
-                    time = String::new()
+                    host_name = self.host_name(cx),
+                    when = self
+                        .link(cx)
+                        .and_then(|link| match link.sync_error {
+                            Some(tcode_core::pull_request::PullRequestSyncError::RateLimited {
+                                retry_at,
+                            }) => Some(super::resumes(retry_at)),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| crate::tr!("pull_requests.notice_soon").into_owned())
                 )
                 .into_owned(),
                 None,
@@ -1774,7 +1791,11 @@ impl PullRequestView {
         match error.code.as_str() {
             "pull_request_no_credential" | "pull_request_host_disabled" => material::empty_state(
                 Icon::new(IconName::Lock),
-                crate::tr!("pull_requests.detail.no_credential_title").into_owned(),
+                crate::tr!(
+                    "pull_requests.detail.no_credential_title",
+                    host_name = self.host_name(cx)
+                )
+                .into_owned(),
                 String::new(),
                 cx,
             )
@@ -1805,7 +1826,10 @@ impl PullRequestView {
                             Button::new("pr-unavailable-open")
                                 .ghost()
                                 .small()
-                                .label(crate::tr!("pull_requests.open_on_github"))
+                                .label(crate::tr!(
+                                    "pull_requests.open_on_host",
+                                    host_name = self.host_name(cx)
+                                ))
                                 .on_click(move |_, _, cx| cx.open_url(&url))
                         })),
                 )
