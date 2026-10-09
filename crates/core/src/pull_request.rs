@@ -20,6 +20,28 @@ pub struct HostTerms {
     /// Whether a web URL reads as one of the host's pull requests: a menu hint only, since the
     /// host validates and canonicalizes the target.
     pub pull_request_url: fn(&str) -> bool,
+    /// Whether a person reads the host by its own name rather than the product's: one product
+    /// name would mislabel a server that runs a sibling of it.
+    pub named_by_host: bool,
+    /// The host's monochrome mark among the UI's icon assets.
+    pub mark: &'static str,
+}
+
+impl HostTerms {
+    /// The host as a person reads it, for a host at `authority`.
+    pub fn display_name(&self, authority: &str) -> String {
+        if self.named_by_host {
+            host_name(authority).to_owned()
+        } else {
+            self.name.to_owned()
+        }
+    }
+}
+
+/// The host name of an authority, without its port or mount path.
+pub fn host_name(authority: &str) -> &str {
+    let host = authority.split('/').next().unwrap_or(authority);
+    host.split(':').next().unwrap_or(host)
 }
 
 pub const GITHUB: HostTerms = HostTerms {
@@ -45,37 +67,207 @@ pub const GITHUB: HostTerms = HostTerms {
             && !repository.is_empty()
             && number.parse::<u64>().is_ok_and(|number| number > 0)
     },
+    named_by_host: false,
+    mark: "icons/github.svg",
 };
 
+pub const FORGEJO: HostTerms = HostTerms {
+    name: "Forgejo",
+    clis: "tea",
+    stacks: None,
+    merge_commands: &[("tea", "pr")],
+    pull_request_url: forgejo_pull_request_url,
+    named_by_host: true,
+    mark: "icons/forgejo.svg",
+};
+
+/// Gitea and Forgejo share an API and a CLI, so they differ only in name.
+pub const GITEA: HostTerms = HostTerms {
+    name: "Gitea",
+    ..FORGEJO
+};
+
+/// `https://host[:port][/mount]/owner/repository/pulls/N`, on any host.
+fn forgejo_pull_request_url(value: &str) -> bool {
+    let value = value.split(['?', '#']).next().unwrap_or_default();
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let parts: Vec<_> = rest.split('/').collect();
+    parts.iter().enumerate().any(|(index, part)| {
+        *part == "pulls"
+            && index >= 3
+            && !parts[0].is_empty()
+            && !parts[index - 2].is_empty()
+            && !parts[index - 1].is_empty()
+            && parts
+                .get(index + 1)
+                .and_then(|number| number.parse::<u64>().ok())
+                .is_some_and(|number| number > 0)
+    })
+}
+
 /// Every host Tcode reads pull requests from.
-pub const HOSTS: &[&HostTerms] = &[&GITHUB];
+pub const HOSTS: &[&HostTerms] = &[&GITHUB, &FORGEJO, &GITEA];
+
+/// The software a source-control host runs, which decides how Tcode talks to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKind {
+    Github,
+    Forgejo,
+    Gitea,
+}
+
+/// Why an authority cannot be a host of a kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostRefusal {
+    Blank,
+    Invalid,
+    /// A port or a path on a kind whose hosts are named by host name alone.
+    PortOrPath,
+}
+
+impl HostKind {
+    pub const ALL: [Self; 3] = [Self::Github, Self::Forgejo, Self::Gitea];
+
+    pub fn terms(self) -> &'static HostTerms {
+        match self {
+            Self::Github => &GITHUB,
+            Self::Forgejo => &FORGEJO,
+            Self::Gitea => &GITEA,
+        }
+    }
+
+    /// The kind's public host, which needs no adding.
+    pub fn public_host(self) -> &'static str {
+        match self {
+            Self::Github => "github.com",
+            Self::Forgejo => "codeberg.org",
+            Self::Gitea => "gitea.com",
+        }
+    }
+
+    /// The kind a host's name says it runs: a public host, or a whole DNS label naming the
+    /// software.
+    pub fn detect(authority: &str) -> Option<Self> {
+        let host = host_name(authority).to_ascii_lowercase();
+        Self::ALL.into_iter().find(|kind| {
+            host == kind.public_host()
+                || host.split('.').any(|label| {
+                    label
+                        == match kind {
+                            Self::Github => "github",
+                            Self::Forgejo => "forgejo",
+                            Self::Gitea => "gitea",
+                        }
+                })
+        })
+    }
+
+    /// An authority as settings keep it: lowercase, without a scheme or trailing slashes. Only
+    /// Forgejo and Gitea servers take a port and a mount path.
+    pub fn authority(self, raw: &str) -> Result<String, HostRefusal> {
+        let value = raw.trim().to_ascii_lowercase();
+        let value = value
+            .strip_prefix("https://")
+            .or_else(|| value.strip_prefix("http://"))
+            .unwrap_or(&value)
+            .trim_end_matches('/');
+        if value.is_empty() {
+            return Err(HostRefusal::Blank);
+        }
+        let (host_port, path) = value.split_once('/').unwrap_or((value, ""));
+        let (host, port) = match host_port.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_port, None),
+        };
+        if !dns_name(host) {
+            return Err(HostRefusal::Invalid);
+        }
+        if port.is_none() && path.is_empty() {
+            return Ok(value.to_owned());
+        }
+        if self == Self::Github {
+            return Err(HostRefusal::PortOrPath);
+        }
+        if port.is_some_and(|port| port.parse::<u16>().map_or(true, |port| port == 0))
+            || (!path.is_empty()
+                && !path.split('/').all(|segment| {
+                    !segment.is_empty()
+                        && segment != "."
+                        && segment != ".."
+                        && segment
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b))
+                }))
+        {
+            return Err(HostRefusal::Invalid);
+        }
+        Ok(value.to_owned())
+    }
+}
+
+/// A DNS host name: labels of ASCII letters, digits and inner hyphens.
+pub fn dns_name(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// The hosts whose terms Tcode's text names: GitHub's, and those of every other kind in
+/// `kinds`, in [`HOSTS`] order.
+pub fn hosts_in(kinds: impl IntoIterator<Item = HostKind>) -> Vec<&'static HostTerms> {
+    let kinds: Vec<_> = kinds.into_iter().collect();
+    HOSTS
+        .iter()
+        .copied()
+        .filter(|terms| {
+            std::ptr::eq(*terms, &GITHUB)
+                || kinds.iter().any(|kind| std::ptr::eq(kind.terms(), *terms))
+        })
+        .collect()
+}
 
 const LINKING_OPEN: &str = "<pull_request_linking>\n";
 const LINKING_CLOSE: &str = "\n</pull_request_linking>\n\n";
 
 /// The hosts by name, as Tcode's text to the model names them together.
-pub fn host_names() -> String {
-    let names: Vec<_> = HOSTS.iter().map(|terms| terms.name).collect();
+pub fn host_names(hosts: &[&HostTerms]) -> String {
+    let names: Vec<_> = hosts.iter().map(|terms| terms.name).collect();
     names.join(" or ")
 }
 
 /// Prepended to each turn while the pull request tools are registered; the transcript shows it.
-pub fn linking_instructions() -> &'static str {
-    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TEXT.get_or_init(|| {
-        let clis: Vec<_> = HOSTS.iter().map(|terms| terms.clis).collect();
-        let mut text = format!(
-            "{LINKING_OPEN}When the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to {}, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.",
-            clis.join(", ")
-        );
-        for (stacks, docs) in HOSTS.iter().filter_map(|terms| terms.stacks) {
-            text.push_str(&format!(
-                "\nFor dependent changes, {stacks} preserve the full bottom-to-top topology and merge scope; see {docs} ."
-            ));
+pub fn linking_instructions(hosts: &[&HostTerms]) -> String {
+    let mut clis: Vec<_> = Vec::new();
+    for terms in hosts {
+        if !clis.contains(&terms.clis) {
+            clis.push(terms.clis);
         }
-        text.push_str(LINKING_CLOSE);
-        text
-    })
+    }
+    let mut text = format!(
+        "{LINKING_OPEN}When the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to {}, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.",
+        clis.join(", ")
+    );
+    for (stacks, docs) in hosts.iter().filter_map(|terms| terms.stacks) {
+        text.push_str(&format!(
+            "\nFor dependent changes, {stacks} preserve the full bottom-to-top topology and merge scope; see {docs} ."
+        ));
+    }
+    text.push_str(LINKING_CLOSE);
+    text
 }
 
 /// The rest of a turn's injected context when it leads with the linking instructions, whichever
@@ -1175,6 +1367,66 @@ mod tests {
         }
     }
 
+    /// The model reads this text on every turn: with only GitHub hosts configured it is what
+    /// it was before other hosts existed, word for word, and a configured Forgejo or Gitea host
+    /// adds its CLI and name, once for the two.
+    #[test]
+    fn the_model_reads_the_hosts_settings_configure() {
+        let github = hosts_in([HostKind::Github]);
+        assert_eq!(
+            linking_instructions(&github),
+            concat!(
+                "<pull_request_linking>\nWhen the tcode_pull_requests MCP server exposes link_pull_request, use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, link every layer, not just the current branch or top PR. This applies to gh, gh stack, other CLIs and host APIs: they do not register PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link anything missing. Do not link unrelated PRs mentioned only as background. If linking fails, report that failure instead of claiming the PR is linked.\nWhen asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: Tcode wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. A wake is news, not a merge decision: check readiness yourself before merging. When you hand the work back to the user, call unwatch_pull_request first.",
+                "\nFor dependent changes, GitHub native stacks preserve the full bottom-to-top topology and merge scope; see https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-stacked-pull-requests .",
+                "\n</pull_request_linking>\n\n"
+            )
+        );
+        assert_eq!(host_names(&github), "GitHub");
+        let all = hosts_in([HostKind::Gitea, HostKind::Forgejo]);
+        assert_eq!(host_names(&all), "GitHub or Forgejo or Gitea");
+        assert!(
+            linking_instructions(&all).contains("This applies to gh, gh stack, tea, other CLIs")
+        );
+        assert!(merges_or_closes("tea pr merge 3"));
+        assert!(
+            strip_linking_instructions(&format!("{}typed", linking_instructions(&all)))
+                == Some("typed")
+        );
+    }
+
+    /// What Add host accepts, and what the host's validation of a settings write accepts: a
+    /// GitHub host is a host name alone; a Forgejo or Gitea server may carry a port and a mount.
+    #[test]
+    fn each_kind_names_its_hosts_by_its_own_rule() {
+        assert_eq!(
+            HostKind::Forgejo.authority(" HTTPS://Git.Acme.test:3000/forge/ "),
+            Ok("git.acme.test:3000/forge".to_owned())
+        );
+        assert_eq!(
+            HostKind::Github.authority("github.example.com:8443"),
+            Err(HostRefusal::PortOrPath)
+        );
+        assert_eq!(HostKind::Gitea.authority("  "), Err(HostRefusal::Blank));
+        for invalid in ["a b", "git.acme.test:0", "git.acme.test/../x", "-x.test"] {
+            assert_eq!(
+                HostKind::Gitea.authority(invalid),
+                Err(HostRefusal::Invalid),
+                "{invalid}"
+            );
+        }
+        assert_eq!(HostKind::detect("codeberg.org"), Some(HostKind::Forgejo));
+        assert_eq!(
+            HostKind::detect("gitea.acme.test:3000/x"),
+            Some(HostKind::Gitea)
+        );
+        assert_eq!(HostKind::detect("ghost.acme.test"), None);
+        assert_eq!(
+            FORGEJO.display_name("git.acme.test:3000/forge"),
+            "git.acme.test"
+        );
+        assert_eq!(GITHUB.display_name("github.example.com"), "GitHub");
+    }
+
     fn link(number: u64, state: Option<PullRequestState>, draft: bool) -> ThreadPullRequestLink {
         ThreadPullRequestLink {
             key: PullRequestKey::new("github.com", "sample/project", number),
@@ -1270,6 +1522,9 @@ mod tests {
         ));
         assert!(is_pull_request_url(
             "https://github.com/sample/project/pull/123?view=1#issuecomment-7"
+        ));
+        assert!(is_pull_request_url(
+            "https://git.acme.test:3000/forge/sample/project/pulls/4/files"
         ));
         for ordinary in [
             "https://github.com/sample/project/issues/123",

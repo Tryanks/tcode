@@ -108,7 +108,7 @@ pub fn classify(source: &str) -> Option<MediaSource> {
     }
 }
 
-fn media_type(value: &str) -> Option<String> {
+pub(crate) fn media_type(value: &str) -> Option<String> {
     let value = value.split(';').next()?.trim().to_ascii_lowercase();
     let (kind, subtype) = value.split_once('/')?;
     (matches!(kind, "image" | "video" | "audio")
@@ -121,7 +121,7 @@ fn media_type(value: &str) -> Option<String> {
 
 /// The raw host labels every committed binary `application/octet-stream`, so the name decides
 /// those.
-fn type_from_name(url: &Url) -> Option<&'static str> {
+pub(crate) fn type_from_name(url: &Url) -> Option<&'static str> {
     let name = url.path_segments()?.next_back()?.to_ascii_lowercase();
     Some(match name.rsplit_once('.')?.1 {
         "png" => "image/png",
@@ -141,6 +141,22 @@ fn type_from_name(url: &Url) -> Option<&'static str> {
         "ogg" => "audio/ogg",
         _ => return None,
     })
+}
+
+/// An SVG is a document; the client draws it as an image only, so its dimensions are the
+/// layout's. Every other image must decode to bounded dimensions.
+pub(crate) fn bounded(mime: &str, bytes: &[u8]) -> Result<(), GitHubError> {
+    if mime != "image/svg+xml" {
+        let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|reader| reader.into_dimensions().ok())
+            .ok_or(GitHubError::UnsupportedMedia)?;
+        if width > MAX_SIDE || height > MAX_SIDE || width as u64 * height as u64 > MAX_PIXELS {
+            return Err(GitHubError::BodyTooLarge);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn fetch(
@@ -257,18 +273,7 @@ pub(super) fn fetch(
     if bytes.len() > MAX_PULL_REQUEST_MEDIA_BYTES {
         return Err(GitHubError::BodyTooLarge);
     }
-    // An SVG is a document; the client draws it as an image only, so its dimensions are the
-    // layout's. Every other image must decode to bounded dimensions.
-    if mime != "image/svg+xml" {
-        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|reader| reader.into_dimensions().ok())
-            .ok_or(GitHubError::UnsupportedMedia)?;
-        if width > MAX_SIDE || height > MAX_SIDE || width as u64 * height as u64 > MAX_PIXELS {
-            return Err(GitHubError::BodyTooLarge);
-        }
-    }
+    bounded(&mime, &bytes)?;
     Ok(PullRequestMedia::Image {
         bytes,
         mime,

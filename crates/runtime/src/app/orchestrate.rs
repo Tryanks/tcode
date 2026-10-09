@@ -13,6 +13,8 @@ pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_r
 pub(super) struct McpWiring {
     pub(super) pull_request_url: Option<String>,
     pub(super) pull_request_tokens: Option<pull_request_mcp::TokenRegistry>,
+    /// The hosts the pull request tools' descriptions name.
+    pub(super) pull_request_hosts: Option<pull_request_mcp::HostNames>,
     pub(super) pull_request_registrations: HashMap<String, agent::McpRegistration>,
     pub(super) preview_url: Option<String>,
     pub(super) preview_tokens: Option<preview_mcp::TokenRegistry>,

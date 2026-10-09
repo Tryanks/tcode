@@ -87,11 +87,11 @@ pub enum Command {
         attachment_paths: Vec<PathBuf>,
     },
     ReloadProvider,
-    SetGitHubToken {
+    SetHostToken {
         host: String,
         token: Option<String>,
     },
-    RefreshGitHubCredentials,
+    RefreshHostCredentials,
     LinkPullRequest {
         session_id: String,
         reference: String,
@@ -575,7 +575,7 @@ impl Command {
     pub fn contains_secret(&self) -> bool {
         matches!(
             self,
-            Self::SetGitHubToken { .. }
+            Self::SetHostToken { .. }
                 | Self::SetProfileSecret { .. }
                 | Self::CreateThirdPartyProfile { .. }
         )
@@ -592,7 +592,7 @@ impl Command {
                 | Self::PreviewReply { .. }
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
-                | Self::RefreshGitHubCredentials
+                | Self::RefreshHostCredentials
                 | Self::RunPullRequestAction { .. }
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage

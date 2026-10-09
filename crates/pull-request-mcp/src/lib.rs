@@ -8,7 +8,10 @@ use rmcp::{
     },
 };
 use serde::Deserialize;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +41,30 @@ pub struct PullRequestMcpServer {
     pub url: String,
     pub tokens: TokenRegistry,
     pub requests: async_channel::Receiver<BrokerRequest>,
+    pub hosts: HostNames,
+}
+
+/// The hosts the tool descriptions name, as the host's settings have them now; a thread's tools
+/// are described with the names current when it connects.
+#[derive(Clone)]
+pub struct HostNames(Arc<RwLock<String>>);
+
+impl Default for HostNames {
+    fn default() -> Self {
+        let github = tcode_core::pull_request::hosts_in([]);
+        Self(Arc::new(RwLock::new(tcode_core::pull_request::host_names(
+            &github,
+        ))))
+    }
+}
+
+impl HostNames {
+    pub fn set(&self, names: String) {
+        *self.0.write().unwrap() = names;
+    }
+    fn get(&self) -> String {
+        self.0.read().unwrap().clone()
+    }
 }
 pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
     let (sender, requests) = async_channel::unbounded();
@@ -50,10 +77,19 @@ pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
             timed_out: "pull request operation timed out",
         },
     );
+    let hosts = HostNames::default();
+    let named = hosts.clone();
     let tokens = TokenRegistry::new(move |session_id| {
         let broker = broker.clone();
+        let hosts = named.clone();
         StreamableHttpService::new(
-            move || Ok(PullRequestTools::new(broker.clone(), session_id.clone())),
+            move || {
+                Ok(PullRequestTools::new(
+                    broker.clone(),
+                    session_id.clone(),
+                    &hosts.get(),
+                ))
+            },
             Arc::new(LocalSessionManager::default()),
             StreamableHttpServerConfig::default(),
         )
@@ -63,6 +99,7 @@ pub fn start(host: &mut mcp_host::Host) -> PullRequestMcpServer {
         url: host.url("/pull-requests"),
         tokens,
         requests,
+        hosts,
     }
 }
 #[derive(Clone)]
@@ -73,11 +110,11 @@ pub struct PullRequestTools {
 }
 #[tool_router]
 impl PullRequestTools {
-    fn new(broker: Broker, session_id: String) -> Self {
+    fn new(broker: Broker, session_id: String, hosts: &str) -> Self {
         Self {
             broker,
             session_id,
-            tool_router: named_router(),
+            tool_router: named_router(hosts),
         }
     }
     async fn invoke(&self, operation: Operation) -> CallToolResult {
@@ -126,33 +163,30 @@ impl PullRequestTools {
     }
 }
 
-/// The tools, with each description naming the hosts where it says `{hosts}`.
-fn named_router() -> ToolRouter<PullRequestTools> {
-    let hosts = tcode_core::pull_request::host_names();
+/// The tools, with each description naming `hosts` where it says `{hosts}`.
+fn named_router(hosts: &str) -> ToolRouter<PullRequestTools> {
     let mut router = PullRequestTools::tool_router();
     for route in router.map.values_mut() {
         if let Some(description) = &mut route.attr.description {
-            *description = description.replace("{hosts}", &hosts).into();
+            *description = description.replace("{hosts}", hosts).into();
         }
     }
     router
 }
 
-/// Every tool's name and the description its model reads, in the order they are listed.
-pub fn tool_descriptions() -> &'static [(String, String)] {
-    static TOOLS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
-    TOOLS.get_or_init(|| {
-        named_router()
-            .list_all()
-            .into_iter()
-            .map(|tool| {
-                (
-                    tool.name.to_string(),
-                    tool.description.as_deref().unwrap_or_default().to_owned(),
-                )
-            })
-            .collect()
-    })
+/// Every tool's name and the description its model reads naming `hosts`, in the order they
+/// are listed.
+pub fn tool_descriptions(hosts: &str) -> Vec<(String, String)> {
+    named_router(hosts)
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.to_string(),
+                tool.description.as_deref().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
 }
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PullRequestTools {

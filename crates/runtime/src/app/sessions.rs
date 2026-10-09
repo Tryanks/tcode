@@ -925,11 +925,13 @@ impl AppState {
         for id in changed {
             self.providers.invalidate_usage(&id);
         }
-        let github_changed = self.settings.github.hosts != settings.github.hosts;
+        let hosts_changed = self.settings.source_control.hosts != settings.source_control.hosts;
         self.settings = settings;
-        self.forge.configure(self.settings.github.hosts.clone());
-        if github_changed {
-            self.refresh_github_credentials(cx);
+        self.forge
+            .configure(self.settings.source_control.hosts.clone());
+        if hosts_changed {
+            self.name_pull_request_hosts();
+            self.refresh_host_credentials(cx);
         }
         if settlement_changed {
             self.request_settlement_sweep(cx);

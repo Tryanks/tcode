@@ -742,11 +742,11 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
     );
     let settings_store = SettingsStore::new(store.root().clone());
     let mut settings = settings_store.load();
-    settings.github.hosts.insert(
+    settings.source_control.hosts.insert(
         "github.com".into(),
-        tcode_core::settings::GitHubHostSettings {
+        tcode_core::settings::HostSettings {
             enabled: false,
-            ..Default::default()
+            ..tcode_core::settings::HostSettings::new(pull_request::HostKind::Github)
         },
     );
     settings_store.save(&settings).unwrap();
@@ -895,7 +895,10 @@ fn registered_tools_prefix_each_turn_except_a_native_command() {
         if instructed {
             assert_eq!(
                 text,
-                format!("{}{typed}", pull_request::linking_instructions())
+                format!(
+                    "{}{typed}",
+                    pull_request::linking_instructions(&pull_request::hosts_in([]))
+                )
             );
         } else {
             assert_eq!(text, typed_wire, "a native command stays at byte zero");

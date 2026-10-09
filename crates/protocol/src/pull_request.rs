@@ -241,6 +241,8 @@ pub struct PullRequestCapabilities {
     pub update_branch: bool,
     /// Opening a pull request that reverses a merged one.
     pub revert: bool,
+    /// The host keeps the account's viewed marks; without them Tcode keeps the marks.
+    pub host_viewed_marks: bool,
 }
 impl PullRequestCapabilities {
     pub const ALL: Self = Self {
@@ -253,6 +255,7 @@ impl PullRequestCapabilities {
         auto_merge: true,
         update_branch: true,
         revert: true,
+        host_viewed_marks: true,
     };
 }
 

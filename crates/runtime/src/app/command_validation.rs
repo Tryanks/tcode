@@ -64,17 +64,27 @@ impl AppState {
                 .apply(patch.clone())
                 .map_err(|message| error("invalid_settings", message))?;
         }
-        match command {
-            Command::SetGitHubToken { host, .. }
-            | Command::PatchSettings {
-                patch: tcode_core::settings::SettingsPatch::GitHubHost { host, .. },
-            } if self.forge.normalize_host(host).is_none() => {
-                return Err(error(
-                    "invalid_github_host",
-                    "Use a GitHub hostname without a URL or path.",
-                ));
+        let host_kind = match command {
+            Command::SetHostToken { host, .. } => Some((
+                host,
+                self.settings
+                    .source_control
+                    .kind(host)
+                    .or_else(|| tcode_core::pull_request::HostKind::detect(host)),
+            )),
+            Command::PatchSettings {
+                patch: SettingsPatch::SourceControlHost { host, kind, .. },
+            } => Some((host, Some(*kind))),
+            _ => None,
+        };
+        if let Some((host, kind)) = host_kind {
+            let kind = kind.unwrap_or(tcode_core::pull_request::HostKind::Github);
+            // Settings and the token store lowercase and trim; a scheme or slash is not theirs to drop.
+            if kind.authority(host).ok() != Some(host.trim().to_ascii_lowercase()) {
+                return Err(error("invalid_host", &host_rule(kind)));
             }
-
+        }
+        match command {
             Command::DeleteProfile { profile_id }
                 if Settings::is_builtin_profile_id(profile_id) =>
             {
@@ -436,11 +446,62 @@ impl AppState {
     }
 }
 
+/// What an authority of `kind` looks like, for a host that refused one.
+fn host_rule(kind: tcode_core::pull_request::HostKind) -> String {
+    use tcode_core::pull_request::HostKind;
+    match kind {
+        HostKind::Github => "Use a GitHub hostname without a URL or path.".into(),
+        HostKind::Forgejo | HostKind::Gitea => format!(
+            "Use a {} host name in lowercase, with its port and path if the server has them, without a URL scheme.",
+            kind.terms().name
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::test_support::{TestAppContext, TestStore};
     use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage};
+
+    /// A host is written to settings by its kind's rule: a Forgejo server keeps its port and
+    /// mount, a GitHub host takes neither, and each refusal says the kind's own rule.
+    #[test]
+    fn a_host_is_refused_by_its_kinds_rule() {
+        use tcode_core::pull_request::HostKind;
+        let store = TestStore::new("host-validation");
+        let state = AppState::new((*store).clone()).unwrap();
+        let add = |host: &str, kind| Command::PatchSettings {
+            patch: SettingsPatch::SourceControlHost {
+                host: host.into(),
+                kind,
+                enabled: Some(true),
+                account: None,
+            },
+        };
+        assert!(
+            state
+                .validate_command_target(&add("git.acme.test:3000/forge", HostKind::Forgejo))
+                .is_ok()
+        );
+        let github = state
+            .validate_command_target(&add("git.acme.test:3000", HostKind::Github))
+            .unwrap_err();
+        assert_eq!(github.code, "invalid_host");
+        assert_eq!(
+            github.message,
+            "Use a GitHub hostname without a URL or path."
+        );
+        let gitea = state
+            .validate_command_target(&add("https://git.acme.test", HostKind::Gitea))
+            .unwrap_err();
+        assert_eq!(gitea.code, "invalid_host");
+        assert!(
+            gitea.message.starts_with("Use a Gitea host name"),
+            "{}",
+            gitea.message
+        );
+    }
 
     #[test]
     fn writes_blocked_by_host_state_receive_rejected_acks() {

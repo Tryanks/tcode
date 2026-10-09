@@ -5,7 +5,7 @@ use std::{
     thread,
     time::{Duration, SystemTime},
 };
-use tcode_core::settings::GitHubHostSettings;
+use tcode_core::{pull_request::HostKind, settings::HostSettings};
 use tcode_services::github::{
     CredentialError, GitHubApi, GitHubError, RequestOptions, RestRequest,
     api::Authentication,
@@ -92,7 +92,11 @@ fn maps_hosts_and_keeps_saved_environment_and_enterprise_credentials_in_their_bo
     assert!(request.starts_with("POST /api/graphql "));
     store
         .store
-        .set_github_token("GITHUB.COM", Some("saved-first"))
+        .set_token(
+            tcode_core::pull_request::HostKind::Github,
+            "GITHUB.COM",
+            Some("saved-first"),
+        )
         .unwrap();
     let (answer, request, _) = fixture.call(
         || {
@@ -110,7 +114,11 @@ fn maps_hosts_and_keeps_saved_environment_and_enterprise_credentials_in_their_bo
     assert!(request.contains("Bearer saved-first"));
     store
         .store
-        .set_github_token("github.com", Some("replacement"))
+        .set_token(
+            tcode_core::pull_request::HostKind::Github,
+            "github.com",
+            Some("replacement"),
+        )
         .unwrap();
     let (answer, request, _) = fixture.call(
         || {
@@ -126,7 +134,14 @@ fn maps_hosts_and_keeps_saved_environment_and_enterprise_credentials_in_their_bo
     );
     answer.unwrap();
     assert!(request.contains("Bearer replacement"));
-    store.store.set_github_token("github.com", None).unwrap();
+    store
+        .store
+        .set_token(
+            tcode_core::pull_request::HostKind::Github,
+            "github.com",
+            None,
+        )
+        .unwrap();
     let (answer, request, _) = fixture.call(
         || {
             api.rest(
@@ -143,7 +158,8 @@ fn maps_hosts_and_keeps_saved_environment_and_enterprise_credentials_in_their_bo
     assert!(request.contains("Bearer public-first"));
     credentials.configure(BTreeMap::from([(
         "github.com".into(),
-        GitHubHostSettings {
+        HostSettings {
+            kind: HostKind::Github,
             enabled: false,
             account: None,
         },
@@ -481,7 +497,11 @@ fn latest_arrival_can_restore_quota_but_an_older_success_cannot_clear_a_new_refu
     answer.unwrap();
     store
         .store
-        .set_github_token("github.com", Some("fresh-quota-scope"))
+        .set_token(
+            tcode_core::pull_request::HostKind::Github,
+            "github.com",
+            Some("fresh-quota-scope"),
+        )
         .unwrap();
     let (answer, _, _) = fixture.call(
         || api.rest("github.com", RestRequest::get("/new"), &interactive),
@@ -554,7 +574,11 @@ fn pinned_verified_identity_is_cached_per_fingerprint_and_refuses_another_host()
     );
     store
         .store
-        .set_github_token("github.com", Some("replacement"))
+        .set_token(
+            tcode_core::pull_request::HostKind::Github,
+            "github.com",
+            Some("replacement"),
+        )
         .unwrap();
     let (verified, _, _) = fixture.call(
         || api.verified_credential("github.com"),
@@ -754,7 +778,7 @@ if [ -n "$6" ]; then printf '%s' "account-$6"; else /bin/cat "$FIXTURE_ROOT/toke
 #[test]
 fn gh_process_boundary_honors_binding_pins_cache_invalidation_and_failure_ttls() {
     use std::os::unix::fs::PermissionsExt as _;
-    use tcode_core::settings::GitHubCredentialSource;
+    use tcode_core::settings::CredentialSource;
     use tcode_services::github::Credentials;
     let fixture = Fixture::new();
     let store = Store::new();
@@ -843,7 +867,8 @@ fn gh_process_boundary_honors_binding_pins_cache_invalidation_and_failure_ttls()
     ] {
         credentials.configure(BTreeMap::from([(
             "github.com".into(),
-            GitHubHostSettings {
+            HostSettings {
+                kind: HostKind::Github,
                 enabled: true,
                 account: Some(account.into()),
             },
@@ -871,7 +896,8 @@ fn gh_process_boundary_honors_binding_pins_cache_invalidation_and_failure_ttls()
     let env_credentials = Credentials::new(store.store.clone(), env);
     env_credentials.configure(BTreeMap::from([(
         "github.com".into(),
-        GitHubHostSettings {
+        HostSettings {
+            kind: HostKind::Github,
             enabled: true,
             account: Some("second".into()),
         },
@@ -896,7 +922,9 @@ fn gh_process_boundary_honors_binding_pins_cache_invalidation_and_failure_ttls()
     assert_eq!(status["github.com"].accounts, ["first", "second"]);
     assert_eq!(
         status["github.com"].source,
-        Some(GitHubCredentialSource::Env)
+        Some(CredentialSource::Env {
+            name: "GITHUB_TOKEN".into()
+        })
     );
     // A negative CLI lookup is cached; a repaired executable failure is retried immediately.
     let retry_credentials = Credentials::new(store.store.clone(), gh_fixture(&store));

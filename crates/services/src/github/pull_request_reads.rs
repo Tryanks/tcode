@@ -903,7 +903,7 @@ fn is_repository_path(path: &str) -> bool {
             .all(|segment| !matches!(segment, "" | "." | ".."))
 }
 
-pub(super) fn percent_encode(segment: &str) -> String {
+pub(crate) fn percent_encode(segment: &str) -> String {
     segment
         .bytes()
         .map(|byte| {
@@ -1147,7 +1147,7 @@ fn listed_file(row: &Value) -> Option<PullRequestFile> {
     })
 }
 
-fn diff_files(diff: &str) -> Option<Vec<PullRequestFile>> {
+pub(crate) fn diff_files(diff: &str) -> Option<Vec<PullRequestFile>> {
     agent::file_changes_from_unified_diff(diff)
         .ok()?
         .into_iter()

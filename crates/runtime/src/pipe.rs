@@ -501,9 +501,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx,
             ));
         }
-        Command::RefreshGitHubCredentials => app.refresh_github_credentials(cx),
-        Command::SetGitHubToken { host, token } => {
-            return CommandOutcome::Pending(app.set_github_token(host, token, cx));
+        Command::RefreshHostCredentials => app.refresh_host_credentials(cx),
+        Command::SetHostToken { host, token } => {
+            return CommandOutcome::Pending(app.set_host_token(host, token, cx));
         }
         Command::SetProfileSecret {
             profile_id,
