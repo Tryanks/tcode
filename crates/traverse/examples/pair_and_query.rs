@@ -5,14 +5,14 @@
 //!
 //! ```sh
 //! cargo run -p tcode-headless -- serve --name test --data-dir /tmp/tcode-traverse-test
-//! cargo run -p tcode-traverse --example pair_and_query -- 'tcode://pair?v=2&...'
+//! cargo run -p tcode-traverse --example pair_and_query -- 'tcode://pair?v=3&...' [ip]
 //! cargo run -p tcode-traverse --example pair_and_query -- --connect
 //! ```
 //!
-//! With `TRAVERSE_RELAY_ONLY=1` the device drops the invite's direct
-//! addresses and reaches the machine through its Traverse instance's relay
-//! and lookup, which exercises the same path a phone on another network
-//! takes. `RUST_LOG=tcode_traverse=debug` shows the LAN lookup at work.
+//! The link names no address, so pairing takes the relay, lookups and the
+//! LAN browse, as a phone does. An `ip` after the link is dialed at the
+//! link's port as well, as the address a person types once nothing found
+//! the machine. `RUST_LOG=tcode_traverse=debug` shows the LAN lookup at work.
 use std::time::{Duration, Instant};
 
 use tcode_client::ConnectionState;
@@ -22,7 +22,7 @@ use tcode_traverse::DeviceIdentity;
 fn main() {
     env_logger::init();
     let Some(argument) = std::env::args().nth(1) else {
-        eprintln!("usage: pair_and_query <tcode://pair?...> | --connect");
+        eprintln!("usage: pair_and_query <tcode://pair?...> [ip] | --connect");
         std::process::exit(2);
     };
     let data_dir = std::env::temp_dir().join("tcode-traverse-example-device");
@@ -42,11 +42,13 @@ fn main() {
         );
         saved
     } else {
-        let mut invite = parse_pair_url(&argument).expect("a v2 invite link");
-        if std::env::var_os("TRAVERSE_RELAY_ONLY").is_some() {
-            invite.addrs.clear();
-        }
-        let paired = match tcode_traverse::pair_blocking(&invite, &device) {
+        let invite = parse_pair_url(&argument).expect("a v3 invite link");
+        let address = std::env::args().nth(2).map(|address| {
+            address
+                .parse::<std::net::IpAddr>()
+                .expect("an IPv4 or IPv6 address")
+        });
+        let paired = match tcode_traverse::pair_blocking(&invite, address, &device) {
             Ok(paired) => paired,
             Err(error) => {
                 eprintln!("pairing failed: {error}");

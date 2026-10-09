@@ -287,13 +287,17 @@ impl ClientHost for NativeClientHost {
 
     /// Pairing runs on the Traverse runtime; the UI executor only awaits the
     /// result.
-    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
+    fn pair(
+        &self,
+        invite: PairInvite,
+        address: Option<std::net::IpAddr>,
+    ) -> HostFuture<'_, Result<PairedHost, String>> {
         let device = self.device();
         Box::pin(async move {
             let device = device?;
             let (done, result) = async_channel::bounded(1);
             crate::runtime().spawn(async move {
-                let paired = crate::pair(&invite, &device)
+                let paired = crate::pair(&invite, address, &device)
                     .await
                     .map_err(|error| error.to_string());
                 let _ = done.send(paired).await;
@@ -603,7 +607,7 @@ mod tests {
             space_name: None,
             host_id: "machine".into(),
             name: "Machine".into(),
-            traverse: None,
+            traverse: Vec::new(),
             relay: None,
             addrs: vec!["192.168.31.5:47420".into()],
             last_connected_unix: None,

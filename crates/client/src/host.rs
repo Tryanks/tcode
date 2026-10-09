@@ -210,9 +210,15 @@ pub trait ClientHost: 'static {
     }
 
     /// Exchange the invitation's secret for a pairing with exactly the
-    /// machine the invitation names.
-    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
-        let _ = invite;
+    /// machine the invitation names. `address` is the machine's IP address
+    /// as the user typed it after an attempt found no path to the machine;
+    /// it is dialed at the invitation's port.
+    fn pair(
+        &self,
+        invite: PairInvite,
+        address: Option<std::net::IpAddr>,
+    ) -> HostFuture<'_, Result<PairedHost, String>> {
+        let _ = (invite, address);
         Box::pin(async { Err("this client cannot add machines".into()) })
     }
 

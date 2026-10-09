@@ -93,7 +93,12 @@ fn attach(machine: &Machine) -> Device {
     let device = DeviceIdentity::load_or_create(&dir.0).unwrap();
     device.set_details("phone".into(), None);
     let minted = machine.host().new_invitation();
-    let paired: PairedHost = tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();
+    let paired: PairedHost = tcode_traverse::pair_blocking(
+        &minted.invite,
+        Some(std::net::Ipv4Addr::LOCALHOST.into()),
+        &device,
+    )
+    .unwrap();
     let transport = tcode_traverse::connect(&paired, &device);
     wait_syncing(&transport);
     let tunnels = transport.current_host.as_ref().unwrap().tunnels().unwrap();
@@ -234,11 +239,10 @@ fn a_connect_before_hello_is_refused_and_tunnels_per_connection_are_bounded() {
     let minted = machine.host().new_invitation();
     let addr = iroh::EndpointAddr::from_parts(
         minted.invite.host_id.parse().unwrap(),
-        minted
-            .invite
-            .addrs
-            .iter()
-            .map(|addr| iroh::TransportAddr::Ip(addr.parse().unwrap())),
+        [iroh::TransportAddr::Ip(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::LOCALHOST,
+            minted.invite.port,
+        )))],
     );
     tcode_traverse::block_on(async {
         let connection = raw.connect(addr.clone(), wire::ALPN_PAIR).await.unwrap();

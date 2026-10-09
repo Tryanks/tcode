@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     io,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
@@ -116,10 +117,11 @@ fn saved_sources(data_dir: &Path) -> Vec<ManifestSource> {
         Vec::new()
     });
     let mut sources = Vec::new();
-    for host in &hosts {
-        if let Some(source) = ManifestSource::from_traverse(host.traverse.as_deref())
-            && !sources.contains(&source)
-        {
+    for source in hosts
+        .iter()
+        .flat_map(|host| ManifestSource::from_traverse(&host.traverse))
+    {
+        if !sources.contains(&source) {
             sources.push(source);
         }
     }
@@ -192,6 +194,17 @@ impl Lookups {
         }
     }
 
+    /// [`Self::ensure`] each of `sources`, fetching concurrently.
+    async fn ensure_all(self: &Arc<Self>, sources: &[ManifestSource], pin: bool) {
+        let mut fetches = tokio::task::JoinSet::new();
+        for source in sources {
+            let lookups = self.clone();
+            let source = source.clone();
+            fetches.spawn(async move { lookups.ensure(&source, pin).await });
+        }
+        fetches.join_all().await;
+    }
+
     fn unpin(&self, source: &ManifestSource) {
         if let Some(known) = self.sources.lock().unwrap().get_mut(source) {
             known.pinned = known.pinned.saturating_sub(1);
@@ -247,9 +260,7 @@ impl Lookups {
         if dropped {
             self.apply().await;
         }
-        for source in &wanted {
-            self.ensure(source, false).await;
-        }
+        self.ensure_all(&wanted, false).await;
     }
 }
 
@@ -367,11 +378,11 @@ impl DeviceIdentity {
 }
 
 impl ClientEndpoint {
-    /// Make the machine's Traverse instance resolvable before dialing it.
-    async fn ensure_lookups(&self, traverse: Option<&str>) {
-        if let Some(source) = ManifestSource::from_traverse(traverse) {
-            self.lookups.ensure(&source, false).await;
-        }
+    /// Make the machine's Traverse instances resolvable before dialing it.
+    async fn ensure_lookups(&self, traverse: &[String]) {
+        self.lookups
+            .ensure_all(&ManifestSource::from_traverse(traverse), false)
+            .await;
     }
 }
 
@@ -383,7 +394,11 @@ pub enum PairError {
     Busy,
     AlreadyMember,
     SpaceUnavailable,
+    /// No path to the machine opened within the connect budget. The secret
+    /// was never sent, so the invitation is still valid.
     Unreachable(String),
+    /// The connection to the machine ended during the exchange.
+    Lost(String),
     /// The machine answered with something other than a pairing reply.
     Protocol(String),
 }
@@ -397,6 +412,7 @@ impl std::fmt::Display for PairError {
             Self::SpaceUnavailable => f.write_str("space_unavailable"),
             Self::Busy => f.write_str("the machine could not record the pairing; try again"),
             Self::Unreachable(error) => write!(f, "could not connect to the machine: {error}"),
+            Self::Lost(error) => write!(f, "lost the connection to the machine: {error}"),
             Self::Protocol(error) => write!(f, "invalid pairing response: {error}"),
         }
     }
@@ -421,26 +437,35 @@ fn dial_addr(host_id: &str, relay: Option<&str>, addrs: &[String]) -> Option<End
 }
 
 /// Exchange the invitation's secret for a pairing with exactly
-/// `invite.host_id`.
-pub async fn pair(invite: &PairInvite, device: &DeviceIdentity) -> Result<PairedHost, PairError> {
+/// `invite.host_id`. `address` is one the user typed for the machine after
+/// an attempt found no path; it is dialed at the invitation's port alongside
+/// everything else that may reach the machine.
+pub async fn pair(
+    invite: &PairInvite,
+    address: Option<IpAddr>,
+    device: &DeviceIdentity,
+) -> Result<PairedHost, PairError> {
     let client = device
         .client()
         .await
         .map_err(|error| PairError::Unreachable(error.to_string()))?;
-    let addr = dial_addr(&invite.host_id, invite.relay.as_deref(), &invite.addrs)
+    let typed: Vec<String> = address
+        .map(|ip| SocketAddr::new(ip, invite.port).to_string())
+        .into_iter()
+        .collect();
+    let addr = dial_addr(&invite.host_id, invite.relay.as_deref(), &typed)
         .ok_or_else(|| PairError::Protocol("invalid machine id".into()))?;
-    // The machine's instance is held for the exchange; the caller saves the
-    // machine on success, which keeps it, and a failure lets it go again.
-    let source = ManifestSource::from_traverse(invite.traverse.as_deref());
-    if let Some(source) = &source {
-        client.lookups.ensure(source, true).await;
-    }
+    // The machine's instances are held for the exchange; the caller saves
+    // the machine on success, which keeps them, and a failure lets them go
+    // again.
+    let sources = ManifestSource::from_traverse(&invite.traverse);
+    client.lookups.ensure_all(&sources, true).await;
     let result = pair_exchange(client, addr, invite, device).await;
-    if let Some(source) = &source {
+    for source in &sources {
         client.lookups.unpin(source);
-        if result.is_err() {
-            client.lookups.reconcile().await;
-        }
+    }
+    if result.is_err() && !sources.is_empty() {
+        client.lookups.reconcile().await;
     }
     result
 }
@@ -465,7 +490,7 @@ async fn pair_exchange(
         let (mut send, recv) = connection
             .open_bi()
             .await
-            .map_err(|error| PairError::Unreachable(error.to_string()))?;
+            .map_err(|error| PairError::Lost(error.to_string()))?;
         wire::write_line(
             &mut send,
             &ClientLine::Pair {
@@ -475,9 +500,9 @@ async fn pair_exchange(
             },
         )
         .await
-        .map_err(|error| PairError::Unreachable(error.to_string()))?;
+        .map_err(|error| PairError::Lost(error.to_string()))?;
         send.finish()
-            .map_err(|error| PairError::Unreachable(error.to_string()))?;
+            .map_err(|error| PairError::Lost(error.to_string()))?;
         let mut reader = wire::reader(recv);
         // Never resubmit a possibly consumed invitation after losing its
         // response.
@@ -491,6 +516,7 @@ async fn pair_exchange(
             } => {
                 let mut host = invite.paired(host_name);
                 host.space_name = space_name;
+                learn_addresses(&mut host, &connection);
                 Ok(host)
             }
             HostLine::PairRejected { reason } => Err(match reason {
@@ -512,9 +538,10 @@ async fn pair_exchange(
 /// [`pair`] from a thread outside the runtime.
 pub fn pair_blocking(
     invite: &PairInvite,
+    address: Option<IpAddr>,
     device: &DeviceIdentity,
 ) -> Result<PairedHost, PairError> {
-    block_on(pair(invite, device))
+    block_on(pair(invite, address, device))
 }
 
 /// Preview tunnels of one attachment: opened on whichever connection the
@@ -834,7 +861,7 @@ async fn establish(
     })?;
     let addr = dial_addr(&host.host_id, host.relay.as_deref(), &host.addrs)
         .ok_or_else(|| ConnectionFailure::Unreachable(Some("invalid machine id".into())))?;
-    client.ensure_lookups(host.traverse.as_deref()).await;
+    client.ensure_lookups(&host.traverse).await;
     let connection = match tokio::time::timeout(
         CONNECT_BUDGET,
         client.endpoint.connect(addr, wire::ALPN_MAIN),
@@ -925,8 +952,8 @@ fn close_failure(reason: &ConnectionError) -> ConnectionFailure {
     }
 }
 
-/// Remember how this connection actually reaches the machine, ahead of the
-/// hints the invite carried. Returns whether anything changed.
+/// Remember how this connection actually reaches the machine, ahead of what
+/// was known before. Returns whether anything changed.
 fn learn_addresses(host: &mut PairedHost, connection: &Connection) -> bool {
     let before = (host.addrs.clone(), host.relay.clone());
     let paths = connection.paths();
