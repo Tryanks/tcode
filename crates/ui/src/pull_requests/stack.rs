@@ -1226,22 +1226,20 @@ pub(super) fn answer_toast(
                 }
             }
         }
+        // A rebase that did not start names why and that nothing moved.
+        PullRequestActionResult::Rejected(rejection)
+            if answer.rebase && *rejection != PullRequestRejection::OperationRunning =>
+        {
+            not(
+                tr_with(
+                    "result_not_rebased",
+                    &[("reason", rejection_reason(rejection))],
+                ),
+                tr("nothing_changed"),
+            )
+        }
         PullRequestActionResult::Rejected(rejection) => {
-            let nothing = if answer.rebase {
-                tr("nothing_changed")
-            } else {
-                String::new()
-            };
-            let titled = |title: String, body: String| {
-                if answer.rebase {
-                    not(
-                        tr_with("result_not_rebased", &[("reason", body)]),
-                        nothing.clone(),
-                    )
-                } else {
-                    not(title, body)
-                }
-            };
+            let titled = not;
             match rejection {
                 PullRequestRejection::LayerChanged {
                     number,
@@ -2595,6 +2593,13 @@ impl RebaseStackDialog {
                 }
                 ready = blockers.is_empty() && changed.is_none();
             }
+        }
+        if self.state.is_none() {
+            count = target
+                .offer
+                .stack
+                .as_ref()
+                .map_or(0, |offer| offer.map().unmerged().len());
         }
         let label = if self.sending {
             tr("starting")
