@@ -812,22 +812,121 @@ pub enum SettingsPatch {
     LastProject(Option<String>),
 }
 
-/// Which Traverse instance this machine publishes to while hosting: relay
-/// fallback and wide-area discovery for devices off the LAN.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum TraverseSetting {
-    /// The official service.
-    #[default]
+/// The Traverse instances this machine publishes to while hosting: relay
+/// fallback and wide-area discovery for devices off the LAN. The official
+/// service is always the first source and is only ever disabled, never
+/// removed; with every source disabled the machine uses no relay and no
+/// wide-area discovery, and devices reach it on the LAN or at the addresses
+/// an invite carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "TraverseSettingFile")]
+pub struct TraverseSetting {
+    pub sources: Vec<TraverseSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraverseSource {
+    #[serde(flatten)]
+    pub instance: TraverseInstance,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraverseInstance {
     Official,
     /// A self-hosted instance, by the base URL its manifest is served from.
+    Custom {
+        url: String,
+    },
+}
+
+/// Every shape a settings file has held: the source list, or the single
+/// choice written before a machine could publish to several instances.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TraverseSettingFile {
+    Sources { sources: Vec<TraverseSource> },
+    Mode(TraverseMode),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum TraverseMode {
+    Official,
     Custom { url: String },
-    /// No relay and no wide-area discovery: devices reach this machine on
-    /// the LAN or at the addresses an invite carries.
     Off,
 }
 
+impl From<TraverseSettingFile> for TraverseSetting {
+    fn from(file: TraverseSettingFile) -> Self {
+        let official = |enabled| TraverseSource {
+            instance: TraverseInstance::Official,
+            enabled,
+        };
+        let sources = match file {
+            TraverseSettingFile::Sources { sources } => sources,
+            TraverseSettingFile::Mode(TraverseMode::Official) => vec![official(true)],
+            TraverseSettingFile::Mode(TraverseMode::Off) => vec![official(false)],
+            // The old choice was either-or: a self-hosted instance replaced
+            // the official one.
+            TraverseSettingFile::Mode(TraverseMode::Custom { url }) => vec![
+                official(false),
+                TraverseSource {
+                    instance: TraverseInstance::Custom { url },
+                    enabled: true,
+                },
+            ],
+        };
+        Self::new(sources)
+    }
+}
+
+impl Default for TraverseSetting {
+    fn default() -> Self {
+        Self {
+            sources: vec![TraverseSource {
+                instance: TraverseInstance::Official,
+                enabled: true,
+            }],
+        }
+    }
+}
+
 impl TraverseSetting {
+    /// `sources` with the official service first exactly once, keeping the
+    /// first official entry's switch, and each self-hosted URL once. A list
+    /// that names no official entry leaves it off, as a self-hosted choice
+    /// always has.
+    pub fn new(sources: Vec<TraverseSource>) -> Self {
+        let official = sources
+            .iter()
+            .find(|source| source.instance == TraverseInstance::Official)
+            .is_some_and(|source| source.enabled);
+        let mut normalized = vec![TraverseSource {
+            instance: TraverseInstance::Official,
+            enabled: official,
+        }];
+        for source in sources {
+            if !normalized
+                .iter()
+                .any(|kept| kept.instance == source.instance)
+            {
+                normalized.push(source);
+            }
+        }
+        Self {
+            sources: normalized,
+        }
+    }
+
+    pub fn enabled(&self) -> impl Iterator<Item = &TraverseInstance> {
+        self.sources
+            .iter()
+            .filter(|source| source.enabled)
+            .map(|source| &source.instance)
+    }
+
     fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -964,7 +1063,8 @@ pub struct Settings {
     /// clients. Absent in legacy files → hosting off.
     #[serde(default)]
     pub remote_hosting_enabled: bool,
-    /// Traverse instance used while hosting. Absent in legacy files → official.
+    /// Traverse instances used while hosting. Absent in legacy files →
+    /// official.
     #[serde(default, skip_serializing_if = "TraverseSetting::is_default")]
     pub traverse: TraverseSetting,
     /// Name this host advertises while pairing and on the discovery beacon.
@@ -1195,7 +1295,7 @@ impl Settings {
             }
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
             SettingsPatch::RemoteHostingEnabled(value) => self.remote_hosting_enabled = value,
-            SettingsPatch::Traverse(value) => self.traverse = value,
+            SettingsPatch::Traverse(value) => self.traverse = TraverseSetting::new(value.sources),
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
         }
@@ -1439,7 +1539,6 @@ mod tests {
         assert!(!legacy.sidebar_provider_marks);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);
-        assert_eq!(legacy.traverse, TraverseSetting::Official);
         assert_eq!(legacy.remote_host_name, None);
         assert!(legacy.profiles.is_empty());
         assert_eq!(legacy.title_generation.profile_id, None);
@@ -2279,34 +2378,66 @@ mod tests {
         .unwrap();
         legacy.migrate_legacy();
         assert!(legacy.remote_hosting_enabled);
-        assert_eq!(legacy.traverse, TraverseSetting::Official);
+        assert_eq!(
+            serde_json::to_value(&legacy.traverse).unwrap(),
+            serde_json::json!({"sources": [{"kind": "official", "enabled": true}]})
+        );
         assert_eq!(legacy.remote_host_name.as_deref(), Some("Studio"));
         let written: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
         assert_eq!(written.get("remote_port"), None);
         assert_eq!(written.get("traverse"), None, "the default is not written");
+    }
 
-        let custom: Settings = serde_json::from_str(
-            r#"{"traverse":{"mode":"custom","url":"https://traverse.example/"}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            custom.traverse,
-            TraverseSetting::Custom {
-                url: "https://traverse.example/".into()
-            }
-        );
-        let off: Settings = serde_json::from_str(r#"{"traverse":{"mode":"off"}}"#).unwrap();
-        assert_eq!(off.traverse, TraverseSetting::Off);
+    /// Every Traverse setting a settings file has held loads as the source
+    /// list it meant: the single choice of earlier builds keeps its
+    /// either-or meaning, and a hand-edited list gets the official source
+    /// first exactly once. What is written back is the list.
+    #[test]
+    fn traverse_settings_load_as_a_source_list_with_the_official_source_first() {
+        let official = |enabled| serde_json::json!({"kind": "official", "enabled": enabled});
+        let custom = |url: &str, enabled| serde_json::json!({"kind": "custom", "url": url, "enabled": enabled});
+        for (file, expected) in [
+            (r#"{}"#, vec![official(true)]),
+            (r#"{"traverse":{"mode":"official"}}"#, vec![official(true)]),
+            (r#"{"traverse":{"mode":"off"}}"#, vec![official(false)]),
+            (
+                r#"{"traverse":{"mode":"custom","url":"https://traverse.example/"}}"#,
+                vec![official(false), custom("https://traverse.example/", true)],
+            ),
+            (
+                r#"{"traverse":{"sources":[{"kind":"official","enabled":true},{"kind":"custom","url":"https://a.example/","enabled":true},{"kind":"custom","url":"https://b.example/","enabled":false}]}}"#,
+                vec![
+                    official(true),
+                    custom("https://a.example/", true),
+                    custom("https://b.example/", false),
+                ],
+            ),
+            (
+                r#"{"traverse":{"sources":[{"kind":"custom","url":"https://a.example/","enabled":true},{"kind":"official","enabled":true},{"kind":"official","enabled":false},{"kind":"custom","url":"https://a.example/","enabled":false}]}}"#,
+                vec![official(true), custom("https://a.example/", true)],
+            ),
+            (
+                r#"{"traverse":{"sources":[{"kind":"custom","url":"https://a.example/","enabled":true}]}}"#,
+                vec![official(false), custom("https://a.example/", true)],
+            ),
+        ] {
+            let settings: Settings = serde_json::from_str(file).unwrap();
+            assert_eq!(
+                serde_json::to_value(&settings.traverse).unwrap(),
+                serde_json::json!({ "sources": expected }),
+                "{file}"
+            );
+        }
 
         let mut patched = Settings::default();
-        patched
-            .apply(SettingsPatch::Traverse(TraverseSetting::Off))
-            .unwrap();
+        let off: TraverseSetting = serde_json::from_str(r#"{"mode":"off"}"#).unwrap();
+        patched.apply(SettingsPatch::Traverse(off)).unwrap();
         assert_eq!(
             serde_json::to_value(&patched).unwrap().get("traverse"),
-            Some(&serde_json::json!({"mode": "off"}))
+            Some(&serde_json::json!({"sources": [official(false)]}))
         );
+        assert_eq!(patched.traverse.enabled().count(), 0);
     }
 }
 

@@ -5768,7 +5768,7 @@ mod tests {
     #[gpui::test]
     fn the_share_item_toggles_the_project_in_a_space_on_this_machine(cx: &mut TestAppContext) {
         use gpui::BorrowAppContext as _;
-        use tcode_traverse::{HostConfig, HostMux, TraverseHost, TraverseMode};
+        use tcode_traverse::{HostConfig, HostMux, TraverseHost};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         cx.update(crate::theme::init);
@@ -5801,7 +5801,7 @@ mod tests {
             HostConfig {
                 host_name: "Studio".into(),
                 data_dir: root.join("traverse"),
-                traverse: TraverseMode::Off,
+                traverse: Vec::new(),
                 pairing_enabled: true,
                 bind_port: None,
             },

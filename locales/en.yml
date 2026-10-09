@@ -1276,13 +1276,16 @@ remote:
     description: "Shown to other devices."
   traverse:
     title: "Traverse"
+    description: "Relay and lookup services that let devices reach this machine off its network. With all of them off, devices connect on the LAN or at the addresses an invitation carries."
     official: "Official Traverse"
     custom: "Self-hosted Traverse"
-    off: "Off"
-    url: "Traverse URL"
     url_description: "The base URL your instance serves its manifest from."
     url_placeholder: "https://traverse.example"
     invalid_url: "Enter an http or https URL."
+    duplicate: "This instance is already in the list."
+    add_title: "Add self-hosted Traverse"
+    add: "Add"
+    remove: "Remove this Traverse instance"
   invite:
     title: "INVITATION"
     expired: "Invitation expired"

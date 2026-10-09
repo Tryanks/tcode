@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use agent::ProviderKind;
 use tcode_core::settings::Settings;
 #[cfg(test)]
-use tcode_core::settings::{EnvVar, ThemeMode, TraverseSetting};
+use tcode_core::settings::{EnvVar, ThemeMode};
 
 type Secrets = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -201,10 +201,9 @@ mod tests {
         // New fields tolerantly default to off.
         assert!(!loaded.word_wrap_diffs);
         assert!(!loaded.skip_delete_confirmation);
-        // The HTTP listener's port is gone; hosting continues on official
-        // Traverse and the next save no longer carries the port.
+        // The HTTP listener's port is gone; hosting continues and the next
+        // save no longer carries the port.
         assert!(loaded.remote_hosting_enabled);
-        assert_eq!(loaded.traverse, TraverseSetting::Official);
         store.save(&loaded).unwrap();
         assert!(
             !fs::read_to_string(&store.path)
