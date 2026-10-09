@@ -4,7 +4,8 @@ use tcode_core::pull_request::{
     PullRequestState, PullRequestSyncError,
 };
 use tcode_protocol::{
-    CommandResponse, ProtocolError, PullRequestRead, PullRequestReadResponse, QueryResponse,
+    CommandResponse, ProtocolError, PullRequestAction, PullRequestActionResult, PullRequestRead,
+    PullRequestReadResponse, QueryResponse,
 };
 use tcode_services::github::{
     CredentialError, GitHubApi, GitHubError,
@@ -348,6 +349,14 @@ impl AppState {
                     reads.viewed_files(&key)?,
                     PullRequestReadResponse::ViewedFiles,
                 ),
+                PullRequestRead::LabelCandidates => reply(
+                    reads.label_candidates(&key)?,
+                    PullRequestReadResponse::LabelCandidates,
+                ),
+                PullRequestRead::ReviewerCandidates => reply(
+                    reads.reviewer_candidates(&key)?,
+                    PullRequestReadResponse::ReviewerCandidates,
+                ),
                 PullRequestRead::Media { url, validator } => {
                     let media = reads.media(&key, &url, validator.as_deref())?;
                     let expires_at = match &media {
@@ -408,6 +417,86 @@ impl AppState {
                 .map_err(read_error)
         })
     }
+    /// A write to the pull request. Whenever GitHub may have applied it, the sync reads the pull
+    /// request again; a submitted review leaves the draft only once GitHub took it.
+    pub fn run_pull_request_action(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        action: PullRequestAction,
+        cx: &mut HostCx,
+    ) -> HostTask<Result<CommandResponse, ProtocolError>> {
+        if let Err(error) = self.linked_pull_request(session_id, &key) {
+            return cx.spawn_background(async move { Err(error) });
+        }
+        let draft = self
+            .find_meta(session_id)
+            .and_then(|meta| {
+                meta.pull_request_reviews
+                    .into_iter()
+                    .find(|draft| draft.key == key)
+            })
+            .unwrap_or_else(|| pull_request::PullRequestReviewDraft {
+                key: key.clone(),
+                body: String::new(),
+                comments: Vec::new(),
+                next_id: 0,
+            });
+        let reads = self.pull_requests.reads.clone();
+        let review = matches!(action, PullRequestAction::SubmitReview { .. });
+        let writing = key.clone();
+        let sent = draft.clone();
+        let task = cx.unblock(move || match &action {
+            PullRequestAction::SubmitReview { verdict, head } => {
+                reads.submit_review(&writing, *verdict, head, &sent.body, &sent.comments)
+            }
+            action => reads.act(&writing, action),
+        });
+        let host = cx.clone();
+        let id = session_id.to_owned();
+        cx.spawn_background(async move {
+            let outcome = task.await;
+            if !matches!(outcome, PullRequestActionResult::Rejected(_)) {
+                let applied = outcome == PullRequestActionResult::Applied;
+                let _ = host
+                    .enqueue_and_wait(move |state, cx| {
+                        if review
+                            && applied
+                            && let Some(mut meta) = state.find_meta(&id)
+                        {
+                            let sent: Vec<_> =
+                                draft.comments.iter().map(|comment| comment.id).collect();
+                            pull_request::submitted_review(
+                                &mut meta.pull_request_reviews,
+                                &key,
+                                &sent,
+                                &draft.body,
+                            );
+                            state.save_pull_request_meta(meta, cx);
+                        }
+                        state.request_pull_request_sync(key, cx);
+                    })
+                    .await;
+            }
+            Ok(CommandResponse::PullRequestAction(outcome))
+        })
+    }
+    pub fn edit_pull_request_review_draft(
+        &mut self,
+        session_id: &str,
+        key: PullRequestKey,
+        edit: pull_request::PullRequestReviewDraftEdit,
+        cx: &mut HostCx,
+    ) -> Result<(), ProtocolError> {
+        self.linked_pull_request(session_id, &key)?;
+        let Some(mut meta) = self.find_meta(session_id) else {
+            return Ok(());
+        };
+        if pull_request::edit_review_draft(&mut meta.pull_request_reviews, &key, edit) {
+            self.save_pull_request_meta(meta, cx);
+        }
+        Ok(())
+    }
     fn pull_request_project_cwd(&self, meta: &SessionMeta) -> PathBuf {
         self.projects
             .iter()
@@ -456,6 +545,9 @@ impl AppState {
     pub(super) fn save_pull_request_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         if let Some(resident) = self.meta_mut(&meta.id) {
             resident.pull_requests.clone_from(&meta.pull_requests);
+            resident
+                .pull_request_reviews
+                .clone_from(&meta.pull_request_reviews);
         }
         self.persist_meta(&meta, cx);
     }
@@ -495,6 +587,9 @@ impl AppState {
             return;
         }
         if pull_request::unlink_pull_request(&mut meta.pull_requests, key) {
+            let links = &meta.pull_requests;
+            meta.pull_request_reviews
+                .retain(|draft| pull_request::shown(links, &draft.key));
             self.discard_pull_request_wakes(id, Some(key));
             self.save_pull_request_meta(meta, cx);
         }

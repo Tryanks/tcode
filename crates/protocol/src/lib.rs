@@ -11,11 +11,14 @@ mod pull_request;
 mod query;
 pub use preview::{PreviewRequest, PreviewResponse};
 pub use pull_request::{
-    MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestActor, PullRequestComment, PullRequestConversation,
-    PullRequestFile, PullRequestFileText, PullRequestFiles, PullRequestMedia, PullRequestPatch,
-    PullRequestReaction, PullRequestRead, PullRequestReadResponse, PullRequestReviewAnchor,
-    PullRequestReviewState, PullRequestReviewThread, PullRequestThreadReplies,
-    PullRequestViewedFiles, PullRequestViewedState,
+    MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult, PullRequestActor,
+    PullRequestComment, PullRequestConversation, PullRequestFile, PullRequestFileText,
+    PullRequestFiles, PullRequestLabelCandidate, PullRequestLabelCandidates, PullRequestMedia,
+    PullRequestPatch, PullRequestReaction, PullRequestReactionContent, PullRequestRead,
+    PullRequestReadResponse, PullRequestRejection, PullRequestReviewAnchor, PullRequestReviewState,
+    PullRequestReviewThread, PullRequestReviewVerdict, PullRequestReviewer,
+    PullRequestReviewerCandidate, PullRequestReviewerCandidates, PullRequestReviewerKind,
+    PullRequestThreadReplies, PullRequestViewedFiles, PullRequestViewedState,
 };
 pub mod terminal;
 mod wire;
@@ -111,6 +114,12 @@ pub use wire::{
 // RefreshPullRequest drops the host's reads of one and syncs it.
 // Unreleased: thread metadata carries pinned_at, pin_order and active_order;
 // adds the PinSession, UnpinSession, ReorderPinned and ReorderActive commands.
+// Unreleased: RunPullRequestAction writes to a linked pull request (comment,
+// review, thread reply and resolution, reactions, edits, labels, reviewers)
+// and answers PullRequestAction with a typed result; EditPullRequestReviewDraft
+// edits the host-owned review draft that thread metadata carries as
+// pull_request_reviews; Query::PullRequest reads label and reviewer
+// candidates; a reaction's content is a typed name.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

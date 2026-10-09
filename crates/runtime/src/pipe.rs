@@ -462,6 +462,28 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                 cx,
             ));
         }
+        Command::RunPullRequestAction {
+            session_id,
+            key,
+            action,
+        } => {
+            return CommandOutcome::Pending(app.run_pull_request_action(
+                &session_id,
+                key,
+                action,
+                cx,
+            ));
+        }
+        Command::EditPullRequestReviewDraft {
+            session_id,
+            key,
+            edit,
+        } => {
+            return CommandOutcome::Immediate(
+                app.edit_pull_request_review_draft(&session_id, key, edit, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::UnlinkPullRequest { session_id, key } => {
             app.unlink_pull_request(&session_id, &key, cx);
         }

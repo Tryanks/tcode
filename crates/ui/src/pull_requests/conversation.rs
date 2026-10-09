@@ -10,8 +10,8 @@ use gpui::{
 use gpui_base::{Avatar, AvatarFallback, AvatarImage, h_flex, v_flex};
 use tcode_core::{pull_request::PullRequestState, session::ReviewSide};
 use tcode_protocol::{
-    PullRequestComment, PullRequestRead, PullRequestReadResponse, PullRequestReviewState,
-    PullRequestReviewThread,
+    PullRequestComment, PullRequestReactionContent, PullRequestRead, PullRequestReadResponse,
+    PullRequestReviewState, PullRequestReviewThread,
 };
 
 use super::detail::{PullRequestView, Replies, Tab, ago_rfc3339, reason};
@@ -56,17 +56,16 @@ pub(super) fn visible_body(body: &str) -> Option<String> {
     (!visible.is_empty()).then_some(visible)
 }
 
-fn reaction_emoji(content: &str) -> &'static str {
+fn reaction_emoji(content: PullRequestReactionContent) -> &'static str {
     match content {
-        "THUMBS_UP" => "👍",
-        "THUMBS_DOWN" => "👎",
-        "LAUGH" => "😄",
-        "HOORAY" => "🎉",
-        "CONFUSED" => "😕",
-        "HEART" => "❤️",
-        "ROCKET" => "🚀",
-        "EYES" => "👀",
-        _ => "·",
+        PullRequestReactionContent::ThumbsUp => "👍",
+        PullRequestReactionContent::ThumbsDown => "👎",
+        PullRequestReactionContent::Laugh => "😄",
+        PullRequestReactionContent::Hooray => "🎉",
+        PullRequestReactionContent::Confused => "😕",
+        PullRequestReactionContent::Heart => "❤️",
+        PullRequestReactionContent::Rocket => "🚀",
+        PullRequestReactionContent::Eyes => "👀",
     }
 }
 
@@ -397,7 +396,7 @@ impl PullRequestView {
                             cx.theme().secondary
                         })
                         .text_size(px(12.))
-                        .child(reaction_emoji(&reaction.content))
+                        .child(reaction_emoji(reaction.content))
                         .child(reaction.count.to_string())
                 }))
                 .into_any_element(),

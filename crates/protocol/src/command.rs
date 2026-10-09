@@ -117,6 +117,18 @@ pub enum Command {
         paths: Vec<String>,
         viewed: bool,
     },
+    /// A write to a linked pull request, answered with [`CommandResponse::PullRequestAction`].
+    /// It is never retained for redelivery: a write resent after a lost answer could apply twice.
+    RunPullRequestAction {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        action: crate::PullRequestAction,
+    },
+    EditPullRequestReviewDraft {
+        session_id: String,
+        key: tcode_core::pull_request::PullRequestKey,
+        edit: tcode_core::pull_request::PullRequestReviewDraftEdit,
+    },
     SetProfileSecret {
         profile_id: String,
         name: String,
@@ -487,6 +499,7 @@ pub enum CommandResponse {
         key: tcode_core::pull_request::PullRequestKey,
         already_linked: bool,
     },
+    PullRequestAction(crate::PullRequestActionResult),
     ProjectId(Option<String>),
     SessionId(Option<String>),
     PendingRelaunchSection {
@@ -505,6 +518,8 @@ impl Command {
             | Self::WatchPullRequest { session_id, .. }
             | Self::SetPullRequestFilesViewed { session_id, .. }
             | Self::RefreshPullRequest { session_id, .. }
+            | Self::RunPullRequestAction { session_id, .. }
+            | Self::EditPullRequestReviewDraft { session_id, .. }
             | Self::OrchestrateTurn { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }
@@ -566,9 +581,10 @@ impl Command {
         )
     }
 
-    /// Idempotent controls and reads do not need retained delivery.
-    /// All other variants are retained writes, including settings assignments:
-    /// repeating an old assignment after a newer one would undo user intent.
+    /// Idempotent controls and reads do not need retained delivery, and a
+    /// pull request action must not have it. All other variants are retained
+    /// writes, including settings assignments: repeating an old assignment
+    /// after a newer one would undo user intent.
     pub fn requires_delivery_key(&self) -> bool {
         !matches!(
             self,
@@ -577,6 +593,7 @@ impl Command {
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
                 | Self::RefreshGitHubCredentials
+                | Self::RunPullRequestAction { .. }
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage
                 | Self::CheckProviderVersions

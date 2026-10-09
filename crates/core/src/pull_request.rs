@@ -443,6 +443,142 @@ pub fn groups(links: &[ThreadPullRequestLink]) -> Vec<PullRequestGroup<'_>> {
     groups
 }
 
+/// A review being written on the host. GitHub sees none of it until it is submitted whole, so a
+/// draft outlives a client, a device and a moved head alike.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReviewDraft {
+    pub key: PullRequestKey,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<PullRequestReviewDraftComment>,
+    /// Never reused, so an edit naming a removed comment cannot reach a later one.
+    #[serde(default)]
+    pub next_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestReviewDraftComment {
+    pub id: u64,
+    /// The head commit whose lines the comment is on.
+    pub revision: String,
+    pub path: String,
+    pub side: crate::session::ReviewSide,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum PullRequestReviewDraftEdit {
+    AddComment {
+        revision: String,
+        path: String,
+        side: crate::session::ReviewSide,
+        start_line: u32,
+        end_line: u32,
+        body: String,
+    },
+    RemoveComment {
+        id: u64,
+    },
+    SetBody {
+        body: String,
+    },
+    Discard,
+}
+
+/// Applies an edit to the thread's drafts; false when it changed nothing or was malformed.
+pub fn edit_review_draft(
+    drafts: &mut Vec<PullRequestReviewDraft>,
+    key: &PullRequestKey,
+    edit: PullRequestReviewDraftEdit,
+) -> bool {
+    let index = match drafts.iter().position(|draft| draft.key == *key) {
+        Some(index) => index,
+        None if matches!(edit, PullRequestReviewDraftEdit::AddComment { .. })
+            || matches!(&edit, PullRequestReviewDraftEdit::SetBody { body } if !body.is_empty()) =>
+        {
+            drafts.push(PullRequestReviewDraft {
+                key: key.clone(),
+                body: String::new(),
+                comments: Vec::new(),
+                next_id: 1,
+            });
+            drafts.len() - 1
+        }
+        None => return false,
+    };
+    let draft = &mut drafts[index];
+    let changed = match edit {
+        PullRequestReviewDraftEdit::AddComment {
+            revision,
+            path,
+            side,
+            start_line,
+            end_line,
+            body,
+        } => {
+            if path.is_empty() || start_line == 0 || start_line > end_line || body.trim().is_empty()
+            {
+                false
+            } else {
+                draft.comments.push(PullRequestReviewDraftComment {
+                    id: draft.next_id,
+                    revision,
+                    path,
+                    side,
+                    start_line,
+                    end_line,
+                    body,
+                });
+                draft.next_id += 1;
+                true
+            }
+        }
+        PullRequestReviewDraftEdit::RemoveComment { id } => {
+            let before = draft.comments.len();
+            draft.comments.retain(|comment| comment.id != id);
+            draft.comments.len() != before
+        }
+        PullRequestReviewDraftEdit::SetBody { body } => {
+            body != std::mem::replace(&mut draft.body, body.clone())
+        }
+        PullRequestReviewDraftEdit::Discard => {
+            drafts.remove(index);
+            return true;
+        }
+    };
+    if draft.body.is_empty() && draft.comments.is_empty() {
+        drafts.remove(index);
+    }
+    changed
+}
+
+/// Takes what a submission sent out of the draft: its comments by id, and the body only while it
+/// still reads as sent, since a body revised meanwhile is new work.
+pub fn submitted_review(
+    drafts: &mut Vec<PullRequestReviewDraft>,
+    key: &PullRequestKey,
+    comments: &[u64],
+    body: &str,
+) {
+    let Some(index) = drafts.iter().position(|draft| draft.key == *key) else {
+        return;
+    };
+    let draft = &mut drafts[index];
+    draft
+        .comments
+        .retain(|comment| !comments.contains(&comment.id));
+    if draft.body == body {
+        draft.body.clear();
+    }
+    if draft.body.is_empty() && draft.comments.is_empty() {
+        drafts.remove(index);
+    }
+}
+
 /// A menu visibility hint only; the host forge adapter validates and canonicalizes the target.
 pub fn is_pull_request_url(value: &str) -> bool {
     let value = value.split(['?', '#']).next().unwrap_or_default();

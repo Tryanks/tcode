@@ -84,6 +84,9 @@ pub enum SettledOverride {
 pub struct SessionMeta {
     #[serde(default)]
     pub pull_requests: Vec<crate::pull_request::ThreadPullRequestLink>,
+    /// Reviews being written in this thread, one per pull request it shows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_request_reviews: Vec<crate::pull_request::PullRequestReviewDraft>,
     pub id: String,
     pub title: String,
     pub provider: ProviderKind,
@@ -275,6 +278,7 @@ impl SessionMeta {
             id: uuid::Uuid::new_v4().to_string(),
             title: format!("New {} session", provider.display_name()),
             pull_requests: Vec::new(),
+            pull_request_reviews: Vec::new(),
             provider,
             profile_id: None,
             cwd,
