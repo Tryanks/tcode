@@ -107,6 +107,33 @@ fn reaction_emoji(content: PullRequestReactionContent) -> &'static str {
     }
 }
 
+/// A reaction chip's shape; the account's own reactions are tinted.
+fn reaction_chip(
+    id: SharedString,
+    label: String,
+    own: bool,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    material::accessible_clickable(h_flex(), id, gpui::Role::Button, label, cx)
+        .h(px(22.))
+        .px(px(6.))
+        .gap_1()
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(if own {
+            cx.theme().primary
+        } else {
+            cx.theme().border
+        })
+        .bg(if own {
+            cx.theme().primary.opacity(0.1)
+        } else {
+            cx.theme().secondary
+        })
+        .text_size(px(12.))
+}
+
 impl PullRequestView {
     fn items(&self, cx: &App) -> Vec<Item> {
         let Some(conversation) = self.page().and_then(|page| page.conversation.data.as_ref())
@@ -570,6 +597,10 @@ impl PullRequestView {
             (writable && comment.viewer_can_react && self.shown_reactions(comment).is_empty())
                 .then(|| self.reaction_popover(comment, true, cx));
         h_flex()
+            .group(SharedString::from(format!(
+                "pr-comment-head-{}",
+                comment.id
+            )))
             .gap_2()
             .items_center()
             .text_size(px(12.))
@@ -698,15 +729,30 @@ impl PullRequestView {
             .collect();
         let view = cx.entity();
         let open_id = id.clone();
-        let chip = Button::new(SharedString::from(format!("pr-reaction-add-{id}-{head}")))
-            .ghost()
-            .xsmall()
-            .compact()
-            .icon(IconName::Sticker)
-            .tooltip(crate::tr!("pull_requests.reactions.add"))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_sheet(Some(Sheet::Reactions(open_id.clone())), cx)
-            }));
+        // In the head row a pointer that can hover finds it on hover; a keyboard on focus.
+        let reveal = head && !compact && !crate::window_seam::is_mobile(cx);
+        let chip = reaction_chip(
+            SharedString::from(format!("pr-reaction-add-{id}-{head}")),
+            crate::tr!("pull_requests.reactions.add").into_owned(),
+            false,
+            cx,
+        )
+        .child(Icon::new(IconName::Sticker).size(px(14.)))
+        .cursor_pointer()
+        .tooltip(|window, cx| {
+            Tooltip::new(crate::tr!("pull_requests.reactions.add")).build(window, cx)
+        })
+        .when(reveal, |chip| {
+            chip.opacity(0.)
+                .group_hover(
+                    SharedString::from(format!("pr-comment-head-{id}")),
+                    |chip| chip.opacity(1.),
+                )
+                .focus_visible(|chip| chip.opacity(1.))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.open_sheet(Some(Sheet::Reactions(open_id.clone())), cx)
+        }));
         let popover = Popover::new(SharedString::from(format!("pr-reactions-{id}-{head}")))
             .open(self.sheet_open(&sheet))
             .on_open_change({
@@ -717,7 +763,7 @@ impl PullRequestView {
                     }
                 }
             })
-            .trigger(chip);
+            .trigger_with(move |_, _, _| chip.into_any_element());
         let popover = if compact {
             popover.bottom_sheet(crate::tr!("pull_requests.reactions.add").into_owned())
         } else {
@@ -788,14 +834,13 @@ impl PullRequestView {
                         count = reaction.count.to_string()
                     )
                     .into_owned();
-                    let chip = material::accessible_clickable(
-                        h_flex(),
+                    let chip = reaction_chip(
                         SharedString::from(format!(
                             "pr-reaction-chip-{}-{:?}",
                             comment.id, reaction.content
                         )),
-                        gpui::Role::Button,
                         label,
+                        own,
                         cx,
                     )
                     .aria_toggled(if own {
@@ -803,23 +848,6 @@ impl PullRequestView {
                     } else {
                         gpui::Toggled::False
                     })
-                    .h(px(22.))
-                    .px(px(6.))
-                    .gap_1()
-                    .items_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(if own {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(if own {
-                        cx.theme().primary.opacity(0.1)
-                    } else {
-                        cx.theme().secondary
-                    })
-                    .text_size(px(12.))
                     .child(reaction_emoji(reaction.content))
                     .child(reaction.count.to_string());
                     if interactive {
@@ -1414,7 +1442,6 @@ impl PullRequestView {
                 .items_center()
                 .text_size(px(12.))
                 .children(reply.map(|reply| div().flex_1().min_w_0().child(reply)))
-                .when(thread.viewer_can_reply, |footer| footer)
                 .when(!thread.viewer_can_reply, |footer| {
                     footer.child(div().flex_1())
                 })

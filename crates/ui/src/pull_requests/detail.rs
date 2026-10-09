@@ -906,21 +906,25 @@ impl PullRequestView {
         if !editable {
             return text.into_any_element();
         }
-        let start = Button::new("pr-title-edit")
-            .ghost()
-            .xsmall()
-            .compact()
-            .icon(IconName::Pencil)
-            .tooltip(crate::tr!("pull_requests.compose.edit_title"))
-            .on_click(cx.listener(move |this, _, window, cx| this.start_title(window, cx)));
+        // A phone starts the edit from the ⋯ menu; the sheet needs no trigger.
         let affordance = if compact {
-            self.title_sheet(start, cx)
+            self.title_sheet(cx)
         } else {
             div()
                 .flex_none()
                 .invisible()
                 .group_hover("pr-header-title", |style| style.visible())
-                .child(start)
+                .child(
+                    Button::new("pr-title-edit")
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .icon(IconName::Pencil)
+                        .tooltip(crate::tr!("pull_requests.compose.edit_title"))
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.start_title(window, cx)),
+                        ),
+                )
                 .into_any_element()
         };
         h_flex()
@@ -934,8 +938,8 @@ impl PullRequestView {
             .into_any_element()
     }
 
-    /// The phone's title editor: a sheet around the edit affordance.
-    fn title_sheet(&self, trigger: Button, cx: &mut Context<Self>) -> AnyElement {
+    /// The phone's title editor.
+    fn title_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity();
         crate::widgets::Popover::new("pr-title-sheet")
             .bottom_sheet(crate::tr!("pull_requests.compose.edit_title").into_owned())
@@ -948,7 +952,6 @@ impl PullRequestView {
                     }
                 }
             })
-            .trigger(trigger)
             .content(move |_, _, cx| {
                 let this = view.read(cx);
                 let Some((input, _)) = this.writes().and_then(|writes| writes.title.as_ref())

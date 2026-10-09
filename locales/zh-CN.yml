@@ -1756,6 +1756,7 @@ pull_requests:
     stale_title: "自你开始此审查以来，#%{number} 已发生变化。"
     stale_body: "其头部提交已从 %{old} 变为 %{new}。你的待提交评论已保留。请将它们移到新的头部提交后再提交。"
     move_to_head: "移到新的头部提交"
+    move_first: "请先移到新的头部提交"
     unplaced: "请移除或重新添加 %{count} 条所在行已变更的评论。"
     unplaced_one: "请移除或重新添加 1 条所在行已变更的评论。"
     uncertain_notice: "上次提交的结果未知。再次提交前请先查看讨论。"
