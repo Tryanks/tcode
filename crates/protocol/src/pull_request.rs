@@ -347,7 +347,8 @@ pub enum PullRequestMergeState {
     Unknown,
 }
 
-/// What a lifecycle action would meet: read fresh before every one of them, and on request.
+/// What a lifecycle action would meet: read fresh before a merge or a branch update, and on
+/// request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestActionState {
     /// The head a branch update or a merge must still find.
