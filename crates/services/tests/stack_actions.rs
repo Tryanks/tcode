@@ -73,48 +73,68 @@ impl Stack {
     }
 }
 
-/// Submits a merge of #3 at `heads` to a GitHub listing `stack` that answers the submission with
-/// `put`, and returns what came of it with the body of every submission GitHub saw.
-fn merge(
+/// A GitHub listing `stack` for #3 that answers every other request with `other`, and the
+/// request line of everything it was asked.
+fn github(
     stack: Stack,
-    put: (u16, Value),
-    heads: &[(u64, String)],
-) -> (MergeSubmission, Vec<Value>) {
+    other: impl Fn(&str, &[u8]) -> (u16, Value) + Send + Sync + 'static,
+) -> (Arc<PullRequestReads>, Server, Arc<Mutex<Vec<String>>>) {
     let store = Store::new();
     let fixture = Fixture::new();
     let reads = PullRequestReads::new(GitHubApi::new(
         store.credentials(&[("GH_TOKEN", "fixture-token")]),
         fixture.builder(),
     ));
-    let submitted: Arc<Mutex<Vec<Value>>> = Arc::default();
-    let seen = submitted.clone();
-    let _server: Server = fixture.serve(move |exchange| {
+    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = asked.clone();
+    let server: Server = fixture.serve(move |exchange| {
         let line = exchange.request.lines().next().unwrap().to_owned();
+        seen.lock().unwrap().push(line.clone());
         let (status, reply) = if line.starts_with("GET /repos/octo/repo/stacks?pull_request=3 ") {
             (200, stack.listing())
         } else if line.starts_with(&format!("GET /repos/octo/repo/stacks/{} ", stack.number)) {
             (200, stack.detail())
-        } else if line.starts_with("PUT /repos/octo/repo/pulls/3/merge-async ") {
-            seen.lock()
-                .unwrap()
-                .push(serde_json::from_slice(&exchange.body).unwrap());
-            put.clone()
         } else {
-            (404, json!({"message": "Not Found"}))
+            other(&line, &exchange.body)
         };
         exchange.reply(status, "", reply.to_string().as_bytes());
     });
-    let heads: Vec<_> = heads
+    (reads, server, asked)
+}
+
+fn heads(heads: &[(u64, String)]) -> Vec<PullRequestStackHead> {
+    heads
         .iter()
         .map(|(number, head)| PullRequestStackHead {
             number: *number,
             head: head.clone(),
         })
-        .collect();
+        .collect()
+}
+
+/// Submits a merge of #3 at `heads` to a GitHub listing `stack` that answers the submission with
+/// `put`, and returns what came of it with the body of every submission GitHub saw.
+fn merge(
+    stack: Stack,
+    put: (u16, Value),
+    confirmed: &[(u64, String)],
+) -> (MergeSubmission, Vec<Value>) {
+    let submitted: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let seen = submitted.clone();
+    let (reads, _server, _) = github(stack, move |line, body| {
+        if line.starts_with("PUT /repos/octo/repo/pulls/3/merge-async ") {
+            seen.lock()
+                .unwrap()
+                .push(serde_json::from_slice(body).unwrap());
+            put.clone()
+        } else {
+            (404, json!({"message": "Not Found"}))
+        }
+    });
     let submission = reads.merge_stack(
         &PullRequestKey::new("github.com", "octo/repo", 3),
         50,
-        &heads,
+        &heads(confirmed),
         PullRequestMergeMethod::Squash,
     );
     let submitted = submitted.lock().unwrap().clone();
@@ -258,6 +278,39 @@ fn a_moved_head_a_changed_scope_or_a_blocked_layer_sends_nothing() {
     }
 }
 
+#[test]
+fn a_layer_the_account_cannot_push_to_refuses_the_rebase_before_anything_runs() {
+    let (reads, _server, asked) = github(Stack::default(), |line, _| {
+        if line.starts_with("POST ") && line.contains("graphql") {
+            (
+                200,
+                json!({"data": {"repository": {
+                    "pr2": {"headRepository": {"viewerPermission": "WRITE"}, "maintainerCanModify": false},
+                    "pr3": {"headRepository": {"viewerPermission": "READ"}, "maintainerCanModify": false},
+                }}}),
+            )
+        } else {
+            (404, json!({"message": "Not Found"}))
+        }
+    });
+    let plan = reads.plan_stack_rebase(
+        &PullRequestKey::new("github.com", "octo/repo", 3),
+        50,
+        &heads(&scope()),
+    );
+    assert_eq!(
+        plan.err(),
+        Some(PullRequestRejection::NoPushAccess { numbers: vec![3] })
+    );
+    // No plan, so no Git runs and nothing is pushed: GitHub was only read.
+    let asked = asked.lock().unwrap();
+    assert!(
+        asked.iter().all(|line| line.starts_with("GET ")
+            || (line.starts_with("POST ") && line.contains("graphql"))),
+        "{asked:?}"
+    );
+}
+
 /// A bare repository standing in for GitHub, holding a three-layer stack cut from `main`, with
 /// `main` moved ahead since. Each layer changes its own file, so each has one commit of its own.
 struct Remote {
@@ -370,7 +423,8 @@ impl Remote {
     fn rebase(&self, layers: &[RebaseLayer]) -> Vec<StackRebaseStep> {
         stack_rebase::cascade(
             self.path.to_str().unwrap(),
-            None,
+            // An extra header keyed to a filesystem remote is never sent.
+            "fixture-token",
             &Identity::new("Host", "host@example.test"),
             "main",
             layers,

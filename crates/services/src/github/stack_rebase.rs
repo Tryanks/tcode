@@ -66,6 +66,9 @@ fn git(dir: &Path, env: &[(String, String)], args: &[&str]) -> Run {
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
+        // The lease refusal is recognised by Git's own words, which a host locale translates.
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "")
         .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -126,9 +129,12 @@ impl Drop for Scratch {
 /// and answers every layer's final step. It stops at the first layer that fails: the scratch
 /// rebase is aborted, that layer's branch is left as it was, the layers below it stay pushed
 /// and those above it are not started. `token` rides only in this run's Git environment.
+/// `identity` is the one the plan found before the user confirmed, passed in rather than left
+/// to the scratch clone's Git, so a host without a name or email refuses the rebase before
+/// anything is pushed instead of failing at the first layer's commit.
 pub fn cascade(
     remote: &str,
-    token: Option<&str>,
+    token: &str,
     identity: &Identity,
     base: &str,
     layers: &[RebaseLayer],
@@ -181,19 +187,16 @@ pub fn cascade(
         );
         return steps;
     }
-    let mut config = vec![
+    use base64::Engine as _;
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+    let config = [
         ("user.name".to_owned(), identity.name.clone()),
         ("user.email".to_owned(), identity.email.clone()),
-    ];
-    if let Some(token) = token {
-        use base64::Engine as _;
-        let basic =
-            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
-        config.push((
+        (
             format!("http.{remote}.extraheader"),
             format!("AUTHORIZATION: basic {basic}"),
-        ));
-    }
+        ),
+    ];
     let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), config.len().to_string())];
     for (index, (key, value)) in config.into_iter().enumerate() {
         env.push((format!("GIT_CONFIG_KEY_{index}"), key));

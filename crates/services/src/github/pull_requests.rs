@@ -406,7 +406,7 @@ impl PullRequests {
 fn string(raw: &Value, field: &str) -> Option<String> {
     raw[field].as_str().map(str::to_owned)
 }
-pub(super) fn state(raw: &Value) -> Option<PullRequestState> {
+fn state(raw: &Value) -> Option<PullRequestState> {
     if raw
         .get("mergedAt")
         .or_else(|| raw.get("merged_at"))

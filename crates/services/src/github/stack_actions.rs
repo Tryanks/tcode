@@ -8,7 +8,7 @@ use super::{
     graphql::Document,
     pull_request_actions::rejection,
     pull_request_reads::{PullRequestReads, Reader, is_revision, percent_encode},
-    pull_requests::{decode_stack, state},
+    pull_requests::decode_stack,
     stack_rebase::{self, Identity, RebaseLayer},
 };
 use serde_json::{Value, json};
@@ -193,7 +193,7 @@ impl Reader<'_> {
                     .as_str()
                     .filter(|sha| is_revision(sha))
                     .map(str::to_owned),
-                state: state(row).unwrap_or(layer.state),
+                state: layer.state,
                 draft: row["draft"].as_bool() == Some(true),
                 push: None,
             })
@@ -533,7 +533,7 @@ impl RebasePlan {
     pub fn run(&self, progress: impl FnMut(usize, StackRebaseStep)) -> Outcome {
         let steps = stack_rebase::cascade(
             &self.remote,
-            Some(&self.token),
+            &self.token,
             &self.identity,
             &self.base,
             &self.layers,
