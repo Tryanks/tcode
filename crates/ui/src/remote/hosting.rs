@@ -15,12 +15,15 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context, Entity,
     Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Task, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_client::HostLink;
 use tcode_core::settings::{Settings, TraverseInstance, TraverseSetting, TraverseSource};
-use tcode_protocol::{Command, DeviceAccess, HostingAction, HostingState, SettingsPatch};
+use tcode_protocol::{
+    Command, DeviceAccess, HostingAction, HostingState, SettingsPatch, TraverseLookupState,
+    TraverseManifestState, TraverseRelayStatus, TraverseSourceStatus,
+};
 use tcode_traverse::manifest::ManifestSource;
 use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost};
 
@@ -223,6 +226,14 @@ impl RemoteController {
         }
     }
 
+    /// How each enabled Traverse source is doing while hosting.
+    pub fn traverse_status(&self) -> Vec<TraverseSourceStatus> {
+        self.host
+            .as_ref()
+            .map(TraverseHost::traverse_status)
+            .unwrap_or_default()
+    }
+
     pub fn devices(&self) -> Vec<DeviceInfo> {
         self.host
             .as_ref()
@@ -335,6 +346,10 @@ fn field_row(compact: bool) -> gpui::Div {
 /// The width a [`field_row`]'s label keeps before its field wraps under it.
 const FIELD_LABEL_BASIS: f32 = 200.;
 
+/// The narrowest a Traverse source's status summary gets before it
+/// truncates further.
+const STATUS_MIN_WIDTH: f32 = 96.;
+
 /// [`labels`] for a [`field_row`].
 fn field_labels(title: SharedString, description: Option<SharedString>, cx: &App) -> gpui::Div {
     labels(title, description, cx).flex_basis(px(FIELD_LABEL_BASIS))
@@ -366,6 +381,8 @@ struct TraverseRow {
     /// A self-hosted instance's base URL as typed; `None` is the official
     /// service.
     url: Option<(Entity<InputState>, gpui::Subscription)>,
+    /// Whether its status shows every relay and lookup, not one line.
+    expanded: bool,
 }
 
 /// Settings → Remote: the editable hosting controls for *this machine*.
@@ -403,6 +420,7 @@ impl HostingPanel {
             .iter()
             .map(|source| TraverseRow {
                 enabled: source.enabled,
+                expanded: false,
                 url: match &source.instance {
                     TraverseInstance::Official => None,
                     TraverseInstance::Custom { url } => Some(url_input(url, window, cx)),
@@ -696,6 +714,7 @@ impl HostingPanel {
         let input = url_input(url.as_str(), window, cx);
         self.traverse_rows.push(TraverseRow {
             enabled: true,
+            expanded: false,
             url: Some(input),
         });
         self.traverse_add_input
@@ -814,7 +833,50 @@ impl HostingPanel {
                 .into_any_element(),
         ];
         let urls = self.typed_urls(cx);
+        let (hosting, statuses) = cx
+            .try_global::<RemoteController>()
+            .map(|controller| (controller.is_hosting(), controller.traverse_status()))
+            .unwrap_or_default();
         for (index, (source, url)) in self.traverse_rows.iter().zip(urls).enumerate() {
+            // The status names a source as invitations do.
+            let key = match &url {
+                None => Some(tcode_client::pairing::TRAVERSE_OFFICIAL.to_owned()),
+                Some(Ok(url)) => Some(url.to_string()),
+                Some(Err(_)) => None,
+            };
+            let status = key.and_then(|key| statuses.iter().find(|status| status.source == key));
+            let (slot, detail) = match (source.enabled, hosting, status) {
+                (false, _, _) => (None, None),
+                (true, false, _) => (
+                    Some(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .justify_end()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(crate::tr!("remote.traverse.status.while_hosting")),
+                            )
+                            .into_any_element(),
+                    ),
+                    None,
+                ),
+                (true, true, None) => (None, None),
+                (true, true, Some(status)) => (
+                    Some(traverse_status_toggle(index, status, source.expanded, cx)),
+                    Some(
+                        gpui_base::Collapsible::new()
+                            .w_full()
+                            .open(source.expanded)
+                            .content(traverse_status_detail(status, cx))
+                            .into_any_element(),
+                    ),
+                ),
+            };
             let switch = Switch::new(SharedString::from(format!("remote-traverse-{index}")))
                 .checked(source.enabled)
                 .on_click(cx.listener(move |this, checked: &bool, window, cx| {
@@ -850,6 +912,9 @@ impl HostingPanel {
                                 .gap_3()
                                 .items_center()
                                 .when(compact, |controls| controls.w_full())
+                                // The status slot takes what is left of the
+                                // line the field is on.
+                                .when(slot.is_some(), |controls| controls.flex_grow(1.))
                                 .child(
                                     field(compact).child(
                                         Input::new(input)
@@ -858,18 +923,29 @@ impl HostingPanel {
                                     ),
                                 )
                                 .child(remove)
+                                .children(slot)
                                 .child(switch),
                         )
                 }
                 _ => switch_row()
-                    .child(labels(
-                        crate::tr!("remote.traverse.official").into_owned().into(),
-                        None,
-                        cx,
-                    ))
+                    .child(
+                        labels(
+                            crate::tr!("remote.traverse.official").into_owned().into(),
+                            None,
+                            cx,
+                        )
+                        .when(slot.is_some(), |labels| labels.flex_none()),
+                    )
+                    .children(slot)
                     .child(switch),
             };
-            rows.push(element.into_any_element());
+            rows.push(
+                v_flex()
+                    .w_full()
+                    .child(element)
+                    .children(detail.map(|detail| div().w_full().px_3().pb_2p5().child(detail)))
+                    .into_any_element(),
+            );
         }
         let addition = self.typed_addition(cx);
         let add_description = match &addition {
@@ -914,6 +990,13 @@ impl HostingPanel {
                 .into_any_element(),
         );
         rows
+    }
+
+    fn toggle_traverse_status(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(row) = self.traverse_rows.get_mut(index) {
+            row.expanded = !row.expanded;
+        }
+        cx.notify();
     }
 
     fn render_devices(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1013,6 +1096,249 @@ impl HostingPanel {
             .child(group)
             .into_any_element()
     }
+}
+
+fn manifest_word(state: TraverseManifestState) -> SharedString {
+    match state {
+        TraverseManifestState::Live => crate::tr!("remote.traverse.status.live"),
+        TraverseManifestState::Cached => crate::tr!("remote.traverse.status.cached"),
+        TraverseManifestState::Bundled => crate::tr!("remote.traverse.status.bundled"),
+        TraverseManifestState::Failed => crate::tr!("remote.traverse.status.failed"),
+    }
+    .into_owned()
+    .into()
+}
+
+/// A fetched manifest is current; a cached or bundled one may be stale; a
+/// source without one offers nothing.
+fn manifest_color(state: TraverseManifestState, cx: &App) -> gpui::Hsla {
+    match state {
+        TraverseManifestState::Live => cx.theme().success,
+        TraverseManifestState::Cached | TraverseManifestState::Bundled => cx.theme().warning,
+        TraverseManifestState::Failed => cx.theme().danger,
+    }
+}
+
+/// The region the manifest gives a relay, else what tells its URL apart.
+fn relay_name(relay: &TraverseRelayStatus) -> String {
+    relay
+        .region
+        .clone()
+        .or_else(|| super::relay_region(&relay.url))
+        .unwrap_or_else(|| relay.url.clone())
+}
+
+/// One line for a source: `live · 3 relays · best 42 ms (eu) · lookup ok`.
+fn traverse_summary(status: &TraverseSourceStatus) -> String {
+    let mut parts = vec![manifest_word(status.manifest.state).to_string()];
+    if !status.relays.is_empty() {
+        parts.push(match status.relays.len() {
+            1 => crate::tr!("remote.traverse.status.relays_one").into_owned(),
+            count => crate::tr!("remote.traverse.status.relays", count = count).into_owned(),
+        });
+    }
+    if let Some((relay, ms)) = status
+        .relays
+        .iter()
+        .filter_map(|relay| Some((relay, relay.latency_ms?)))
+        .min_by_key(|(_, ms)| *ms)
+    {
+        parts.push(
+            crate::tr!(
+                "remote.traverse.status.best",
+                ms = ms,
+                relay = relay_name(relay)
+            )
+            .into_owned(),
+        );
+    }
+    let lookups = || status.lookups.iter().map(|lookup| lookup.state);
+    if !status.lookups.is_empty() {
+        parts.push(
+            if lookups().any(|state| state == TraverseLookupState::Failed) {
+                crate::tr!("remote.traverse.status.lookup_failed")
+            } else if lookups().any(|state| state == TraverseLookupState::Pending) {
+                crate::tr!("remote.traverse.status.lookup_pending")
+            } else {
+                crate::tr!("remote.traverse.status.lookup_ok")
+            }
+            .into_owned(),
+        );
+    }
+    parts.join(" · ")
+}
+
+/// The status slot of a source's row: the manifest's dot and the summary
+/// line, a disclosure that opens the detail. It takes the room the row has
+/// left and truncates, so it never squeezes the source's name; the same
+/// disclosure shape as Settings' Advanced toggle, since a button's label
+/// cannot truncate.
+fn traverse_status_toggle(
+    index: usize,
+    status: &TraverseSourceStatus,
+    expanded: bool,
+    cx: &mut Context<HostingPanel>,
+) -> AnyElement {
+    let summary = traverse_summary(status);
+    crate::material::accessible_clickable(
+        h_flex(),
+        SharedString::from(format!("remote-traverse-status-{index}")),
+        gpui::Role::Button,
+        summary.clone(),
+        cx,
+    )
+    .aria_expanded(expanded)
+    .debug_selector(move || format!("remote-traverse-status-{index}"))
+    .flex_1()
+    // Room for the dot, the chevron and a word: a self-hosted row's URL
+    // field gives way before the status does.
+    .min_w(px(STATUS_MIN_WIDTH))
+    .justify_end()
+    .gap_1p5()
+    .items_center()
+    .cursor_pointer()
+    .text_size(px(12.))
+    .text_color(cx.theme().muted_foreground)
+    .child(
+        div()
+            .flex_none()
+            .size(px(8.))
+            .rounded_full()
+            .bg(manifest_color(status.manifest.state, cx)),
+    )
+    .child(
+        crate::icon::Icon::new(if expanded {
+            IconName::ChevronUp
+        } else {
+            IconName::ChevronDown
+        })
+        .size(px(12.))
+        .flex_none(),
+    )
+    .child(div().min_w_0().truncate().child(summary))
+    .on_click(cx.listener(move |this, _, _, cx| {
+        this.toggle_traverse_status(index, cx);
+    }))
+    .into_any_element()
+}
+
+/// Every relay with its latency, and every lookup with its last check.
+fn traverse_status_detail(status: &TraverseSourceStatus, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let danger = cx.theme().danger;
+    let heading = |text: SharedString| {
+        div()
+            .pt_1()
+            .text_size(px(11.))
+            .font_medium()
+            .text_color(muted)
+            .child(text)
+    };
+    let line = |name: String, value: AnyElement| {
+        h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .justify_between()
+            .child(div().min_w_0().truncate().child(name))
+            .child(value)
+    };
+    let error = |text: &str| {
+        div()
+            .w_full()
+            .text_size(px(12.))
+            .text_color(danger)
+            .child(text.to_owned())
+    };
+    let manifest = &status.manifest;
+    let mut manifest_value = vec![manifest_word(manifest.state).to_string()];
+    if let Some(fetched) = manifest.fetched_unix {
+        manifest_value.push(
+            crate::tr!(
+                "remote.traverse.status.fetched",
+                time = crate::time::humanize_ago(crate::time::now_secs().saturating_sub(fetched))
+            )
+            .into_owned(),
+        );
+    }
+    let mut column = v_flex()
+        .w_full()
+        .gap_1()
+        .px_2()
+        .py_1p5()
+        .rounded(crate::material::radius_input(cx))
+        .bg(cx.theme().muted.opacity(0.5))
+        .text_size(px(12.))
+        .child(line(
+            crate::tr!("remote.traverse.status.manifest").into_owned(),
+            div()
+                .flex_none()
+                .text_color(muted)
+                .child(manifest_value.join(" · "))
+                .into_any_element(),
+        ))
+        .children(manifest.error.as_deref().map(error));
+    if !status.relays.is_empty() {
+        column = column.child(heading(
+            crate::tr!("remote.traverse.status.relays_title")
+                .into_owned()
+                .into(),
+        ));
+    }
+    for relay in &status.relays {
+        let latency = match relay.latency_ms {
+            Some(ms) => crate::tr!("remote.traverse.status.latency", ms = ms),
+            None => crate::tr!("remote.traverse.status.unmeasured"),
+        };
+        column = column
+            .child(line(
+                relay_name(relay),
+                h_flex()
+                    .flex_none()
+                    .gap_2()
+                    .items_center()
+                    .when(relay.home, |value| {
+                        value.child(crate::material::semantic_chip(
+                            crate::tr!("remote.traverse.status.home").into_owned(),
+                            cx.theme().success.opacity(0.15),
+                            cx.theme().success,
+                            cx,
+                        ))
+                    })
+                    .child(div().text_color(muted).child(latency.into_owned()))
+                    .into_any_element(),
+            ))
+            .children(relay.error.as_deref().map(error));
+    }
+    if !status.lookups.is_empty() {
+        column = column.child(heading(
+            crate::tr!("remote.traverse.status.lookups_title")
+                .into_owned()
+                .into(),
+        ));
+    }
+    for lookup in &status.lookups {
+        let name = url::Url::parse(&lookup.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| lookup.url.clone());
+        let (value, color) = match lookup.state {
+            TraverseLookupState::Ok => (crate::tr!("remote.traverse.status.ok"), muted),
+            TraverseLookupState::Pending => (crate::tr!("remote.traverse.status.pending"), muted),
+            TraverseLookupState::Failed => (crate::tr!("remote.traverse.status.failed"), danger),
+        };
+        column = column
+            .child(line(
+                name,
+                div()
+                    .flex_none()
+                    .text_color(color)
+                    .child(value.into_owned())
+                    .into_any_element(),
+            ))
+            .children(lookup.error.as_deref().map(error));
+    }
+    column.into_any_element()
 }
 
 /// Mint a new invitation. The row that offers it repaints on its next tick.

@@ -482,6 +482,20 @@ a device whose machines are all Off has no relay and contacts no service, and
 the official manifest is loaded only while some machine uses the official
 service. Adding or removing a machine applies this to the running endpoint.
 
+While hosting, each enabled source's row in **Settings → Remote** shows how
+it is doing: a dot and a word for its manifest (**live** fetched by this run,
+**cached** from an earlier run, **bundled** with Tcode, **failed** with none),
+and a one-line summary such as `3 relays · best 42 ms (eu) · lookup ok`.
+Opening it lists every relay with the latency the machine last measured (`—`
+before it has), marks the home relay and shows why its connection fails if it
+does, and gives each pkarr URL's lookup check: shortly after every publish and
+every five minutes the machine reads its own record back from that URL, and
+the check fails if the record is missing, names another relay or has not been
+rewritten for longer than the republish interval. `tcode-headless serve`
+prints the same summary, one `Traverse <source>: …` line per source, once the
+sources settle and again whenever a manifest, home relay or lookup outcome
+changes.
+
 A Traverse instance describes itself with a JSON manifest: a list of relays
 (`url`, optional `quic_port` and `region`) and a list of pkarr lookup URLs.
 Relay and pkarr URLs must be `https`. The machine builds its relay list from
