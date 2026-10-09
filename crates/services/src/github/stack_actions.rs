@@ -151,28 +151,30 @@ fn check_heads(
 }
 
 impl Reader<'_> {
-    /// The stack the pull request is in, read now: `None` when it is in none.
+    /// The stack the pull request is in, read now: `None` when it is in none. The listing names
+    /// the stack; its detail carries each layer's title as well as its head and state.
     fn fresh_stack(&self) -> Result<Option<FreshStack>, GitHubError> {
-        let response = self.api.rest(
-            &self.key.host,
-            RestRequest::get(&self.rest_path(&format!(
-                "stacks?pull_request={}",
-                self.key.number
-            ))),
-            &RequestOptions {
-                operation: "PullRequestStackState",
-                ..self.options.clone()
-            },
-        );
-        let raw: Value = match response {
+        let read = |path: String| {
+            self.api.rest(
+                &self.key.host,
+                RestRequest::get(&self.rest_path(&path)),
+                &RequestOptions {
+                    operation: "PullRequestStackState",
+                    ..self.options.clone()
+                },
+            )
+        };
+        let raw: Value = match read(format!("stacks?pull_request={}", self.key.number)) {
             Ok(response) => response.json()?,
             Err(GitHubError::NotFound) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let Some(stack) = raw.as_array().ok_or(GitHubError::InvalidResponse)?.first() else {
+        let Some(listed) = raw.as_array().ok_or(GitHubError::InvalidResponse)?.first() else {
             return Ok(None);
         };
-        let topology = decode_stack(stack, &self.repository).ok_or(GitHubError::InvalidResponse)?;
+        let number = listed["number"].as_u64().ok_or(GitHubError::InvalidResponse)?;
+        let stack: Value = read(format!("stacks/{number}"))?.json()?;
+        let topology = decode_stack(&stack, &self.repository).ok_or(GitHubError::InvalidResponse)?;
         let rows = stack["pull_requests"]
             .as_array()
             .ok_or(GitHubError::InvalidResponse)?;

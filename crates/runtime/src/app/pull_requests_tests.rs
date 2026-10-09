@@ -1684,7 +1684,9 @@ fn stack_reply(host: &Mutex<StackHost>, exchange: fixture::Exchange) {
     let line = exchange.request.lines().next().unwrap_or_default().to_owned();
     let mut host = host.lock().unwrap();
     let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
-    let reply = if path.starts_with("/repos/sample/project/stacks?pull_request=") {
+    let reply = if path.starts_with("/repos/sample/project/stacks?pull_request=")
+        || path == "/repos/sample/project/stacks/50"
+    {
         let layers: Vec<_> = [2, 3]
             .map(|number| {
                 json!({
@@ -1694,11 +1696,16 @@ fn stack_reply(host: &Mutex<StackHost>, exchange: fixture::Exchange) {
                 })
             })
             .to_vec();
-        json!([{
+        let stack = json!({
             "number": 50, "url": "https://api.github.com/repos/sample/project/stacks/50",
             "base": {"ref": "main"},
             "pull_requests": layers,
-        }])
+        });
+        if path.ends_with("/50") {
+            stack
+        } else {
+            json!([stack])
+        }
     } else if line.starts_with("PUT /repos/sample/project/pulls/3/merge-async ") {
         host.submissions += 1;
         json!({"status": "pending", "details": {"uuid": "op-1"}})

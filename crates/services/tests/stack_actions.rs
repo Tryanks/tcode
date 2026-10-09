@@ -43,8 +43,21 @@ impl Default for Stack {
 }
 
 impl Stack {
+    /// The listing names the stack and its members, without their titles.
     fn listing(&self) -> Value {
         json!([{
+            "number": self.number,
+            "url": "https://api.github.com/repos/octo/repo/stacks/50",
+            "base": {"ref": "main"},
+            "pull_requests": self.layers.iter().map(|(number, head, ..)| json!({
+                "number": number,
+                "head": {"ref": format!("layer-{number}"), "sha": head},
+            })).collect::<Vec<_>>(),
+        }])
+    }
+
+    fn detail(&self) -> Value {
+        json!({
             "number": self.number,
             "url": "https://api.github.com/repos/octo/repo/stacks/50",
             "base": {"ref": "main"},
@@ -56,7 +69,7 @@ impl Stack {
                 "merged_at": (*state == "merged").then_some("2026-10-01T00:00:00Z"),
                 "draft": draft,
             })).collect::<Vec<_>>(),
-        }])
+        })
     }
 }
 
@@ -75,6 +88,8 @@ fn merge(stack: Stack, put: (u16, Value), heads: &[(u64, String)]) -> (MergeSubm
         let line = exchange.request.lines().next().unwrap().to_owned();
         let (status, reply) = if line.starts_with("GET /repos/octo/repo/stacks?pull_request=3 ") {
             (200, stack.listing())
+        } else if line.starts_with(&format!("GET /repos/octo/repo/stacks/{} ", stack.number)) {
+            (200, stack.detail())
         } else if line.starts_with("PUT /repos/octo/repo/pulls/3/merge-async ") {
             seen.lock()
                 .unwrap()
