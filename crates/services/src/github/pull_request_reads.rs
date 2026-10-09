@@ -90,6 +90,10 @@ impl Reader<'_> {
         }
     }
 
+    fn account_name(&self) -> String {
+        super::digest(&self.account)[..16].to_owned()
+    }
+
     pub(super) fn rest_path(&self, rest: &str) -> String {
         format!(
             "/repos/{}/{}/{rest}",
@@ -353,7 +357,7 @@ impl Reader<'_> {
                 comments,
                 threads,
                 complete,
-                account: super::digest(&self.account)[..16].to_owned(),
+                account: self.account_name(),
                 permissions,
                 labels,
                 reviewers: reviewer_states(pr),
@@ -666,6 +670,11 @@ impl PullRequestReads {
             || reader.conversation(),
             conversation_bytes,
         )
+    }
+
+    /// The account the host reads the pull request as, named as its conversation names it.
+    pub fn account(&self, key: &PullRequestKey) -> Result<String, GitHubError> {
+        Ok(self.reader(key)?.account_name())
     }
 
     pub fn thread_replies(

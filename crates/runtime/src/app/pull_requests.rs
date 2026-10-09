@@ -8,7 +8,7 @@ use tcode_protocol::{
     PullRequestReadResponse, QueryResponse,
 };
 use tcode_services::github::{
-    CredentialError, GitHubApi, GitHubError,
+    CredentialError, GitHubApi, GitHubError, pull_request_actions,
     pull_request_reads::PullRequestReads,
     pull_requests::{PullRequests, Summary},
     repository::{self, Repository},
@@ -28,6 +28,9 @@ pub(super) struct PullRequestRuntime {
     discover_again: HashMap<String, bool>,
     merge_commands: HashSet<String>,
     workers: Vec<HostTask<()>>,
+    /// Counts the review submissions that have landed, so a conversation read clears an
+    /// unanswered one only when it began after it.
+    submissions: u64,
 }
 impl PullRequestRuntime {
     pub(super) fn new(api: Arc<GitHubApi>) -> Self {
@@ -44,6 +47,7 @@ impl PullRequestRuntime {
             discover_again: HashMap::new(),
             merge_commands: HashSet::new(),
             workers: Vec::new(),
+            submissions: 0,
         }
     }
 }
@@ -321,6 +325,13 @@ impl AppState {
             return cx.spawn_background(async move { Err(error) });
         }
         let reads = self.pull_requests.reads.clone();
+        let conversation = matches!(read, PullRequestRead::Conversation).then(|| {
+            (
+                session_id.to_owned(),
+                key.clone(),
+                self.pull_requests.submissions,
+            )
+        });
         let task = cx.unblock(move || {
             use tcode_services::github::Fresh;
             fn reply<V: Clone>(
@@ -370,8 +381,20 @@ impl AppState {
                 }
             })
         });
+        let host = cx.clone();
         cx.spawn_background(async move {
-            task.await
+            let answer = task.await;
+            if let (Ok((PullRequestReadResponse::Conversation(read), _)), Some((id, key, since))) =
+                (&answer, conversation)
+            {
+                let account = read.account.clone();
+                let _ = host
+                    .enqueue_and_wait(move |state, cx| {
+                        state.read_after_submission(&id, &key, &account, since, cx)
+                    })
+                    .await;
+            }
+            answer
                 .map(|(response, expires_at)| QueryResponse::PullRequest {
                     response: Box::new(response),
                     expires_at: expires_at
@@ -394,18 +417,31 @@ impl AppState {
     ) -> Result<(), ProtocolError> {
         self.linked_pull_request(session_id, &key)?;
         self.pull_requests.reads.invalidate(&key);
-        // The pull request is read again, which is what an unanswered review waited for.
+        self.request_pull_request_sync(key, cx);
+        Ok(())
+    }
+    /// A conversation read that began after every submission landed shows what GitHub made of
+    /// them, which is what an unanswered one waits for.
+    fn read_after_submission(
+        &mut self,
+        session_id: &str,
+        key: &PullRequestKey,
+        account: &str,
+        since: u64,
+        cx: &mut HostCx,
+    ) {
+        if self.pull_requests.submissions != since {
+            return;
+        }
         if let Some(mut meta) = self.find_meta(session_id)
             && let Some(draft) = meta
                 .pull_request_reviews
                 .iter_mut()
-                .find(|draft| draft.key == key && draft.uncertain)
+                .find(|draft| draft.key == *key && draft.account == account && draft.uncertain)
         {
             draft.uncertain = false;
             self.save_pull_request_meta(meta, cx);
         }
-        self.request_pull_request_sync(key, cx);
-        Ok(())
     }
     pub fn set_pull_request_files_viewed(
         &mut self,
@@ -427,7 +463,7 @@ impl AppState {
         })
     }
     /// A write to the pull request. Whenever GitHub may have applied it, the sync reads the pull
-    /// request again. A review takes the thread's draft and leaves it only once GitHub took it.
+    /// request again. A review takes the account's draft and leaves it only once GitHub took it.
     pub fn run_pull_request_action(
         &mut self,
         session_id: &str,
@@ -438,39 +474,57 @@ impl AppState {
         if let Err(error) = self.linked_pull_request(session_id, &key) {
             return cx.spawn_background(async move { Err(error) });
         }
-        let draft = self.review_draft(session_id, &key);
+        let drafts = self.review_drafts(session_id);
         let reads = self.pull_requests.reads.clone();
-        let review = matches!(action, PullRequestAction::SubmitReview { .. });
         let writing = key.clone();
-        let sent = draft.clone();
         let task = cx.unblock(move || match &action {
             PullRequestAction::SubmitReview { verdict, head } => {
-                // Comments are anchored at the draft's head, which is what GitHub must still be at.
-                let head = if sent.comments.is_empty() {
-                    head
-                } else {
-                    &sent.head
+                let account = match reads.account(&writing) {
+                    Ok(account) => account,
+                    Err(error) => {
+                        return (
+                            None,
+                            PullRequestActionResult::Rejected(pull_request_actions::rejection(
+                                error,
+                            )),
+                        );
+                    }
                 };
-                reads.submit_review(&writing, *verdict, head, &sent.body, &sent.comments)
+                let (anchor, body, comments) =
+                    match pull_request::review_draft(&drafts, &writing, &account) {
+                        Some(draft) => (
+                            draft.head.as_str(),
+                            draft.body.clone(),
+                            draft.comments.as_slice(),
+                        ),
+                        None => ("", String::new(), &[][..]),
+                    };
+                // Comments are anchored at the draft's head, which is what GitHub must still be at.
+                let head = if comments.is_empty() { head } else { anchor };
+                let outcome = reads.submit_review(&writing, *verdict, head, &body, comments);
+                let ids: Vec<_> = comments.iter().map(|comment| comment.id).collect();
+                (Some((account, ids, body)), outcome)
             }
-            action => reads.act(&writing, action),
+            action => (None, reads.act(&writing, action)),
         });
         let host = cx.clone();
         let id = session_id.to_owned();
         cx.spawn_background(async move {
-            let outcome = task.await;
+            let (review, outcome) = task.await;
             if !matches!(outcome, PullRequestActionResult::Rejected(_)) {
                 let applied = outcome == PullRequestActionResult::Applied;
                 let _ = host
                     .enqueue_and_wait(move |state, cx| {
-                        if review && let Some(mut meta) = state.find_meta(&id) {
-                            let ids: Vec<_> =
-                                draft.comments.iter().map(|comment| comment.id).collect();
-                            if pull_request::submitted_review(
-                                &mut meta.pull_request_reviews,
-                                &key,
-                                applied.then_some((ids.as_slice(), draft.body.as_str())),
-                            ) {
+                        if let Some((account, ids, body)) = review {
+                            state.pull_requests.submissions += 1;
+                            if let Some(mut meta) = state.find_meta(&id)
+                                && pull_request::submitted_review(
+                                    &mut meta.pull_request_reviews,
+                                    &key,
+                                    &account,
+                                    applied.then_some((ids.as_slice(), body.as_str())),
+                                )
+                            {
                                 state.save_pull_request_meta(meta, cx);
                             }
                         }
@@ -481,25 +535,10 @@ impl AppState {
             Ok(CommandResponse::PullRequestAction(outcome))
         })
     }
-    fn review_draft(
-        &self,
-        session_id: &str,
-        key: &PullRequestKey,
-    ) -> pull_request::PullRequestReviewDraft {
+    fn review_drafts(&self, session_id: &str) -> Vec<pull_request::PullRequestReviewDraft> {
         self.find_meta(session_id)
-            .and_then(|meta| {
-                meta.pull_request_reviews
-                    .into_iter()
-                    .find(|draft| draft.key == *key)
-            })
-            .unwrap_or_else(|| pull_request::PullRequestReviewDraft {
-                key: key.clone(),
-                head: String::new(),
-                body: String::new(),
-                comments: Vec::new(),
-                next_id: 0,
-                uncertain: false,
-            })
+            .map(|meta| meta.pull_request_reviews)
+            .unwrap_or_default()
     }
     /// A new comment is taken only on lines GitHub would accept at the draft's head, and moving
     /// the draft reads where each comment's lines are now; both read the diff first.
@@ -516,13 +555,23 @@ impl AppState {
             return cx.spawn_background(async move { Err(error) });
         }
         let reads = self.pull_requests.reads.clone();
-        let draft = self.review_draft(session_id, &key);
+        let drafts = self.review_drafts(session_id);
         let id = session_id.to_owned();
         let host = cx.clone();
         cx.spawn_background(async move {
             let anchor_error = |code: &str, message: &str| ProtocolError {
                 code: code.into(),
                 message: message.into(),
+            };
+            let head_changed = || ProtocolError {
+                code: "pull_request_head_changed".into(),
+                message: "The pull request's head changed.".into(),
+            };
+            let account = {
+                let (reads, key) = (reads.clone(), key.clone());
+                host.unblock(move || reads.account(&key))
+                    .await
+                    .map_err(read_error)?
             };
             let moved = match &edit {
                 Edit::AddComment {
@@ -553,18 +602,16 @@ impl AppState {
                                 "GitHub only accepts comments on lines in the diff.",
                             ));
                         }
-                        Anchoring::Moved => {
-                            return Err(anchor_error(
-                                "pull_request_head_changed",
-                                "The pull request's head changed.",
-                            ));
-                        }
+                        Anchoring::Moved => return Err(head_changed()),
                     }
                 }
                 Edit::MoveToHead => {
                     let (reads, key) = (reads.clone(), key.clone());
+                    let comments = pull_request::review_draft(&drafts, &key, &account)
+                        .map(|draft| draft.comments.clone())
+                        .unwrap_or_default();
                     Some(
-                        host.unblock(move || reads.reanchor(&key, &draft.comments))
+                        host.unblock(move || reads.reanchor(&key, &comments))
                             .await
                             .map_err(read_error)?,
                     )
@@ -573,12 +620,21 @@ impl AppState {
             };
             host.enqueue_and_wait(move |state, cx| {
                 let Some(mut meta) = state.find_meta(&id) else {
-                    return;
+                    return Ok(());
                 };
+                // A comment read at another head than the draft's would be sent where its lines
+                // may read differently; the draft moves to the new head first.
+                if let Edit::AddComment { head, .. } = &edit
+                    && pull_request::review_draft(&meta.pull_request_reviews, &key, &account)
+                        .is_some_and(|draft| !draft.comments.is_empty() && draft.head != *head)
+                {
+                    return Err(head_changed());
+                }
                 let changed = match moved {
                     Some((head, moved)) => pull_request::reanchor_review(
                         &mut meta.pull_request_reviews,
                         &key,
+                        &account,
                         &head,
                         |comment| {
                             moved
@@ -587,16 +643,20 @@ impl AppState {
                                 .and_then(|(_, revision)| revision.clone())
                         },
                     ),
-                    None => {
-                        pull_request::edit_review_draft(&mut meta.pull_request_reviews, &key, edit)
-                    }
+                    None => pull_request::edit_review_draft(
+                        &mut meta.pull_request_reviews,
+                        &key,
+                        &account,
+                        edit,
+                    ),
                 };
                 if changed {
                     state.save_pull_request_meta(meta, cx);
                 }
+                Ok(())
             })
             .await
-            .map_err(|_| failure("Host closed."))?;
+            .map_err(|_| failure("Host closed."))??;
             Ok(CommandResponse::Unit)
         })
     }
@@ -690,9 +750,6 @@ impl AppState {
             return;
         }
         if pull_request::unlink_pull_request(&mut meta.pull_requests, key) {
-            let links = &meta.pull_requests;
-            meta.pull_request_reviews
-                .retain(|draft| pull_request::shown(links, &draft.key));
             self.discard_pull_request_wakes(id, Some(key));
             self.save_pull_request_meta(meta, cx);
         }

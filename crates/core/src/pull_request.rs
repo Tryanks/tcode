@@ -448,6 +448,10 @@ pub fn groups(links: &[ThreadPullRequestLink]) -> Vec<PullRequestGroup<'_>> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRequestReviewDraft {
     pub key: PullRequestKey,
+    /// The GitHub account writing it, as the conversation names it: a draft is another
+    /// account's work once the host reads as someone else, so it is kept and not shown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
     /// The head commit the comments are anchored at.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub head: String,
@@ -518,20 +522,43 @@ pub enum PullRequestReviewDraftEdit {
     Discard,
 }
 
-/// Applies an edit to the thread's drafts; false when it changed nothing, was malformed, or was
+/// The account's draft of the pull request.
+pub fn review_draft<'a>(
+    drafts: &'a [PullRequestReviewDraft],
+    key: &PullRequestKey,
+    account: &str,
+) -> Option<&'a PullRequestReviewDraft> {
+    drafts
+        .iter()
+        .find(|draft| draft.key == *key && draft.account == account)
+}
+
+fn draft_index(
+    drafts: &[PullRequestReviewDraft],
+    key: &PullRequestKey,
+    account: &str,
+) -> Option<usize> {
+    drafts
+        .iter()
+        .position(|draft| draft.key == *key && draft.account == account)
+}
+
+/// Applies an edit to the account's draft; false when it changed nothing, was malformed, or was
 /// [`PullRequestReviewDraftEdit::MoveToHead`].
 pub fn edit_review_draft(
     drafts: &mut Vec<PullRequestReviewDraft>,
     key: &PullRequestKey,
+    account: &str,
     edit: PullRequestReviewDraftEdit,
 ) -> bool {
-    let index = match drafts.iter().position(|draft| draft.key == *key) {
+    let index = match draft_index(drafts, key, account) {
         Some(index) => index,
         None if matches!(edit, PullRequestReviewDraftEdit::AddComment { .. })
             || matches!(&edit, PullRequestReviewDraftEdit::SetBody { body } if !body.is_empty()) =>
         {
             drafts.push(PullRequestReviewDraft {
                 key: key.clone(),
+                account: account.to_owned(),
                 head: String::new(),
                 body: String::new(),
                 comments: Vec::new(),
@@ -612,12 +639,14 @@ pub fn edit_review_draft(
 pub fn reanchor_review(
     drafts: &mut [PullRequestReviewDraft],
     key: &PullRequestKey,
+    account: &str,
     head: &str,
     moved: impl Fn(&PullRequestReviewDraftComment) -> Option<String>,
 ) -> bool {
-    let Some(draft) = drafts.iter_mut().find(|draft| draft.key == *key) else {
+    let Some(index) = draft_index(drafts, key, account) else {
         return false;
     };
+    let draft = &mut drafts[index];
     if draft.head == head {
         return false;
     }
@@ -637,9 +666,10 @@ pub fn reanchor_review(
 pub fn submitted_review(
     drafts: &mut Vec<PullRequestReviewDraft>,
     key: &PullRequestKey,
+    account: &str,
     sent: Option<(&[u64], &str)>,
 ) -> bool {
-    let Some(index) = drafts.iter().position(|draft| draft.key == *key) else {
+    let Some(index) = draft_index(drafts, key, account) else {
         return false;
     };
     let draft = &mut drafts[index];

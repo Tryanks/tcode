@@ -17,7 +17,7 @@ use tcode_core::{
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestFile, PullRequestFileText,
     PullRequestPatch, PullRequestRejection as Rejection, PullRequestReviewVerdict,
-    PullRequestReviewerKind,
+    PullRequestReviewer, PullRequestReviewerKind,
 };
 
 /// A pending comment's id and the revision its lines now read at, if they still do.
@@ -67,16 +67,8 @@ fn in_hunks(
         })
 }
 
-/// The reads a write may change.
-#[derive(Clone, Copy)]
-enum Affects {
-    Conversation,
-    Labels,
-    Reviewers,
-}
-
 /// Why a write was not sent, or why GitHub refused it.
-fn rejection(error: GitHubError) -> Rejection {
+pub fn rejection(error: GitHubError) -> Rejection {
     match error {
         GitHubError::Credential(CredentialError::Disabled) => Rejection::HostDisabled,
         GitHubError::Credential(_) | GitHubError::Unauthorized => Rejection::NoCredential,
@@ -182,53 +174,43 @@ impl Reader<'_> {
         }
         Ok(node["__typename"].as_str().unwrap_or_default().to_owned())
     }
+}
 
-    fn thread(&self, id: &str) -> Result<(), Rejection> {
-        match self.subject(id)?.as_str() {
-            "PullRequestReviewThread" => Ok(()),
-            _ => Err(Rejection::Invalid),
-        }
-    }
+/// One request of a write made of several, and the names it covers.
+type Step<'a> = (Vec<String>, Box<dyn FnOnce() -> Outcome + 'a>);
 
-    /// Labels come off one request each, since the endpoint names one in its path; the first
-    /// failure stops the rest.
-    fn remove_labels(&self, labels: &[String]) -> Outcome {
-        let issue = format!("issues/{}/labels", self.key.number);
-        for (index, label) in labels.iter().enumerate() {
-            let outcome = self.send(
-                "RemovePullRequestLabel",
-                "DELETE",
-                &format!("{issue}/{}", percent_encode(label)),
-                None,
-            );
-            if outcome == Outcome::Applied {
-                continue;
-            }
-            if index == 0 {
-                return outcome;
-            }
-            return Outcome::Partial {
-                applied: labels[..index].to_vec(),
-                unapplied: labels[index..].to_vec(),
-                failure: Box::new(outcome),
-            };
+/// Sends the steps in order until one is not applied; when some went through before it, the
+/// answer is [`Outcome::Partial`] by the names each covers.
+fn in_order<'a>(steps: impl IntoIterator<Item = Step<'a>>) -> Outcome {
+    let mut applied = Vec::new();
+    let mut steps = steps.into_iter();
+    while let Some((names, send)) = steps.next() {
+        let outcome = send();
+        if outcome == Outcome::Applied {
+            applied.extend(names);
+            continue;
         }
-        Outcome::Applied
+        if applied.is_empty() {
+            return outcome;
+        }
+        return Outcome::Partial {
+            applied,
+            unapplied: names
+                .into_iter()
+                .chain(steps.flat_map(|(names, _)| names))
+                .collect(),
+            failure: Box::new(outcome),
+        };
     }
+    Outcome::Applied
 }
 
 impl PullRequestReads {
     /// Every action but a review, whose content is the runtime's draft: see [`Self::submit_review`].
     pub fn act(&self, key: &PullRequestKey, action: &PullRequestAction) -> Outcome {
-        let affects = match action {
-            PullRequestAction::AddLabels { .. } | PullRequestAction::RemoveLabels { .. } => {
-                Affects::Labels
-            }
-            PullRequestAction::RequestReviewers { .. } => Affects::Reviewers,
-            _ => Affects::Conversation,
-        };
+        self.drop_written(key);
         let outcome = self.write(key, action).unwrap_or_else(Outcome::Rejected);
-        self.written(key, affects, &outcome);
+        self.drop_written(key);
         outcome
     }
 
@@ -255,7 +237,6 @@ impl PullRequestReads {
                 if blank(body) {
                     return Err(Rejection::Invalid);
                 }
-                reader.thread(thread_id)?;
                 reader.mutate(
                     "ReplyToPullRequestThread",
                     "mutation ReplyToPullRequestThread($threadId: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } } }",
@@ -266,7 +247,6 @@ impl PullRequestReads {
                 thread_id,
                 resolved,
             } => {
-                reader.thread(thread_id)?;
                 let (operation, query) = if *resolved {
                     (
                         "ResolvePullRequestThread",
@@ -285,13 +265,16 @@ impl PullRequestReads {
                 content,
                 reacted,
             } => {
-                if !matches!(
-                    reader.subject(subject_id)?.as_str(),
-                    "PullRequest"
-                        | "IssueComment"
-                        | "PullRequestReviewComment"
-                        | "PullRequestReview"
-                ) {
+                // The pull request's own id needs no proof that it is this pull request's.
+                if *subject_id != self.node_id(&reader).map_err(rejection)?
+                    && !matches!(
+                        reader.subject(subject_id)?.as_str(),
+                        "PullRequest"
+                            | "IssueComment"
+                            | "PullRequestReviewComment"
+                            | "PullRequestReview"
+                    )
+                {
                     return Err(Rejection::Invalid);
                 }
                 let (operation, query) = if *reacted {
@@ -352,49 +335,77 @@ impl PullRequestReads {
                     variables,
                 )
             }
-            PullRequestAction::AddLabels { labels } => {
-                if labels.is_empty() {
+            PullRequestAction::SetLabels { add, remove } => {
+                if add.is_empty() && remove.is_empty() {
                     return Err(Rejection::Invalid);
                 }
-                // A pull request is an issue to the labels API, which adds to what is there.
-                reader.send(
-                    "AddPullRequestLabels",
-                    "POST",
-                    &format!("issues/{}/labels", key.number),
-                    Some(&json!({"labels": labels})),
-                )
+                let issue = format!("issues/{}/labels", key.number);
+                // A pull request is an issue to the labels API, which adds to what is there; it
+                // takes a label off one request each, since the endpoint names one in its path.
+                let adding = (!add.is_empty()).then(|| -> Step<'_> {
+                    (
+                        add.clone(),
+                        Box::new(|| {
+                            reader.send(
+                                "AddPullRequestLabels",
+                                "POST",
+                                &issue,
+                                Some(&json!({"labels": add})),
+                            )
+                        }),
+                    )
+                });
+                let removing = remove.iter().map(|label| -> Step<'_> {
+                    (
+                        vec![label.clone()],
+                        Box::new(|| {
+                            reader.send(
+                                "RemovePullRequestLabel",
+                                "DELETE",
+                                &format!("{issue}/{}", percent_encode(label)),
+                                None,
+                            )
+                        }),
+                    )
+                });
+                in_order(adding.into_iter().chain(removing))
             }
-            PullRequestAction::RemoveLabels { labels } => {
-                if labels.is_empty() {
+            PullRequestAction::SetReviewers { add, remove } => {
+                if add.is_empty() && remove.is_empty() {
                     return Err(Rejection::Invalid);
                 }
-                reader.remove_labels(labels)
-            }
-            PullRequestAction::RequestReviewers {
-                reviewers,
-                requested,
-            } => {
-                if reviewers.is_empty() {
-                    return Err(Rejection::Invalid);
-                }
-                let named = |kind| {
+                let path = format!("pulls/{}/requested_reviewers", key.number);
+                let names = |reviewers: &[PullRequestReviewer]| {
                     reviewers
                         .iter()
-                        .filter(|reviewer| reviewer.kind == kind)
-                        .map(|reviewer| reviewer.login.as_str())
+                        .map(|reviewer| reviewer.login.clone())
                         .collect::<Vec<_>>()
                 };
-                // GitHub takes a request back from exactly whoever it was made of, so both
-                // methods send the same body.
-                reader.send(
-                    "RequestPullRequestReviewers",
-                    if *requested { "POST" } else { "DELETE" },
-                    &format!("pulls/{}/requested_reviewers", key.number),
-                    Some(&json!({
-                        "reviewers": named(PullRequestReviewerKind::User),
-                        "team_reviewers": named(PullRequestReviewerKind::Team),
-                    })),
-                )
+                let request = |method: &'static str, reviewers: &[PullRequestReviewer]| {
+                    let named = |kind| {
+                        reviewers
+                            .iter()
+                            .filter(|reviewer| reviewer.kind == kind)
+                            .map(|reviewer| reviewer.login.as_str())
+                            .collect::<Vec<_>>()
+                    };
+                    // GitHub takes a request back from exactly whoever it was made of, so both
+                    // methods send the same body.
+                    reader.send(
+                        "RequestPullRequestReviewers",
+                        method,
+                        &path,
+                        Some(&json!({
+                            "reviewers": named(PullRequestReviewerKind::User),
+                            "team_reviewers": named(PullRequestReviewerKind::Team),
+                        })),
+                    )
+                };
+                let steps: [Step<'_>; 2] = [
+                    (names(add), Box::new(|| request("POST", add))),
+                    (names(remove), Box::new(|| request("DELETE", remove))),
+                ];
+                in_order(steps.into_iter().filter(|(names, _)| !names.is_empty()))
             }
         })
     }
@@ -410,10 +421,11 @@ impl PullRequestReads {
         body: &str,
         comments: &[PullRequestReviewDraftComment],
     ) -> Outcome {
+        self.drop_written(key);
         let outcome = self
             .review(key, verdict, head, body, comments)
             .unwrap_or_else(Outcome::Rejected);
-        self.written(key, Affects::Conversation, &outcome);
+        self.drop_written(key);
         outcome
     }
 
@@ -551,17 +563,12 @@ impl PullRequestReads {
         Ok((head, moved))
     }
 
-    fn written(&self, key: &PullRequestKey, affects: Affects, outcome: &Outcome) {
-        if matches!(outcome, Outcome::Rejected(_)) {
-            return;
-        }
-        match affects {
-            Affects::Conversation => {
-                self.conversations.invalidate(key);
-                self.replies.invalidate(key);
-            }
-            Affects::Labels => self.labels.invalidate(key),
-            Affects::Reviewers => self.reviewers.invalidate(key),
-        }
+    /// Everything a write may change, before it and again after whatever became of it, so no
+    /// answer read while it was sent is kept.
+    fn drop_written(&self, key: &PullRequestKey) {
+        self.conversations.invalidate(key);
+        self.replies.invalidate(key);
+        self.labels.invalidate(key);
+        self.reviewers.invalidate(key);
     }
 }

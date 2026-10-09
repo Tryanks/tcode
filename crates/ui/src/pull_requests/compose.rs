@@ -278,16 +278,21 @@ impl PullRequestView {
             .is_some_and(|writes| writes.waiting || writes.busy.contains(what))
     }
 
-    /// The thread's review draft of this pull request, as the host keeps it.
+    /// The thread's review draft of this pull request, as the host keeps it, when the account
+    /// the conversation was read as wrote it.
     pub(super) fn draft(&self, cx: &App) -> Option<PullRequestReviewDraft> {
         let (session, key) = self.current.as_ref()?;
-        self.store
-            .read(cx)
-            .thread_meta(session)?
-            .pull_request_reviews
-            .iter()
-            .find(|draft| draft.key == *key)
-            .cloned()
+        let account = &self.page()?.conversation.data.as_ref()?.account;
+        tcode_core::pull_request::review_draft(
+            &self
+                .store
+                .read(cx)
+                .thread_meta(session)?
+                .pull_request_reviews,
+            key,
+            account,
+        )
+        .cloned()
     }
 
     pub(super) fn open_sheet(&mut self, sheet: Option<Sheet>, cx: &mut Context<Self>) {

@@ -385,17 +385,16 @@ pub enum PullRequestAction {
         title: Option<String>,
         body: Option<String>,
     },
-    /// One request for every label.
-    AddLabels {
-        labels: Vec<String>,
+    /// The additions in one request, then one request per removal, in order, stopping at the
+    /// first that fails.
+    SetLabels {
+        add: Vec<String>,
+        remove: Vec<String>,
     },
-    /// One request per label, in order, stopping at the first that fails.
-    RemoveLabels {
-        labels: Vec<String>,
-    },
-    RequestReviewers {
-        reviewers: Vec<PullRequestReviewer>,
-        requested: bool,
+    /// The additions in one request, then the removals in another.
+    SetReviewers {
+        add: Vec<PullRequestReviewer>,
+        remove: Vec<PullRequestReviewer>,
     },
 }
 
