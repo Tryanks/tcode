@@ -29,6 +29,13 @@ struct OpenImage {
     title: String,
 }
 
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown, no_json)]
+struct ShowMathSource {
+    path: String,
+    source: bool,
+}
+
 /// Items a surface adds below the view's own: a message offers to copy or
 /// rewind itself, a plan to download itself.
 pub type MenuExtension = Rc<dyn Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu>;
@@ -179,6 +186,15 @@ impl Element for MarkdownView {
                     crate::image_viewer::open(source, action.title.clone(), window, cx);
                 }
             })
+            .on_action({
+                let state = state.clone();
+                move |action: &ShowMathSource, window, cx| {
+                    gpui_base::TextSelection::clear(window, cx);
+                    state.update(cx, |state, cx| {
+                        state.set_math_source(&action.path, action.source, cx)
+                    });
+                }
+            })
             .child(state.clone())
             .refine_style(&self.style)
             .context_menu({
@@ -233,6 +249,30 @@ impl Element for MarkdownView {
                             crate::tr!("markdown.code_copy").into_owned(),
                             Box::new(CopyText(code)),
                         ),
+                        Some(PendingContextTarget::Math {
+                            path,
+                            latex,
+                            show_source,
+                        }) => menu
+                            .separator()
+                            .menu(
+                                crate::tr!("markdown.math_copy").into_owned(),
+                                Box::new(CopyText(latex)),
+                            )
+                            .when_some(show_source, |menu, show_source| {
+                                menu.menu(
+                                    crate::tr!(if show_source {
+                                        "markdown.math_show_rendered"
+                                    } else {
+                                        "markdown.math_show_source"
+                                    })
+                                    .into_owned(),
+                                    Box::new(ShowMathSource {
+                                        path,
+                                        source: !show_source,
+                                    }),
+                                )
+                            }),
                         Some(PendingContextTarget::Image { url, title }) => {
                             let menu = menu.separator().menu(
                                 crate::tr!("markdown.open_image").into_owned(),
@@ -679,12 +719,16 @@ mod tests {
         );
         drag_to(cx, point(end.left(), end.center().y));
         assert_eq!(release(cx, point(end.left(), end.center().y)), "1+2");
-        let source = cx.debug_bounds("math-mode-true-root-0").unwrap();
-        cx.simulate_click(source.center(), Modifiers::default());
+        let block = cx.debug_bounds("markdown-math-root-0").unwrap();
+        cx.simulate_mouse_move(block.center(), None, Modifiers::default());
+        cx.update(|window, cx| _ = window.draw(cx));
+        let toggle = cx.debug_bounds("markdown-math-toggle-root-0").unwrap();
+        cx.simulate_mouse_move(toggle.center(), None, Modifiers::default());
+        cx.simulate_click(toggle.center(), Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
         assert!(cx.debug_bounds("markdown-code-line-0").is_some());
-        let rendered = cx.debug_bounds("math-mode-false-root-0").unwrap();
-        cx.simulate_click(rendered.center(), Modifiers::default());
+        let toggle = cx.debug_bounds("markdown-math-toggle-root-0").unwrap();
+        cx.simulate_click(toggle.center(), Modifiers::default());
         cx.update(|window, cx| _ = window.draw(cx));
         assert!(cx.debug_bounds("markdown-code-line-0").is_none());
         root.update(cx, |root, cx| {
@@ -1429,6 +1473,44 @@ mod tests {
             focused.is_some_and(|focused| focused != markdown_focus),
             "a link right-click must open and focus the context menu"
         );
+    }
+
+    #[gpui::test]
+    fn inline_formula_menu_copies_latex_and_switches_to_source(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        cx.update(crate::widgets::menu::init);
+        let (view, cx) = right_click_window(cx);
+        view.update(cx, |root, cx| {
+            root.markdown
+                .update(cx, |md, cx| md.set_text("before $x^2$ after", cx))
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        let formula = cx.debug_bounds("math-glyph-0").unwrap().center();
+        let menu = |keys: &str, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_down(formula, MouseButton::Right, Modifiers::default());
+            cx.simulate_mouse_up(formula, MouseButton::Right, Modifiers::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| _ = window.draw(cx));
+            // Copy is disabled with nothing selected; the first Down lands
+            // on Select All, the next on the formula's own items.
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            cx.update(|window, cx| _ = window.draw(cx));
+        };
+
+        menu("down down enter", cx);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("x^2")
+        );
+        menu("down down down enter", cx);
+        assert!(cx.debug_bounds("math-glyph-0").is_none());
+        menu("down down down enter", cx);
+        assert!(cx.debug_bounds("math-glyph-0").is_some());
     }
 
     struct TouchRoot {
