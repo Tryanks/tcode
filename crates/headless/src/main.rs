@@ -150,8 +150,6 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         drop_superseded_diffs: true,
         ..HostServices::default()
     };
-    // Preview requests travel to whichever client shows the session's preview panel, so the
-    // headless host serves it too.
     if let Err(error) = services.start_mcp_servers(false) {
         eprintln!("tcode-headless: MCP servers unavailable: {error}");
     }

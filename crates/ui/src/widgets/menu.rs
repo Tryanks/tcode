@@ -132,21 +132,17 @@ impl PopupMenu {
         self.menu_with_icon_and_enable(label, icon, action, true)
     }
     pub fn menu_with_icon_and_enable(
-        mut self,
+        self,
         label: impl Into<SharedString>,
         icon: IconName,
         action: Box<dyn Action>,
         enable: bool,
     ) -> Self {
-        self.items.push(MenuItem::Item {
-            label: Some(label.into()),
-            icon: Some(icon),
-            render: None,
-            action,
-            disabled: !enable,
-            checked: false,
-        });
-        self
+        let mut menu = self.menu_with_enable(label, action, enable);
+        if let Some(MenuItem::Item { icon: slot, .. }) = menu.items.last_mut() {
+            *slot = Some(icon);
+        }
+        menu
     }
     pub fn menu_with_check(
         mut self,
@@ -401,11 +397,13 @@ impl Render for PopupMenu {
                                         this.choose(index, window, cx)
                                     }))
                             })
-                            .child(match (*checked, icon.clone()) {
-                                (true, _) => Icon::new(IconName::Check).xsmall().into_any_element(),
-                                (false, Some(icon)) => Icon::new(icon).small().into_any_element(),
-                                (false, None) => div().w_4().into_any_element(),
-                            })
+                            .child(div().flex_none().w_4().flex().justify_center().children(
+                                match (*checked, icon.clone()) {
+                                    (true, _) => Some(Icon::new(IconName::Check).xsmall()),
+                                    (false, Some(icon)) => Some(Icon::new(icon).small()),
+                                    (false, None) => None,
+                                },
+                            ))
                             .when_some(label.clone(), |el, label| el.child(label))
                             .when_some(content, |el, content| el.child(content)),
                     );

@@ -43,6 +43,8 @@ pub struct HostServices {
 impl HostServices {
     /// Starts the MCP servers a host offers its agents on one loopback MCP host, computer use
     /// only where `computer_use`. A host that cannot bind or start runs without any of them.
+    /// Preview requests travel to whichever client shows the session's preview panel, so a host
+    /// without a desktop serves preview too.
     pub fn start_mcp_servers(&mut self, computer_use: bool) -> std::io::Result<()> {
         let mut host = mcp_host::Host::bind()?;
         let preview = preview_mcp::start(&mut host);
