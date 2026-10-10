@@ -92,6 +92,11 @@ const BLOBS: &str = "query($path: ID!, $ref: String!, $paths: [String!]!) {
   project(fullPath: $path) { repository { blobs(ref: $ref, paths: $paths) { nodes { path oid } } } }
 }";
 
+/// Lines added and removed, which REST's merge request does not count.
+const DIFF_STATS: &str = "query($path: ID!, $iid: String!) {
+  project(fullPath: $path) { mergeRequest(iid: $iid) { diffStatsSummary { additions deletions } } }
+}";
+
 /// What a merge or squash commit would say, which a merge may replace.
 const MERGE_MESSAGE: &str = "query($path: ID!, $iid: String!) {
   project(fullPath: $path) { mergeRequest(iid: $iid) { diffHeadSha defaultMergeCommitMessage defaultSquashCommitMessage } }
@@ -189,6 +194,12 @@ impl Mr<'_> {
             }
         }
         Ok((first.unwrap_or_default(), viewer, discussions, false))
+    }
+    /// Lines added and removed, or `None` when GitLab has no count for the merge request.
+    pub(super) fn diff_stats(&self) -> Result<Option<(u64, u64)>, ForgeError> {
+        let data = self.graphql(DIFF_STATS, json!({}), "DiffStats")?;
+        let stats = &data["project"]["mergeRequest"]["diffStatsSummary"];
+        Ok(stats["additions"].as_u64().zip(stats["deletions"].as_u64()))
     }
     /// Whether the reading account may change the merge request's state, and push to its source
     /// branch.
@@ -384,8 +395,10 @@ fn changed_files(mr: &Value) -> u64 {
     count.trim_end_matches('+').parse().unwrap_or(0)
 }
 
+/// `stats` is lines added and removed, where GitLab counted them.
 pub(super) fn snapshot(
     mr: &Value,
+    stats: Option<(u64, u64)>,
     mergeability: Mergeability,
     synced_at: u64,
 ) -> Option<PullRequestSnapshot> {
@@ -403,9 +416,8 @@ pub(super) fn snapshot(
             login,
             avatar_url: text(&mr["author"], "avatar_url"),
         }),
-        // GitLab counts neither on a merge request.
-        additions: 0,
-        deletions: 0,
+        additions: stats.map(|(additions, _)| additions),
+        deletions: stats.map(|(_, deletions)| deletions),
         changed_files: changed_files(mr),
         review_decision: None,
         checks_state: checks_state(&checks(mr)),

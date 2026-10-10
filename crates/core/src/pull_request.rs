@@ -461,8 +461,11 @@ pub struct PullRequestSnapshot {
     pub closed_at: Option<String>,
     pub merged_at: Option<String>,
     pub author: Option<PullRequestAuthor>,
-    pub additions: u64,
-    pub deletions: u64,
+    /// Lines added and removed; `None` where the host gave no count.
+    #[serde(default)]
+    pub additions: Option<u64>,
+    #[serde(default)]
+    pub deletions: Option<u64>,
     pub changed_files: u64,
     pub review_decision: Option<ReviewDecision>,
     pub checks_state: Option<ChecksState>,
@@ -1534,8 +1537,8 @@ mod tests {
                 closed_at: None,
                 merged_at: None,
                 author: None,
-                additions: 0,
-                deletions: 0,
+                additions: Some(0),
+                deletions: Some(0),
                 changed_files: 0,
                 review_decision: None,
                 checks_state: None,
@@ -1545,6 +1548,17 @@ mod tests {
             sync_error: None,
             watch: None,
         }
+    }
+    /// A snapshot thread metadata kept before counts could be absent still reads its counts; a
+    /// host that gives none is read as giving none, not as zero lines.
+    #[test]
+    fn a_kept_snapshot_reads_its_line_counts() {
+        let kept = r#"{"state":"open","title":"Change","head_branch":"feature","base_branch":"main","is_draft":false,"updated_at":"2026-10-08T00:00:00Z","synced_at":1,"closed_at":null,"merged_at":null,"author":null,"additions":3,"deletions":1,"changed_files":2,"review_decision":null,"checks_state":null,"mergeability":"clean"}"#;
+        let snapshot: PullRequestSnapshot = serde_json::from_str(kept).unwrap();
+        assert_eq!((snapshot.additions, snapshot.deletions), (Some(3), Some(1)));
+        let uncounted = kept.replace(r#""additions":3,"deletions":1,"#, "");
+        let snapshot: PullRequestSnapshot = serde_json::from_str(&uncounted).unwrap();
+        assert_eq!((snapshot.additions, snapshot.deletions), (None, None));
     }
     #[test]
     fn badge_distinguishes_unknown_drafts_terminal_and_related_links() {

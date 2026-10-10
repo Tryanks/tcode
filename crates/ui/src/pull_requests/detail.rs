@@ -1601,7 +1601,8 @@ impl PullRequestView {
         let stats = (tab == Tab::Files)
             .then(|| link.as_ref().and_then(|link| link.snapshot.clone()))
             .flatten()
-            .map(|snapshot| {
+            .and_then(|snapshot| snapshot.additions.zip(snapshot.deletions))
+            .map(|(additions, deletions)| {
                 h_flex()
                     .flex_none()
                     .gap_1()
@@ -1610,12 +1611,12 @@ impl PullRequestView {
                     .child(
                         div()
                             .text_color(cx.theme().success)
-                            .child(format!("+{}", snapshot.additions)),
+                            .child(format!("+{additions}")),
                     )
                     .child(
                         div()
                             .text_color(cx.theme().danger)
-                            .child(format!("−{}", snapshot.deletions)),
+                            .child(format!("−{deletions}")),
                     )
             });
         h_flex()

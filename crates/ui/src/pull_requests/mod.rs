@@ -770,14 +770,15 @@ impl PullRequestsPanel {
         let line_two = if let Some(snapshot) = snapshot {
             let author = snapshot.author.as_ref().map(|author| author.login.clone());
             let branches = format!("{} → {}", snapshot.head_branch, snapshot.base_branch);
-            let stat = (
-                format!("+{}", snapshot.additions),
-                format!("−{}", snapshot.deletions),
-            );
+            // A host that counts no lines shows no stat rather than zeros.
+            let stat = snapshot
+                .additions
+                .zip(snapshot.deletions)
+                .map(|(additions, deletions)| (format!("+{additions}"), format!("−{deletions}")));
             detail.extend(author.clone());
             detail.push(branches.clone());
             detail.extend(layer.clone());
-            detail.push(format!("{} {}", stat.0, stat.1));
+            detail.extend(stat.as_ref().map(|stat| format!("{} {}", stat.0, stat.1)));
             detail.retain(|part| !part.is_empty());
             if compact {
                 // The phone sheet has no room for parts that give way, so the line truncates whole.
@@ -811,21 +812,23 @@ impl PullRequestsPanel {
                     .when_some(layer.clone(), |line, layer| {
                         line.child(dot()).child(div().flex_none().child(layer))
                     })
-                    .child(dot())
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_color(cx.theme().success)
-                            .child(stat.0),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_color(cx.theme().danger)
-                            .child(stat.1),
-                    )
+                    .when_some(stat, |line, (additions, deletions)| {
+                        line.child(dot())
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(cx.theme().success)
+                                    .child(additions),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(cx.theme().danger)
+                                    .child(deletions),
+                            )
+                    })
                     .into_any_element()
             }
         } else {
