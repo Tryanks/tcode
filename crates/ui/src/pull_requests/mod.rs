@@ -794,8 +794,8 @@ impl PullRequestsPanel {
             let lead = detail.join(" · ");
             detail.extend(layer.clone());
             detail.push(format!("{} {}", stat.0, stat.1));
-            let line = h_flex().gap_1().items_center().min_w_0().overflow_hidden();
             if compact {
+                let line = h_flex().gap_1().items_center().min_w_0().overflow_hidden();
                 tail_layer(
                     line.child(div().min_w_0().truncate().child(lead)),
                     layer.clone(),
@@ -804,46 +804,69 @@ impl PullRequestsPanel {
                 .child(div().flex_none().child(format!("{} {}", stat.0, stat.1)))
                 .into_any_element()
             } else {
-                let line = line
+                // Spacing is each part's leading margin, so a part that gives way takes its
+                // separator and its spacing with it.
+                let sep = || div().flex_none().ml_1().child("·");
+                let mono = cx.theme().mono_font_family.clone();
+                h_flex()
+                    .items_center()
+                    .min_w_0()
+                    .overflow_hidden()
                     .child(div().flex_none().child(source.clone()))
-                    // The author gives way first, and its separator with it.
+                    // The author gives way first, whole: a line too narrow for it wraps it onto
+                    // a second line this one-line box clips. gpui has no setter for a shrink
+                    // value, hence the reach into the style.
                     .when_some(author, |line, author| {
                         line.child(
                             h_flex()
-                                .gap_1()
+                                .flex_wrap()
+                                .h(px(16.))
+                                .line_height(px(16.))
                                 .min_w_0()
                                 .overflow_hidden()
                                 .map(|mut group| {
                                     group.style().flex_shrink = Some(1000.);
                                     group
                                 })
-                                .child(dot())
-                                .child(div().min_w_0().truncate().child(author)),
+                                // An empty first item, so the author wraps rather than overflows.
+                                .child(div().h_full())
+                                .child(
+                                    h_flex()
+                                        .flex_none()
+                                        .child(sep())
+                                        .child(div().ml_1().child(author)),
+                                ),
                         )
                     })
-                    .child(dot())
+                    .child(sep())
                     // gpui-base has no middle truncation; the row tooltip holds the full pair.
                     .child(
                         div()
+                            .ml_1()
                             .min_w_0()
                             .max_w(gpui::relative(0.5))
                             .truncate()
-                            .font_family(cx.theme().mono_font_family.clone())
+                            .font_family(mono.clone())
                             .child(branches),
-                    );
-                tail_layer(line, layer.clone())
-                    .child(dot())
+                    )
+                    .when_some(layer.clone(), |line, layer| {
+                        line.child(sep())
+                            .child(div().flex_none().ml_1().child(layer))
+                    })
+                    .child(sep())
                     .child(
                         div()
                             .flex_none()
-                            .font_family(cx.theme().mono_font_family.clone())
+                            .ml_1()
+                            .font_family(mono.clone())
                             .text_color(cx.theme().success)
                             .child(stat.0),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .font_family(cx.theme().mono_font_family.clone())
+                            .ml_1()
+                            .font_family(mono)
                             .text_color(cx.theme().danger)
                             .child(stat.1),
                     )
