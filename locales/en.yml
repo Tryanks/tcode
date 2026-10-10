@@ -90,6 +90,7 @@ chat:
     resumes_in: "Resumes in %{countdown}"
     cancel: "Cancel"
     schedule: "Resume when limit resets"
+    continue_now: "Continue"
   steering: "Steering…"
   steered: "Steered"
   orchestrate_skill: "Orchestrate Skill"

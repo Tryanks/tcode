@@ -58,6 +58,40 @@ pub(crate) fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
     }
 }
 
+/// What the error card of an exhausted usage window offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LimitResumeAction {
+    /// A resume is queued for the reset: countdown plus cancel.
+    Scheduled {
+        queued_id: u64,
+        remaining_secs: u64,
+    },
+    /// The reset is still ahead and nothing is queued for it.
+    Schedule,
+    /// The reset has passed while the error still ends the thread. The
+    /// scheduled resume lives in the host's in-memory queue, so a restart
+    /// loses it; the card offers to continue now instead.
+    ContinueNow,
+    None,
+}
+
+pub(crate) fn limit_resume_action(
+    resets_at: u64,
+    queued_id: Option<u64>,
+    now: u64,
+    ends_thread: bool,
+) -> LimitResumeAction {
+    match queued_id {
+        Some(queued_id) => LimitResumeAction::Scheduled {
+            queued_id,
+            remaining_secs: resets_at.saturating_sub(now),
+        },
+        None if resets_at > now => LimitResumeAction::Schedule,
+        None if ends_thread => LimitResumeAction::ContinueNow,
+        None => LimitResumeAction::None,
+    }
+}
+
 pub(crate) type UserContent<'a> = (&'a str, Option<SteeringStatus>, Option<usize>, &'a [String]);
 
 pub(crate) fn user_content(content: &EntryContent) -> Option<UserContent<'_>> {
@@ -1553,6 +1587,33 @@ mod tests {
     use std::sync::Arc;
     use tcode_core::project::{Project, SessionMeta};
     use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
+
+    /// A thread reopened after the reset has lost its queued resume: the
+    /// card must offer to continue now, but only while the error still ends
+    /// the thread, and must keep offering to schedule while the reset is ahead.
+    #[test]
+    fn limit_card_offers_continue_once_reset_passed() {
+        let now = 1_800_000_000;
+        assert_eq!(
+            limit_resume_action(now - 60, None, now, true),
+            LimitResumeAction::ContinueNow
+        );
+        assert_eq!(
+            limit_resume_action(now - 60, None, now, false),
+            LimitResumeAction::None
+        );
+        assert_eq!(
+            limit_resume_action(now + 60, None, now, true),
+            LimitResumeAction::Schedule
+        );
+        assert_eq!(
+            limit_resume_action(now - 60, Some(7), now, true),
+            LimitResumeAction::Scheduled {
+                queued_id: 7,
+                remaining_secs: 0
+            }
+        );
+    }
 
     const REAL_DIFF: &str = "--- a/src/foo.rs\n\
                              +++ b/src/foo.rs\n\
