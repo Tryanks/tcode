@@ -117,12 +117,12 @@ impl Mr<'_> {
             return Ok(Outcome::UpToDate);
         }
         // GitLab rebases in the background and answers once it has the request.
-        Ok(answered(self.write(
-            "PUT",
-            self.path("/rebase"),
-            None,
-            "Rebase",
-        )))
+        Ok(
+            match answered(self.write("PUT", self.path("/rebase"), None, "Rebase")) {
+                Outcome::Applied => Outcome::RebaseStarted,
+                outcome => outcome,
+            },
+        )
     }
 
     fn merge(

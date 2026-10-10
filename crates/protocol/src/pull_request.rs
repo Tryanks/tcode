@@ -634,7 +634,8 @@ pub enum PullRequestActionResult {
     MergeUnconfirmed {
         id: String,
     },
-    /// The host started rebasing the stack; its progress is the stack's operation.
+    /// The host started rebasing and finishes it on its own: for a stack its progress is the
+    /// stack's operation; one pull request's rebase is not followed.
     RebaseStarted,
     /// Every layer was rebased: `pushed` were force-pushed, `current` needed nothing.
     Rebased {

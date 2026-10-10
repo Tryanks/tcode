@@ -1075,8 +1075,13 @@ impl PullRequestView {
             )
             .into_owned()
         };
+        let merges = super::lifecycle::merges_base(Some(state));
         let tooltip = crate::tr!(
-            "pull_requests.actions.update_tooltip",
+            if merges {
+                "pull_requests.actions.update_tooltip"
+            } else {
+                "pull_requests.actions.rebase_tooltip"
+            },
             base = base,
             head = snapshot.head_branch.clone(),
             host_name = self.host_name(cx)
@@ -1086,7 +1091,6 @@ impl PullRequestView {
             (state.can_update_branch && state.capabilities.update_branch && !self.read_only(cx))
                 .then(|| key.clone());
         let busy = offer.busy;
-        let merges = super::lifecycle::merges_base(Some(state));
         let chip = Button::new("pr-behind")
             .ghost()
             .compact()

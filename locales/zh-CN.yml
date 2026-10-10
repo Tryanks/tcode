@@ -1930,6 +1930,8 @@ pull_requests:
     update_failed: "无法更新 %{head}：%{reason}"
     updated: "已用 %{base} 更新 %{head}"
     updated_body: "在此对话推送前请先拉取。"
+    rebase_started: "已开始变基 %{head}"
+    rebase_started_body: "%{host_name} 将很快完成变基。在此对话推送前请先拉取。"
   actions:
     and_more: "等另外 %{count} 项"
     ask_agent: "在此对话中让智能体处理"
@@ -1973,6 +1975,7 @@ pull_requests:
     update_rebase: "以变基方式更新"
     update_rebase_menu: "以变基方式更新…"
     update_tooltip: "在 %{host_name} 上将最新的 %{base} 合并到 %{head}。在此对话再次推送前请先拉取。"
+    rebase_tooltip: "在 %{host_name} 上将 %{head} 变基到最新的 %{base}。在此对话再次推送前请先拉取。"
     verb_close: "关闭"
     verb_disable_auto_merge: "停用自动合并"
     verb_draft: "转为草稿"

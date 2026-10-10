@@ -971,6 +971,18 @@ impl Target {
                 };
                 open_on_host(Notification::warning(message).title(title))
             }
+            // A host that rebases in the background has only started it.
+            PullRequestActionResult::RebaseStarted if updating => Notification::success(
+                crate::tr!(
+                    "pull_requests.result.rebase_started_body",
+                    host_name = self.host_name.clone()
+                )
+                .into_owned(),
+            )
+            .title(crate::tr!(
+                "pull_requests.result.rebase_started",
+                head = head
+            )),
             // A stack write's answers are the stack's own words.
             PullRequestActionResult::Partial { .. }
             | PullRequestActionResult::Pending { .. }
@@ -986,6 +998,7 @@ impl Target {
                 | PullRequestActionResult::Queued { .. }
                 | PullRequestActionResult::AutoMergeEnabled { .. }
                 | PullRequestActionResult::Opened { .. }
+                | PullRequestActionResult::RebaseStarted
         );
         Some(note.autohide(settled))
     }
@@ -1664,7 +1677,7 @@ pub(super) fn primary_element(
         )
         .tooltip(
             crate::tr!(
-                "pull_requests.actions.update_tooltip",
+                "pull_requests.actions.rebase_tooltip",
                 base = target.base_branch.clone(),
                 head = target.head_branch.clone(),
                 host_name = target.host_name.clone()

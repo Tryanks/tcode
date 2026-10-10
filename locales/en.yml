@@ -1937,6 +1937,8 @@ pull_requests:
     update_failed: "Could not update %{head}: %{reason}"
     updated: "Updated %{head} with %{base}"
     updated_body: "Pull before pushing from this thread."
+    rebase_started: "Rebase started for %{head}"
+    rebase_started_body: "%{host_name} rebases it shortly. Pull before pushing from this thread."
   actions:
     and_more: "and %{count} more"
     ask_agent: "Ask the agent in this thread"
@@ -1980,6 +1982,7 @@ pull_requests:
     update_rebase: "Update with rebase"
     update_rebase_menu: "Update with rebase…"
     update_tooltip: "Merges the latest %{base} into %{head} on %{host_name}. Pull before pushing again from this thread."
+    rebase_tooltip: "Rebases %{head} onto the latest %{base} on %{host_name}. Pull before pushing again from this thread."
     verb_close: "close"
     verb_disable_auto_merge: "turn off auto-merge for"
     verb_draft: "convert to draft"
