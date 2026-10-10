@@ -2498,10 +2498,6 @@ impl ChatView {
                                 .aria_label(label)
                                 .rounded(crate::material::radius_chip(cx))
                                 .bg(cx.theme().muted)
-                                // The press reaches the sheet's trigger, which opens it; a
-                                // listener of the pill's own gives it the press action
-                                // assistive technology looks for.
-                                .on_click(|_, _, _| {})
                                 .child(badge),
                         )
                         .content(move |_, _, _| panel.clone()),

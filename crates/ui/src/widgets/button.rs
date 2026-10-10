@@ -213,6 +213,8 @@ impl InteractiveElement for Button {
     }
 }
 
+impl StatefulInteractiveElement for Button {}
+
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
