@@ -68,9 +68,11 @@ pub(crate) enum LimitResumeAction {
     },
     /// The reset is still ahead and nothing is queued for it.
     Schedule,
-    /// The reset has passed while the error still ends the thread. The
-    /// scheduled resume lives in the host's in-memory queue, so a restart
-    /// loses it; the card offers to continue now instead.
+    /// The reset has passed while the error still ends the thread and nothing
+    /// is queued after it. The scheduled resume lives in the host's in-memory
+    /// queue, so a restart loses it; the card offers to continue now instead.
+    /// A queued message (the continue itself while the provider starts, or
+    /// the user's own) means something already follows the error.
     ContinueNow,
     None,
 }
@@ -80,6 +82,7 @@ pub(crate) fn limit_resume_action(
     queued_id: Option<u64>,
     now: u64,
     ends_thread: bool,
+    queue_empty: bool,
 ) -> LimitResumeAction {
     match queued_id {
         Some(queued_id) => LimitResumeAction::Scheduled {
@@ -87,7 +90,7 @@ pub(crate) fn limit_resume_action(
             remaining_secs: resets_at.saturating_sub(now),
         },
         None if resets_at > now => LimitResumeAction::Schedule,
-        None if ends_thread => LimitResumeAction::ContinueNow,
+        None if ends_thread && queue_empty => LimitResumeAction::ContinueNow,
         None => LimitResumeAction::None,
     }
 }
@@ -1590,24 +1593,30 @@ mod tests {
 
     /// A thread reopened after the reset has lost its queued resume: the
     /// card must offer to continue now, but only while the error still ends
-    /// the thread, and must keep offering to schedule while the reset is ahead.
+    /// the thread and nothing is queued after it (a second click or the user's
+    /// own message must not queue a duplicate), and must keep offering to
+    /// schedule while the reset is ahead.
     #[test]
     fn limit_card_offers_continue_once_reset_passed() {
         let now = 1_800_000_000;
         assert_eq!(
-            limit_resume_action(now - 60, None, now, true),
+            limit_resume_action(now - 60, None, now, true, true),
             LimitResumeAction::ContinueNow
         );
         assert_eq!(
-            limit_resume_action(now - 60, None, now, false),
+            limit_resume_action(now - 60, None, now, false, true),
             LimitResumeAction::None
         );
         assert_eq!(
-            limit_resume_action(now + 60, None, now, true),
+            limit_resume_action(now - 60, None, now, true, false),
+            LimitResumeAction::None
+        );
+        assert_eq!(
+            limit_resume_action(now + 60, None, now, true, true),
             LimitResumeAction::Schedule
         );
         assert_eq!(
-            limit_resume_action(now - 60, Some(7), now, true),
+            limit_resume_action(now - 60, Some(7), now, true, true),
             LimitResumeAction::Scheduled {
                 queued_id: 7,
                 remaining_secs: 0

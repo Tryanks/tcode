@@ -1528,20 +1528,29 @@ impl ChatView {
                         } => {
                             let resets_at = *resets_at;
                             let store = self.workspace_store.read(cx);
-                            let queued_id = store
+                            let queued: Vec<_> = store
                                 .composer_state()
                                 .queue
                                 .into_iter()
                                 .flat_map(|queue| queue.messages)
+                                .collect();
+                            let queued_id = queued
+                                .iter()
                                 .find(|message| message.fire_at_unix_secs == Some(resets_at))
                                 .map(|message| message.id);
+                            let queue_empty = queued.is_empty();
                             let ends_thread = store
                                 .with_active_timeline(|timeline| {
                                     !timeline.turn_running && index + 1 == timeline.turns.len()
                                 })
                                 .unwrap_or(false);
-                            match limit_resume_action(resets_at, queued_id, now_secs(), ends_thread)
-                            {
+                            match limit_resume_action(
+                                resets_at,
+                                queued_id,
+                                now_secs(),
+                                ends_thread,
+                                queue_empty,
+                            ) {
                                 LimitResumeAction::Scheduled {
                                     queued_id: id,
                                     remaining_secs,
