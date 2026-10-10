@@ -529,8 +529,7 @@ impl Forge for GitLab {
             .api
             .glab_logins()
             .into_iter()
-            .chain(self.api.environment_host())
-            .chain([HostKind::Gitlab.public_host().to_owned()]);
+            .chain(self.api.environment_host());
         for host in detected {
             hosts.insert(host, false);
         }
@@ -897,5 +896,38 @@ impl Forge for GitLab {
     ) -> Result<Option<Vec<PullRequestRemark>>, ForgeError> {
         let (_, _, discussions, complete) = self.mr(key).discussions()?;
         Ok(complete.then(|| reads::remarks(&discussions)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// gitlab.com is listed like any other server, once settings, a glab login or the
+    /// environment name it, never by default.
+    #[test]
+    fn gitlab_com_is_listed_once_something_names_it() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-gitlab-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let host = |environment: Vec<(String, String)>| {
+            GitLab::new(
+                SettingsStore::new(root.clone()),
+                environment,
+                Arc::new(ViewedMarks::new(root.join("viewed-marks.json"))),
+            )
+        };
+        let quiet = host(Vec::new());
+        assert!(quiet.credential_status().is_empty());
+        quiet.configure(BTreeMap::from([(
+            "gitlab.com".to_owned(),
+            HostSettings::new(HostKind::Gitlab),
+        )]));
+        assert!(quiet.credential_status()["gitlab.com"].added);
+        let named = host(vec![("GITLAB_TOKEN".into(), "secret".into())]);
+        let status = named.credential_status();
+        assert_eq!(status.keys().collect::<Vec<_>>(), ["gitlab.com"]);
+        assert!(!status["gitlab.com"].added);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
