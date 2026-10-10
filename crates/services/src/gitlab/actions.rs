@@ -3,7 +3,7 @@
 
 use super::{
     api::{Request, Response},
-    reads::{Mr, PULL_REQUEST, award_name, merge_methods, text},
+    reads::{Mr, PULL_REQUEST, award_name, merge_methods, nodes, text},
 };
 use crate::forge::{ForgeError, ForgeErrorKind, Step, answered, in_order};
 use serde_json::{Value, json};
@@ -186,6 +186,42 @@ impl Mr<'_> {
     }
 }
 
+/// Adds or removes reviewers by username against the set GitLab holds when it applies the
+/// change, so a reviewer someone else added meanwhile stays.
+const SET_REVIEWERS: &str = "mutation($input: MergeRequestSetReviewersInput!) {
+  mergeRequestSetReviewers(input: $input) { errors mergeRequest { reviewers { nodes { username } } } }
+}";
+
+/// Which of `names` a reviewer change in `mode` took, by the reviewers GitLab answered with, and
+/// what became of the rest. A server that takes one reviewer at a time keeps its set without
+/// an error, so only the answered set says whether the change happened.
+pub(super) fn reviewer_change(
+    mode: &str,
+    names: &[String],
+    payload: &Value,
+) -> (Vec<String>, Option<Outcome>) {
+    let refused = || {
+        Outcome::Rejected(Rejection::Refused {
+            messages: payload["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|error| error.as_str().map(str::to_owned))
+                .collect(),
+        })
+    };
+    if payload["mergeRequest"].is_null() {
+        return (Vec::new(), Some(refused()));
+    }
+    let now: Vec<String> = nodes(&payload["mergeRequest"]["reviewers"])
+        .filter_map(|user| text(user, "username"))
+        .collect();
+    let (took, missed): (Vec<_>, Vec<_>) = names.iter().cloned().partition(|name| {
+        now.iter().any(|held| held.eq_ignore_ascii_case(name)) == (mode == "APPEND")
+    });
+    (took, (!missed.is_empty()).then(refused))
+}
+
 /// A title without the prefixes GitLab reads as a draft: `Draft:`, `[Draft]`, `(Draft)` and
 /// `Draft -`, in any case, however many lead it.
 pub(super) fn undrafted(title: &str) -> &str {
@@ -300,37 +336,64 @@ pub(super) fn act(mr: &Mr<'_>, action: &PullRequestAction) -> Outcome {
                 }
                 answered(mr.write("PUT", mr.path(""), Some(Value::Object(fields)), "SetLabels"))
             }
-            // GitLab writes the whole set of reviewers, by numeric id.
+            // The additions in one change, then the removals, each by username.
             PullRequestAction::SetReviewers { add, remove } => {
                 if add.is_empty() && remove.is_empty() {
                     return Err(Rejection::Invalid);
                 }
-                let ids = |reviewers: &[tcode_protocol::PullRequestReviewer]| {
+                let logins = |reviewers: &[tcode_protocol::PullRequestReviewer]| -> Vec<String> {
                     reviewers
                         .iter()
-                        .map(|reviewer| reviewer.id.parse::<u64>().map_err(|_| Rejection::Invalid))
-                        .collect::<Result<Vec<_>, _>>()
+                        .map(|reviewer| reviewer.login.clone())
+                        .collect()
                 };
-                let (added, removed) = (ids(add)?, ids(remove)?);
-                let current = mr.mr().map_err(ForgeError::rejection)?;
-                let mut set: Vec<u64> = current["reviewers"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|user| user["id"].as_u64())
-                    .filter(|id| !removed.contains(id))
-                    .collect();
-                for id in added {
-                    if !set.contains(&id) {
-                        set.push(id);
+                let changes = [("APPEND", logins(add)), ("REMOVE", logins(remove))];
+                let mut applied = Vec::new();
+                for (index, (mode, names)) in changes.iter().enumerate() {
+                    if names.is_empty() {
+                        continue;
                     }
+                    let input = json!({ "input": {
+                        "projectPath": mr.key.repository,
+                        "iid": mr.key.number.to_string(),
+                        "reviewerUsernames": names,
+                        "operationMode": mode,
+                    }});
+                    let (took, failure) = match mr.api.graphql_write(
+                        mr.authority(),
+                        SET_REVIEWERS,
+                        input,
+                        "SetReviewers",
+                    ) {
+                        Ok(data) => reviewer_change(mode, names, &data["mergeRequestSetReviewers"]),
+                        Err(error) => (Vec::new(), Some(answered::<()>(Err(error)))),
+                    };
+                    let Some(failure) = failure else {
+                        applied.extend(took);
+                        continue;
+                    };
+                    let unapplied: Vec<String> = names
+                        .iter()
+                        .filter(|name| !took.contains(name))
+                        .cloned()
+                        .chain(
+                            changes[index + 1..]
+                                .iter()
+                                .flat_map(|(_, rest)| rest.clone()),
+                        )
+                        .collect();
+                    applied.extend(took);
+                    return Ok(if applied.is_empty() {
+                        failure
+                    } else {
+                        Outcome::Partial {
+                            applied,
+                            unapplied,
+                            failure: Box::new(failure),
+                        }
+                    });
                 }
-                answered(mr.write(
-                    "PUT",
-                    mr.path(""),
-                    Some(json!({ "reviewer_ids": set })),
-                    "SetReviewers",
-                ))
+                Outcome::Applied
             }
             PullRequestAction::ReadyForReview => mr.set_draft(false)?,
             PullRequestAction::ConvertToDraft => mr.set_draft(true)?,
@@ -510,6 +573,44 @@ pub(super) fn submit_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reviewer change holds only as far as GitLab's answered set shows it: a server that takes
+    /// one reviewer keeps the second out without an error, and an answer without the merge
+    /// request is no removal.
+    #[test]
+    fn a_reviewer_change_is_what_gitlab_answers() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        let answer = |held: &[&str]| {
+            json!({"errors": [], "mergeRequest": {"reviewers": {"nodes":
+                held.iter().map(|name| json!({"username": name})).collect::<Vec<_>>()}}})
+        };
+        assert_eq!(
+            reviewer_change("APPEND", &names(&["ana", "Bo"]), &answer(&["ana", "bo"])),
+            (names(&["ana", "Bo"]), None)
+        );
+        let (took, failure) = reviewer_change("APPEND", &names(&["ana", "bo"]), &answer(&["ana"]));
+        assert_eq!(took, names(&["ana"]));
+        assert_eq!(
+            failure,
+            Some(Outcome::Rejected(Rejection::Refused { messages: vec![] }))
+        );
+        assert_eq!(
+            reviewer_change("REMOVE", &names(&["ana"]), &answer(&["bo"])),
+            (names(&["ana"]), None)
+        );
+        let (took, failure) = reviewer_change(
+            "REMOVE",
+            &names(&["ana"]),
+            &json!({"errors": ["Not allowed"], "mergeRequest": null}),
+        );
+        assert!(took.is_empty());
+        assert_eq!(
+            failure,
+            Some(Outcome::Rejected(Rejection::Refused {
+                messages: vec!["Not allowed".into()]
+            }))
+        );
+    }
 
     /// GitLab reads a title as a draft by any of its prefixes, so marking ready removes every
     /// one and nothing else.

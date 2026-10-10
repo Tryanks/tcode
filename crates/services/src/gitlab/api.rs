@@ -304,6 +304,28 @@ impl Api {
         variables: Value,
         operation: &'static str,
     ) -> Result<Value, ForgeError> {
+        self.graphql_request(authority, query, variables, operation, false)
+    }
+
+    /// A GraphQL mutation, which goes only with a credential.
+    pub(super) fn graphql_write(
+        &self,
+        authority: &str,
+        query: &str,
+        variables: Value,
+        operation: &'static str,
+    ) -> Result<Value, ForgeError> {
+        self.graphql_request(authority, query, variables, operation, true)
+    }
+
+    fn graphql_request(
+        &self,
+        authority: &str,
+        query: &str,
+        variables: Value,
+        operation: &'static str,
+        write: bool,
+    ) -> Result<Value, ForgeError> {
         let response: Value = self
             .call(
                 authority,
@@ -311,6 +333,7 @@ impl Api {
                 Request {
                     method: "POST",
                     body: Some(json!({ "query": query, "variables": variables })),
+                    write,
                     ..Request::get("/graphql", operation)
                 },
             )?
