@@ -22,16 +22,18 @@ const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
 /// How long a rate-limited server is left alone when it names no time.
 const PAUSE: Duration = Duration::from_secs(60);
-/// The environment token glab itself reads, for the server `GITLAB_HOST` names, else
+/// The environment token glab itself reads, for the server its host variables name, else
 /// gitlab.com.
 pub(super) const ENV_TOKEN: &str = "GITLAB_TOKEN";
-const ENV_HOST: &str = "GITLAB_HOST";
+/// The variables glab reads its server from, first set first (glab's `internal/config/schema.go`).
+const ENV_HOSTS: [&str; 3] = ["GITLAB_HOST", "GITLAB_URI", "GL_HOST"];
 /// Every variable glab would prefer over its stored login.
 const GLAB_ENVIRONMENT: &[&str] = &[
     ENV_TOKEN,
     "GITLAB_ACCESS_TOKEN",
     "OAUTH_TOKEN",
-    ENV_HOST,
+    "GITLAB_HOST",
+    "GITLAB_URI",
     "GL_HOST",
 ];
 
@@ -221,11 +223,15 @@ impl Api {
             .then(|| self.environment.get(ENV_TOKEN).cloned().and_then(nonempty))?
     }
 
-    /// The server `GITLAB_TOKEN` is for: the one `GITLAB_HOST` names, else gitlab.com, when the
-    /// variable is set.
+    /// The server `GITLAB_TOKEN` is for, when the variable is set: the one the first of glab's
+    /// host variables names, else gitlab.com. A host variable that names no server sends the
+    /// token nowhere.
     pub(super) fn environment_host(&self) -> Option<String> {
         self.environment.get(ENV_TOKEN)?;
-        match self.environment.get(ENV_HOST) {
+        match ENV_HOSTS
+            .iter()
+            .find_map(|name| self.environment.get(*name))
+        {
             Some(named) => HostKind::Gitlab.authority(named).ok(),
             None => Some(HostKind::Gitlab.public_host().to_owned()),
         }
@@ -540,9 +546,9 @@ fn nonempty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    /// `GITLAB_TOKEN` goes only to the server `GITLAB_HOST` names, gitlab.com without it, and
-    /// glab's token for one server never to another: glab is asked for each server by its own
-    /// host.
+    /// `GITLAB_TOKEN` goes only to the server glab's host variables name (`GITLAB_HOST`, else
+    /// `GL_HOST`), gitlab.com without them, and glab's token for one server never to another:
+    /// glab is asked for each server by its own host, with none of those variables.
     #[cfg(unix)]
     #[test]
     fn a_token_goes_only_to_the_server_it_is_for() {
@@ -555,7 +561,7 @@ mod tests {
         let glab = root.join("glab");
         std::fs::write(
             &glab,
-            "#!/bin/sh\n[ -n \"$GITLAB_TOKEN\" ] && exit 1\nwhile read -r line; do\n  [ \"$line\" = host=glab.test:8443 ] && echo password=glab-secret\ndone\nexit 0\n",
+            "#!/bin/sh\n[ -n \"$GITLAB_TOKEN$GITLAB_HOST$GITLAB_URI$GL_HOST\" ] && exit 1\nwhile read -r line; do\n  [ \"$line\" = host=glab.test:8443 ] && echo password=glab-secret\ndone\nexit 0\n",
         )
         .unwrap();
         std::fs::set_permissions(&glab, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -576,11 +582,19 @@ mod tests {
         let public = Api::new(store(), [path.clone(), token.clone()]);
         assert_eq!(source(&public, "gitlab.com"), env);
         assert_eq!(source(&public, "gitlab.acme.test"), None);
+        let gl_host = (
+            "GL_HOST".to_owned(),
+            "https://gitlab.corp.example".to_owned(),
+        );
+        let corp = Api::new(store(), [path.clone(), token.clone(), gl_host.clone()]);
+        assert_eq!(source(&corp, "gitlab.corp.example"), env);
+        assert_eq!(source(&corp, "gitlab.com"), None);
         let named = Api::new(
             store(),
             [
                 path,
                 token,
+                gl_host,
                 (
                     "GITLAB_HOST".to_owned(),
                     "https://gitlab.acme.test/".to_owned(),
@@ -589,6 +603,7 @@ mod tests {
         );
         assert_eq!(source(&named, "gitlab.acme.test"), env);
         assert_eq!(source(&named, "gitlab.com"), None);
+        assert_eq!(source(&named, "gitlab.corp.example"), None);
         assert_eq!(
             source(&named, "glab.test:8443"),
             Some((
