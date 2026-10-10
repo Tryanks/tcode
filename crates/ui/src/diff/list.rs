@@ -16,9 +16,9 @@ use crate::workspace_walk::relativize_to_workspace;
 use agent::FileChangeKind;
 use gpui::{
     Action, AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
-    ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Window, canvas, div, list,
-    prelude::FluentBuilder as _, px,
+    ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
+    ScrollHandle, StatefulInteractiveElement as _, Styled as _, StyledText, Window, canvas, div,
+    list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -153,8 +153,8 @@ pub(crate) struct DiffList {
     pub(crate) unified_list: ListState,
     pub(crate) split_list: ListState,
     pub(crate) selection: Option<LineSelection>,
-    /// The width the list shows of its rows, as last laid out; a file header spans it.
-    viewport_width: Rc<std::cell::Cell<Pixels>>,
+    /// The viewport that scrolls the rows sideways; a file header spans it and stays in it.
+    horizontal: ScrollHandle,
 }
 
 impl DiffList {
@@ -173,7 +173,7 @@ impl DiffList {
             unified_content_width,
             split_content_width,
             selection: None,
-            viewport_width: Rc::default(),
+            horizontal: ScrollHandle::new(),
         }
     }
 
@@ -436,7 +436,8 @@ pub(crate) fn render_list<H: DiffListHost>(
     } else {
         (diff.unified_list.clone(), diff.unified_content_width)
     };
-    let viewport_width = diff.viewport_width.clone();
+    let horizontal = diff.horizontal.clone();
+    let shown = (horizontal.bounds().size.width, horizontal.offset().x);
     let entity = cx.entity();
     let mut rows = list(list_state.clone(), move |index, _, cx| {
         entity.update(cx, |host, cx| render_item(host, index, split, wrap, cx))
@@ -461,17 +462,19 @@ pub(crate) fn render_list<H: DiffListHost>(
         .flex_1()
         .min_h_0()
         .overflow_x_scroll()
+        .track_scroll(&diff.horizontal)
         .lock_scroll_axis()
         .child(crate::scroll::page_viewport(
             "diff-body-bounce",
             crate::wheel_easing::Handle::List(list_state),
             rows,
         ))
-        // Draws again once the viewport's width changes, for the headers that span it.
+        // Draws again once the viewport's width or offset settles elsewhere than the headers
+        // were placed for.
         .child(
             canvas(
-                move |bounds, window, _| {
-                    if viewport_width.replace(bounds.size.width) != bounds.size.width {
+                move |_, window, _| {
+                    if (horizontal.bounds().size.width, horizontal.offset().x) != shown {
                         window.request_animation_frame();
                     }
                 },
@@ -592,17 +595,20 @@ fn render_file_header<H: DiffListHost>(
         FileChangeKind::Rename => Some((crate::tr!("diff.renamed"), cx.theme().info_foreground)),
         FileChangeKind::Modify => None,
     };
-    let viewport_width = host
-        .diff_list()
-        .map_or(px(0.), |list| list.viewport_width.get());
+    let (viewport_width, scrolled) = host.diff_list().map_or((px(0.), px(0.)), |list| {
+        (
+            list.horizontal.bounds().size.width,
+            -list.horizontal.offset().x,
+        )
+    });
     let menu = host.file_menu(file_index, cx);
     h_flex()
         .id(("diff-file-header", file_index))
-        // A header spans what the list shows, not its lines' width, so its counts stay in view
-        // however far a long line reaches.
+        // A header spans what the list shows and moves with it, not with its lines, so the path,
+        // the counts and the menu stay in view however far a long line reaches.
         .map(|header| {
             if viewport_width > px(0.) {
-                header.w(viewport_width)
+                header.w(viewport_width).left(scrolled)
             } else {
                 header.min_w_full()
             }
