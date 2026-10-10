@@ -512,12 +512,29 @@ fn reactions(awards: &Value, viewer: Option<&str>) -> Vec<PullRequestReaction> {
         .collect()
 }
 
-fn comment(authority: &str, note: &Value, viewer: Option<&str>) -> Option<PullRequestComment> {
+/// A body with its project's uploads named in full: GitLab writes them relative to the project,
+/// as `/uploads/<secret>/<file>`, which no reader outside GitLab's own page can resolve. Markdown
+/// links and images, reference definitions and HTML `src`/`href` attributes are rewritten.
+pub(super) fn absolute_uploads(body: &str, authority: &str, project: &str) -> String {
+    let base = format!("https://{authority}/{project}/uploads/");
+    let mut body = body.to_owned();
+    for lead in ["](", "]: ", "src=\"", "src='", "href=\"", "href='"] {
+        body = body.replace(&format!("{lead}/uploads/"), &format!("{lead}{base}"));
+    }
+    body
+}
+
+fn comment(
+    authority: &str,
+    project: &str,
+    note: &Value,
+    viewer: Option<&str>,
+) -> Option<PullRequestComment> {
     let permissions = &note["userPermissions"];
     Some(PullRequestComment {
         id: rest_id(note["id"].as_str()?)?,
         author: actor(authority, &note["author"]),
-        body: text(note, "body").unwrap_or_default(),
+        body: absolute_uploads(&text(note, "body").unwrap_or_default(), authority, project),
         created_at: text(note, "createdAt")?,
         edited_at: edited_at(note),
         url: text(note, "url"),
@@ -577,6 +594,7 @@ pub(super) struct Conversation {
 
 pub(super) fn conversation(
     authority: &str,
+    project: &str,
     mr: &Value,
     viewer: Option<&str>,
     discussions: &[Value],
@@ -594,13 +612,13 @@ pub(super) fn conversation(
             comments.extend(
                 notes
                     .iter()
-                    .filter_map(|note| comment(authority, note, viewer)),
+                    .filter_map(|note| comment(authority, project, note, viewer)),
             );
             continue;
         };
         let thread_comments: Vec<_> = notes
             .iter()
-            .filter_map(|note| comment(authority, note, viewer))
+            .filter_map(|note| comment(authority, project, note, viewer))
             .collect();
         let id = discussion["id"].as_str()?.rsplit('/').next()?.to_owned();
         threads.push(PullRequestReviewThread {
@@ -631,7 +649,11 @@ pub(super) fn conversation(
     let description = PullRequestComment {
         id: PULL_REQUEST.into(),
         author: actor(authority, &mr["author"]),
-        body: text(mr, "description").unwrap_or_default(),
+        body: absolute_uploads(
+            &text(mr, "description").unwrap_or_default(),
+            authority,
+            project,
+        ),
         created_at: text(mr, "createdAt").unwrap_or_default(),
         // GitLab's GraphQL names no edit of a merge request's description.
         edited_at: None,
@@ -811,6 +833,18 @@ mod tests {
         assert_eq!(
             merge_state(&mr("mergeable", false), Mergeability::Clean, &running),
             PullRequestMergeState::Unstable
+        );
+    }
+
+    /// GitLab names a note's uploads below its project; the conversation names them on the
+    /// server, so the client can draw them and the media read finds them named. Absolute links
+    /// and text that only mentions `/uploads/` stay as written.
+    #[test]
+    fn uploads_are_named_on_their_server() {
+        let body = "![shot](/uploads/ab12/shot.png) and [log](/uploads/cd34/log.txt)\n\n[ref]: /uploads/ef56/a.png\n<img src=\"/uploads/0a/b.png\">\nsee /uploads/ in docs, ![x](https://cdn.test/uploads/x.png)";
+        assert_eq!(
+            absolute_uploads(body, "code.acme.test:8443", "team/apps/web"),
+            "![shot](https://code.acme.test:8443/team/apps/web/uploads/ab12/shot.png) and [log](https://code.acme.test:8443/team/apps/web/uploads/cd34/log.txt)\n\n[ref]: https://code.acme.test:8443/team/apps/web/uploads/ef56/a.png\n<img src=\"https://code.acme.test:8443/team/apps/web/uploads/0a/b.png\">\nsee /uploads/ in docs, ![x](https://cdn.test/uploads/x.png)"
         );
     }
 

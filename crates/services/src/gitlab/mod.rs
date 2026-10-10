@@ -222,8 +222,14 @@ impl GitLab {
 
     fn conversation(&self, key: &PullRequestKey) -> Result<PullRequestConversation, ForgeError> {
         let (mr, viewer, discussions, complete) = self.mr(key).discussions()?;
-        let conversation = reads::conversation(&key.host, &mr, viewer.as_deref(), &discussions)
-            .ok_or_else(|| error(ForgeErrorKind::Uncertain, "GitLab conversation unreadable"))?;
+        let conversation = reads::conversation(
+            &key.host,
+            &key.repository,
+            &mr,
+            viewer.as_deref(),
+            &discussions,
+        )
+        .ok_or_else(|| error(ForgeErrorKind::Uncertain, "GitLab conversation unreadable"))?;
         Ok(PullRequestConversation {
             description: conversation.description,
             comments: conversation.comments,
@@ -441,10 +447,7 @@ impl GitLab {
         if !own {
             return Ok(PullRequestMedia::Unsupported);
         }
-        // A note names its project's uploads below the project, as `/uploads/…`.
-        let below = path
-            .get(project.len() - "/uploads/".len()..)
-            .filter(|_| path.to_ascii_lowercase().starts_with(&project));
+        // Bodies name their uploads in full (see reads::absolute_uploads).
         let conversation = self.conversation_read(key)?;
         let named = std::iter::once(&conversation.description)
             .chain(&conversation.comments)
@@ -456,7 +459,6 @@ impl GitLab {
             )
             .any(|comment| {
                 comment.body.contains(url)
-                    || below.is_some_and(|below| comment.body.contains(&format!("]({below}")))
                     || comment
                         .author
                         .as_ref()
