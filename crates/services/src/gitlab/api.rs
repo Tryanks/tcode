@@ -50,6 +50,15 @@ pub(super) struct Credential {
     pub(super) source: CredentialSource,
 }
 
+impl Credential {
+    /// Opaque, and different for each credential.
+    fn fingerprint(&self) -> String {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(self.token.as_bytes());
+        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Response {
     pub(super) body: Vec<u8>,
@@ -119,6 +128,8 @@ pub(super) struct Api {
     pub(super) agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     paused: Mutex<HashMap<String, SystemTime>>,
+    /// Each server and the fingerprint of the last saved token it answered a request with.
+    worked: Mutex<HashMap<String, String>>,
 }
 
 impl Api {
@@ -137,6 +148,7 @@ impl Api {
                 .build(),
             tokens: Mutex::default(),
             paused: Mutex::default(),
+            worked: Mutex::default(),
         })
     }
 
@@ -209,6 +221,7 @@ impl Api {
 
     pub(super) fn forget(&self, authority: &str) {
         self.tokens.lock().unwrap().remove(authority);
+        self.worked.lock().unwrap().remove(authority);
     }
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
@@ -216,6 +229,11 @@ impl Api {
             .token(HostKind::Gitlab, authority)
             .and_then(nonempty)
             .is_some()
+    }
+
+    /// Whether the server has answered a request sent with `credential`, a saved token.
+    pub(super) fn worked(&self, authority: &str, credential: &Credential) -> bool {
+        self.worked.lock().unwrap().get(authority) == Some(&credential.fingerprint())
     }
 
     fn environment_token(&self, authority: &str) -> Option<String> {
@@ -445,6 +463,15 @@ impl Api {
             ));
         }
         if (200..300).contains(&status) {
+            if let Some(credential) = credential
+                .as_ref()
+                .filter(|credential| credential.source == CredentialSource::Saved)
+            {
+                self.worked
+                    .lock()
+                    .unwrap()
+                    .insert(authority.to_owned(), credential.fingerprint());
+            }
             return Ok(Response {
                 body,
                 truncated,

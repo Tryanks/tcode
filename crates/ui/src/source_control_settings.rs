@@ -88,10 +88,15 @@ fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
     listed
 }
 
-/// Where Atlassian makes the API tokens a Basic credential takes, and where it explains the
-/// access tokens a Bearer credential is.
-const API_TOKENS_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
-const ACCESS_TOKENS_URL: &str = "https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/";
+/// A link off Tcode to a page the host names.
+fn external_link(id: String, label: SharedString, url: String) -> Button {
+    Button::new(SharedString::from(id))
+        .ghost()
+        .xsmall()
+        .icon(crate::icon::IconName::ExternalLink)
+        .label(label)
+        .on_click(move |_, _, cx| cx.open_url(&url))
+}
 
 fn source_slot(source: &CredentialSource) -> String {
     match source {
@@ -173,6 +178,7 @@ impl SourceControlPanel {
 
     fn notice(&self, host: &str, kind: HostKind, problem: &HostProblem, cx: &App) -> AnyElement {
         let theme = cx.theme();
+        let warning = *problem != HostProblem::Unverified;
         let text = match problem {
             // A host without a CLI is connected by a saved token alone.
             HostProblem::NoCredential { tools_missing }
@@ -200,6 +206,9 @@ impl SourceControlPanel {
                     .into_owned())
                     .unwrap_or_default()
             ),
+            HostProblem::Unverified => {
+                crate::tr!("source_control.notice_unverified", host = host)
+            }
         };
         let command = match problem {
             HostProblem::NotSignedIn {
@@ -209,7 +218,9 @@ impl SourceControlPanel {
             _ => None,
         };
         let compact = self.window_state.read(cx).compact;
+        let selector = format!("source-control-notice-{host}");
         v_flex()
+            .debug_selector(move || selector)
             .gap_1()
             .px_3()
             .py_2()
@@ -220,11 +231,13 @@ impl SourceControlPanel {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(
-                        Icon::new(crate::icon::IconName::TriangleAlert)
-                            .size(px(12.))
-                            .text_color(theme.warning),
-                    )
+                    .when(warning, |line| {
+                        line.child(
+                            Icon::new(crate::icon::IconName::TriangleAlert)
+                                .size(px(12.))
+                                .text_color(theme.warning),
+                        )
+                    })
                     .child(div().flex_1().min_w_0().child(text.into_owned())),
             )
             .when_some(command, |notice, command| {
@@ -519,7 +532,37 @@ impl SourceControlPanel {
         } else {
             h_flex().w_full().gap_2().child(field).child(buttons)
         };
-        row.child(editor).into_any_element()
+        let scopes = status
+            .as_ref()
+            .filter(|status| !status.token_scopes.is_empty())
+            .map(|status| {
+                crate::tr!(
+                    "source_control.token_scopes",
+                    scopes = status.token_scopes.join(", ")
+                )
+                .into_owned()
+            });
+        let token_url = status.and_then(|status| status.token_url);
+        let help = (scopes.is_some() || token_url.is_some()).then(|| {
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .gap_1()
+                .items_center()
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .children(scopes)
+                .when_some(token_url, |help, url| {
+                    help.child(external_link(
+                        format!("source-control-token-link-{host}"),
+                        crate::tr!("source_control.create_token")
+                            .into_owned()
+                            .into(),
+                        url,
+                    ))
+                })
+        });
+        row.child(editor).children(help).into_any_element()
     }
 }
 
@@ -622,13 +665,13 @@ impl SourceControlPanel {
             (
                 crate::tr!("source_control.bitbucket_api_desc"),
                 crate::tr!("source_control.bitbucket_api_link"),
-                API_TOKENS_URL,
+                status.and_then(|status| status.token_url.clone()),
             )
         } else {
             (
                 crate::tr!("source_control.bitbucket_access_desc"),
                 crate::tr!("source_control.bitbucket_access_link"),
-                ACCESS_TOKENS_URL,
+                status.and_then(|status| status.access_token_url.clone()),
             )
         };
         let description = v_flex()
@@ -638,16 +681,13 @@ impl SourceControlPanel {
             .text_size(px(12.))
             .text_color(theme.muted_foreground)
             .child(div().w_full().child(description.into_owned()))
-            .child(
-                Button::new(SharedString::from(format!(
-                    "source-control-method-link-{host}"
-                )))
-                .ghost()
-                .xsmall()
-                .icon(crate::icon::IconName::ExternalLink)
-                .label(link_label.into_owned())
-                .on_click(move |_, _, cx| cx.open_url(link)),
-            );
+            .when_some(link, |description, url| {
+                description.child(external_link(
+                    format!("source-control-method-link-{host}"),
+                    link_label.into_owned().into(),
+                    url,
+                ))
+            });
         let replaces = match (with_email, &saved) {
             (true, Some(CredentialSource::SavedBearer)) => {
                 Some(crate::tr!("source_control.bitbucket_replaces_access"))
@@ -703,13 +743,21 @@ impl SourceControlPanel {
                 store.set_host_token(clear_host.clone(), None, None)
             })
         });
-        let field = |input: &Entity<InputState>| div().w_full().child(Input::new(input).small());
+        let email_label = crate::tr!("source_control.bitbucket_email_label", host = host);
         v_flex()
             .gap_2()
             .child(track)
             .child(description)
-            .when(with_email, |editor| editor.child(field(&email)))
-            .child(field(&token))
+            .when(with_email, |editor| {
+                editor.child(
+                    div().w_full().child(
+                        Input::new(&email)
+                            .small()
+                            .aria_label(email_label.into_owned()),
+                    ),
+                )
+            })
+            .child(div().w_full().child(Input::new(&token).small()))
             .child(
                 h_flex()
                     .w_full()
@@ -723,7 +771,7 @@ impl SourceControlPanel {
                             .text_color(theme.muted_foreground)
                             .children(replaces.map(|replaces| replaces.into_owned())),
                     )
-                    .child(h_flex().gap_2().child(clear).child(set)),
+                    .child(h_flex().gap_2().child(set).child(clear)),
             )
             .into_any_element()
     }
@@ -1055,5 +1103,97 @@ impl Render for AddHostDialog {
                     .text_color(theme.danger)
                     .children(self.error.clone()),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
+
+    /// A saved token the host has not seen work gets the row's one notice; a connected host with
+    /// nothing wrong gets none.
+    #[gpui::test]
+    fn an_unverified_token_gets_its_notice(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let status = |kind, source, problem| HostStatus {
+            kind,
+            added: true,
+            token_set: true,
+            source: Some(source),
+            accounts: Vec::new(),
+            env_overrides_account: false,
+            order: vec![CredentialSource::Saved],
+            problem,
+            token_url: None,
+            access_token_url: None,
+            token_scopes: Vec::new(),
+        };
+        let mut settings = tcode_core::settings::Settings {
+            language: Some(crate::LANGUAGE_ENGLISH.into()),
+            ..Default::default()
+        };
+        settings.source_control.status = BTreeMap::from([
+            (
+                "bitbucket.org".to_owned(),
+                status(
+                    HostKind::Bitbucket,
+                    CredentialSource::SavedBearer,
+                    Some(HostProblem::Unverified),
+                ),
+            ),
+            (
+                "gitlab.com".to_owned(),
+                status(HostKind::Gitlab, CredentialSource::Saved, None),
+            ),
+        ]);
+        let (to_host, _requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::SettingsSnapshot(settings),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let (_, cx) =
+            cx.add_window_view(|_, cx| SourceControlPanel::new(store.clone(), window_state, cx));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(
+            cx.debug_bounds("source-control-notice-bitbucket.org")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("source-control-notice-gitlab.com")
+                .is_none()
+        );
     }
 }
