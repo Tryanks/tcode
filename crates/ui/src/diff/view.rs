@@ -827,6 +827,7 @@ impl DiffPanel {
             // Right icon cluster: expand toggle, a layout no-op, close.
             .child(
                 Button::new("diff-expand")
+                    .debug_selector(|| "diff-expand".into())
                     .ghost()
                     .small()
                     .compact()

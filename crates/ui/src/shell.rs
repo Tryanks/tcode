@@ -2574,13 +2574,16 @@ impl AppShell {
                     ),
             );
         let attachment = self.attachment.as_ref().expect("attachment checked above");
-        // `flex_none`: whatever the group's sizes leave over or lack goes to the
-        // chat, so the panel is exactly the width restored above.
+        // Beside the chat, `flex_none`: whatever the group's sizes leave over or
+        // lack goes to the chat, so the panel is exactly the width restored
+        // above. Expanded, there is no chat, so the panel grows into it all.
         let right = resizable_panel()
-            .flex_none()
+            .when(chat_visible, |panel| panel.flex_none())
             .visible(right_docked)
             .size(px(RIGHT_PANEL_WIDTH))
-            .size_range(px(RIGHT_PANEL_MIN_WIDTH)..px(1400.))
+            .size_range(
+                px(RIGHT_PANEL_MIN_WIDTH)..if chat_visible { px(1400.) } else { Pixels::MAX },
+            )
             .child(
                 div()
                     .debug_selector(|| "right-panel".into())
@@ -2589,6 +2592,20 @@ impl AppShell {
                     .shadow_sm()
                     .children(docked_panel),
             );
+        // Expanded, the panel's own handle has no chat to trade width with,
+        // and a drag on it would choose the width Restore returns to. gpui-base
+        // cannot switch a single handle off through its API, but a covered
+        // handle stays idle: occlude its band, 4pt either side of the
+        // panel's left edge.
+        let handle_cover = (!chat_visible).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left(sidebar_layout_width - px(5.))
+                .w(px(10.))
+                .h_full()
+                .occlude()
+        });
         let floating_right = floating_panel.map(|panel| {
             div()
                 .id("right-panel-overlay")
@@ -2666,6 +2683,7 @@ impl AppShell {
                 .relative()
                 .size_full()
                 .child(group("chat-diff-panels").child(chat_panel).child(right))
+                .children(handle_cover)
                 .children(floating_right)
                 // This fixed transparent strip only opens the overlay. Its
                 // inevitable false transition when the overlay occludes it is
@@ -2731,6 +2749,7 @@ impl AppShell {
                         .child(chat_panel)
                         .child(right),
                 )
+                .children(handle_cover)
                 .children(floating_right)
                 .into_any_element()
         };
@@ -6083,9 +6102,10 @@ mod tests {
     /// less whatever the chat needs for its minimum — more while the header
     /// clears the macOS traffic lights or links to its parent — and it comes
     /// back to that width after the window narrows and widens again, after it
-    /// floated, and after a sidebar drag squeezed it; the header's last toggle
-    /// ends before the panel starts. At every width no tab label is cut off and
-    /// the close button is on screen and closes the panel.
+    /// floated, after a sidebar drag squeezed it, and after it was expanded to
+    /// everything beside the sidebar and dragged there; the header's last
+    /// toggle ends before the panel starts. At every width no tab label is cut
+    /// off and the close button is on screen and closes the panel.
     #[gpui::test]
     fn the_right_panel_keeps_its_width_and_leaves_the_chat_header_clear(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -6188,6 +6208,45 @@ mod tests {
         );
         walk(cx, &[1600.]);
 
+        // Expanded, the panel takes everything beside the sidebar, however
+        // wide the window; restored, it is back at the width the user chose.
+        store.update(cx, |store, cx| store.toggle_diff_expanded(cx));
+        for width in [1600., 2000.] {
+            resize(cx, width);
+            draw_until(&shell, cx, &host, "diff-body", None);
+            draw(cx);
+            let sidebar = shell.read_with(cx, |shell, _| {
+                shell
+                    .attachment
+                    .as_ref()
+                    .expect("attached")
+                    .sidebar_width
+                    .get()
+            });
+            let panel = cx.debug_bounds("right-panel").expect("the expanded panel");
+            assert_eq!(
+                (panel.left(), panel.right()),
+                (sidebar, px(width)),
+                "{width}pt: the expanded panel spans the window beside the sidebar"
+            );
+        }
+        // Drags on the expanded panel's left edge do not choose a width for
+        // the docked panel.
+        for _ in 0..2 {
+            let edge = cx.debug_bounds("right-panel").expect("the expanded panel");
+            let from = gpui::point(edge.left(), px(400.));
+            let to = gpui::point(edge.left() + px(12.), px(400.));
+            cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+            for step in [from + gpui::point(px(5.), px(0.)), to] {
+                cx.simulate_mouse_move(step, Some(MouseButton::Left), gpui::Modifiers::default());
+                draw(cx);
+            }
+            cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+            draw(cx);
+        }
+        store.update(cx, |store, cx| store.toggle_diff_expanded(cx));
+        walk(cx, &[1600.]);
+
         window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
         walk(cx, &[1600., 1250., 1100., 1000., 900., 860., 720., 1600.]);
 
@@ -6199,6 +6258,45 @@ mod tests {
         assert!(
             !store.read_with(cx, |store, _| store.panel_state().right_panel_open),
             "nothing covers the close button"
+        );
+    }
+
+    /// Expand and Restore lay the right panel out again without remounting it:
+    /// what its elements keep by their place in the tree — the focus a press
+    /// gives the Expand button, the scroll of a list — is still theirs after.
+    #[gpui::test]
+    fn expanding_the_right_panel_keeps_its_elements_state(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 1600.);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body", None);
+
+        let press_expand = |cx: &mut VisualTestContext| {
+            let expand = cx.debug_bounds("diff-expand").expect("the expand button");
+            cx.simulate_click(expand.center(), gpui::Modifiers::default());
+            draw(cx);
+            draw(cx);
+            cx.update(|window, cx| window.focused(cx))
+        };
+        let expanded = press_expand(cx);
+        assert!(
+            store.read_with(cx, |store, _| store.panel_state().right_panel_expanded),
+            "the press expands the panel"
+        );
+        assert!(
+            expanded.is_some(),
+            "the expanded panel's button keeps its focus"
+        );
+        let restored = press_expand(cx);
+        assert!(
+            !store.read_with(cx, |store, _| store.panel_state().right_panel_expanded),
+            "the second press restores it"
+        );
+        assert_eq!(
+            restored, expanded,
+            "the restored panel's button is the same one"
         );
     }
 
