@@ -59,6 +59,7 @@ pub(super) enum StoreWrite {
         kind: tcode_core::pull_request::HostKind,
         host: String,
         token: Option<String>,
+        email: Option<String>,
         completion: smol::channel::Sender<Result<(), String>>,
     },
     ClearProfileSecrets(String),
@@ -407,11 +408,12 @@ impl StoreWriter {
                 kind,
                 host,
                 token,
+                email,
                 completion,
             } => {
                 let result = self
                     .settings_store
-                    .set_token(kind, &host, token.as_deref())
+                    .set_credential(kind, &host, token.as_deref(), email.as_deref())
                     .map_err(|error| error.to_string());
                 let _ = completion.try_send(result);
                 None

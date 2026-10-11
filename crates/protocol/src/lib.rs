@@ -162,6 +162,9 @@ pub use wire::{
 // snapshot's additions and deletions may be absent (null) where the host counts
 // no lines; RebaseStarted also answers one pull request's branch update that the
 // host finishes on its own.
+// Unreleased: a source-control host's kind may be bitbucket; a credential source
+// may be saved_basic, with the email it is sent with, or saved_bearer;
+// SetHostToken carries an optional email.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

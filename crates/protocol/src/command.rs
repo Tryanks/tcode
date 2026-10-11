@@ -90,6 +90,10 @@ pub enum Command {
     SetHostToken {
         host: String,
         token: Option<String>,
+        /// The account email a host that takes one authenticates the token with; with no
+        /// token, the one already saved with an email goes on with this one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
     },
     RefreshHostCredentials,
     LinkPullRequest {
