@@ -27,7 +27,7 @@ pub fn thread_section(meta: &SessionMeta) -> ThreadSection {
 }
 
 /// When a settled thread settled, in Unix seconds; the time it shows and sorts by.
-pub fn settled_timestamp(meta: &SessionMeta) -> u64 {
+fn settled_timestamp(meta: &SessionMeta) -> u64 {
     meta.settled_at.unwrap_or(meta.updated_at)
 }
 
@@ -36,6 +36,16 @@ pub fn settled_timestamp(meta: &SessionMeta) -> u64 {
 /// reopen stamps `unsettled_at`.
 fn last_activity(meta: &SessionMeta) -> u64 {
     meta.updated_at.max(meta.unsettled_at.unwrap_or(0))
+}
+
+/// The time a threads-view row shows: when a settled thread settled, else
+/// its last activity, which is what an unarranged active row sorts by.
+pub fn shown_timestamp(meta: &SessionMeta) -> u64 {
+    if meta.is_settled() {
+        settled_timestamp(meta)
+    } else {
+        last_activity(meta)
+    }
 }
 
 /// Pinned threads by key, then keyless ones newest created first. Active
@@ -275,6 +285,12 @@ mod tests {
         assert_eq!(
             order(&mut sessions),
             ["pinned", "reopened", "new", "old", "arranged"]
+        );
+        let reopened = sessions.iter().find(|meta| meta.id == "reopened").unwrap();
+        assert_eq!(
+            shown_timestamp(reopened),
+            60,
+            "a row shows the time it sorts by"
         );
 
         for meta in &mut sessions {

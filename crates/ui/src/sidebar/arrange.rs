@@ -1,6 +1,7 @@
-//! Pinning and arranging threads. Desktop rows drag within and between the
-//! Pinned, Active and Settled sections; the phone's Arrange threads page drags
-//! by handle; Move up / Move down write the same keys without a drag.
+//! Pinning and arranging threads. Rows of the desktop threads view drag within
+//! and between the Pinned, Active and Settled sections; the phone's Arrange
+//! threads page drags by handle; Move up / Move down write the same keys
+//! without a drag. Rows of the project view do none of this.
 //!
 //! gpui-base has no sortable-list primitive (its dock drag is specific to tab
 //! groups), so the drag composes GPUI's `on_drag`, `on_drag_move` and
@@ -463,6 +464,8 @@ impl SessionsSidebar {
         });
     }
 
+    /// The list a drag in progress scrolls: the Arrange threads page's, or
+    /// else the threads view's.
     fn drag_list(&self, cx: &App) -> Option<ListState> {
         self.drag.as_ref()?;
         Some(

@@ -380,6 +380,8 @@ struct CompactThreadRow {
     row_id: SharedString,
     label: SharedString,
     project_name: Option<SharedString>,
+    /// The time the row shows, the one its list sorts it by.
+    timestamp: u64,
     relative_time: SharedString,
     separator: bool,
 }
@@ -1051,13 +1053,17 @@ impl SessionsSidebar {
         cx.spawn_in(window, async move |this, cx| {
             for command in commands {
                 let settling = matches!(command, Command::SettleSession { .. });
+                let pinning = matches!(command, Command::PinSession { .. });
                 let Ok(request) =
                     cx.update(|_, cx| store.update(cx, |store, cx| store.command(command, cx)))
                 else {
                     return;
                 };
                 if let Err(error) = request.await {
-                    let _ = this.update_in(cx, |_, window, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if pinning {
+                            this.reveal_pinned = None;
+                        }
                         let message = if settling && error.code == "thread_busy" {
                             crate::tr!("sidebar.settle_refused").into_owned()
                         } else {
@@ -2782,29 +2788,31 @@ impl SessionsSidebar {
                 |row, badge| row.child(badge),
             )
             .when(!working, |row| {
-                row.child(self.render_flat_thread_right_slot(meta, &row_key, false, true, cx))
+                row.child(self.render_flat_thread_right_slot(
+                    meta,
+                    &row_key,
+                    meta.updated_at,
+                    true,
+                    cx,
+                ))
             })
         };
 
         self.thread_context_menu(row, meta, &state, working, false, cx)
     }
 
+    /// `timestamp` is the time the row shows: the one its list sorts it by.
     fn render_flat_thread_right_slot(
         &self,
         meta: &SessionMeta,
         row_key: &str,
-        _waiting: bool,
+        timestamp: u64,
         action_on_hover: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let session_id = meta.id.clone();
         let action_id = session_id.clone();
         let settled = meta.is_settled();
-        let timestamp = if settled {
-            tcode_core::thread_sort::settled_timestamp(meta)
-        } else {
-            meta.updated_at
-        };
         let ago = humanize_ago(now_secs().saturating_sub(timestamp));
         let action_on_hover = settled
             || (action_on_hover
@@ -2934,7 +2942,13 @@ impl SessionsSidebar {
                 .child(title_or_input)
                 .when(!renaming, |line| {
                     line.children(self.pin_glyph(meta, &row_key, cx)).child(
-                        self.render_flat_thread_right_slot(meta, &row_key, waiting, !working, cx),
+                        self.render_flat_thread_right_slot(
+                            meta,
+                            &row_key,
+                            tcode_core::thread_sort::shown_timestamp(meta),
+                            !working,
+                            cx,
+                        ),
                     )
                 });
 
@@ -3178,26 +3192,37 @@ fn thread_list_scrollbar(
 
 /// Replace every row of `state`. A list at its top stays there, so a project
 /// that moves up by recent activity is shown. Otherwise the row at the scroll
-/// top keeps its place while it keeps its key, and a vanished row leaves the
-/// list at the same index instead of jumping to the top.
+/// top keeps its place while it stays among the rows it was between, so a row
+/// added or removed above the viewport moves nothing on screen; when that row
+/// itself moved elsewhere (activity lifted it) or vanished, the list keeps its
+/// index instead of following it.
 fn replace_list_rows<K: PartialEq>(
     state: &ListState,
-    previous_key: impl FnOnce(usize) -> Option<K>,
-    mut keys: impl ExactSizeIterator<Item = K>,
+    previous_key: impl Fn(usize) -> Option<K>,
+    keys: impl ExactSizeIterator<Item = K>,
 ) {
     let mut anchor = state.logical_scroll_top();
+    let keys: Vec<K> = keys.collect();
     let count = keys.len();
     let at_top = anchor.item_ix == 0 && anchor.offset_in_item <= px(0.);
-    let index =
-        previous_key(anchor.item_ix).and_then(|previous| keys.position(|key| key == previous));
+    let position = |key: &K| keys.iter().position(|other| other == key);
+    let index = previous_key(anchor.item_ix).and_then(|top| {
+        let index = position(&top)?;
+        let neighbour_kept =
+            |old: Option<K>, new: Option<&K>| old.is_some_and(|old| new == Some(&old));
+        let before = anchor.item_ix.checked_sub(1).and_then(&previous_key);
+        let after = previous_key(anchor.item_ix + 1);
+        (neighbour_kept(
+            before,
+            index.checked_sub(1).and_then(|index| keys.get(index)),
+        ) || neighbour_kept(after, keys.get(index + 1)))
+        .then_some(index)
+    });
     state.splice(0..state.item_count(), count);
     if at_top || count == 0 {
         return;
     }
-    match index {
-        Some(index) => anchor.item_ix = index,
-        None => anchor.item_ix = anchor.item_ix.min(count - 1),
-    }
+    anchor.item_ix = index.unwrap_or(anchor.item_ix).min(count - 1);
     state.scroll_to(anchor);
 }
 
@@ -3246,18 +3271,19 @@ impl SessionsSidebar {
                         })
                         .flatten()
                         .map(|group| SharedString::from(group.project.name.clone()));
+                    let timestamp = if recent {
+                        tcode_core::thread_sort::shown_timestamp(meta)
+                    } else {
+                        meta.updated_at
+                    };
                     rows.push(CompactListRow::Thread(Rc::new(CompactThreadRow {
                         title: meta.title.clone().into(),
                         row_id: format!("compact-thread-row-{}", meta.id).into(),
                         label: crate::tr!("sidebar.thread", title = meta.title.clone())
                             .into_owned()
                             .into(),
-                        relative_time: humanize_ago(now.saturating_sub(if meta.is_settled() {
-                            tcode_core::thread_sort::settled_timestamp(meta)
-                        } else {
-                            meta.updated_at
-                        }))
-                        .into(),
+                        timestamp,
+                        relative_time: humanize_ago(now.saturating_sub(timestamp)).into(),
                         working: flags.get(&meta.id).is_some_and(|flags| flags.working),
                         state,
                         meta: meta.clone(),
@@ -3393,13 +3419,7 @@ impl SessionsSidebar {
             for row in &mut model.rows {
                 if let CompactListRow::Thread(row) = row {
                     let row = Rc::make_mut(row);
-                    row.relative_time =
-                        humanize_ago(now.saturating_sub(if row.meta.is_settled() {
-                            tcode_core::thread_sort::settled_timestamp(&row.meta)
-                        } else {
-                            row.meta.updated_at
-                        }))
-                        .into();
+                    row.relative_time = humanize_ago(now.saturating_sub(row.timestamp)).into();
                 }
             }
         }
@@ -5113,13 +5133,11 @@ mod tests {
         }))
         .unwrap();
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        // The host sends its index from its own threads, and seeding gives up
-        // after a few seconds on a loaded machine: wait for every thread, as
-        // the app's event pump would, before judging the list.
-        while store.read_with(cx, |store, _| store.flat_sessions().len() < 60) {
-            std::thread::yield_now();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        }
+        // The host sends its index from its own threads; wait for every
+        // thread, as the app's event pump would, before judging the list.
+        crate::store::tests::wait_until(cx, &store, "every thread", |cx| {
+            store.read_with(cx, |store, _| store.flat_sessions().len() == 60)
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -6093,9 +6111,10 @@ mod tests {
         }
     }
 
-    /// Opening or closing the Settled shelf and selecting a row leave a
-    /// scrolled threads list exactly where it was, including when the
-    /// selection takes a viewed settled row out from under the closed shelf.
+    /// Opening or closing the Settled shelf, selecting a row and activity
+    /// lifting the row at the top edge leave a scrolled threads list exactly
+    /// where it was, including when the selection takes a viewed settled row
+    /// out from under the closed shelf.
     #[gpui::test]
     fn the_threads_list_keeps_its_offset_across_the_shelf_and_selection(cx: &mut TestAppContext) {
         use tcode_protocol::{
@@ -6227,6 +6246,38 @@ mod tests {
             "the settled row left with the selection"
         );
         unchanged(cx, "selecting a row");
+
+        // A message lifts the thread at the top edge to the head of Active;
+        // the list stays where it was instead of following it there.
+        let (kind, lifted) = top_row.clone();
+        assert_eq!(kind, "thread");
+        let mut sessions = store.read_with(cx, |store, _| store.sidebar_sessions());
+        sessions
+            .iter_mut()
+            .find(|meta| meta.id == lifted)
+            .unwrap()
+            .updated_at = 2_000;
+        send(
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                sessions,
+                projects: store.read_with(cx, |store, _| store.projects()),
+                summary: Default::default(),
+            }),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        assert_eq!(
+            sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx))[0],
+            lifted
+        );
+        let top = list.logical_scroll_top();
+        assert_eq!(
+            (top.item_ix, top.offset_in_item),
+            (offset.item_ix, offset.offset_in_item),
+            "the lifted row is not followed"
+        );
     }
 
     /// The project view lists a project whose roots are pinned, active and
@@ -6383,13 +6434,13 @@ mod tests {
             if compact {
                 // The phone lists every row of a project, as it always did.
                 verify(cx, expected(8));
-                continue;
+            } else {
+                verify(cx, expected(6));
+                let more = cx.debug_bounds("show-more-many").unwrap();
+                cx.simulate_click(more.center(), gpui::Modifiers::default());
+                draw(cx);
+                verify(cx, expected(8));
             }
-            verify(cx, expected(6));
-            let more = cx.debug_bounds("show-more-many").unwrap();
-            cx.simulate_click(more.center(), gpui::Modifiers::default());
-            draw(cx);
-            verify(cx, expected(8));
 
             send(
                 Topic::Settings,
@@ -6408,7 +6459,7 @@ mod tests {
                     .map(|id| id.to_string())
                     .chain(many(8))
                     .collect::<Vec<_>>(),
-                "a collapsed project lists nothing"
+                "a collapsed project lists nothing; compact={compact}"
             );
             send(
                 Topic::Settings,
@@ -6516,10 +6567,9 @@ mod tests {
                 }
             }
         });
-        while store.read_with(cx, |store, _| store.flat_sessions().is_empty()) {
-            std::thread::yield_now();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        }
+        crate::store::tests::wait_until(cx, &store, "the threads", |cx| {
+            store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let mut sidebar = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
@@ -6574,14 +6624,13 @@ mod tests {
             meta.pinned_at = Some(2);
             meta.pin_order = Some(key.clone());
             incoming.try_send(snapshot(&sessions)).unwrap();
-            while store.read_with(cx, |store, _| {
-                store
-                    .thread_meta(id)
-                    .is_none_or(|meta| meta.pinned_at.is_none())
-            }) {
-                std::thread::yield_now();
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            }
+            crate::store::tests::wait_until(cx, &store, "the pin", |cx| {
+                store.read_with(cx, |store, _| {
+                    store
+                        .thread_meta(id)
+                        .is_some_and(|meta| meta.pinned_at.is_some())
+                })
+            });
             draw(cx);
 
             let ids = sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx));
@@ -6617,12 +6666,11 @@ mod tests {
         started.updated_at = 2_000;
         sessions.push(started);
         incoming.try_send(snapshot(&sessions)).unwrap();
-        while store.read_with(cx, |store, _| {
-            store.thread_meta("started-elsewhere").is_none()
-        }) {
-            std::thread::yield_now();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        }
+        crate::store::tests::wait_until(cx, &store, "the new thread", |cx| {
+            store.read_with(cx, |store, _| {
+                store.thread_meta("started-elsewhere").is_some()
+            })
+        });
         draw(cx);
         sidebar.read_with(cx, |sidebar, _| {
             let top = sidebar.flat_list_state.logical_scroll_top().item_ix;
@@ -6752,10 +6800,9 @@ mod tests {
                 }
             }
         });
-        while store.read_with(cx, |store, _| store.flat_sessions().is_empty()) {
-            std::thread::yield_now();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        }
+        crate::store::tests::wait_until(cx, &store, "the threads", |cx| {
+            store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let mut sidebar = None;
         let (_, cx) = cx.add_window_view(|window, cx| {

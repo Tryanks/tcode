@@ -457,6 +457,11 @@ impl WorkspaceStore {
                     Err(async_channel::TryRecvError::Closed) => break,
                 }
             }
+            // Under test nothing applies host events after this, so a store
+            // left unseeded would only show up later as empty lists.
+            #[cfg(test)]
+            assert!(store.seed_ready(), "host scope snapshot seeding timed out");
+            #[cfg(not(test))]
             if !store.seed_ready() {
                 log::error!("host scope snapshot seeding timed out");
             }
@@ -5836,7 +5841,10 @@ pub(crate) mod tests {
             .expect("drain test store and stop host");
     }
 
-    fn wait_until(
+    /// Drain the host's events into `workspace` until `ready`. A host
+    /// delivers from its own threads, so a test waits on the condition, never
+    /// unbounded: past the deadline it fails naming what it waited for.
+    pub(crate) fn wait_until(
         cx: &mut TestAppContext,
         workspace: &gpui::Entity<WorkspaceStore>,
         description: &str,
