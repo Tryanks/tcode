@@ -6422,6 +6422,41 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// A user message is activity: once the provider accepts it the thread's
+/// updated time moves, which is what lifts it in the threads list.
+#[test]
+fn an_accepted_user_message_moves_the_thread_updated_time() {
+    let cx = &mut TestAppContext::default();
+    let cwd = std::env::temp_dir().join(format!("tcode-message-activity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&cwd).unwrap();
+    let test_store = TestStore::new("tcode-message-activity-data");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(TestClientState::new(store));
+    let (mut session, commands) = fake_live_session(cwd.clone());
+    session.meta.title = "Tidy the parser".into();
+    session.meta.updated_at = 100;
+    let id = session.meta.id.clone();
+
+    state.update(cx, |state, cx| {
+        state.store.upsert_meta(&session.meta).unwrap();
+        state.sessions = state.store.load_index().unwrap();
+        state.install_selected(session);
+        state.send_turn(&id, "one more change".into(), Vec::new(), cx);
+        let delivery_id = match commands.try_recv() {
+            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+            other => panic!("expected SendTurn, got {other:?}"),
+        };
+        assert_eq!(state.find_meta(&id).unwrap().updated_at, 100);
+        state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
+        assert!(state.find_meta(&id).unwrap().updated_at >= now_secs() - 60);
+    });
+    cx.run_until_parked();
+    let persisted = test_store.load_index().unwrap();
+    assert!(persisted[0].updated_at >= now_secs() - 60);
+
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 #[test]
 fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
     let cx = &mut TestAppContext::default();
@@ -11072,7 +11107,8 @@ fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
 
 /// A pin promotes a settled thread without reopening it, holds an idle
 /// thread out of automatic settlement, and a settle removes the pin and the
-/// thread's place in the active order.
+/// thread's place in the active order. None of them is activity, so none
+/// moves the thread in the project view.
 #[test]
 fn pinning_promotes_and_exempts_until_a_settle_unpins() {
     use tcode_core::project::SettledOverride;
@@ -11258,6 +11294,14 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
         let idle = state.find_meta("idle").unwrap();
         assert!(idle.is_settled());
         assert_eq!(idle.pinned_at, None, "settling unpins");
+        for id in ["idle", "arranged"] {
+            let meta = state.find_meta(id).unwrap();
+            assert_eq!(
+                meta.updated_at,
+                stamp / 1000,
+                "settling, by hand or by the sweep, is not activity"
+            );
+        }
     });
 }
 

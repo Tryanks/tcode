@@ -31,10 +31,18 @@ pub fn settled_timestamp(meta: &SessionMeta) -> u64 {
     meta.settled_at.unwrap_or(meta.updated_at)
 }
 
+/// When an active thread was last worked on, in Unix seconds: the host moves
+/// `updated_at` on a user message, a finished turn and a rename, and a
+/// reopen stamps `unsettled_at`.
+fn last_activity(meta: &SessionMeta) -> u64 {
+    meta.updated_at.max(meta.unsettled_at.unwrap_or(0))
+}
+
 /// Pinned threads by key, then keyless ones newest created first. Active
-/// threads without a key (new and reopened ones) newest created or reopened
-/// first, then arranged ones by key. Settled threads newest settled first.
-/// Activity never reorders a row.
+/// threads nobody arranged by hand by their last activity, newest first, so
+/// a message or a finished turn moves one to the top; then the arranged ones
+/// by the key the user gave them, which activity does not change. Settled
+/// threads newest settled first.
 pub fn compare_threads(a: &SessionMeta, b: &SessionMeta) -> Ordering {
     let section = thread_section(a);
     section
@@ -51,10 +59,7 @@ pub fn compare_threads(a: &SessionMeta, b: &SessionMeta) -> Ordering {
                 (Some(a), Some(b)) => a.cmp(b),
                 (Some(_), None) => Ordering::Greater,
                 (None, Some(_)) => Ordering::Less,
-                (None, None) => b
-                    .created_at
-                    .max(b.unsettled_at.unwrap_or(0))
-                    .cmp(&a.created_at.max(a.unsettled_at.unwrap_or(0))),
+                (None, None) => last_activity(b).cmp(&last_activity(a)),
             },
         })
         .then_with(|| a.id.cmp(&b.id))
@@ -233,6 +238,67 @@ pub fn plan_reorder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Activity lifts an active thread nobody arranged above the others; a
+    /// thread the user arranged keeps its key, and a pin given a key before
+    /// the first pinned one leads Pinned.
+    #[test]
+    fn activity_orders_unarranged_threads_and_keys_hold_the_rest() {
+        let thread = |id: &str, created: u64, updated: u64| {
+            let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/sample".into(), None);
+            meta.id = id.into();
+            meta.created_at = created;
+            meta.updated_at = updated;
+            meta
+        };
+        let order = |sessions: &mut Vec<SessionMeta>| {
+            sort_threads(sessions);
+            sessions
+                .iter()
+                .map(|meta| meta.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut reopened = thread("reopened", 10, 10);
+        reopened.unsettled_at = Some(60);
+        let mut arranged = thread("arranged", 5, 5);
+        arranged.active_order = Some("m".into());
+        let mut pinned = thread("pinned", 1, 1);
+        pinned.pinned_at = Some(1);
+        pinned.pin_order = Some("h".into());
+        let mut sessions = vec![
+            thread("new", 50, 50),
+            thread("old", 20, 20),
+            reopened,
+            arranged,
+            pinned,
+        ];
+        assert_eq!(
+            order(&mut sessions),
+            ["pinned", "reopened", "new", "old", "arranged"]
+        );
+
+        for meta in &mut sessions {
+            match meta.id.as_str() {
+                "old" => meta.updated_at = 100,
+                "arranged" => meta.updated_at = 200,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            order(&mut sessions),
+            ["pinned", "old", "reopened", "new", "arranged"],
+            "a message or a finished turn lifts the unarranged thread only"
+        );
+
+        let first = sessions[0].pin_order.clone();
+        let fresh = sessions.iter_mut().find(|meta| meta.id == "new").unwrap();
+        fresh.pinned_at = Some(300);
+        fresh.pin_order = order_key_between(None, first.as_deref());
+        assert_eq!(
+            order(&mut sessions),
+            ["new", "pinned", "old", "reopened", "arranged"]
+        );
+    }
 
     #[test]
     fn keys_fit_between_any_neighbours_and_refuse_corrupt_bounds() {

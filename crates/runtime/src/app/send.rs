@@ -496,6 +496,11 @@ impl AppState {
         );
         cx.author = author;
         cx.origin = origin;
+        if let Some(meta) = self.meta_mut(session_id) {
+            meta.updated_at = now_secs();
+            let meta = meta.clone();
+            self.persist_meta(&meta, cx);
+        }
         self.clear_pull_request_watch_stop(session_id);
         if let QueuedMessageKind::PullRequestWake { key, id } = &message.kind {
             self.acknowledge_pull_request_wake(session_id, key, id, cx);
