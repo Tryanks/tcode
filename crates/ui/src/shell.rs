@@ -16,6 +16,10 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
@@ -23,10 +27,10 @@ use crate::widgets::tabs::{TabBar, TabItem};
 use crate::window_state::{NavigationPanel, NavigationSnapshot};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Div,
-    ElementId, Entity, FocusHandle, Focusable as _, Global, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, actions,
-    div, prelude::FluentBuilder as _, px,
+    ElementId, Entity, FocusHandle, Focusable as _, Global, HitboxBehavior,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    TouchPhase, WeakEntity, Window, actions, canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
     NavMotion, NavOperation, NavStack, NavStackState, ResizableState, StyledExt as _, h_flex,
@@ -264,6 +268,7 @@ pub struct AppShell {
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
     nav: Entity<NavStackState>,
+    back_swipe: Option<BackSwipe>,
     /// The navigation history as the compact stack currently has it mounted.
     /// [`AppShell::sync_nav`] reconciles it with `window_state`'s history, which
     /// is the only authority for where the window is.
@@ -288,6 +293,15 @@ pub struct AppShell {
     /// language, and a language switch reaches the shell only as a redraw.
     window_title: String,
     _subscriptions: Vec<Subscription>,
+}
+
+struct BackSwipe {
+    origin: gpui::Point<Pixels>,
+    travel: Pixels,
+    last_moved_at: Instant,
+    velocity: f32,
+    width: Pixels,
+    finished: bool,
 }
 
 /// The right panel's default width.
@@ -417,6 +431,7 @@ impl AppShell {
             attachment: None,
             hosts,
             nav: cx.new(|_| NavStackState::new()),
+            back_swipe: None,
             mounted: Vec::new(),
             panel_shows_terminal: false,
             navigation: setup.restore_navigation.then_some(NavigationPersistence {
@@ -959,6 +974,11 @@ impl AppShell {
     /// entry, so the same destination visited twice is two independent pages.
     fn sync_nav(&mut self, motion: NavMotion, cx: &mut Context<Self>) {
         let history = self.window_state.read(cx).history().to_vec();
+        if self.mounted != history
+            && let Some(swipe) = &mut self.back_swipe
+        {
+            swipe.finished = true;
+        }
         let common = self
             .mounted
             .iter()
@@ -2206,6 +2226,96 @@ impl AppShell {
         cx.notify();
     }
 
+    // gpui-base 0.7.1 has no edge gesture or interactive pop API: NavPage progress
+    // is read-only and driven by Presence's clock. Remove this wrapper when
+    // NavStack supports touch-back; until then release commits its animated pop.
+    fn swipe_back_stack(
+        &self,
+        stack: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let shell = cx.entity().downgrade();
+        div().relative().size_full().child(stack).child(
+            canvas(
+                |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                move |bounds, hitbox, window, _| {
+                    // Claiming TouchDrag would swallow edge taps. GPUI keeps
+                    // a pan's original contact in ScrollWheelEvent.position.
+                    window.on_mouse_event(
+                        move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                            if !phase.capture() {
+                                return;
+                            }
+                            let gpui::ScrollDelta::Pixels(delta) = event.delta else {
+                                return;
+                            };
+                            let Some(shell) = shell.upgrade() else { return };
+                            shell.update(cx, |shell, cx| {
+                                if delta.y != px(0.) {
+                                    shell.back_swipe = None;
+                                    return;
+                                }
+                                if event.touch_phase == TouchPhase::Started {
+                                    shell.back_swipe = None;
+                                    if !hitbox.should_handle_scroll(window)
+                                        || shell.nav.read(cx).depth() <= 1
+                                        || !bounds.contains(&event.position)
+                                        || event.position.x - bounds.left() > px(20.)
+                                    {
+                                        return;
+                                    }
+                                    shell.back_swipe = Some(BackSwipe {
+                                        origin: event.position,
+                                        travel: px(0.),
+                                        last_moved_at: cx.background_executor().now(),
+                                        velocity: 0.,
+                                        width: bounds.size.width,
+                                        finished: false,
+                                    });
+                                }
+                                let Some(swipe) = shell.back_swipe.as_mut() else {
+                                    return;
+                                };
+                                if event.position != swipe.origin {
+                                    return;
+                                }
+                                cx.stop_propagation();
+                                if swipe.finished {
+                                    return;
+                                }
+                                let now = cx.background_executor().now();
+                                swipe.travel += delta.x;
+                                if event.touch_phase == TouchPhase::Moved && delta.x != px(0.) {
+                                    let elapsed =
+                                        now.duration_since(swipe.last_moved_at).as_secs_f32();
+                                    swipe.velocity = f32::from(delta.x) / elapsed.max(0.001);
+                                    swipe.last_moved_at = now;
+                                }
+                                if matches!(
+                                    event.touch_phase,
+                                    TouchPhase::Ended | TouchPhase::Cancelled
+                                ) {
+                                    swipe.finished = true;
+                                    let fast = swipe.travel >= px(32.)
+                                        && swipe.velocity >= 600.
+                                        && now.duration_since(swipe.last_moved_at)
+                                            <= Duration::from_millis(100);
+                                    if event.touch_phase == TouchPhase::Ended
+                                        && (swipe.travel >= swipe.width / 3. || fast)
+                                    {
+                                        shell.back(window, cx);
+                                    }
+                                }
+                            });
+                        },
+                    );
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+    }
+
     fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.nav.read(cx).is_empty() {
             self.sync_nav(NavMotion::Immediate, cx);
@@ -2261,7 +2371,7 @@ impl AppShell {
             .on_action(cx.listener(Self::on_thread_undo))
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
-            .child(stack)
+            .child(self.swipe_back_stack(stack, cx))
             .when(palette_open, |el| {
                 el.children(
                     self.attachment
@@ -5012,6 +5122,152 @@ mod tests {
     /// compact, a desktop window being wide at any width.
     fn as_mobile(cx: &mut VisualTestContext) {
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, true));
+    }
+
+    fn touch_drag(
+        cx: &mut VisualTestContext,
+        id: u64,
+        steps: &[(gpui::TouchPhase, f32, f32, u64)],
+    ) {
+        for &(phase, x, y, elapsed) in steps {
+            cx.executor().advance_clock(Duration::from_millis(elapsed));
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::Touch(gpui::TouchEvent {
+                        id: gpui::TouchId(id),
+                        phase,
+                        position: gpui::point(px(x), px(y)),
+                        predicted_position: None,
+                        force: None,
+                    }),
+                    cx,
+                );
+            });
+            draw(cx);
+        }
+    }
+
+    #[gpui::test]
+    fn compact_edge_touch_swipe_commits_or_cancels_back(cx: &mut TestAppContext) {
+        use gpui::TouchPhase::{Cancelled, Ended, Moved, Started};
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        for (id, end_x, end_y, elapsed, phase, pops) in [
+            (1, 180., 300., 400, Ended, true),
+            (2, 70., 300., 50, Ended, true),
+            (3, 70., 300., 400, Ended, false),
+            (4, 180., 300., 50, Cancelled, false),
+            (5, 70., 500., 50, Ended, false),
+        ] {
+            shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+            draw(cx);
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+            let before = shell.read_with(cx, |shell, cx| {
+                shell.window_state.read(cx).history().to_vec()
+            });
+            touch_drag(
+                cx,
+                id,
+                &[
+                    (Started, 10., 300., 0),
+                    (Moved, (10. + end_x) / 2., (300. + end_y) / 2., elapsed / 2),
+                    (Moved, end_x, end_y, elapsed / 2),
+                    (phase, end_x, end_y, 10),
+                ],
+            );
+            shell.read_with(cx, |shell, cx| {
+                let expected = if pops {
+                    &before[..before.len() - 1]
+                } else {
+                    &before[..]
+                };
+                assert_eq!(
+                    shell.window_state.read(cx).history(),
+                    expected,
+                    "touch {id}"
+                );
+                assert_eq!(shell.nav.read(cx).depth(), expected.len());
+            });
+        }
+        cx.update(|window, cx| shell.update(cx, |shell, cx| while shell.back(window, cx) {}));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        touch_drag(
+            cx,
+            6,
+            &[
+                (Started, 10., 300., 0),
+                (Moved, 180., 300., 50),
+                (Ended, 180., 300., 10),
+            ],
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.window_state.read(cx).history().len(), 1);
+            assert_eq!(shell.nav.read(cx).depth(), 1);
+        });
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        let back = cx
+            .debug_bounds("compact-back")
+            .expect("Back on pushed page");
+        let x = f32::from(back.left() + px(6.));
+        let y = f32::from(back.center().y);
+        touch_drag(cx, 7, &[(Started, x, y, 0), (Ended, x, y, 50)]);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.window_state.read(cx).history().len(), 1);
+            assert_eq!(shell.nav.read(cx).depth(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn compact_touch_drag_away_from_edge_preserves_page(cx: &mut TestAppContext) {
+        use gpui::TouchPhase::{Ended, Moved, Started};
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        let before = shell.read_with(cx, |shell, cx| {
+            shell.window_state.read(cx).history().to_vec()
+        });
+        for (id, start_x, middle_x) in [(1, 60., 240.), (2, 60., 10.)] {
+            // Catch an edge pan's fling with the next off-edge contact. GPUI
+            // starts that contact directly as a pan, without a TouchDrag offer.
+            touch_drag(
+                cx,
+                10 + id,
+                &[
+                    (Started, 10., 300., 0),
+                    (Moved, 25., 300., 10),
+                    (Ended, 25., 300., 10),
+                ],
+            );
+            touch_drag(
+                cx,
+                id,
+                &[
+                    (Started, start_x, 300., 0),
+                    (Moved, middle_x, 300., 50),
+                    (Moved, 280., 300., 50),
+                    (Ended, 280., 300., 10),
+                ],
+            );
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(shell.window_state.read(cx).history(), before);
+                assert_eq!(shell.nav.read(cx).depth(), before.len());
+            });
+        }
     }
 
     #[gpui::test]
