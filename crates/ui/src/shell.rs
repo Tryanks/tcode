@@ -223,6 +223,10 @@ pub struct ShellSetup {
     /// How to reach a host running inside this process. A client that can never
     /// host has none.
     pub local: Option<LocalTransport>,
+    /// Why that host did not start at launch. Machines says so from the first
+    /// frame, whatever the window attaches to, and the window attaches to that
+    /// host only when asked again.
+    pub local_failure: Option<String>,
     /// Where to attach at launch; `None` opens on the hosts list.
     pub initial: Option<AttachmentTarget>,
     /// A browser link that could not be paired opens the normal form with the
@@ -421,6 +425,14 @@ impl AppShell {
             _subscriptions: subscriptions,
             setup,
         };
+        if let Some(reason) = shell.setup.local_failure.take() {
+            shell
+                .hosts
+                .update(cx, |hosts, cx| hosts.set_local_failure(Some(reason), cx));
+            if shell.setup.initial == Some(AttachmentTarget::Local) {
+                shell.setup.initial = None;
+            }
+        }
         if let Some(target) = shell.setup.initial.take() {
             shell.attach(target, window, cx);
         }
@@ -654,13 +666,32 @@ impl AppShell {
     }
 
     fn attach(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
+        // A local host that does not start is an attachment failure like any
+        // other: Hosts shows why, and whatever this window was on stays.
+        let local = match (&target, &self.setup.local) {
+            (AttachmentTarget::Local, Some(start)) => match start(cx) {
+                Ok(transport) => Some(transport),
+                Err(reason) => {
+                    log::error!("the local host is unavailable: {reason}");
+                    self.hosts
+                        .update(cx, |hosts, cx| hosts.set_local_failure(Some(reason), cx));
+                    cx.notify();
+                    return;
+                }
+            },
+            _ => None,
+        };
+        if local.is_some() {
+            self.hosts
+                .update(cx, |hosts, cx| hosts.set_local_failure(None, cx));
+        }
         self.pending_navigation_restore = None;
         if let Some(old) = self.attachment.take() {
             old.link.close(cx).close();
         }
         let Some(link) = Attachment::open(
             target,
-            self.setup.local.as_ref(),
+            local,
             self.setup.client_host.clone(),
             self.setup.seed_blocking,
             cx,
@@ -1148,7 +1179,9 @@ pub(crate) fn detach_current(cx: &mut App) {
     let Some(shell) = current_shell(cx) else {
         return;
     };
-    shell.update(cx, |shell, cx| shell.detach(cx));
+    // The Hosts menu calls this from its panel's listener, and detaching
+    // updates that panel.
+    cx.defer(move |cx| shell.update(cx, |shell, cx| shell.detach(cx)));
 }
 
 /// Route a platform Back gesture into the shell that owns the window.
@@ -4514,8 +4547,8 @@ mod tests {
                 AppShell::new(
                     window_state,
                     ShellSetup {
-                        local: Some(Rc::new(move || {
-                            transport.borrow_mut().take().expect("one attachment")
+                        local: Some(Rc::new(move |_| {
+                            Ok(transport.borrow_mut().take().expect("one attachment"))
                         })),
                         initial,
                         ..Default::default()
@@ -4581,6 +4614,162 @@ mod tests {
             Destination::Hosts
         );
         assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+    }
+
+    /// A local host that did not start at launch is on Machines from the
+    /// first frame, whatever the window attached to. Retry asks bootstrap to
+    /// start it again; a failed start keeps the machine the window is on, and
+    /// one that comes up replaces it.
+    #[gpui::test]
+    fn a_local_host_that_does_not_start_is_shown_and_retried(cx: &mut TestAppContext) {
+        struct Desk {
+            saved: tcode_client::pairing::PairedHost,
+            transports: RefCell<Vec<Transport>>,
+        }
+        impl ClientHost for Desk {
+            fn device_name(&self) -> String {
+                "desk".into()
+            }
+            fn device_id(&self) -> String {
+                "desk".into()
+            }
+            fn device_platform(&self) -> Option<String> {
+                None
+            }
+            fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
+                vec![self.saved.clone()]
+            }
+            fn save_hosts(&self, _: &[tcode_client::pairing::PairedHost]) {}
+            fn last_host_id(&self) -> Option<String> {
+                None
+            }
+            fn set_last_host_id(&self, _: Option<&str>) {}
+            fn pair(
+                &self,
+                _: tcode_client::pairing::PairInvite,
+                _: Option<std::net::IpAddr>,
+            ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
+            {
+                unreachable!("nothing is paired here")
+            }
+            fn connect(&self, _: &tcode_client::pairing::PairedHost) -> Transport {
+                self.transports.borrow_mut().pop().expect("one connection")
+            }
+        }
+        fn transport() -> (Transport, async_channel::Sender<String>) {
+            let (to_host, _) = async_channel::unbounded();
+            let (incoming, from_host) = async_channel::unbounded();
+            let (_, state) = async_channel::unbounded();
+            let transport = Transport {
+                to_host: to_host.into(),
+                from_host,
+                state,
+                current_host: None,
+            };
+            (transport, incoming)
+        }
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let busy = "another Tcode host is already using the data directory /tmp/demo";
+        let (local_transport, local_incoming) = transport();
+        // Answered from the back: busy on the first Retry, up on the second.
+        let answers = RefCell::new(vec![Ok(local_transport), Err(busy.to_owned())]);
+        let attempts = Rc::new(Cell::new(0));
+        let local: LocalTransport = {
+            let attempts = attempts.clone();
+            Rc::new(move |_| {
+                attempts.set(attempts.get() + 1);
+                answers.borrow_mut().pop().expect("an unexpected start")
+            })
+        };
+        let saved = tcode_client::pairing::PairedHost {
+            host_id: "studio".into(),
+            name: "Studio".into(),
+            traverse: Vec::new(),
+            relay: None,
+            addrs: vec!["127.0.0.1:47503".into()],
+            last_connected_unix: None,
+            space_id: None,
+            space_name: None,
+        };
+        let (remote_transport, _remote_incoming) = transport();
+        let desk: Rc<dyn ClientHost> = Rc::new(Desk {
+            saved: saved.clone(),
+            transports: RefCell::new(vec![remote_transport]),
+        });
+        cx.update(|cx| {
+            cx.set_global(crate::remote::ClientAttachment::new(
+                desk.clone(),
+                true,
+                switch_current,
+            ))
+        });
+        let mounted = Rc::new(RefCell::new(None));
+        let capture = mounted.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let window_state = cx.new(|_| WindowState::new(false));
+            let shell = cx.new(|cx| {
+                AppShell::new(
+                    window_state,
+                    ShellSetup {
+                        client_host: Some(desk),
+                        local: Some(local),
+                        local_failure: Some(busy.to_owned()),
+                        initial: Some(AttachmentTarget::Remote(saved)),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            });
+            *capture.borrow_mut() = Some(shell.clone());
+            gpui_base::Root::new(shell, window, cx)
+        });
+        let shell: Entity<AppShell> = mounted.borrow_mut().take().unwrap();
+        cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
+        resize(cx, 1024.);
+        let attached = |cx: &mut VisualTestContext| {
+            shell.read_with(cx, |shell, cx| {
+                shell
+                    .store()
+                    .map(|store| store.read(cx).remote_host_id().map(str::to_owned))
+            })
+        };
+        let open_machines = |cx: &mut VisualTestContext| {
+            shell
+                .read_with(cx, |shell, _| shell.window_state())
+                .update(cx, |state, cx| state.go(Destination::Hosts, cx));
+            draw(cx);
+        };
+        let retry = |cx: &mut VisualTestContext| {
+            let button = cx.debug_bounds("hosts-local-retry").expect("Retry");
+            cx.simulate_click(button.center(), gpui::Modifiers::default());
+            draw(cx);
+        };
+
+        open_machines(cx);
+        assert_eq!(attempts.get(), 0, "the launch's failure is not asked again");
+        assert_eq!(attached(cx), Some(Some("studio".into())));
+        assert!(cx.debug_bounds("hosts-local-failure").is_some());
+
+        retry(cx);
+        assert_eq!(attempts.get(), 1, "Retry starts the local host again");
+        assert_eq!(
+            attached(cx),
+            Some(Some("studio".into())),
+            "a failed start keeps the machine the window is on"
+        );
+        open_machines(cx);
+        assert!(cx.debug_bounds("hosts-local-failure").is_some());
+
+        retry(cx);
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(attached(cx), Some(None), "the local host replaces it");
+        let store = shell.read_with(cx, |shell, _| shell.store()).unwrap();
+        crate::store::tests::seed_full_scope(&store, &local_incoming, Vec::new(), cx);
+        open_machines(cx);
+        assert!(cx.debug_bounds("hosts-local-failure").is_none());
     }
 
     #[gpui::test]

@@ -26,8 +26,9 @@ use crate::store::{WorkspaceAttachment, WorkspaceStore};
 
 /// How this window reaches a host running inside its own process. Desktop
 /// bootstrap supplies one; a client that can never host has none, so
-/// [`AttachmentTarget::Local`] simply has nothing to open.
-pub type LocalTransport = Rc<dyn Fn() -> Transport>;
+/// [`AttachmentTarget::Local`] simply has nothing to open. `Err` says why that
+/// host is not running; asking again starts it again.
+pub type LocalTransport = Rc<dyn Fn(&mut App) -> Result<Transport, String>>;
 
 struct AttachmentRuntime {
     link: HostLink,
@@ -94,18 +95,19 @@ pub struct Attachment {
 }
 
 impl Attachment {
-    /// Open a link to `target` and build its store. `None` when this client has
-    /// no way to reach that target — a browser asked to attach locally has no
-    /// local host to attach to.
+    /// Open a link to `target` and build its store, over `local` when the
+    /// target is this process's own host. `None` when this client has no way
+    /// to reach that target — a browser asked to attach locally has no local
+    /// host to attach to.
     pub fn open(
         target: AttachmentTarget,
-        local: Option<&LocalTransport>,
+        local: Option<Transport>,
         client_host: Option<Rc<dyn ClientHost>>,
         seed_blocking: bool,
         cx: &mut App,
     ) -> Option<Self> {
         let (transport, identity) = match &target {
-            AttachmentTarget::Local => (local?(), WorkspaceAttachment::Local),
+            AttachmentTarget::Local => (local?, WorkspaceAttachment::Local),
             AttachmentTarget::Remote(host) => (
                 client_host.as_ref()?.connect(host),
                 WorkspaceAttachment::Remote {
@@ -230,10 +232,15 @@ mod tests {
     ) {
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
-        let local: LocalTransport = Rc::new(move || transport(to_host.clone(), from_host.clone()));
         let attachment = cx.update(|cx| {
-            Attachment::open(AttachmentTarget::Local, Some(&local), None, false, cx)
-                .expect("local attachment")
+            Attachment::open(
+                AttachmentTarget::Local,
+                Some(transport(to_host, from_host)),
+                None,
+                false,
+                cx,
+            )
+            .expect("local attachment")
         });
         cx.run_until_parked();
 
