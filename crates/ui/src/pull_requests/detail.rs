@@ -2108,6 +2108,32 @@ mod tests {
         }
     }
 
+    /// An empty conversation on a host that offers everything.
+    fn conversation() -> PullRequestConversation {
+        PullRequestConversation {
+            description: PullRequestComment {
+                id: "PR_7".into(),
+                author: None,
+                body: String::new(),
+                created_at: "2026-10-01T00:00:00Z".into(),
+                edited_at: None,
+                url: None,
+                review_state: None,
+                reactions: Vec::new(),
+                viewer_can_update: false,
+                viewer_can_react: false,
+            },
+            comments: Vec::new(),
+            threads: Vec::new(),
+            complete: true,
+            account: "account".into(),
+            permissions: Default::default(),
+            labels: Vec::new(),
+            reviewers: Vec::new(),
+            capabilities: PullRequestCapabilities::ALL,
+        }
+    }
+
     /// Answers a read other than a page of files, valid until `expires_at`.
     fn answer_other(
         incoming: &async_channel::Sender<String>,
@@ -2117,28 +2143,7 @@ mod tests {
     ) {
         let response = match read {
             PullRequestRead::Conversation => {
-                PullRequestReadResponse::Conversation(Box::new(PullRequestConversation {
-                    description: PullRequestComment {
-                        id: "PR_7".into(),
-                        author: None,
-                        body: String::new(),
-                        created_at: "2026-10-01T00:00:00Z".into(),
-                        edited_at: None,
-                        url: None,
-                        review_state: None,
-                        reactions: Vec::new(),
-                        viewer_can_update: false,
-                        viewer_can_react: false,
-                    },
-                    comments: Vec::new(),
-                    threads: Vec::new(),
-                    complete: true,
-                    account: "account".into(),
-                    permissions: Default::default(),
-                    labels: Vec::new(),
-                    reviewers: Vec::new(),
-                    capabilities: PullRequestCapabilities::ALL,
-                }))
+                PullRequestReadResponse::Conversation(Box::new(conversation()))
             }
             PullRequestRead::ViewedFiles => {
                 PullRequestReadResponse::ViewedFiles(PullRequestViewedFiles {
@@ -2235,6 +2240,57 @@ mod tests {
             );
         });
         assert!(reads(&requests).is_empty());
+    }
+
+    /// The meta block lists a host's labels only where the host has labels: on one without them
+    /// (Bitbucket) there is no Labels row, not even an empty one, beside the reviewers.
+    #[gpui::test]
+    fn the_labels_row_is_absent_where_the_host_has_no_labels(cx: &mut TestAppContext) {
+        for labels in [true, false] {
+            let Mounted {
+                view,
+                requests,
+                incoming,
+                _pump,
+                cx,
+            } = mount(cx);
+            let later = now() + 3600;
+            for (id, read) in reads(&requests) {
+                let response = match read {
+                    PullRequestRead::Conversation => {
+                        PullRequestReadResponse::Conversation(Box::new(PullRequestConversation {
+                            reviewers: vec![tcode_protocol::PullRequestReviewerState {
+                                reviewer: tcode_protocol::PullRequestReviewer {
+                                    id: "reviewer".into(),
+                                    login: "reviewer".into(),
+                                    kind: tcode_protocol::PullRequestReviewerKind::User,
+                                },
+                                avatar_url: None,
+                                verdict: None,
+                            }],
+                            capabilities: PullRequestCapabilities {
+                                labels,
+                                ..PullRequestCapabilities::ALL
+                            },
+                            ..conversation()
+                        }))
+                    }
+                    PullRequestRead::Files { cursor: None } => {
+                        PullRequestReadResponse::Files(files(0..1, None))
+                    }
+                    read => {
+                        answer_other(&incoming, id, read, later);
+                        continue;
+                    }
+                };
+                answer(&incoming, id, response, later);
+            }
+            settle(cx);
+            view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
+            settle(cx);
+            assert!(cx.debug_bounds("pr-meta-reviewers").is_some());
+            assert_eq!(cx.debug_bounds("pr-meta-labels").is_some(), labels);
+        }
     }
 
     #[gpui::test]

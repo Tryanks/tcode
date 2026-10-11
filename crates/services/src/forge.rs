@@ -356,6 +356,7 @@ fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -
         PullRequestAction::ReplyToThread { .. } => capabilities.reply,
         PullRequestAction::ResolveThread { .. } => capabilities.resolve,
         PullRequestAction::React { .. } => capabilities.reactions,
+        PullRequestAction::SetLabels { .. } => capabilities.labels,
         PullRequestAction::ReadyForReview | PullRequestAction::ConvertToDraft => capabilities.draft,
         PullRequestAction::Reopen => capabilities.reopen,
         PullRequestAction::Revert => capabilities.revert,
@@ -692,19 +693,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Bitbucket closes by declining, which it never undoes: a reopen is refused before any
-    /// request, as a capability the host lacks rather than a permission.
+    /// Bitbucket closes by declining, which it never undoes, and has no labels: a reopen or a
+    /// label edit is refused before any request, as a capability the host lacks rather than a
+    /// permission.
     #[test]
-    fn a_declined_bitbucket_pull_request_is_not_reopened() {
+    fn a_bitbucket_reopen_or_label_edit_is_refused() {
         let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let forge = connect(SettingsStore::new(root.clone()), []);
         let key = PullRequestKey::new("bitbucket.org", "team/web", 8);
-        assert!(!forge.capabilities(&key).reopen);
-        assert_eq!(
-            forge.act(&key, &PullRequestAction::Reopen),
-            Outcome::Rejected(Rejection::Unsupported)
-        );
+        let capabilities = forge.capabilities(&key);
+        assert!(!capabilities.reopen && !capabilities.labels);
+        for action in [
+            PullRequestAction::Reopen,
+            PullRequestAction::SetLabels {
+                add: vec!["bug".into()],
+                remove: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                forge.act(&key, &action),
+                Outcome::Rejected(Rejection::Unsupported),
+                "{action:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

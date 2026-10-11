@@ -34,6 +34,7 @@ pub(super) fn capabilities() -> PullRequestCapabilities {
         reply: true,
         resolve: true,
         reactions: true,
+        labels: true,
         // GitLab's REST API approves or does not; it has no verdict that asks for changes.
         request_changes: false,
         // A `Draft:` title prefix, which the API edits as the title.
