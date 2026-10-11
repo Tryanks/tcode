@@ -21,6 +21,12 @@ pub(super) struct PullRequestRuntime {
     discovering: bool,
     /// Threads triggered during a discovery pass, each with the refresh its triggers asked for.
     discover_again: HashMap<String, bool>,
+    /// The checkout and project root of every discovery read in flight; each
+    /// runs git in both.
+    discovery_reads: Vec<(PathBuf, PathBuf)>,
+    /// Project roots being moved, each with the move's wait for the discovery
+    /// reads in it to end while any is in flight.
+    moving_roots: Vec<(PathBuf, Option<smol::channel::Sender<()>>)>,
     merge_commands: HashSet<String>,
     pub(super) workers: Vec<HostTask<()>>,
     /// Stacks with a write submitted and not yet answered.
@@ -41,12 +47,67 @@ impl PullRequestRuntime {
             sync_scheduled: false,
             discovering: false,
             discover_again: HashMap::new(),
+            discovery_reads: Vec::new(),
+            moving_roots: Vec::new(),
             merge_commands: HashSet::new(),
             workers: Vec::new(),
             stack_writes: HashSet::new(),
             submissions: 0,
         }
     }
+
+    /// Keep discovery out of `root` until [`Self::end_root_move`]. Windows
+    /// refuses to rename a directory that is a process's current directory,
+    /// so the move waits until the receiver closes: when no discovery read
+    /// in flight runs git in `root`.
+    pub(super) fn begin_root_move(&mut self, root: PathBuf) -> smol::channel::Receiver<()> {
+        let (waiting, reads_ended) = smol::channel::bounded(1);
+        let waiting = reading_in(&self.discovery_reads, &root).then_some(waiting);
+        self.moving_roots.push((root, waiting));
+        reads_ended
+    }
+
+    pub(super) fn end_root_move(&mut self, root: &Path) {
+        if let Some(index) = self
+            .moving_roots
+            .iter()
+            .position(|(moving, _)| moving == root)
+        {
+            self.moving_roots.remove(index);
+        }
+    }
+
+    /// Admit a discovery read unless it would run git in a moving root.
+    fn begin_discovery_read(&mut self, cwd: &Path, root: &Path) -> bool {
+        let moving = self
+            .moving_roots
+            .iter()
+            .any(|(moving, _)| cwd.starts_with(moving) || root.starts_with(moving));
+        if !moving {
+            self.discovery_reads.push((cwd.to_owned(), root.to_owned()));
+        }
+        !moving
+    }
+
+    fn end_discovery_read(&mut self, cwd: &Path, root: &Path) {
+        if let Some(index) = self
+            .discovery_reads
+            .iter()
+            .position(|read| read.0 == cwd && read.1 == root)
+        {
+            self.discovery_reads.remove(index);
+        }
+        for (moving, waiting) in &mut self.moving_roots {
+            if !reading_in(&self.discovery_reads, moving) {
+                *waiting = None;
+            }
+        }
+    }
+}
+fn reading_in(reads: &[(PathBuf, PathBuf)], dir: &Path) -> bool {
+    reads
+        .iter()
+        .any(|(cwd, root)| cwd.starts_with(dir) || root.starts_with(dir))
 }
 struct SyncGroup {
     key: PullRequestKey,
@@ -1264,18 +1325,36 @@ impl AppState {
         let host = cx.clone();
         cx.spawn_background(async move {
             for chunk in groups.chunks(32) {
+                let chunk = chunk.to_vec();
+                let admitted = host
+                    .enqueue_and_wait(move |state, _| {
+                        chunk
+                            .into_iter()
+                            .filter(|((cwd, root), _)| {
+                                state.pull_requests.begin_discovery_read(cwd, root)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                    .unwrap_or_default();
                 let mut tasks = Vec::new();
-                for ((cwd, root), (metas, refresh)) in chunk {
-                    let (cwd, root, refresh) = (cwd.clone(), root.clone(), *refresh);
+                for ((cwd, root), (metas, refresh)) in admitted {
+                    let (read_cwd, read_root) = (cwd.clone(), root.clone());
                     let forge = forge.clone();
                     tasks.push((
-                        metas.clone(),
-                        root.clone(),
-                        host.unblock(move || forge.discover(&cwd, &root, refresh)),
+                        metas,
+                        cwd,
+                        root,
+                        host.unblock(move || forge.discover(&read_cwd, &read_root, refresh)),
                     ));
                 }
-                for (metas, root, task) in tasks {
-                    let Some(result) = task.await else {
+                for (metas, cwd, root, task) in tasks {
+                    let result = task.await;
+                    let read_root = root.clone();
+                    host.enqueue(move |state, _| {
+                        state.pull_requests.end_discovery_read(&cwd, &read_root)
+                    });
+                    let Some(result) = result else {
                         continue;
                     };
                     for meta in metas {
