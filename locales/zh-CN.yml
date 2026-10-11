@@ -1964,6 +1964,7 @@ pull_requests:
     close_confirm: "关闭拉取请求"
     close_desc: "这会关闭 #%{number} 而不合并。你之后可以重新打开它。"
     close_desc_final: "这会关闭 #%{number} 而不合并。%{host_name} 之后无法重新打开它。"
+    close_desc_unknown: "这会关闭 #%{number} 而不合并。在 %{host_name} 上可能无法重新打开它。"
     close_menu: "关闭拉取请求…"
     close_title: "关闭 #%{number}？"
     disable_auto_merge: "停用自动合并"

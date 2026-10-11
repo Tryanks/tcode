@@ -631,33 +631,36 @@ impl Target {
                     cx,
                 )
             }
-            Lifecycle::Close => {
-                // The consequence changes where the host never reopens what it closed.
-                let description = if self
-                    .offer
-                    .action
-                    .as_ref()
-                    .is_some_and(|action| !action.capabilities.reopen)
-                {
-                    crate::tr!(
-                        "pull_requests.actions.close_desc_final",
-                        number = number.clone(),
-                        host_name = self.host_name.clone()
-                    )
-                } else {
-                    crate::tr!("pull_requests.actions.close_desc", number = number.clone())
-                };
-                self.confirm(
-                    crate::tr!("pull_requests.actions.close_title", number = number),
-                    description,
-                    crate::tr!("pull_requests.actions.close_confirm"),
-                    ButtonVariant::Danger,
-                    PullRequestAction::Close,
-                    kind,
-                    window,
-                    cx,
-                )
-            }
+            Lifecycle::Close => match &self.offer.action {
+                Some(action) => {
+                    let reopen = Some(action.capabilities.reopen);
+                    self.confirm_close(reopen, kind, window, cx)
+                }
+                // A menu opened before the action state was read: read it, so the confirmation
+                // never promises a reopen the host cannot do.
+                None => {
+                    let task = self.store.update(cx, |store, cx| {
+                        store.read_pull_request(
+                            self.session.clone(),
+                            self.offer.key.clone(),
+                            PullRequestRead::ActionState,
+                            cx,
+                        )
+                    });
+                    window
+                        .spawn(cx, async move |cx| {
+                            let reopen = match task.await {
+                                Ok((PullRequestReadResponse::ActionState(state), _)) => {
+                                    Some(state.capabilities.reopen)
+                                }
+                                _ => None,
+                            };
+                            let _ = cx
+                                .update(|window, cx| self.confirm_close(reopen, kind, window, cx));
+                        })
+                        .detach();
+                }
+            },
             Lifecycle::Revert => self.confirm(
                 crate::tr!(
                     "pull_requests.actions.revert_title",
@@ -754,6 +757,43 @@ impl Target {
         if self.window_state.read(cx).destination() == Destination::PullRequest {
             self.window_state.update(cx, |state, cx| state.back(cx));
         }
+    }
+
+    /// The close confirmation, whose consequence depends on whether the host can `reopen` what
+    /// it closes; `None` when that could not be read.
+    fn confirm_close(
+        self,
+        reopen: Option<bool>,
+        kind: Lifecycle,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let number = self.number();
+        let description = match reopen {
+            Some(true) => {
+                crate::tr!("pull_requests.actions.close_desc", number = number.clone())
+            }
+            Some(false) => crate::tr!(
+                "pull_requests.actions.close_desc_final",
+                number = number.clone(),
+                host_name = self.host_name.clone()
+            ),
+            None => crate::tr!(
+                "pull_requests.actions.close_desc_unknown",
+                number = number.clone(),
+                host_name = self.host_name.clone()
+            ),
+        };
+        self.confirm(
+            crate::tr!("pull_requests.actions.close_title", number = number),
+            description,
+            crate::tr!("pull_requests.actions.close_confirm"),
+            ButtonVariant::Danger,
+            PullRequestAction::Close,
+            kind,
+            window,
+            cx,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

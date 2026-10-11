@@ -1971,6 +1971,7 @@ pull_requests:
     close_confirm: "Close pull request"
     close_desc: "This closes #%{number} without merging it. You can reopen it later."
     close_desc_final: "This closes #%{number} without merging it. %{host_name} can't reopen it afterwards."
+    close_desc_unknown: "This closes #%{number} without merging it. It may not be reopenable on %{host_name}."
     close_menu: "Close pull request…"
     close_title: "Close #%{number}?"
     disable_auto_merge: "Disable auto-merge"
