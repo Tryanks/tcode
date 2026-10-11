@@ -453,7 +453,7 @@ fn decode_summary(raw: &Value, key: &PullRequestKey) -> Option<Summary> {
             }),
             additions: Some(raw["additions"].as_u64().unwrap_or(0)),
             deletions: Some(raw["deletions"].as_u64().unwrap_or(0)),
-            changed_files: raw["changedFiles"].as_u64().unwrap_or(0),
+            changed_files: Some(raw["changedFiles"].as_u64().unwrap_or(0)),
             review_decision: review_decision(raw),
             checks_state: checks,
             mergeability: match raw["mergeable"].as_str() {
