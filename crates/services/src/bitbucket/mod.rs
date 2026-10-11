@@ -40,6 +40,10 @@ use tcode_protocol::{
 };
 
 const READ_TTL: Duration = Duration::from_secs(60);
+/// How long a summary or a branch's pull request is kept while reading anonymously: Bitbucket
+/// allows 60 anonymous requests an hour, and a summary each minute (two requests) for one open
+/// pull request with a discovery each minute (one) spends them in twenty minutes.
+const ANONYMOUS_TTL: Duration = Duration::from_secs(600);
 /// Text at a commit never changes; the bound is only on how long it holds memory.
 const TEXT_TTL: Duration = Duration::from_secs(600);
 const FILE_BYTES: usize = 1024 * 1024;
@@ -61,6 +65,8 @@ pub struct Bitbucket {
     /// The whole diff, which the files, viewed marks and anchoring reads all page from.
     diffs: Mutex<Diffs>,
     branches: Mutex<Branches>,
+    /// Each pull request's last summary, kept for [`Bitbucket::sync_ttl`].
+    summaries: Mutex<HashMap<PullRequestKey, (Instant, Summary)>>,
     verdicts: Verdicts,
 }
 
@@ -76,6 +82,7 @@ impl Bitbucket {
             reads: Mutex::default(),
             diffs: Mutex::default(),
             branches: Mutex::default(),
+            summaries: Mutex::default(),
             verdicts: Verdicts::default(),
         })
     }
@@ -84,6 +91,14 @@ impl Bitbucket {
         Pr {
             api: &self.api,
             key,
+        }
+    }
+
+    /// How long the reads a sync repeats are kept: longer while no credential reads.
+    fn sync_ttl(&self) -> Duration {
+        match self.api.credential(HOST) {
+            Ok(None) => ANONYMOUS_TTL,
+            _ => READ_TTL,
         }
     }
 
@@ -139,7 +154,20 @@ impl Bitbucket {
         if reads::state(pr) != Some(tcode_core::pull_request::PullRequestState::Open) {
             return Ok(Mergeability::Unknown);
         }
-        let read = self.pr(key).conflicts()?;
+        // `/conflicts` is not in Bitbucket's published API (it is what its own page reads), so
+        // an answer it stops giving leaves mergeability unknown rather than failing the read; a
+        // rate limit, a refused credential or a host turned off still say so.
+        let read = match self.pr(key).conflicts() {
+            Ok(read) => read,
+            Err(ForgeError {
+                kind:
+                    ForgeErrorKind::NotFound
+                    | ForgeErrorKind::Refused { .. }
+                    | ForgeErrorKind::Uncertain,
+                ..
+            }) => Mergeability::Unknown,
+            Err(failure) => return Err(failure),
+        };
         Ok(self
             .verdicts
             .read(key, reads::head(pr).as_deref(), read, Instant::now()))
@@ -175,9 +203,16 @@ impl Bitbucket {
                 "Bitbucket pull request names no commits",
             ));
         };
+        // A fork's head is not in the destination repository, so it is named in its own, as
+        // Bitbucket's comment links name a comparison.
+        let source = text(&pr["source"]["repository"], "full_name")
+            .filter(|source| !source.eq_ignore_ascii_case(&key.repository))
+            .map(|source| format!("{source}:"))
+            .unwrap_or_default();
         let base = self.pr(key).get(
-            self.pr(key)
-                .repository_path(&format!("/merge-base/{head}..{destination}?fields=hash")),
+            self.pr(key).repository_path(&format!(
+                "/merge-base/{source}{head}..{destination}?fields=hash"
+            )),
             "MergeBase",
         )?;
         text(&base, "hash")
@@ -494,6 +529,7 @@ impl Bitbucket {
             .unwrap()
             .retain(|(held, name), _| held != key || name.starts_with("text:"));
         self.diffs.lock().unwrap().remove(key);
+        self.summaries.lock().unwrap().remove(key);
     }
 }
 
@@ -551,8 +587,12 @@ impl Forge for Bitbucket {
         )])
     }
 
-    // Nothing is held of the credential: it is read from the store on every request.
-    fn forget_credential(&self, _: &str) {}
+    // The credential is read from the store on every request; what was read with the one
+    // before is dropped, as reads kept longer while anonymous would otherwise outlive a token.
+    fn forget_credential(&self, _: &str) {
+        self.summaries.lock().unwrap().clear();
+        self.branches.lock().unwrap().clear();
+    }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
         repository::pull_request_url(url)
@@ -582,7 +622,7 @@ impl Forge for Bitbucket {
         );
         if !refresh
             && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
-            && at.elapsed() < READ_TTL
+            && at.elapsed() < self.sync_ttl()
         {
             return found.clone();
         }
@@ -630,10 +670,16 @@ impl Forge for Bitbucket {
 
     /// The pull request and its head's build statuses.
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
+        let ttl = self.sync_ttl();
+        if let Some((at, summary)) = self.summaries.lock().unwrap().get(key)
+            && at.elapsed() < ttl
+        {
+            return Ok(summary.clone());
+        }
         let pr = self.pr(key);
         let read = pr.pr()?;
         let checks = pr.checks(&reads::head(&read).unwrap_or_default())?;
-        Ok(Summary {
+        let summary = Summary {
             snapshot: reads::snapshot(&read, &checks, Self::now()).ok_or_else(|| {
                 error(
                     ForgeErrorKind::Uncertain,
@@ -641,7 +687,11 @@ impl Forge for Bitbucket {
                 )
             })?,
             stack_number: None,
-        })
+        };
+        let mut summaries = self.summaries.lock().unwrap();
+        summaries.retain(|_, (at, _)| at.elapsed() < ANONYMOUS_TTL);
+        summaries.insert(key.clone(), (Instant::now(), summary.clone()));
+        Ok(summary)
     }
 
     fn stack(&self, _: &PullRequestKey) -> Result<PullRequestStackState, ForgeError> {
