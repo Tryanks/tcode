@@ -127,10 +127,16 @@ struct SettingsCapabilities {
 }
 
 impl SettingsCapabilities {
-    fn current(store: &WorkspaceStore) -> Self {
+    #[cfg_attr(not(feature = "remote-hosting"), allow(unused_variables))]
+    fn current(store: &WorkspaceStore, cx: &App) -> Self {
+        // A desktop whose own host did not start has no listener to configure.
+        #[cfg(feature = "remote-hosting")]
+        let hosting = cx.has_global::<crate::remote::RemoteController>();
+        #[cfg(not(feature = "remote-hosting"))]
+        let hosting = cfg!(target_family = "wasm");
         Self {
             preview_backend: crate::preview_panel::PREVIEW_BACKEND,
-            hosting: cfg!(any(feature = "remote-hosting", target_family = "wasm")),
+            hosting,
             local_permissions: cfg!(all(feature = "local-permissions", target_os = "macos")),
             remote_attachment: store.is_remote(),
         }
@@ -430,7 +436,7 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let capabilities = SettingsCapabilities::current(store.read(cx));
+        let capabilities = SettingsCapabilities::current(store.read(cx), cx);
         let title_generation = store.read(cx).settings().title_generation;
         let title_model_picker = cx.new(|cx| {
             ProviderModelPicker::selection(

@@ -203,9 +203,9 @@ fn start_local(store: SessionStore) -> std::io::Result<(SpawnedHost, HostMux)> {
     Ok((host, mux))
 }
 
-/// The local host did not start — most often because another Tcode already
-/// owns the data directory. Say why on stderr and in a dialog, then exit
-/// non-zero.
+/// No data directory can even be named, so there is nowhere for this client's
+/// own files and no window to compose. Say why on stderr and in a dialog, then
+/// exit non-zero.
 fn exit_with_startup_failure(error: std::io::Error) -> ! {
     struct StartupFailure;
     impl gpui::Render for StartupFailure {
@@ -302,6 +302,27 @@ fn window_options(cx: &App, inactive_frame_interval: Option<Duration>) -> Window
     }
 }
 
+/// The local host, once this process owns the data dir.
+enum LocalStart {
+    Started(LocalKernel),
+    /// An older build's data must move into the data dir first.
+    Migrate(SessionStore),
+}
+
+/// Take ownership of the data dir and start the local host on it: at launch,
+/// and again on Retry. The error is what the window shows instead of that
+/// host.
+fn start_local_host() -> Result<LocalStart, String> {
+    let store = SessionStore::open_host(None)
+        .map_err(|error| format!("{error}. {}", tcode_ui::tr!("hosts.local.default_settings")))?;
+    if store.needs_migration().map_err(|error| error.to_string())? {
+        return Ok(LocalStart::Migrate(store));
+    }
+    LocalKernel::start(store)
+        .map(LocalStart::Started)
+        .map_err(|error| error.to_string())
+}
+
 struct LocalKernel {
     host: SpawnedHost,
     mux: HostMux,
@@ -322,6 +343,51 @@ impl LocalKernel {
             control_link,
             _control_pump: control_pump,
         })
+    }
+
+    /// Make this kernel the process's host: it hosts remote devices when its
+    /// settings say so, and stops when the application quits. Returns its
+    /// settings.
+    fn own(&self, data_dir: &std::path::Path, cx: &mut App) -> settings::Settings {
+        let local_settings = self.settings();
+        // Hosting belongs to the process-owned local kernel; it carries no
+        // current-attachment mode.
+        cx.set_global(RemoteController::new(
+            self.mux.clone(),
+            data_dir.to_path_buf(),
+            self.control_link.clone(),
+            local_settings.clone(),
+        ));
+        if local_settings.remote_hosting_enabled {
+            let name = local_settings
+                .remote_host_name
+                .clone()
+                .unwrap_or_else(machine_name);
+            cx.update_global::<RemoteController, _>(|controller, _| {
+                if let Err(error) = controller.start_hosting(&local_settings.traverse, name) {
+                    log::error!("remote hosting could not start: {error}");
+                }
+            });
+        }
+        // Process ownership, not the window's current attachment, grants
+        // authority to stop the local kernel on application quit.
+        let link = self.control_link.clone();
+        let to_host = self.host.to_host.clone();
+        let stopped = self.host.stopped.clone();
+        cx.on_app_quit(move |_cx| {
+            let link = link.clone();
+            let to_host = to_host.clone();
+            let stopped = stopped.clone();
+            async move {
+                let _ = link.shutdown().await;
+                // `shutdown` only closes this client's mux connection;
+                // the host loop ends when its own inbox closes.
+                to_host.close();
+                let _ = stopped.recv().await;
+            }
+        })
+        .detach();
+        local_settings
     }
 
     /// A window's link to the local kernel. The mux keeps the kernel alive
@@ -404,12 +470,8 @@ fn main() {
     // Hidden debug/dev flag: open the most recently updated session on launch.
     let open_latest = std::env::args().any(|arg| arg == "--open-latest");
     let args: Vec<String> = std::env::args().collect();
-    // The local kernel is process composition, not a property of the window's
-    // current attachment. Open its store unconditionally and keep it alive even
-    // when the window starts on, or later switches to, a remote host.
-    let store =
-        SessionStore::open_host(None).unwrap_or_else(|error| exit_with_startup_failure(error));
-    let data_dir = store.root().clone();
+    let data_dir =
+        tcode_services::store::data_dir().unwrap_or_else(|error| exit_with_startup_failure(error));
     // The UI never resolves a data directory of its own: whatever client-owned
     // files it needs (the WebView2 profile) live under this one.
     tcode_ui::set_client_data_dir(data_dir.clone());
@@ -424,7 +486,11 @@ fn main() {
     if let Some(index) = args.iter().position(|arg| arg == "--pair") {
         // Pairing writes hosts.json and device.json, at which a later move of
         // an older data dir would stop.
-        match store.pending_relocation() {
+        match SessionStore::open_host(None).and_then(|store| {
+            store
+                .pending_relocation()
+                .map(|previous| previous.map(std::path::Path::to_path_buf))
+        }) {
             Ok(None) => {}
             Ok(Some(previous)) => {
                 eprintln!(
@@ -472,19 +538,13 @@ fn main() {
             None => AttachmentTarget::Local,
         }
     };
-    // An older build's threads move into tcode.db before the kernel starts,
-    // behind a window of their own. With nothing to migrate, the kernel
-    // starts before the event loop.
-    let migration_needed = match store.needs_migration() {
-        Ok(needed) => needed,
-        Err(error) => exit_with_startup_failure(error),
-    };
-    // Kernel ownership is process composition, not a property of whichever
-    // host the window currently views.
-    let kernel = (!migration_needed).then(|| match LocalKernel::start(store.clone()) {
-        Ok(kernel) => Rc::new(kernel),
-        Err(error) => exit_with_startup_failure(error),
-    });
+    // The local kernel is process composition, not a property of the window's
+    // current attachment: it stays alive when the window starts on, or later
+    // switches to, a remote host. An older build's threads move into tcode.db
+    // before it starts, behind a window of their own; with nothing to
+    // migrate, it starts before the event loop. A kernel that does not start
+    // leaves the window without a local host, and says why there.
+    let started = start_local_host();
 
     gpui_platform::application()
         .with_assets(assets::Assets)
@@ -539,51 +599,42 @@ fn main() {
                 }
             });
 
-            let launch = move |cx: &mut App, kernel: Rc<LocalKernel>| {
+            let launch = move |cx: &mut App, started: Result<LocalKernel, String>| {
                 let initial_target = initial_target();
-                let local_settings = kernel.settings();
-                // Hosting belongs to the process-owned local kernel; it carries no
-                // current-attachment mode.
-                cx.set_global(RemoteController::new(
-                    kernel.mux.clone(),
-                    data_dir.clone(),
-                    kernel.control_link.clone(),
-                    local_settings.clone(),
-                ));
-                if local_settings.remote_hosting_enabled {
-                    let name = local_settings
-                        .remote_host_name
-                        .clone()
-                        .unwrap_or_else(machine_name);
-                    cx.update_global::<RemoteController, _>(|controller, _| {
-                        if let Err(error) = controller.start_hosting(&local_settings.traverse, name)
-                        {
-                            log::error!("remote hosting could not start: {error}");
+                let (kernel, failure) = match started {
+                    Ok(kernel) => (Some(Rc::new(kernel)), None),
+                    Err(reason) => (None, Some(reason)),
+                };
+                // A window without a local host has read none of its settings.
+                let local_settings = kernel
+                    .as_ref()
+                    .map(|kernel| kernel.own(&data_dir, cx))
+                    .unwrap_or_default();
+                let owned = Rc::new(RefCell::new(kernel.clone()));
+                // The launch's own failure is the first answer; asking again
+                // is a Retry.
+                let failure = std::cell::Cell::new(failure);
+                let local: tcode_ui::attachment::LocalTransport = Rc::new(move |cx| {
+                    if let Some(kernel) = owned.borrow().as_ref() {
+                        return Ok(kernel.transport());
+                    }
+                    let started = match failure.take() {
+                        Some(reason) => Err(reason),
+                        None => start_local_host(),
+                    };
+                    match started? {
+                        LocalStart::Started(kernel) => {
+                            kernel.own(&data_dir, cx);
+                            let transport = kernel.transport();
+                            *owned.borrow_mut() = Some(Rc::new(kernel));
+                            Ok(transport)
                         }
-                    });
-                }
-                // Process ownership, not the window's current attachment, grants
-                // authority to stop the local kernel on application quit.
-                let quit_subscription = cx.on_app_quit({
-                    let link = kernel.control_link.clone();
-                    let to_host = kernel.host.to_host.clone();
-                    let stopped = kernel.host.stopped.clone();
-                    move |_cx| {
-                        let link = link.clone();
-                        let to_host = to_host.clone();
-                        let stopped = stopped.clone();
-                        async move {
-                            let _ = link.shutdown().await;
-                            // `shutdown` only closes this client's mux connection;
-                            // the host loop ends when its own inbox closes.
-                            to_host.close();
-                            let _ = stopped.recv().await;
+                        LocalStart::Migrate(_) => {
+                            Err(tcode_ui::tr!("hosts.local.needs_migration").into_owned())
                         }
                     }
                 });
-                quit_subscription.detach();
 
-                let local_kernel = kernel.clone();
                 let options = window_options(
                     cx,
                     (!local_settings.inactive_frame_throttle_disabled)
@@ -596,7 +647,7 @@ fn main() {
                         window: options,
                         setup: ShellSetup {
                             client_host: Some(native_client.clone()),
-                            local: Some(Rc::new(move || local_kernel.transport())),
+                            local: Some(local),
                             initial: Some(initial_target),
                             initial_pairing_error: None,
                             // Only here: bootstrap applies locale and theme from the
@@ -612,10 +663,11 @@ fn main() {
                 // relaunch, reopen the recorded session and Settings page. Only
                 // meaningful for a host in this process: the marker lives in this
                 // machine's data dir, and a remote host's marker is its own.
-                if shell
-                    .read(cx)
-                    .store()
-                    .is_some_and(|store| !store.read(cx).is_remote())
+                if let Some(kernel) = kernel
+                    && shell
+                        .read(cx)
+                        .store()
+                        .is_some_and(|store| !store.read(cx).is_remote())
                     && let Ok(CommandResponse::PendingRelaunchSection {
                         section: Some(section),
                         session_id,
@@ -675,16 +727,17 @@ fn main() {
                 .detach();
             };
 
-            match kernel {
-                Some(kernel) => launch(cx, kernel),
-                None => {
+            match started {
+                Ok(LocalStart::Started(kernel)) => launch(cx, Ok(kernel)),
+                Ok(LocalStart::Migrate(store)) => {
                     let options = window_options(cx, Some(INACTIVE_FRAME_INTERVAL));
                     let kernel_store = store.clone();
                     migration::run(cx, store, options, appearance, move |cx| {
-                        launch(cx, Rc::new(LocalKernel::start(kernel_store)?));
+                        launch(cx, Ok(LocalKernel::start(kernel_store)?));
                         Ok(())
                     });
                 }
+                Err(reason) => launch(cx, Err(reason)),
             }
         });
 }
