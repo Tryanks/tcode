@@ -61,6 +61,10 @@ targets:
           - Security
           - "-framework"
           - Network
+          # netdev and system-configuration read DNS and proxy settings from
+          # SCDynamicStore.
+          - "-framework"
+          - SystemConfiguration
           - "-lc++"
 
 schemes:
