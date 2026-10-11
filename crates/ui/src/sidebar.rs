@@ -5090,7 +5090,8 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
-            "tcode-sidebar-scrollbar-{}",
+            "tcode-sidebar-scrollbar-{}-{}",
+            std::process::id(),
             tcode_services::store::now_millis()
         ));
         let host = spawn_host(
@@ -5112,6 +5113,13 @@ mod tests {
         }))
         .unwrap();
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        // The host sends its index from its own threads, and seeding gives up
+        // after a few seconds on a loaded machine: wait for every thread, as
+        // the app's event pump would, before judging the list.
+        while store.read_with(cx, |store, _| store.flat_sessions().len() < 60) {
+            std::thread::yield_now();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        }
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
