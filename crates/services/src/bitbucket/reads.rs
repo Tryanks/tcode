@@ -248,7 +248,7 @@ pub(super) fn snapshot(
         // Only the diffstat counts lines, one more read per file page.
         additions: None,
         deletions: None,
-        changed_files: 0,
+        changed_files: None,
         review_decision: None,
         checks_state: checks_state(checks),
         // Conflicts are a read of their own, which the summary leaves to the detail.

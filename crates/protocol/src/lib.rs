@@ -167,6 +167,8 @@ pub use wire::{
 // SetHostToken carries an optional email.
 // Unreleased: a source-control host's kind may be azure, whose hosts are
 // organizations, dev.azure.com/{organization}.
+// Unreleased: a pull request snapshot's changed_files may be absent (null) where
+// the host counts no files.
 // Unreleased: a source-control host's status carries token_url, access_token_url and
 // token_scopes, and its problem may be unverified; capabilities carry labels, without which
 // SetLabels is rejected as Unsupported.

@@ -419,7 +419,7 @@ pub(super) fn snapshot(
         }),
         additions: stats.map(|(additions, _)| additions),
         deletions: stats.map(|(_, deletions)| deletions),
-        changed_files: changed_files(mr),
+        changed_files: Some(changed_files(mr)),
         review_decision: None,
         checks_state: checks_state(&checks(mr)),
         mergeability,

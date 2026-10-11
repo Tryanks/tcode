@@ -213,7 +213,7 @@ pub(super) fn snapshot(
         }),
         additions: Some(pr["additions"].as_u64().unwrap_or(0)),
         deletions: Some(pr["deletions"].as_u64().unwrap_or(0)),
-        changed_files: pr["changed_files"].as_u64().unwrap_or(0),
+        changed_files: Some(pr["changed_files"].as_u64().unwrap_or(0)),
         review_decision: None,
         checks_state: checks,
         mergeability,
