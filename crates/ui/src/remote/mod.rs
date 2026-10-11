@@ -146,6 +146,9 @@ pub struct RemotePanel {
     /// The window's current attachment, when it has one. Hosts is also the
     /// root of a window that has none.
     store: Option<Entity<WorkspaceStore>>,
+    /// Why the host in this process did not start the last time this window
+    /// tried to attach to it.
+    local_failure: Option<String>,
     /// Navigation: "Paste an invitation link" pushes [`Destination::Pair`],
     /// which Back pops back to whatever asked for it.
     window_state: Entity<WindowState>,
@@ -212,6 +215,7 @@ impl RemotePanel {
         ];
         Self {
             store,
+            local_failure: None,
             window_state,
             form,
             fixed_machine,
@@ -229,6 +233,11 @@ impl RemotePanel {
     /// Follow the window onto another attachment, or off every attachment.
     pub fn set_store(&mut self, store: Option<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
         self.store = store;
+        cx.notify();
+    }
+
+    pub(crate) fn set_local_failure(&mut self, reason: Option<String>, cx: &mut Context<Self>) {
+        self.local_failure = reason;
         cx.notify();
     }
 
@@ -364,30 +373,78 @@ impl RemotePanel {
 
     /// This machine: one target among the saved machines, offered only where
     /// bootstrap actually gave this window a local host to attach to. Being
-    /// on it is not a connection, so the row carries a check, not a dot.
+    /// on it is not a connection, so the row carries a check, not a dot. A
+    /// host that did not start says why, and offers starting it again or
+    /// quitting.
     fn local_row(&self, cx: &mut Context<Self>) -> Option<Row> {
         cx.try_global::<ClientAttachment>()
             .is_some_and(ClientAttachment::can_attach_local)
             .then(|| {
                 let current = self.attached_locally(cx);
+                let failure = self.local_failure.clone();
+                let failed = failure.is_some();
                 list_row(
                     "hosts-local",
                     crate::tr!("hosts.this_computer").into_owned().into(),
                     cx,
                 )
                 .child(
-                    div()
+                    v_flex()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(15.))
-                        .font_medium()
-                        .truncate()
-                        .child(crate::tr!("hosts.this_computer")),
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .font_medium()
+                                .truncate()
+                                .child(crate::tr!("hosts.this_computer")),
+                        )
+                        .when_some(failure, |column, reason| {
+                            column.child(
+                                div()
+                                    .debug_selector(|| "hosts-local-failure".into())
+                                    .text_size(px(13.))
+                                    .text_color(cx.theme().danger_foreground)
+                                    .child(
+                                        crate::tr!("hosts.local.unavailable", reason = reason)
+                                            .into_owned(),
+                                    ),
+                            )
+                        }),
                 )
                 .when(current, |row| row.child(Self::current_glyph(cx)))
-                .on_click(|_, window, cx| {
-                    let switch = cx.global::<ClientAttachment>().switcher();
-                    switch(AttachmentTarget::Local, window, cx);
+                .when(failed, |row| {
+                    row.child(
+                        h_flex()
+                            .flex_none()
+                            .gap_2()
+                            .child(
+                                Button::new("hosts-local-retry")
+                                    .debug_selector(|| "hosts-local-retry".into())
+                                    .primary()
+                                    .compact()
+                                    .label(crate::tr!("hosts.local.retry"))
+                                    .on_click(|_, window, cx| {
+                                        let switch = cx.global::<ClientAttachment>().switcher();
+                                        switch(AttachmentTarget::Local, window, cx);
+                                    }),
+                            )
+                            .child(
+                                Button::new("hosts-local-quit")
+                                    .compact()
+                                    .label(crate::tr!("quit.confirm"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(crate::shell::Quit), cx);
+                                    }),
+                            ),
+                    )
+                })
+                .when(!failed, |row| {
+                    row.on_click(|_, window, cx| {
+                        let switch = cx.global::<ClientAttachment>().switcher();
+                        switch(AttachmentTarget::Local, window, cx);
+                    })
                 })
             })
     }
@@ -519,8 +576,9 @@ impl RemotePanel {
         if let Some(local) = self.local_row(cx) {
             column = column.child(plain_list(vec![local.into_any_element()], cx));
         }
+        // Only a host running in this process can offer an invitation.
         #[cfg(feature = "remote-hosting")]
-        {
+        if cx.has_global::<RemoteController>() {
             column = column.child(self.invitation_section(cx));
         }
         if hosts.is_empty() {
@@ -960,16 +1018,19 @@ impl RemotePanel {
 
     fn on_disconnect(&mut self, _: &DisconnectHost, window: &mut Window, cx: &mut Context<Self>) {
         // Leaving a host is an explicit act; the saved record stays. A client
-        // with a host of its own falls back to it rather than to nothing.
-        if cx
+        // with a host of its own falls back to it rather than to nothing, and
+        // to nothing when that host does not start. Detaching updates this
+        // panel, so it runs once this listener has returned.
+        let local = cx
             .try_global::<ClientAttachment>()
-            .is_some_and(ClientAttachment::can_attach_local)
-        {
-            let switch = cx.global::<ClientAttachment>().switcher();
-            switch(AttachmentTarget::Local, window, cx);
-        } else {
+            .is_some_and(ClientAttachment::can_attach_local);
+        window.defer(cx, move |window, cx| {
             crate::shell::detach_current(cx);
-        }
+            if local {
+                let switch = cx.global::<ClientAttachment>().switcher();
+                switch(AttachmentTarget::Local, window, cx);
+            }
+        });
         cx.notify();
     }
 

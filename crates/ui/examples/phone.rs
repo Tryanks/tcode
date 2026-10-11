@@ -19,7 +19,7 @@ use gpui::{Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, poin
 use tcode_client::host::ClientHost;
 use tcode_ui::{ShellOptions, ShellSetup};
 
-type LocalTransport = Rc<dyn Fn() -> tcode_client::host::Transport>;
+type LocalTransport = Rc<dyn Fn(&mut gpui::App) -> Result<tcode_client::host::Transport, String>>;
 
 fn main() {
     let local = std::env::args().any(|arg| arg == "--local");
@@ -50,15 +50,15 @@ fn main() {
                 let host =
                     tcode_runtime::pipe::spawn_host(store, services).expect("start local host");
                 let mux = tcode_traverse::HostMux::new(host.to_host, host.from_host);
-                Rc::new(move || {
+                Rc::new(move |_: &mut gpui::App| {
                     let connection = mux.attach(tcode_protocol::Principal::Full);
                     let (_, state) = async_channel::unbounded();
-                    tcode_client::host::Transport {
+                    Ok(tcode_client::host::Transport {
                         to_host: connection.to_host.into(),
                         from_host: connection.from_host,
                         state,
                         current_host: None,
-                    }
+                    })
                 }) as LocalTransport
             });
             tcode_ui::run_shell(

@@ -1352,6 +1352,11 @@ hosts:
   forget: "Remove"
   actions: "Actions for %{name}"
   pair_again: "Pair again"
+  local:
+    unavailable: "Could not start: %{reason}"
+    default_settings: "Its settings could not be read, so the default language and theme are in use."
+    needs_migration: "Its data has to be upgraded first. Quit Tcode and open it again."
+    retry: "Retry"
   invite:
     section: "LET OTHER DEVICES CONNECT"
     description: "Scan this QR code in Tcode on another device, or paste the invitation link there. Pairing connects at once."

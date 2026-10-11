@@ -1345,6 +1345,11 @@ hosts:
   forget: "移除"
   actions: "%{name} 的操作"
   pair_again: "重新配对"
+  local:
+    unavailable: "无法启动：%{reason}"
+    default_settings: "无法读取本机设置，当前使用默认语言和主题。"
+    needs_migration: "需要先升级本机数据。请退出 Tcode 后重新打开。"
+    retry: "重试"
   invite:
     section: "让其他设备连接本机"
     description: "在另一台设备的 Tcode 中扫描此二维码，或粘贴邀请链接，即可配对并连接。"
