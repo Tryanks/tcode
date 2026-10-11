@@ -2113,21 +2113,28 @@ impl WorkspaceStore {
         }
     }
 
+    /// The project view: projects ordered by the activity of every thread
+    /// they hold, agents included, each listing its roster threads newest
+    /// updated first. Pinning, arranging and settling order only the threads
+    /// view.
     pub fn grouped_sessions(&self) -> Vec<ProjectGroup> {
-        let visible: Vec<_> = self
+        let unarchived: Vec<_> = self
             .index_replica
             .0
             .iter()
-            .filter(|meta| tcode_core::thread_sort::in_roster(meta))
+            .filter(|meta| meta.archived_at.is_none())
             .cloned()
             .collect();
         let mut groups = group_sessions(
             &self.index_replica.1,
-            &visible,
+            &unarchived,
             self.settings_replica.project_sort,
         );
         for group in &mut groups {
-            tcode_core::thread_sort::sort_threads(&mut group.sessions);
+            group.sessions.retain(tcode_core::thread_sort::in_roster);
+            group
+                .sessions
+                .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
         }
         groups
     }
