@@ -8,7 +8,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::Read as _,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime},
@@ -156,6 +156,8 @@ pub(super) struct Api {
     /// The account each credential reads as, by fingerprint, for a few minutes: every read
     /// that names the viewer would otherwise spend one of Bitbucket's hourly requests on it.
     viewers: Mutex<HashMap<String, (Instant, Option<Value>)>>,
+    /// The fingerprints of the credentials Bitbucket has answered a request with.
+    worked: Mutex<HashSet<String>>,
 }
 
 impl Api {
@@ -175,6 +177,7 @@ impl Api {
                 .build(),
             paused: Mutex::default(),
             viewers: Mutex::default(),
+            worked: Mutex::default(),
         })
     }
 
@@ -229,6 +232,14 @@ impl Api {
 
     pub(super) fn token_saved(&self) -> bool {
         self.store.token(HostKind::Bitbucket, HOST).is_some()
+    }
+
+    /// Whether Bitbucket has answered a request sent with `credential`.
+    pub(super) fn worked(&self, credential: &Credential) -> bool {
+        self.worked
+            .lock()
+            .unwrap()
+            .contains(&credential.fingerprint())
     }
 
     pub(super) fn environment_names_host(&self) -> bool {
@@ -393,6 +404,9 @@ impl Api {
             ));
         }
         if (200..300).contains(&status) {
+            if credential.is_some() {
+                self.worked.lock().unwrap().insert(fingerprint);
+            }
             return Ok(Response {
                 status,
                 body,

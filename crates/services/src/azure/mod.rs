@@ -701,24 +701,27 @@ impl Forge for Azure {
             .into_iter()
             .map(|(host, added)| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let source = self
-                    .api
-                    .credential(&host)
-                    .ok()
-                    .flatten()
-                    .map(|credential| credential.source);
-                let problem = (source.is_none() && enabled).then(|| {
-                    if az {
-                        HostProblem::NotSignedIn {
-                            tool: "az".into(),
-                            command: Some("az login".into()),
-                        }
-                    } else {
-                        HostProblem::NoCredential {
-                            tools_missing: vec!["az".into()],
-                        }
+                let credential = self.api.credential(&host).ok().flatten();
+                let source = credential
+                    .as_ref()
+                    .map(|credential| credential.source.clone());
+                let problem = match &credential {
+                    None if !enabled => None,
+                    None if az => Some(HostProblem::NotSignedIn {
+                        tool: "az".into(),
+                        command: Some("az login".into()),
+                    }),
+                    None => Some(HostProblem::NoCredential {
+                        tools_missing: vec!["az".into()],
+                    }),
+                    Some(credential)
+                        if credential.source == CredentialSource::Saved
+                            && !self.api.worked(&host, credential) =>
+                    {
+                        Some(HostProblem::Unverified)
                     }
-                });
+                    Some(_) => None,
+                };
                 (
                     host.clone(),
                     HostStatus {
@@ -736,6 +739,12 @@ impl Forge for Azure {
                             CredentialSource::Cli { tool: "az".into() },
                         ],
                         problem,
+                        token_url: Some(format!("https://{host}/_usersSettings/tokens")),
+                        access_token_url: None,
+                        token_scopes: vec![
+                            "Code (Read & write)".into(),
+                            "Pull Request Threads (Read & manage)".into(),
+                        ],
                     },
                 )
             })

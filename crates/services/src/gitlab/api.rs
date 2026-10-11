@@ -7,7 +7,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::Read as _,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
@@ -48,6 +48,15 @@ pub(super) fn error(kind: ForgeErrorKind, description: impl Into<String>) -> For
 pub(super) struct Credential {
     token: String,
     pub(super) source: CredentialSource,
+}
+
+impl Credential {
+    /// Opaque, and different for each credential.
+    fn fingerprint(&self) -> String {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(self.token.as_bytes());
+        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 #[derive(Debug)]
@@ -119,6 +128,8 @@ pub(super) struct Api {
     pub(super) agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     paused: Mutex<HashMap<String, SystemTime>>,
+    /// Each server and the fingerprints of the credentials it has answered a request with.
+    worked: Mutex<HashSet<(String, String)>>,
 }
 
 impl Api {
@@ -137,6 +148,7 @@ impl Api {
                 .build(),
             tokens: Mutex::default(),
             paused: Mutex::default(),
+            worked: Mutex::default(),
         })
     }
 
@@ -216,6 +228,14 @@ impl Api {
             .token(HostKind::Gitlab, authority)
             .and_then(nonempty)
             .is_some()
+    }
+
+    /// Whether the server has answered a request sent with `credential`.
+    pub(super) fn worked(&self, authority: &str, credential: &Credential) -> bool {
+        self.worked
+            .lock()
+            .unwrap()
+            .contains(&(authority.to_owned(), credential.fingerprint()))
     }
 
     fn environment_token(&self, authority: &str) -> Option<String> {
@@ -445,6 +465,12 @@ impl Api {
             ));
         }
         if (200..300).contains(&status) {
+            if let Some(credential) = &credential {
+                self.worked
+                    .lock()
+                    .unwrap()
+                    .insert((authority.to_owned(), credential.fingerprint()));
+            }
             return Ok(Response {
                 body,
                 truncated,

@@ -8,7 +8,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     io::Read as _,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
@@ -161,6 +161,9 @@ pub(super) struct Api {
     paused: Mutex<HashMap<String, SystemTime>>,
     /// The account each credential reads as, by fingerprint, for a few minutes.
     viewers: Mutex<HashMap<String, Cached<Value>>>,
+    /// Each organization and the fingerprints of the credentials it has answered a request
+    /// with.
+    worked: Mutex<HashSet<(String, String)>>,
 }
 
 impl Api {
@@ -182,6 +185,7 @@ impl Api {
             az: Mutex::default(),
             paused: Mutex::default(),
             viewers: Mutex::default(),
+            worked: Mutex::default(),
         })
     }
 
@@ -243,6 +247,14 @@ impl Api {
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
         self.store.token(HostKind::Azure, authority).is_some()
+    }
+
+    /// Whether the organization has answered a request sent with `credential`.
+    pub(super) fn worked(&self, authority: &str, credential: &Credential) -> bool {
+        self.worked
+            .lock()
+            .unwrap()
+            .contains(&(authority.to_owned(), credential.fingerprint()))
     }
 
     /// The organization `AZURE_DEVOPS_EXT_PAT` is for, when both variables are set: by name, as
@@ -446,6 +458,12 @@ impl Api {
         }
         // A 203 is Azure's sign-in page served in place of the answer.
         if (200..300).contains(&status) && status != 203 {
+            if let Some(credential) = &credential {
+                self.worked
+                    .lock()
+                    .unwrap()
+                    .insert((authority.to_owned(), credential.fingerprint()));
+            }
             return Ok(Response { body, truncated });
         }
         Err(match status {

@@ -167,6 +167,9 @@ pub use wire::{
 // SetHostToken carries an optional email.
 // Unreleased: a source-control host's kind may be azure, whose hosts are
 // organizations, dev.azure.com/{organization}.
+// Unreleased: a source-control host's status carries token_url, access_token_url and
+// token_scopes, and its problem may be unverified; capabilities carry labels, without which
+// SetLabels is rejected as Unsupported.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

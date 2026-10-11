@@ -558,15 +558,22 @@ impl Forge for Bitbucket {
             return BTreeMap::new();
         }
         let enabled = configured.get(HOST).is_none_or(|choice| choice.enabled);
-        let source = self
-            .api
-            .credential(HOST)
-            .ok()
-            .flatten()
-            .map(|credential| credential.source);
-        let problem = (source.is_none() && enabled).then(|| HostProblem::NoCredential {
-            tools_missing: Vec::new(),
-        });
+        let credential = self.api.credential(HOST).ok().flatten();
+        let source = credential
+            .as_ref()
+            .map(|credential| credential.source.clone());
+        let problem = match &credential {
+            None => enabled.then(|| HostProblem::NoCredential {
+                tools_missing: Vec::new(),
+            }),
+            Some(credential)
+                if credential.source == CredentialSource::SavedBearer
+                    && !self.api.worked(credential) =>
+            {
+                Some(HostProblem::Unverified)
+            }
+            Some(_) => None,
+        };
         BTreeMap::from([(
             HOST.to_owned(),
             HostStatus {
@@ -583,6 +590,13 @@ impl Forge for Bitbucket {
                     },
                 ],
                 problem,
+                token_url: Some(
+                    "https://id.atlassian.com/manage-profile/security/api-tokens".into(),
+                ),
+                access_token_url: Some(
+                    "https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/".into(),
+                ),
+                token_scopes: Vec::new(),
             },
         )])
     }
