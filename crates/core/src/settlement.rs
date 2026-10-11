@@ -86,18 +86,16 @@ impl ThreadActivity {
         }
     }
 
-    /// Every clock is set, so this fold of a log's last records holds the
-    /// latest record of each and no earlier record can change it. The clocks
-    /// are independent: a run's records can bury the message that began it.
-    pub fn complete(&self) -> bool {
-        [
-            self.last_message_at,
-            self.last_human_message_at,
-            self.last_run_started_at,
-            self.last_run_completed_at,
-        ]
-        .iter()
-        .all(Option::is_some)
+    /// Every clock the thread's decisions read is set, so this fold of a
+    /// log's last records holds the latest record of each and no earlier
+    /// record can change it, as long as timestamps do not decrease along the
+    /// log. The clocks are independent: a run's records can bury the message
+    /// that began it. Nothing reads a dispatched child's message clocks: it
+    /// never settles automatically, and its lead reads only its runs.
+    pub fn complete(&self, has_parent: bool) -> bool {
+        let runs = self.last_run_started_at.is_some() && self.last_run_completed_at.is_some();
+        runs && (has_parent
+            || (self.last_message_at.is_some() && self.last_human_message_at.is_some()))
     }
 
     pub fn last_activity_at(&self) -> Option<u64> {

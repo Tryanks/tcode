@@ -10193,7 +10193,8 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
 }
 
 /// A thread whose PR merged before the human resumed it stays open after a
-/// restart, however many records the resumed run wrote after the message.
+/// restart, however many records the resumed run wrote after the message;
+/// a dispatched child's lead still sees when its run started.
 #[test]
 fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
     use tcode_core::pull_request::{
@@ -10243,6 +10244,13 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
         mergeability: Mergeability::Unknown,
     });
     store.upsert_meta(&meta).unwrap();
+    for (id, parent) in [("lead", None), ("worker", Some("lead"))] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_owned);
+        meta.created_at = created / 1000;
+        store.upsert_meta(&meta).unwrap();
+    }
     let mut log = vec![
         (
             resumed,
@@ -10263,7 +10271,7 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
             },
         ),
     ];
-    log.extend((0..300).map(|step| {
+    log.extend((0..history::TAIL_ROWS + 44).map(|step| {
         (
             resumed + 2 + step,
             persisted_assistant_event(&format!("step {step}")),
@@ -10277,21 +10285,26 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
             usage: None,
         },
     ));
-    let mutations: Vec<_> = log
-        .iter()
-        .map(|(ts, event)| {
-            let origin = matches!(
-                event,
-                AgentEvent::ItemCompleted(ThreadItem {
-                    content: ItemContent::UserMessage { .. },
-                    ..
-                })
-            )
-            .then_some(MessageOrigin::Human);
-            Mutation::append_authored_event("resumed", *ts, event, None, origin).unwrap()
-        })
-        .collect();
-    store.apply(&mutations).unwrap();
+    for (id, sender) in [
+        ("resumed", MessageOrigin::Human),
+        ("worker", MessageOrigin::Agent),
+    ] {
+        let mutations: Vec<_> = log
+            .iter()
+            .map(|(ts, event)| {
+                let origin = matches!(
+                    event,
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::UserMessage { .. },
+                        ..
+                    })
+                )
+                .then_some(sender);
+                Mutation::append_authored_event(id, *ts, event, None, origin).unwrap()
+            })
+            .collect();
+        store.apply(&mutations).unwrap();
+    }
 
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, cx| {
@@ -10300,7 +10313,11 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
         assert!(state.resident("resumed").is_none());
         state.start_settlement_sweeps(cx);
     });
-    cx.run_until(|state| state.thread_activity.contains_key("resumed"));
+    cx.run_until(|state| {
+        ["resumed", "worker"]
+            .iter()
+            .all(|id| state.thread_activity.contains_key(*id))
+    });
     state.read(|state| {
         assert_eq!(
             state.thread_activity["resumed"],
@@ -10314,6 +10331,13 @@ fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
             }
         );
         assert!(!state.find_meta("resumed").unwrap().is_settled());
+        let worker = state.index_snapshot().summary.activity["worker"]
+            .agent
+            .unwrap();
+        assert_eq!(
+            (worker.run_started_at, worker.run_completed_at),
+            (Some(resumed + 1), Some(completed))
+        );
     });
 }
 
