@@ -234,9 +234,10 @@ impl PullRequestView {
         let conversation = self.page()?.conversation.data.as_ref()?;
         let permissions = conversation.permissions.clone();
         let read_only = self.read_only(cx);
+        let labelled = conversation.capabilities.labels;
         let (can_review, can_label) = (
             permissions.request_reviewers && !read_only,
-            permissions.label && !read_only,
+            labelled && permissions.label && !read_only,
         );
         if conversation.reviewers.is_empty()
             && conversation.labels.is_empty()
@@ -333,13 +334,15 @@ impl PullRequestView {
                     .into_any_element()
             })
             .collect();
-        let row = |icon: IconName,
+        let row = |selector: &'static str,
+                   icon: IconName,
                    title: &'static str,
                    empty: &'static str,
                    chips: Vec<AnyElement>,
                    edit: Option<AnyElement>,
                    cx: &App| {
             h_flex()
+                .debug_selector(|| selector.into())
                 .gap_2()
                 .items_center()
                 .flex_wrap()
@@ -369,6 +372,7 @@ impl PullRequestView {
                 .border_color(cx.theme().border)
                 .text_size(px(12.))
                 .child(row(
+                    "pr-meta-reviewers",
                     IconName::Users,
                     "pull_requests.meta.reviewers",
                     "pull_requests.meta.no_reviewers",
@@ -376,14 +380,18 @@ impl PullRequestView {
                     reviewers_edit,
                     cx,
                 ))
-                .child(row(
-                    IconName::Tag,
-                    "pull_requests.meta.labels",
-                    "pull_requests.meta.no_labels",
-                    labels,
-                    labels_edit,
-                    cx,
-                ))
+                // A host without labels may still report some, which show read-only.
+                .when(labelled || !conversation.labels.is_empty(), |block| {
+                    block.child(row(
+                        "pr-meta-labels",
+                        IconName::Tag,
+                        "pull_requests.meta.labels",
+                        "pull_requests.meta.no_labels",
+                        labels,
+                        labels_edit,
+                        cx,
+                    ))
+                })
                 .into_any_element(),
         )
     }

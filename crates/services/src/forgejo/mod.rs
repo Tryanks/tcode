@@ -771,6 +771,13 @@ impl Forge for Forgejo {
                             CredentialSource::Cli { tool: "tea".into() },
                         ],
                         problem,
+                        token_url: Some(format!("https://{host}/user/settings/applications")),
+                        access_token_url: None,
+                        token_scopes: vec![
+                            "write:repository".into(),
+                            "write:issue".into(),
+                            "read:user".into(),
+                        ],
                     },
                 )
             })

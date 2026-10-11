@@ -32,6 +32,7 @@ pub(super) fn capabilities() -> PullRequestCapabilities {
         reply: true,
         resolve: true,
         reactions: false,
+        labels: false,
         request_changes: true,
         draft: true,
         // A declined pull request stays declined.

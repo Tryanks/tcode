@@ -34,6 +34,7 @@ pub(super) fn capabilities() -> PullRequestCapabilities {
         resolve: true,
         // Azure has likes on comments, not reactions.
         reactions: false,
+        labels: true,
         request_changes: true,
         draft: true,
         // An abandoned pull request is reactivated.

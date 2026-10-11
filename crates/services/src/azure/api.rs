@@ -161,6 +161,9 @@ pub(super) struct Api {
     paused: Mutex<HashMap<String, SystemTime>>,
     /// The account each credential reads as, by fingerprint, for a few minutes.
     viewers: Mutex<HashMap<String, Cached<Value>>>,
+    /// Each organization and the fingerprint of the last saved token it answered a request
+    /// with.
+    worked: Mutex<HashMap<String, String>>,
 }
 
 impl Api {
@@ -182,6 +185,7 @@ impl Api {
             az: Mutex::default(),
             paused: Mutex::default(),
             viewers: Mutex::default(),
+            worked: Mutex::default(),
         })
     }
 
@@ -237,12 +241,18 @@ impl Api {
         }))
     }
 
-    pub(super) fn forget(&self) {
+    pub(super) fn forget(&self, authority: &str) {
         *self.az.lock().unwrap() = None;
+        self.worked.lock().unwrap().remove(authority);
     }
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
         self.store.token(HostKind::Azure, authority).is_some()
+    }
+
+    /// Whether the organization has answered a request sent with `credential`, a saved token.
+    pub(super) fn worked(&self, authority: &str, credential: &Credential) -> bool {
+        self.worked.lock().unwrap().get(authority) == Some(&credential.fingerprint())
     }
 
     /// The organization `AZURE_DEVOPS_EXT_PAT` is for, when both variables are set: by name, as
@@ -446,6 +456,15 @@ impl Api {
         }
         // A 203 is Azure's sign-in page served in place of the answer.
         if (200..300).contains(&status) && status != 203 {
+            if let Some(credential) = credential
+                .as_ref()
+                .filter(|credential| credential.source == CredentialSource::Saved)
+            {
+                self.worked
+                    .lock()
+                    .unwrap()
+                    .insert(authority.to_owned(), credential.fingerprint());
+            }
             return Ok(Response { body, truncated });
         }
         Err(match status {
@@ -455,7 +474,7 @@ impl Api {
                 "Azure DevOps request needs a sign-in",
             ),
             203 | 300..=399 | 401 => {
-                self.forget();
+                self.forget(authority);
                 error(
                     ForgeErrorKind::Unauthorized,
                     "Azure DevOps request failed (unauthorized)",

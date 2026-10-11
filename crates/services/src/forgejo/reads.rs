@@ -30,6 +30,7 @@ pub(super) fn capabilities(server: Server) -> PullRequestCapabilities {
         reply: server.replies(),
         resolve: server.resolves(),
         reactions: true,
+        labels: true,
         request_changes: true,
         // Draft is a title prefix on these servers; no API field marks it.
         draft: false,

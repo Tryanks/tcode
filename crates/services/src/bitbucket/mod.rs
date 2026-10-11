@@ -558,15 +558,23 @@ impl Forge for Bitbucket {
             return BTreeMap::new();
         }
         let enabled = configured.get(HOST).is_none_or(|choice| choice.enabled);
-        let source = self
-            .api
-            .credential(HOST)
-            .ok()
-            .flatten()
-            .map(|credential| credential.source);
-        let problem = (source.is_none() && enabled).then(|| HostProblem::NoCredential {
-            tools_missing: Vec::new(),
-        });
+        let credential = self.api.credential(HOST).ok().flatten();
+        let source = credential
+            .as_ref()
+            .map(|credential| credential.source.clone());
+        let problem = match &credential {
+            None => enabled.then(|| HostProblem::NoCredential {
+                tools_missing: Vec::new(),
+            }),
+            Some(credential)
+                if enabled
+                    && credential.source == CredentialSource::SavedBearer
+                    && !self.api.worked(credential) =>
+            {
+                Some(HostProblem::Unverified)
+            }
+            Some(_) => None,
+        };
         BTreeMap::from([(
             HOST.to_owned(),
             HostStatus {
@@ -583,6 +591,13 @@ impl Forge for Bitbucket {
                     },
                 ],
                 problem,
+                token_url: Some(
+                    "https://id.atlassian.com/manage-profile/security/api-tokens".into(),
+                ),
+                access_token_url: Some(
+                    "https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/".into(),
+                ),
+                token_scopes: Vec::new(),
             },
         )])
     }
@@ -590,6 +605,7 @@ impl Forge for Bitbucket {
     // The credential is read from the store on every request; what was read with the one
     // before is dropped, as reads kept longer while anonymous would otherwise outlive a token.
     fn forget_credential(&self, _: &str) {
+        self.api.forget();
         self.summaries.lock().unwrap().clear();
         self.branches.lock().unwrap().clear();
     }

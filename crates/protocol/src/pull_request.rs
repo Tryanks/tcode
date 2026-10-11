@@ -231,6 +231,8 @@ pub struct PullRequestCapabilities {
     /// Resolving and unresolving review threads.
     pub resolve: bool,
     pub reactions: bool,
+    /// Labels on pull requests.
+    pub labels: bool,
     /// The request-changes review verdict.
     pub request_changes: bool,
     /// Marking a pull request ready for review and converting it to a draft.
@@ -253,6 +255,7 @@ impl PullRequestCapabilities {
         reply: true,
         resolve: true,
         reactions: true,
+        labels: true,
         request_changes: true,
         draft: true,
         reopen: true,

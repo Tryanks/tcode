@@ -354,7 +354,7 @@ impl Credentials {
                     }
                 });
                 (
-                    host,
+                    host.clone(),
                     HostStatus {
                         kind: HostKind::Github,
                         added,
@@ -364,6 +364,11 @@ impl Credentials {
                         env_overrides_account,
                         order,
                         problem,
+                        token_url: Some(format!(
+                            "https://{host}/settings/tokens/new?scopes=repo,read:org&description=Tcode"
+                        )),
+                        access_token_url: None,
+                        token_scopes: vec!["repo".into(), "read:org".into()],
                     },
                 )
             })

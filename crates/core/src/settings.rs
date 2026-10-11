@@ -105,6 +105,9 @@ pub enum HostProblem {
         tool: String,
         command: Option<String>,
     },
+    /// The token in use is a saved one the host has not yet answered a request with, so
+    /// nothing has shown that it works.
+    Unverified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +124,13 @@ pub struct HostStatus {
     /// The host's resolution order: the first that works is used.
     pub order: Vec<CredentialSource>,
     pub problem: Option<HostProblem>,
+    /// Where the user creates the token the host takes. A host whose token may instead be an
+    /// access token sent alone explains those at `access_token_url`: they are created on the
+    /// item they are scoped to, not on one page.
+    pub token_url: Option<String>,
+    pub access_token_url: Option<String>,
+    /// The scopes a token needs, as the host's token page names them.
+    pub token_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
