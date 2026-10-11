@@ -1969,8 +1969,6 @@ mod tests {
         }
     }
 
-    /// The host decides which actions an entry offers in its context; the
-    /// page draws exactly those and no control the host did not compute.
     #[gpui::test]
     fn switching_language_relocalizes_the_search_placeholder(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -2000,6 +1998,8 @@ mod tests {
         });
     }
 
+    /// The host decides which actions an entry offers in its context; the
+    /// page draws exactly those and no control the host did not compute.
     #[gpui::test]
     fn only_host_computed_plugin_actions_are_rendered(cx: &mut TestAppContext) {
         let (host, cx) = open_plugins(claude_managed(), catalog(vec![alpha()], Vec::new()), cx);

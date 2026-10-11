@@ -402,9 +402,6 @@ impl SourceControlPanel {
             .entry(host.to_owned())
             .or_insert_with(|| cx.new(|cx| InputState::new(window, cx).masked(true)))
             .clone();
-        token.update(cx, |input, cx| {
-            input.set_placeholder(placeholder.into_owned(), window, cx)
-        });
         let set_host = host.to_owned();
         let clear_host = host.to_owned();
         let input = token.clone();
@@ -420,7 +417,7 @@ impl SourceControlPanel {
                     field.flex_1()
                 }
             })
-            .child(Input::new(&token).small());
+            .child(Input::new(&token).placeholder(placeholder).small());
         let mut buttons = h_flex()
             .gap_2()
             .child(

@@ -10,6 +10,7 @@ use components::images::PendingImage;
 use components::voice::Voice;
 use model::*;
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -111,11 +112,11 @@ fn auto_grow_rows(compact: bool) -> (usize, usize) {
     if compact { (2, 5) } else { (1, 8) }
 }
 
-fn draft_placeholder(compact: bool) -> String {
+fn draft_placeholder(compact: bool) -> Cow<'static, str> {
     if compact {
-        crate::tr!("mobile.message").into_owned()
+        crate::tr!("mobile.message")
     } else {
-        crate::tr!("composer.placeholder").into_owned()
+        crate::tr!("composer.placeholder")
     }
 }
 
@@ -1119,9 +1120,9 @@ impl Render for Composer {
         });
 
         let desired_placeholder = if readonly {
-            crate::tr!("chat.subagent_readonly").into_owned()
+            crate::tr!("chat.subagent_readonly")
         } else if self.compact && !self.interactive(cx) {
-            crate::tr!("mobile.offline_message").into_owned()
+            crate::tr!("mobile.offline_message")
         } else {
             draft_placeholder(self.compact)
         };
