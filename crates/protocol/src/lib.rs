@@ -86,93 +86,53 @@ pub use wire::{
 // space id, device access, optional stored-event authors, and a space id on
 // pairing with the space name in the paired reply and two pairing rejections;
 // version 10 (v0.2.2) adds ImageRead, ToolCall.image_reads metadata and
-// ReadItemImage for fetching model-read image bytes outside timeline windows.
+// ReadItemImage for fetching model-read image bytes outside timeline windows;
+// version 11 (v0.2.3) replaces SessionActivity.background_only with waiting, which
+// also covers unfinished child threads and a finished child awaiting settle,
+// carries a dispatched child's execution, delivery and latest run in
+// SessionActivity.agent and adds SessionActivity.failed; adds the
+// CreateNewProject, StartScratchDraft, SetProjectRoot (with the
+// WorkingDirectoryMissing runtime error), CancelAgent, PinSession,
+// UnpinSession, ReorderPinned and ReorderActive commands and thread metadata's
+// pinned_at, pin_order, active_order and cancelled_at; gives thread metadata
+// Settled/Active overrides and lifecycle timestamps, with UnsettleSession
+// replacing MakeSessionActive, SetAutoSettle and global and per-project
+// settlement settings, and removes idle AutoArchiveSweep/ArchivedCount, the
+// idle-auto-archive settings, Settings.collapsed_threads, SetThreadCollapsed
+// and orchestrate archive_on_complete; stored messages carry a
+// human/agent/server origin; the Preview topic no longer names a session;
+// Settings.traverse and SettingsPatch::Traverse carry a list of sources,
+// official or self-hosted, and HostingState.traverse reports each source's
+// manifest, relays with latency and home relay, and pkarr lookup checks; adds
+// pull requests: linked PRs in SessionMeta with LinkPullRequest,
+// UnlinkPullRequest and the PullRequestLinked result, WatchPullRequest with
+// the PullRequestWatch toast and SessionStatus.pull_request_tools,
+// Query::PullRequest reading files (paged by an opaque cursor in
+// PullRequestFiles.next_cursor), file text, conversation, review thread
+// replies, viewed files, media, label and reviewer candidates (by opaque id),
+// ActionState and StackState, SetPullRequestFilesViewed, RefreshPullRequest,
+// RunPullRequestAction for comments, reviews, replies and resolutions,
+// reactions (typed names), edits, labels, reviewers, ready/draft, close,
+// reopen, revert, branch update, merge, auto-merge, MergeStack and RebaseStack
+// with their typed results (UpToDate, Queued, AutoMergeEnabled, Opened,
+// Pending, MergeUnconfirmed, RebaseStarted, Rebased, RebaseStopped) and the
+// StackUnknown and Unsupported rejections, EditPullRequestReviewDraft with
+// pull_request_reviews and pull_request_operations on thread metadata, the
+// PullRequestStack toast, settings project_merge_methods and
+// remove_agent_credits_on_merge with their patches, snapshots whose
+// additions, deletions and changed_files may be null, and host capabilities
+// (update_merge, host_viewed_marks, merge_message, labels) on the
+// conversation and action state; Settings.github becomes
+// Settings.source_control, whose hosts carry a kind (github, forgejo, gitea,
+// gitlab, bitbucket, azure) and a per-host status with kind, added, credential
+// source (saved_basic with its email, saved_bearer), resolution order, problem
+// (which may be unverified), token_url, access_token_url and token_scopes,
+// patched by SourceControlHost and RemoveSourceControlHost, with SetHostToken
+// (optional email) and RefreshHostCredentials replacing SetGitHubToken and
+// RefreshGitHubCredentials.
 //
-// Unreleased: replaces SessionActivity.background_only with waiting, which
-// also covers unfinished child threads; adds the CreateNewProject and
-// StartScratchDraft commands; adds per-host GitHub settings, credential source
-// discovery, SetGitHubToken and RefreshGitHubCredentials.
-// Unreleased: linked PRs in SessionMeta; LinkPullRequest and UnlinkPullRequest commands,
-// and the PullRequestLinked command result.
-// Unreleased: Settled/Active overrides and lifecycle timestamps on thread
-// metadata; UnsettleSession replaces MakeSessionActive, SetAutoSettle controls
-// the durable per-thread disable; global and per-project settlement settings;
-// SessionActivity.failed. Idle AutoArchiveSweep/ArchivedCount and the
-// idle-auto-archive settings are removed.
-// Unreleased: stored messages carry human/agent/server origin; absent origin
-// uses the historical top-level human / dispatched child agent fallback.
-// Unreleased: adds the SetProjectRoot command and the WorkingDirectoryMissing
-// runtime error.
-// Unreleased: a pull request watch on linked PRs; the WatchPullRequest command,
-// the PullRequestWatch toast and SessionStatus.pull_request_tools.
-// Unreleased: SessionActivity.agent carries a dispatched child's execution,
-// delivery and latest run start and end, and waiting also covers a finished
-// child awaiting settle;
-// thread metadata carries cancelled_at; CancelAgent cancels a dispatched
-// child from a client; Settings.collapsed_threads,
-// SetThreadCollapsed, orchestrate archive_on_complete (settings, metadata and
-// OrchestrateArchiveOnComplete) are removed.
-// Unreleased: the Preview topic no longer names a session, so a subscriber
-// answers automation for threads it is not viewing.
-// Unreleased: Query::PullRequest reads a linked pull request's files, file
-// text, conversation, review thread replies, viewed files and media;
-// SetPullRequestFilesViewed marks or unmarks files as viewed;
-// RefreshPullRequest drops the host's reads of one and syncs it.
-// Unreleased: thread metadata carries pinned_at, pin_order and active_order;
-// adds the PinSession, UnpinSession, ReorderPinned and ReorderActive commands.
-// Unreleased: RunPullRequestAction writes to a linked pull request (comment,
-// review, thread reply and resolution, reactions, edits, labels, reviewers)
-// and answers PullRequestAction with a typed result; EditPullRequestReviewDraft
-// edits the host-owned review draft that thread metadata carries as
-// pull_request_reviews; Query::PullRequest reads label and reviewer
-// candidates; a reaction's content is a typed name; the conversation carries
-// the account's permissions, labels and reviewers, and comments and threads
-// what the account may do to them.
-// Unreleased: RunPullRequestAction also marks ready, converts to draft,
-// closes, reopens, reverts, updates the branch, merges and disables
-// auto-merge, answering UpToDate, Queued, AutoMergeEnabled and Opened, or a
-// rejection InStack or StackUnknown; Query::PullRequest reads ActionState;
-// settings carry project_merge_methods and remove_agent_credits_on_merge,
-// patched by ProjectMergeMethod and RemoveAgentCreditsOnMerge.
-// Unreleased: RunPullRequestAction merges a native stack through GitHub's
-// asynchronous merge (MergeStack) and rebases one on the host (RebaseStack),
-// answering Pending, MergeUnconfirmed, RebaseStarted, Rebased or RebaseStopped,
-// or the stack rejections; InStack is removed; Query::PullRequest reads
-// StackState; thread metadata carries pull_request_operations, the stack writes
-// running or unconfirmed and a rebase's end until the next full sync; the
-// PullRequestStack toast reports how one ended.
-// Unreleased: Settings.traverse and SettingsPatch::Traverse carry a list of
-// sources, each official or a self-hosted URL with its own switch.
-// Unreleased: HostingState.traverse reports each Traverse source's manifest,
-// relays with their latency and home relay, and pkarr lookup checks.
-// Unreleased: a files read names the page it asks for by an opaque cursor, which
-// PullRequestFiles.next_cursor carries in place of next_page; reviewers carry
-// an opaque id and labels an id that SetLabels names them by; the conversation
-// and the action state carry the host's capabilities.
-// Unreleased: Settings.github becomes Settings.source_control, whose hosts carry
-// a kind (github, forgejo, gitea) and whose status is per host with its kind,
-// whether only settings name it (added), credential source, resolution order
-// and problem; SettingsPatch's GitHubHost becomes SourceControlHost and
-// RemoveSourceControlHost is added;
-// SetGitHubToken and RefreshGitHubCredentials become SetHostToken and
-// RefreshHostCredentials; capabilities carry host_viewed_marks and
-// merge_message; the rejection Unsupported is added.
-// Unreleased: a source-control host's kind may be gitlab; capabilities carry
-// update_merge, without which a branch update is a rebase; a pull request
-// snapshot's additions and deletions may be absent (null) where the host counts
-// no lines; RebaseStarted also answers one pull request's branch update that the
-// host finishes on its own.
-// Unreleased: a source-control host's kind may be bitbucket; a credential source
-// may be saved_basic, with the email it is sent with, or saved_bearer;
-// SetHostToken carries an optional email.
-// Unreleased: a source-control host's kind may be azure, whose hosts are
-// organizations, dev.azure.com/{organization}.
-// Unreleased: a pull request snapshot's changed_files may be absent (null) where
-// the host counts no files.
-// Unreleased: a source-control host's status carries token_url, access_token_url and
-// token_scopes, and its problem may be unverified; capabilities carry labels, without which
-// SetLabels is rejected as Unsupported.
-pub const PROTOCOL_VERSION: u32 = 10;
+// Unreleased: (none)
+pub const PROTOCOL_VERSION: u32 = 11;
 
 #[cfg(test)]
 mod tests;
