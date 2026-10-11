@@ -352,14 +352,14 @@ pub(super) fn merge_state(
     }
 }
 
-/// A pipeline waiting on a person or a schedule is neither progress nor a failure.
+/// Everything not finished is pending, a pipeline waiting on a person's manual job or on its
+/// schedule included: it has not passed.
 pub(super) fn pipeline_status(status: &str) -> CheckStatus {
     match status {
         "success" => CheckStatus::Success,
         "failed" => CheckStatus::Failure,
         "canceled" | "canceling" => CheckStatus::Cancelled,
         "skipped" => CheckStatus::Skipped,
-        "manual" | "scheduled" => CheckStatus::Neutral,
         _ => CheckStatus::Pending,
     }
 }
@@ -848,13 +848,14 @@ mod tests {
         );
     }
 
-    /// The head pipeline is the merge request's one check: a pipeline waiting on a person or
-    /// a schedule neither passes nor fails, and everything not finished is pending.
+    /// The head pipeline is the merge request's one check, and one waiting on a manual job or
+    /// a schedule has not passed: it is pending, like everything not finished.
     #[test]
     fn a_pipeline_reads_as_one_check() {
         assert_eq!(pipeline_status("failed"), CheckStatus::Failure);
         assert!(pipeline_status("canceled").failed());
-        assert_eq!(pipeline_status("manual"), CheckStatus::Neutral);
+        assert_eq!(pipeline_status("manual"), CheckStatus::Pending);
+        assert_eq!(pipeline_status("scheduled"), CheckStatus::Pending);
         assert_eq!(
             pipeline_status("waiting_for_resource"),
             CheckStatus::Pending
@@ -862,7 +863,7 @@ mod tests {
         assert_eq!(checks_state(&checks(&json!({}))), None);
         assert_eq!(
             checks_state(&checks(&json!({"head_pipeline": {"status": "manual"}}))),
-            Some(ChecksState::Passing)
+            Some(ChecksState::Pending)
         );
     }
 }

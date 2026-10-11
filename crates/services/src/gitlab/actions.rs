@@ -171,10 +171,7 @@ impl Mr<'_> {
             match self.write("PUT", self.path("/merge"), Some(body), "Merge") {
                 Ok(response) => match response.json::<Value>() {
                     Ok(mr) if mr["state"].as_str() == Some("merged") => Outcome::Applied,
-                    Ok(mr)
-                        if mr["merge_when_pipeline_succeeds"].as_bool() == Some(true)
-                            || mr["auto_merge_enabled"].as_bool() == Some(true) =>
-                    {
+                    Ok(mr) if mr["merge_when_pipeline_succeeds"].as_bool() == Some(true) => {
                         Outcome::AutoMergeEnabled { method }
                     }
                     Ok(_) => Outcome::Applied,
