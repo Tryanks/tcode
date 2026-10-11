@@ -11107,8 +11107,9 @@ fn settling_detaches_only_its_own_provider_and_releases_its_parent() {
 
 /// A pin promotes a settled thread without reopening it, holds an idle
 /// thread out of automatic settlement, and a settle removes the pin and the
-/// thread's place in the active order. None of them is activity, so none
-/// moves the thread in the project view.
+/// thread's place in the active order. None of them, nor un-settling or
+/// the auto-settle toggle, is activity, so none moves the thread in the
+/// project view.
 #[test]
 fn pinning_promotes_and_exempts_until_a_settle_unpins() {
     use tcode_core::project::SettledOverride;
@@ -11302,6 +11303,35 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
                 "settling, by hand or by the sweep, is not activity"
             );
         }
+    });
+
+    command(
+        &state,
+        cx,
+        10,
+        Command::UnsettleSession {
+            session_id: "idle".into(),
+        },
+    )
+    .unwrap();
+    command(
+        &state,
+        cx,
+        11,
+        Command::SetAutoSettle {
+            session_id: "idle".into(),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    state.read(|state| {
+        let idle = state.find_meta("idle").unwrap();
+        assert!(!idle.is_settled() && idle.auto_settle_disabled_at.is_some());
+        assert_eq!(
+            idle.updated_at,
+            stamp / 1000,
+            "un-settling and the auto-settle toggle are not activity"
+        );
     });
 }
 
