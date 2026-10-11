@@ -81,6 +81,7 @@ pub struct Button {
     aria_label: Option<SharedString>,
     on_click: Option<ClickHandler>,
     on_hover: Option<super::ToggleHandler>,
+    press_then: Option<super::popover::SheetToggle>,
 }
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -104,6 +105,7 @@ impl Button {
             aria_label: None,
             on_click: None,
             on_hover: None,
+            press_then: None,
         }
     }
     pub fn outline(mut self) -> Self {
@@ -170,6 +172,13 @@ impl Button {
         self.on_hover = Some(Rc::new(handler));
         self
     }
+    /// A press action for assistive technology that does what a click on the button does: its
+    /// own handler, then `then`. A disabled or loading button gets none. GPUI's default press
+    /// clicks the node's centre, which misses a button scrolled or clipped out of view.
+    pub(crate) fn press_action(mut self, then: super::popover::SheetToggle) -> Self {
+        self.press_then = Some(then);
+        self
+    }
 }
 
 impl ButtonVariants for Button {
@@ -212,8 +221,6 @@ impl InteractiveElement for Button {
         self.base.interactivity()
     }
 }
-
-impl StatefulInteractiveElement for Button {}
 
 impl RenderOnce for Button {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -280,6 +287,18 @@ impl RenderOnce for Button {
             size => size,
         };
         let accessibility_label = self.aria_label.clone().or_else(|| self.label.clone());
+        let press = self
+            .press_then
+            .filter(|_| !self.disabled && !self.loading)
+            .map(|then| {
+                let on_click = self.on_click.clone();
+                move |_: Option<&gpui::accesskit::ActionData>, window: &mut Window, cx: &mut App| {
+                    if let Some(on_click) = &on_click {
+                        on_click(&ClickEvent::default(), window, cx);
+                    }
+                    then(window, cx);
+                }
+            });
         let content = gpui_base::h_flex()
             .size_full()
             .items_center()
@@ -341,6 +360,9 @@ impl RenderOnce for Button {
             .hover(move |this| this.bg(hover))
             .when_some(self.on_click, |this, handler| {
                 this.on_click(move |event, window, cx| handler(event, window, cx))
+            })
+            .when_some(press, |this, press| {
+                this.on_a11y_action(gpui::accesskit::Action::Click, press)
             })
             .when_some(self.on_hover, |this, handler| {
                 this.on_hover(move |hovered, window, cx| handler(hovered, window, cx))

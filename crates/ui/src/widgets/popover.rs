@@ -32,7 +32,7 @@ pub struct Popover {
 
 /// Builds the trigger; a sheet hands it the toggle it opens with.
 type TriggerBuilder = Box<dyn FnOnce(bool, Option<SheetToggle>, &Window, &App) -> AnyElement>;
-type SheetToggle = Rc<dyn Fn(&mut Window, &mut App)>;
+pub(crate) type SheetToggle = Rc<dyn Fn(&mut Window, &mut App)>;
 type ContentBuilder =
     Box<dyn FnOnce(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> AnyElement>;
 
@@ -95,21 +95,12 @@ impl Popover {
         self.on_open_change = Some(Rc::new(callback));
         self
     }
-    pub fn trigger<T>(mut self, trigger: T) -> Self
-    where
-        T: gpui_base::Selectable + StatefulInteractiveElement + IntoElement + 'static,
-    {
+    pub fn trigger(mut self, trigger: super::Button) -> Self {
         self.trigger = Some(Box::new(move |open, toggle, _, _| {
-            let is_open = trigger.is_open();
-            let trigger = trigger.open(is_open || open);
-            // The sheet's press action is the trigger's own: GPUI's default one clicks the
-            // node's centre, which misses a trigger scrolled or clipped out of view.
+            let is_open = gpui_base::Selectable::is_open(&trigger);
+            let trigger = gpui_base::Selectable::open(trigger, is_open || open);
             match toggle {
-                Some(toggle) => trigger
-                    .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
-                        toggle(window, cx)
-                    })
-                    .into_any_element(),
+                Some(toggle) => trigger.press_action(toggle).into_any_element(),
                 None => trigger.into_any_element(),
             }
         }));
