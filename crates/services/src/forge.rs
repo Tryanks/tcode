@@ -48,8 +48,10 @@ pub fn connect(
     let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
     let forgejo = crate::forgejo::Forgejo::new(store.clone(), environment.clone(), viewed.clone());
     let gitlab = crate::gitlab::GitLab::new(store.clone(), environment.clone(), viewed.clone());
-    let bitbucket = crate::bitbucket::Bitbucket::new(store, environment, viewed);
-    Hosts::new(github, forgejo, gitlab, bitbucket)
+    let bitbucket =
+        crate::bitbucket::Bitbucket::new(store.clone(), environment.clone(), viewed.clone());
+    let azure = crate::azure::Azure::new(store, environment, viewed);
+    Hosts::new(github, forgejo, gitlab, bitbucket, azure)
 }
 
 /// A pull request host. Each entry answers for the host the key names.
@@ -374,6 +376,7 @@ struct Hosts {
     forgejo: Arc<dyn Forge>,
     gitlab: Arc<dyn Forge>,
     bitbucket: Arc<dyn Forge>,
+    azure: Arc<dyn Forge>,
     kinds: RwLock<BTreeMap<String, HostKind>>,
 }
 
@@ -383,23 +386,26 @@ impl Hosts {
         forgejo: Arc<dyn Forge>,
         gitlab: Arc<dyn Forge>,
         bitbucket: Arc<dyn Forge>,
+        azure: Arc<dyn Forge>,
     ) -> Arc<Self> {
         Arc::new(Self {
             github,
             forgejo,
             gitlab,
             bitbucket,
+            azure,
             kinds: RwLock::default(),
         })
     }
 
     /// Every kind's implementation, the one a host falls back to first.
-    fn all(&self) -> [&dyn Forge; 4] {
+    fn all(&self) -> [&dyn Forge; 5] {
         [
             self.github.as_ref(),
             self.forgejo.as_ref(),
             self.gitlab.as_ref(),
             self.bitbucket.as_ref(),
+            self.azure.as_ref(),
         ]
     }
 
@@ -413,6 +419,7 @@ impl Hosts {
             HostKind::Forgejo | HostKind::Gitea => self.forgejo.as_ref(),
             HostKind::Gitlab => self.gitlab.as_ref(),
             HostKind::Bitbucket => self.bitbucket.as_ref(),
+            HostKind::Azure => self.azure.as_ref(),
         }
     }
 
@@ -448,7 +455,8 @@ impl Forge for Hosts {
         self.github.configure(hosts.clone());
         self.forgejo.configure(hosts.clone());
         self.gitlab.configure(hosts.clone());
-        self.bitbucket.configure(hosts);
+        self.bitbucket.configure(hosts.clone());
+        self.azure.configure(hosts);
     }
 
     fn credential_status(&self) -> BTreeMap<String, HostStatus> {
@@ -463,6 +471,11 @@ impl Forge for Hosts {
         for (host, bitbucket) in self.bitbucket.credential_status() {
             if !status.contains_key(&host) || self.kind(&host) == HostKind::Bitbucket {
                 status.insert(host, bitbucket);
+            }
+        }
+        for (host, azure) in self.azure.credential_status() {
+            if !status.contains_key(&host) || self.kind(&host) == HostKind::Azure {
+                status.insert(host, azure);
             }
         }
         for (host, github) in self.github.credential_status() {
@@ -728,6 +741,19 @@ mod tests {
         assert_eq!(name("bitbucket.org"), "Bitbucket");
         // Bitbucket Data Center is not read as Bitbucket.
         assert_eq!(name("bitbucket.acme.test"), "GitHub");
+        // Each Azure DevOps organization is a host of its own, and an older visualstudio.com
+        // URL reads as the same one.
+        assert_eq!(name("dev.azure.com/fabrikam"), "Azure DevOps");
+        for url in [
+            "https://dev.azure.com/Fabrikam/Web/_git/Web/pullrequest/7",
+            "https://fabrikam.visualstudio.com/Web/_git/Web/pullrequest/7",
+        ] {
+            assert_eq!(
+                forge.pull_request_url(url).map(|(key, _)| key),
+                Some(PullRequestKey::new("dev.azure.com/fabrikam", "web/web", 7)),
+                "{url}"
+            );
+        }
         assert_eq!(
             forge
                 .pull_request_url("https://bitbucket.org/team/web/pull-requests/8/diff")
