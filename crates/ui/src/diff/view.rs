@@ -13,7 +13,7 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
-use crate::widgets::tooltip::Tooltip;
+use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -611,191 +611,82 @@ impl DiffPanel {
                 (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
             })
         };
-        let muted = cx.theme().muted_foreground;
-        let tab_active = cx.theme().tab_active;
         let caption_width = if hosts_caption {
             window_caption::CAPTION_CLUSTER_WIDTH
         } else {
             0.
         };
-        let show_labels = tab_labels_fit(self.strip_width.get(), caption_width);
-
-        // Without its label a tab is its icon, named by its tooltip and its
-        // accessibility label.
-        let labelled = |id: &'static str,
-                        icon: IconName,
-                        label: gpui::SharedString,
-                        content: AnyElement,
-                        is_active: bool,
-                        cx: &mut Context<Self>|
-         -> gpui_base::Tab {
-            material::tab(id, label.clone(), is_active, cx)
-                .debug_selector(move || id.into())
-                .flex_none()
-                .h(px(28.))
-                .when(show_labels, |s| s.px_2p5().gap_1p5())
-                .when(!show_labels, |s| s.w(px(28.)))
-                .rounded(material::radius_button(cx))
-                .text_size(px(13.))
-                .font_medium()
-                .when(is_active, |s| s.bg(tab_active))
-                .when(!is_active, |s| {
-                    s.text_color(muted).hover(|s| s.bg(cx.theme().muted))
-                })
-                .child(Icon::new(icon).xsmall().text_color(muted))
-                .map(|s| {
-                    if show_labels {
-                        s.child(content)
-                    } else {
-                        s.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-                    }
-                })
-        };
-        let tab = |id, icon, label: gpui::SharedString, is_active, cx: &mut Context<Self>| {
-            labelled(
-                id,
-                icon,
-                label.clone(),
-                label.into_any_element(),
-                is_active,
-                cx,
-            )
-        };
-
-        let tabs = gpui_base::Tabs::new("right-panel-tabs")
-            .flex()
-            .items_center()
-            .debug_selector(|| "right-panel-tabs".into())
+        let tabs = TabBar::new("right-panel-tabs")
+            .underline()
+            .hairline(false)
             .aria_label(crate::tr!("diff.panel_tabs"))
-            // The tabs give way before the window controls do, so the close
-            // button stays on screen at any panel width. The 2px inset keeps
-            // the focus ring of the first tab inside the clip.
+            .icon_only(!tab_labels_fit(self.strip_width.get(), caption_width))
+            .flex_1()
             .min_w_0()
-            .overflow_hidden()
-            .h_full()
-            .px(px(2.))
-            .ml(px(-2.))
-            .gap_1()
-            .child(
-                tab(
-                    "diff-tab",
-                    IconName::File,
-                    crate::tr!("diff.title").into_owned().into(),
-                    active == RightTab::Diff,
-                    cx,
-                )
-                .on_click(move |_, _, cx| {
-                    store_diff.update(cx, |store, cx| {
-                        store.set_right_tab(RightTab::Diff, cx);
-                    });
-                }),
+            .mb(px(-1.))
+            .self_end()
+            .item(
+                TabItem::new("diff-tab", crate::tr!("diff.title").into_owned())
+                    .icon(IconName::File)
+                    .selected(active == RightTab::Diff)
+                    .on_click(move |_, _, cx| {
+                        store_diff.update(cx, |store, cx| store.set_right_tab(RightTab::Diff, cx));
+                    }),
             )
-            .child(
-                tab(
-                    "plan-tab",
-                    IconName::Map,
-                    crate::tr!("tasks.tab").into_owned().into(),
-                    active == RightTab::Plan,
-                    cx,
-                )
-                .on_click(move |_, _, cx| {
-                    store_plan.update(cx, |store, cx| {
-                        store.set_right_tab(RightTab::Plan, cx);
-                    });
-                }),
+            .item(
+                TabItem::new("plan-tab", crate::tr!("tasks.tab").into_owned())
+                    .icon(IconName::Map)
+                    .selected(active == RightTab::Plan)
+                    .on_click(move |_, _, cx| {
+                        store_plan.update(cx, |store, cx| store.set_right_tab(RightTab::Plan, cx));
+                    }),
+            );
+        let tabs = if let Some(outstanding) = agents {
+            tabs.item(
+                TabItem::new("agents-tab", crate::tr!("agents.title").into_owned())
+                    .icon(IconName::Bot)
+                    .selected(active == RightTab::Agents)
+                    .count(outstanding)
+                    .on_click(move |_, _, cx| {
+                        store_agents
+                            .update(cx, |store, cx| store.set_right_tab(RightTab::Agents, cx));
+                    }),
             )
-            .when_some(agents, |strip, outstanding| {
-                let is_active = active == RightTab::Agents;
-                let tab = if outstanding == 0 {
-                    tab(
-                        "agents-tab",
-                        IconName::Bot,
-                        crate::tr!("agents.title").into_owned().into(),
-                        is_active,
-                        cx,
-                    )
-                } else {
-                    // The localized pattern places the count; only the count is muted.
-                    let pattern = crate::tr!("agents.tab_count", count = "\u{0}").into_owned();
-                    let (before, after) = pattern.split_once('\u{0}').unwrap_or((&pattern, ""));
-                    let content = h_flex()
-                        .gap_1()
-                        .children((!before.trim().is_empty()).then(|| before.trim().to_owned()))
-                        .child(div().text_color(muted).child(outstanding.to_string()))
-                        .children((!after.trim().is_empty()).then(|| after.trim().to_owned()))
-                        .into_any_element();
-                    labelled(
-                        "agents-tab",
-                        IconName::Bot,
-                        crate::tr!("agents.tab_count", count = outstanding.to_string())
-                            .into_owned()
-                            .into(),
-                        content,
-                        is_active,
-                        cx,
-                    )
-                };
-                strip.child(tab.on_click(move |_, _, cx| {
-                    store_agents.update(cx, |store, cx| {
-                        store.set_right_tab(RightTab::Agents, cx);
-                    });
-                }))
-            })
-            .child({
-                let count = self
-                    .workspace_store
+        } else {
+            tabs
+        };
+        let count = self
+            .workspace_store
+            .read(cx)
+            .active_session_id()
+            .map_or(0, |id| {
+                self.workspace_store
                     .read(cx)
-                    .active_session_id()
-                    .map_or(0, |id| {
-                        self.workspace_store
-                            .read(cx)
-                            .pull_requests(&id)
-                            .iter()
-                            .filter(|link| link.visible())
-                            .count()
-                    });
-                let title = crate::tr!("pull_requests.title").into_owned();
-                let is_active = active == RightTab::PullRequests;
-                if count == 0 {
-                    tab(
-                        "pull-requests-tab",
-                        IconName::GitPullRequest,
-                        title.into(),
-                        is_active,
-                        cx,
-                    )
-                } else {
-                    // The localized pattern places the count; only the count is muted.
-                    let pattern =
-                        crate::tr!("pull_requests.tab_count", count = "\u{0}").into_owned();
-                    let (before, after) = pattern.split_once('\u{0}').unwrap_or((&pattern, ""));
-                    let content = h_flex()
-                        .gap_1()
-                        .children((!before.trim().is_empty()).then(|| before.trim().to_owned()))
-                        .child(div().text_color(muted).child(count.to_string()))
-                        .children((!after.trim().is_empty()).then(|| after.trim().to_owned()))
-                        .into_any_element();
-                    labelled(
-                        "pull-requests-tab",
-                        IconName::GitPullRequest,
-                        crate::tr!("pull_requests.tab_count", count = count.to_string())
-                            .into_owned()
-                            .into(),
-                        content,
-                        is_active,
-                        cx,
-                    )
-                }
-                .on_click(move |_, _, cx| {
-                    store_pr.update(cx, |store, cx| {
-                        store.set_right_tab(RightTab::PullRequests, cx)
-                    })
-                })
+                    .pull_requests(&id)
+                    .iter()
+                    .filter(|link| link.visible())
+                    .count()
             });
+        let tabs = tabs.item(
+            TabItem::new(
+                "pull-requests-tab",
+                crate::tr!("pull_requests.title").into_owned(),
+            )
+            .icon(IconName::GitPullRequest)
+            .selected(active == RightTab::PullRequests)
+            .count(count)
+            .on_click(move |_, _, cx| {
+                store_pr.update(cx, |store, cx| {
+                    store.set_right_tab(RightTab::PullRequests, cx)
+                });
+            }),
+        );
 
         let strip_width = self.strip_width.clone();
         h_flex()
             .flex_none()
+            .border_b_1()
+            .border_color(cx.theme().border)
             .h(px(if hosts_caption {
                 window_caption::CAPTION_STRIP_HEIGHT
             } else {
@@ -820,7 +711,7 @@ impl DiffPanel {
             // children, so without it the drag hitbox collapses to zero height.
             .child(window_caption::drag_region(crate::window_drag_area(
                 "right-panel-tabs-drag",
-                div().flex_1().h_full(),
+                div().flex_none().w(px(8.)).h_full(),
                 window,
                 cx,
             )))
@@ -828,6 +719,7 @@ impl DiffPanel {
             .child(
                 Button::new("diff-expand")
                     .debug_selector(|| "diff-expand".into())
+                    .flex_none()
                     .ghost()
                     .small()
                     .compact()
@@ -849,6 +741,7 @@ impl DiffPanel {
             )
             .child(
                 Button::new("diff-layout")
+                    .flex_none()
                     .ghost()
                     .small()
                     .compact()
@@ -858,6 +751,7 @@ impl DiffPanel {
             .child(
                 Button::new("diff-close")
                     .debug_selector(|| "diff-close".into())
+                    .flex_none()
                     .ghost()
                     .small()
                     .compact()

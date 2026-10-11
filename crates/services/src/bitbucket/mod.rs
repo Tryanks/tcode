@@ -569,7 +569,7 @@ impl Forge for Bitbucket {
             Some(credential)
                 if enabled
                     && credential.source == CredentialSource::SavedBearer
-                    && !self.api.worked(credential) =>
+                    && !self.api.verified(credential) =>
             {
                 Some(HostProblem::Unverified)
             }
@@ -925,5 +925,21 @@ mod tests {
         assert_eq!(status.keys().collect::<Vec<_>>(), [HOST]);
         assert!(!status[HOST].added);
         let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn saved_verification_survives_a_fresh_host() {
+        crate::forge::verification_tests::verification_survives_restart(
+            HostKind::Bitbucket,
+            "bitbucket.org",
+            "team/repo",
+            |store, agent| {
+                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+                let mut host = Bitbucket::new(store, Vec::new(), viewed);
+                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+                    .unwrap()
+                    .agent = agent;
+                host
+            },
+        );
     }
 }

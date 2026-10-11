@@ -871,9 +871,7 @@ impl RemotePanel {
                 )
                 .child(
                     Input::new(&self.form.address)
-                        .placeholder(crate::tr!("hosts.pair.address_placeholder"))
-                        .large()
-                        .rounded(crate::material::radius_input(cx)),
+                        .placeholder(crate::tr!("hosts.pair.address_placeholder")),
                 )
                 .children(error.map(|error| {
                     div()
@@ -936,9 +934,7 @@ impl RemotePanel {
                     )
                     .child(
                         Input::new(&self.form.invitation)
-                            .placeholder(crate::tr!("hosts.pair.invitation_placeholder"))
-                            .large()
-                            .rounded(crate::material::radius_input(cx)),
+                            .placeholder(crate::tr!("hosts.pair.invitation_placeholder")),
                     ),
             )
             .children(self.attempt_status(cx))

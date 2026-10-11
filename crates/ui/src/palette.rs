@@ -826,8 +826,7 @@ impl Render for CommandPalette {
                     div().flex_1().child(
                         Input::new(&self.query)
                             .placeholder(crate::tr!("palette.placeholder"))
-                            .appearance(false)
-                            .rounded(crate::material::radius_input(cx)),
+                            .appearance(false),
                     ),
                 ),
         )

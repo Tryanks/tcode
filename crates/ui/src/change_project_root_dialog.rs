@@ -291,11 +291,7 @@ impl Render for ChangeProjectRootDialog {
                         h_flex()
                             .w_full()
                             .gap_2()
-                            .child(
-                                Input::new(&self.path_input)
-                                    .flex_1()
-                                    .rounded(crate::material::radius_input(cx)),
-                            )
+                            .child(Input::new(&self.path_input).flex_1())
                             .when(can_browse, |row| {
                                 row.child(
                                     Button::new("browse-project-root")

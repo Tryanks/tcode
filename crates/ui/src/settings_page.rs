@@ -9,6 +9,7 @@ use crate::overlay::{DialogButtons, OverlayExt as _};
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::switch::Switch;
+use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -564,8 +565,13 @@ impl SettingsPage {
         let device_name_input =
             cx.new(|cx| InputState::new(window, cx).default_value(device_name.clone()));
         let remote_attachment_limit = remote_attachment_limit_value(store.read(cx));
-        let remote_attachment_limit_input =
-            cx.new(|cx| InputState::new(window, cx).default_value(remote_attachment_limit.clone()));
+        let remote_attachment_limit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .step(1.)
+                .min(1.)
+                .max(u32::MAX as f64)
+                .default_value(remote_attachment_limit.clone())
+        });
         #[cfg(all(feature = "local-permissions", target_os = "macos"))]
         let local_permissions = capabilities.can_manage_local_permissions().then(|| {
             let store = store.clone();
@@ -882,38 +888,11 @@ impl SettingsPage {
         self.section.label()
     }
 
-    fn nav_item(&self, section: Section, cx: &mut Context<Self>) -> AnyElement {
-        let active = self.section == section;
-        let label = section.label();
-        let fg = if active {
-            cx.theme().sidebar_foreground
-        } else {
-            cx.theme().muted_foreground
-        };
-        crate::material::tab(section.id(), label.clone(), active, cx)
-            .debug_selector(move || section.id().into())
-            // Keep the hitbox, stable element id, and hover style on the
-            // same element. Splitting them across an outer clickable and
-            // an anonymous inner row leaves GPUI tracking two overlapping
-            // interaction regions, which makes hover paint stale or skip
-            // as the pointer crosses adjacent tabs.
-            .h(px(30.))
-            .justify_start()
-            .gap_2()
-            .px_2()
-            .rounded(cx.theme().tokens.radius.sm)
-            .when(active, |s| s.bg(cx.theme().list_active))
-            .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
-            .child(Icon::new(section.icon()).size_4().text_color(fg))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .when(active, |d| d.font_medium())
-                    .text_color(fg)
-                    .child(label),
-            )
+    fn nav_item(&self, section: Section, cx: &mut Context<Self>) -> TabItem {
+        TabItem::new(section.id(), section.label())
+            .icon(section.icon())
+            .selected(self.section == section)
             .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
-            .into_any_element()
     }
 
     fn group_caption(&self, group: SectionGroup, cx: &Context<Self>) -> AnyElement {
@@ -1035,39 +1014,56 @@ impl SettingsPage {
     }
 
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut tabs = gpui_base::Tabs::new("settings-nav-tabs")
-            .flex()
-            .flex_col()
-            .aria_label(crate::tr!("settings.title"))
-            .flex_1()
-            .min_h_0()
-            .px_2()
-            .gap(px(2.));
-        let mut group = None;
-        let mut advanced_open = false;
-        let advanced_expanded = self.advanced_expanded();
-        for section in SECTIONS
+        let mut tabs = v_flex().flex_1().min_h_0().px_2().gap(px(2.));
+        for (index, group) in [SectionGroup::Device, SectionGroup::Machine]
             .into_iter()
-            .filter(|section| self.section_applies(section, cx))
-            .collect::<Vec<_>>()
+            .enumerate()
         {
-            if group != Some(section.group()) {
-                let next = section.group();
-                tabs = tabs
-                    .when(group.is_some(), |tabs| tabs.pt_3())
-                    .child(self.group_caption(next, cx));
-                group = Some(next);
+            let sections = SECTIONS
+                .into_iter()
+                .filter(|section| section.group() == group && self.section_applies(section, cx))
+                .collect::<Vec<_>>();
+            if sections.is_empty() {
+                continue;
             }
-            if section.advanced() {
-                if !advanced_open {
-                    advanced_open = true;
-                    tabs = tabs.child(self.advanced_toggle(cx));
-                }
-                if !advanced_expanded {
-                    continue;
+            tabs = tabs.child(
+                div()
+                    .when(index > 0, |caption| caption.pt_3())
+                    .child(self.group_caption(group, cx)),
+            );
+            let plain = sections
+                .iter()
+                .copied()
+                .filter(|section| !section.advanced())
+                .map(|section| self.nav_item(section, cx))
+                .collect::<Vec<_>>();
+            tabs = tabs.child(
+                TabBar::new(if group == SectionGroup::Device {
+                    "settings-nav-tabs"
+                } else {
+                    "settings-machine-tabs"
+                })
+                .rail()
+                .aria_label(crate::tr!("settings.title"))
+                .items(plain),
+            );
+            if sections.iter().any(|section| section.advanced()) {
+                tabs = tabs.child(self.advanced_toggle(cx));
+                if self.advanced_expanded() {
+                    tabs = tabs.child(
+                        TabBar::new("settings-advanced-tabs")
+                            .rail()
+                            .aria_label(crate::tr!("settings.advanced"))
+                            .items(
+                                sections
+                                    .into_iter()
+                                    .filter(|section| section.advanced())
+                                    .map(|section| self.nav_item(section, cx))
+                                    .collect::<Vec<_>>(),
+                            ),
+                    );
                 }
             }
-            tabs = tabs.child(self.nav_item(section, cx));
         }
         v_flex()
             .flex_none()
@@ -1690,9 +1686,7 @@ impl SettingsPage {
                     .when(!compact, |field| field.w(px(240.)))
                     .child(
                         Input::new(&self.device_name_input.state)
-                            .placeholder(crate::tr!("settings.device_name.placeholder"))
-                            .small()
-                            .rounded(crate::material::radius_input(cx)),
+                            .placeholder(crate::tr!("settings.device_name.placeholder")),
                     ),
             )
             .into_any_element()
@@ -1720,11 +1714,9 @@ impl SettingsPage {
                 reset,
                 cx,
             ))
-            .child(
-                Input::new(&self.remote_attachment_limit_input.state)
-                    .w(px(72.))
-                    .rounded(crate::material::radius_input(cx)),
-            )
+            .child(crate::widgets::input::NumberInput::new(
+                &self.remote_attachment_limit_input.state,
+            ))
             .into_any_element()
     }
 
@@ -2520,6 +2512,7 @@ impl SettingsPage {
     }
 
     fn home_url_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
         let overridden = self.store.read(cx).settings().browser.home_url.is_some();
         let reset = self.reset_action(
             "reset-browser-home-url",
@@ -2538,12 +2531,13 @@ impl SettingsPage {
                 cx,
             ))
             .child(
-                div().w(px(240.)).child(
-                    Input::new(&self.home_url_input.state)
-                        .placeholder(crate::tr!("browser.home_url.placeholder"))
-                        .small()
-                        .rounded(crate::material::radius_input(cx)),
-                ),
+                div()
+                    .when(compact, |field| field.w_full())
+                    .when(!compact, |field| field.w(px(240.)))
+                    .child(
+                        Input::new(&self.home_url_input.state)
+                            .placeholder(crate::tr!("browser.home_url.placeholder")),
+                    ),
             )
             .into_any_element()
     }

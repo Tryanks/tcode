@@ -792,95 +792,82 @@ impl PullRequestsPanel {
             detail.extend(author.clone());
             detail.push(branches.clone());
             detail.retain(|part| !part.is_empty());
-            let lead = detail.join(" · ");
             detail.extend(layer.clone());
             detail.extend(stat.as_ref().map(|stat| format!("{} {}", stat.0, stat.1)));
             detail.retain(|part| !part.is_empty());
-            if compact {
-                let line = h_flex().gap_1().items_center().min_w_0().overflow_hidden();
-                tail_layer(
-                    line.child(div().min_w_0().truncate().child(lead)),
-                    layer.clone(),
+            // Spacing is each part's leading margin, so a part that gives way takes its
+            // separator and its spacing with it.
+            let sep = || div().flex_none().ml_1().child("·");
+            let mono = cx.theme().mono_font_family.clone();
+            h_flex()
+                .items_center()
+                .min_w_0()
+                .overflow_hidden()
+                .child(div().min_w_0().truncate().child(source.clone()))
+                // The author gives way first, whole: a line too narrow for it wraps it onto
+                // a second line this one-line box clips. The box sets its own line height
+                // and is exactly one such line tall (16 for line 2's 11px text); stretching
+                // it to the row would not do, as a stretched box takes its wrapped content's
+                // two lines. gpui has no setter for a shrink value, hence the reach into the
+                // style.
+                .when_some(author, |line, author| {
+                    line.child(
+                        h_flex()
+                            .flex_wrap()
+                            .h(px(16.))
+                            .line_height(px(16.))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .map(|mut group| {
+                                group.style().flex_shrink = Some(10000.);
+                                group
+                            })
+                            // An empty first item, so the author wraps rather than overflows.
+                            .child(div().h_full())
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .child(sep())
+                                    .child(div().ml_1().child(author)),
+                            ),
+                    )
+                })
+                // gpui-base has no middle truncation; the row tooltip holds the full pair.
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .map(|mut branches| {
+                            branches.style().flex_shrink = Some(100.);
+                            branches
+                        })
+                        .font_family(mono.clone())
+                        .child(format!(" · {branches}")),
                 )
-                .when_some(stat.as_ref(), |line, (additions, deletions)| {
-                    line.child(dot())
-                        .child(div().flex_none().child(format!("{additions} {deletions}")))
+                .when_some(layer.clone(), |line, layer| {
+                    line.child(sep())
+                        .child(div().flex_none().ml_1().child(layer))
+                })
+                .when_some(stat, |line, (additions, deletions)| {
+                    line.child(sep())
+                        .child(
+                            div()
+                                .flex_none()
+                                .ml_1()
+                                .font_family(mono.clone())
+                                .text_color(cx.theme().success)
+                                .child(additions),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .ml_1()
+                                .font_family(mono)
+                                .text_color(cx.theme().danger)
+                                .child(deletions),
+                        )
                 })
                 .into_any_element()
-            } else {
-                // Spacing is each part's leading margin, so a part that gives way takes its
-                // separator and its spacing with it.
-                let sep = || div().flex_none().ml_1().child("·");
-                let mono = cx.theme().mono_font_family.clone();
-                h_flex()
-                    .items_center()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(div().flex_none().child(source.clone()))
-                    // The author gives way first, whole: a line too narrow for it wraps it onto
-                    // a second line this one-line box clips. The box sets its own line height
-                    // and is exactly one such line tall (16 for line 2's 11px text); stretching
-                    // it to the row would not do, as a stretched box takes its wrapped content's
-                    // two lines. gpui has no setter for a shrink value, hence the reach into the
-                    // style.
-                    .when_some(author, |line, author| {
-                        line.child(
-                            h_flex()
-                                .flex_wrap()
-                                .h(px(16.))
-                                .line_height(px(16.))
-                                .min_w_0()
-                                .overflow_hidden()
-                                .map(|mut group| {
-                                    group.style().flex_shrink = Some(1000.);
-                                    group
-                                })
-                                // An empty first item, so the author wraps rather than overflows.
-                                .child(div().h_full())
-                                .child(
-                                    h_flex()
-                                        .flex_none()
-                                        .child(sep())
-                                        .child(div().ml_1().child(author)),
-                                ),
-                        )
-                    })
-                    .child(sep())
-                    // gpui-base has no middle truncation; the row tooltip holds the full pair.
-                    .child(
-                        div()
-                            .ml_1()
-                            .min_w_0()
-                            .max_w(gpui::relative(0.5))
-                            .truncate()
-                            .font_family(mono.clone())
-                            .child(branches),
-                    )
-                    .when_some(layer.clone(), |line, layer| {
-                        line.child(sep())
-                            .child(div().flex_none().ml_1().child(layer))
-                    })
-                    .when_some(stat, |line, (additions, deletions)| {
-                        line.child(sep())
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .ml_1()
-                                    .font_family(mono.clone())
-                                    .text_color(cx.theme().success)
-                                    .child(additions),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .ml_1()
-                                    .font_family(mono)
-                                    .text_color(cx.theme().danger)
-                                    .child(deletions),
-                            )
-                    })
-                    .into_any_element()
-            }
         } else {
             let layer = if let Some(link) = link.filter(|_| visible) {
                 detail.insert(
@@ -1253,6 +1240,10 @@ impl PullRequestsPanel {
                     .small()
                     .compact()
                     .icon(IconName::Ellipsis)
+                    .aria_label(
+                        crate::tr!("pull_requests.actions_for", number = key.number.to_string())
+                            .into_owned(),
+                    )
                     .tooltip(
                         crate::tr!("pull_requests.actions_for", number = key.number.to_string())
                             .into_owned(),
@@ -1276,6 +1267,7 @@ impl PullRequestsPanel {
         );
 
         row.context_menu(move |state, window, cx| (menu)(state, window, cx))
+            .touch(compact)
             .into_any_element()
     }
 }

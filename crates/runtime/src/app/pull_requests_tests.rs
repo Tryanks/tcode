@@ -2103,3 +2103,278 @@ fn an_ended_rebase_is_kept_for_every_device_until_the_next_full_sync_and_blocks_
         .update(&mut cx, |state, _| state.close_store())
         .unwrap();
 }
+
+#[test]
+fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
+    use std::collections::BTreeMap;
+    use tcode_core::{
+        pull_request::{HostTerms, PullRequestReviewDraftComment},
+        pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
+        session::ReviewSide,
+        settings::{HostSettings, HostStatus},
+    };
+    use tcode_protocol::{
+        PullRequestRead, PullRequestReadResponse, PullRequestRejection, PullRequestReviewVerdict,
+    };
+    use tcode_services::forge::{Anchoring, Discovered, Moved, Repository, Tails};
+
+    struct ReviewHost {
+        first: Mutex<Option<PullRequestActionResult>>,
+        sent: Mutex<Vec<(String, Vec<u64>)>>,
+    }
+    impl Forge for ReviewHost {
+        fn terms(&self, _: &PullRequestKey) -> &'static HostTerms {
+            &pull_request::GITLAB
+        }
+        fn capabilities(&self, _: &PullRequestKey) -> tcode_protocol::PullRequestCapabilities {
+            unreachable!()
+        }
+        fn configure(&self, _: BTreeMap<String, HostSettings>) {
+            unreachable!()
+        }
+        fn credential_status(&self) -> BTreeMap<String, HostStatus> {
+            unreachable!()
+        }
+        fn forget_credential(&self, _: &str) {
+            unreachable!()
+        }
+        fn pull_request_url(&self, _: &str) -> Option<(PullRequestKey, String)> {
+            unreachable!()
+        }
+        fn checkout_repository(&self, _: &Path) -> Option<Repository> {
+            unreachable!()
+        }
+        fn repository(&self, _: &str, _: &str) -> Option<Repository> {
+            unreachable!()
+        }
+        fn url(&self, _: &PullRequestKey) -> Option<String> {
+            unreachable!()
+        }
+        fn discover(&self, _: &Path, _: &Path, _: bool) -> Option<Discovered> {
+            unreachable!()
+        }
+        fn summary(&self, _: &PullRequestKey) -> Result<Summary, ForgeError> {
+            Ok(Summary {
+                snapshot: PullRequestSnapshot {
+                    state: PullRequestState::Open,
+                    title: "Review fixture".into(),
+                    head_branch: "feature".into(),
+                    base_branch: "main".into(),
+                    is_draft: false,
+                    updated_at: "2026-10-01T00:00:00Z".into(),
+                    synced_at: now_secs(),
+                    closed_at: None,
+                    merged_at: None,
+                    author: None,
+                    additions: None,
+                    deletions: None,
+                    changed_files: None,
+                    review_decision: None,
+                    checks_state: None,
+                    mergeability: pull_request::Mergeability::Clean,
+                },
+                stack_number: None,
+            })
+        }
+        fn stack(&self, _: &PullRequestKey) -> Result<PullRequestStackState, ForgeError> {
+            Ok(PullRequestStackState::None)
+        }
+        fn read(
+            &self,
+            _: &PullRequestKey,
+            _: PullRequestRead,
+        ) -> Result<(PullRequestReadResponse, SystemTime), ForgeError> {
+            unreachable!()
+        }
+        fn invalidate(&self, _: &PullRequestKey) {}
+        fn account(&self, _: &PullRequestKey) -> Result<String, ForgeError> {
+            Ok("reviewer".into())
+        }
+        fn set_viewed(&self, _: &PullRequestKey, _: &[String], _: bool) -> Result<(), ForgeError> {
+            unreachable!()
+        }
+        fn act(&self, _: &PullRequestKey, _: &PullRequestAction) -> PullRequestActionResult {
+            unreachable!()
+        }
+        fn submit_review(
+            &self,
+            _: &PullRequestKey,
+            _: PullRequestReviewVerdict,
+            _: &str,
+            body: &str,
+            comments: &[PullRequestReviewDraftComment],
+        ) -> PullRequestActionResult {
+            self.sent.lock().unwrap().push((
+                body.into(),
+                comments.iter().map(|comment| comment.id).collect(),
+            ));
+            self.first
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(PullRequestActionResult::Applied)
+        }
+        fn commentable(
+            &self,
+            _: &PullRequestKey,
+            _: &str,
+            _: &str,
+            _: ReviewSide,
+            _: (u32, u32),
+        ) -> Result<Anchoring, ForgeError> {
+            Ok(Anchoring::InDiff)
+        }
+        fn reanchor(
+            &self,
+            _: &PullRequestKey,
+            _: &[PullRequestReviewDraftComment],
+        ) -> Result<(String, Vec<Moved>), ForgeError> {
+            unreachable!()
+        }
+        fn watch_detail(&self, _: &PullRequestKey) -> Result<PullRequestWatchRead, ForgeError> {
+            unreachable!()
+        }
+        fn activity(
+            &self,
+            _: &PullRequestKey,
+            _: &mut Tails,
+        ) -> Result<Option<Vec<PullRequestRemark>>, ForgeError> {
+            unreachable!()
+        }
+    }
+
+    // Receipts use path:line, so two comments at the same location must consume two receipts.
+    for (applied, failure, remaining, body, uncertain) in [
+        (
+            vec!["src/lib.rs:3"],
+            PullRequestActionResult::Rejected(PullRequestRejection::Failed),
+            vec![2, 3],
+            "Summary",
+            false,
+        ),
+        (
+            vec!["src/lib.rs:3", "src/lib.rs:3"],
+            PullRequestActionResult::Uncertain,
+            vec![3],
+            "Summary",
+            true,
+        ),
+        (
+            vec!["src/lib.rs:3", "src/lib.rs:3", "src/lib.rs:8", "summary"],
+            PullRequestActionResult::Rejected(PullRequestRejection::Failed),
+            vec![],
+            "",
+            false,
+        ),
+    ] {
+        let dir = TestStore::new("tcode-pr-review-partial");
+        let receipt = PullRequestActionResult::Partial {
+            applied: applied.iter().map(|name| (*name).into()).collect(),
+            unapplied: if body.is_empty() {
+                vec!["approval".into()]
+            } else {
+                let mut names = vec!["src/lib.rs:8".into(), "summary".into(), "approval".into()];
+                if applied.len() == 1 {
+                    names.insert(0, "src/lib.rs:3".into());
+                }
+                names
+            },
+            failure: Box::new(failure),
+        };
+        let forge = Arc::new(ReviewHost {
+            first: Mutex::new(Some(receipt.clone())),
+            sent: Mutex::default(),
+        });
+        let mut cx = TestAppContext::default();
+        let state = cx.new_entity(TestClientState::new((*dir).clone()));
+        let meta = linked("active", 1, false);
+        let key = meta.pull_requests[0].key.clone();
+        state.update(&mut cx, |state, _| {
+            state.pull_requests = PullRequestRuntime::new(forge.clone());
+            dir.upsert_meta(&meta).unwrap();
+            state.sessions.push(meta);
+        });
+        let mut id = 0;
+        let mut command = |command| {
+            id += 1;
+            acked(&state, &mut cx, id, command).unwrap()
+        };
+        let edit = |edit| Command::EditPullRequestReviewDraft {
+            session_id: "active".into(),
+            key: key.clone(),
+            edit,
+        };
+        command(edit(PullRequestReviewDraftEdit::SetBody {
+            body: "Summary".into(),
+        }));
+        for line in [3, 3, 8] {
+            command(edit(PullRequestReviewDraftEdit::AddComment {
+                head: "head".into(),
+                revision: "head".into(),
+                path: "src/lib.rs".into(),
+                side: ReviewSide::New,
+                start_line: line,
+                end_line: line,
+                body: format!("Comment at {line}"),
+            }));
+        }
+        let submit = || Command::RunPullRequestAction {
+            session_id: "active".into(),
+            key: key.clone(),
+            action: PullRequestAction::SubmitReview {
+                verdict: PullRequestReviewVerdict::Approve,
+                head: "head".into(),
+            },
+        };
+        assert_eq!(
+            command(submit()),
+            CommandResponse::PullRequestAction(receipt)
+        );
+        let drafts = state.read(|state| state.find_meta("active").unwrap().pull_request_reviews);
+        if body.is_empty() {
+            assert!(
+                drafts.is_empty(),
+                "all draft content was confirmed posted even though approval failed"
+            );
+        } else {
+            assert_eq!(drafts[0].body, body);
+            assert_eq!(
+                drafts[0]
+                    .comments
+                    .iter()
+                    .map(|comment| comment.id)
+                    .collect::<Vec<_>>(),
+                remaining
+            );
+            assert_eq!(drafts[0].uncertain, uncertain);
+        }
+        if !uncertain {
+            assert_eq!(
+                command(submit()),
+                CommandResponse::PullRequestAction(PullRequestActionResult::Applied)
+            );
+            assert_eq!(
+                *forge.sent.lock().unwrap(),
+                vec![("Summary".into(), vec![1, 2, 3]), (body.into(), remaining)]
+            );
+        }
+        cx.run_until(|state| {
+            !state.pull_requests.syncing && state.pull_requests.requested.is_empty()
+        });
+        state
+            .update(&mut cx, |state, _| state.close_store())
+            .unwrap();
+        let reopened = SessionStore::open_at(dir.root().clone()).unwrap();
+        let persisted = reopened.load_index().unwrap()[0]
+            .pull_request_reviews
+            .clone();
+        if uncertain {
+            assert_eq!(
+                persisted, drafts,
+                "the remaining uncertain draft survives a restart"
+            );
+        } else {
+            assert!(persisted.is_empty());
+        }
+    }
+}

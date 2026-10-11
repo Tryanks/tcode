@@ -10,7 +10,12 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_core::session::{EntryContent, OrchestrateCallback, TimelineEntry};
-use tcode_ui::theme::{self, ActiveTheme as _};
+use tcode_ui::icon::IconName;
+use tcode_ui::sizing::Sizable as _;
+use tcode_ui::theme::{self, ActiveTheme as _, ThemeMode};
+use tcode_ui::widgets::choice::{Choice, ChoiceGroup};
+use tcode_ui::widgets::tabs::{TabBar, TabItem};
+use tcode_ui::widgets::{Button, ButtonVariants as _, Switch};
 use tcode_ui::{assets, gallery_support, markdown::MarkdownState};
 
 const ASSISTANT_MARKDOWN: &str = r#"Here is a compact result with **real markdown rendering** and a link to [the guide](https://example.com).
@@ -44,11 +49,47 @@ flowchart LR
 struct Gallery {
     markdown: Entity<MarkdownState>,
     started_at: u64,
+    tabs: TabsState,
+    options: Options,
     _tick: Task<()>,
 }
 
+/// Launch flags: `--dark` starts in the dark theme, `--section N` shows only
+/// section N, `--width W` opens the window W points wide, and `--tab N`
+/// presses Tab N times once the first frame is drawn, to show focus rings.
+#[derive(Clone, Copy, Default)]
+struct Options {
+    dark: bool,
+    section: Option<usize>,
+    width: Option<f32>,
+    tab: usize,
+}
+
+impl Options {
+    fn parse() -> Self {
+        let mut options = Self::default();
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--dark" => options.dark = true,
+                "--section" => options.section = args.next().and_then(|n| n.parse().ok()),
+                "--width" => options.width = args.next().and_then(|w| w.parse().ok()),
+                "--tab" => options.tab = args.next().and_then(|n| n.parse().ok()).unwrap_or(0),
+                _ => {}
+            }
+        }
+        options
+    }
+}
+
+/// The selected item of each bar in the tabs section, by bar.
+#[derive(Default)]
+struct TabsState {
+    selected: [usize; 9],
+}
+
 impl Gallery {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(options: Options, cx: &mut Context<Self>) -> Self {
         let markdown = cx.new(|cx| MarkdownState::new(ASSISTANT_MARKDOWN, cx));
         let started_at = now_millis().saturating_sub(7_300);
         let tick = cx.spawn(async move |this, cx| {
@@ -62,6 +103,10 @@ impl Gallery {
         Self {
             markdown,
             started_at,
+            tabs: TabsState {
+                selected: [0, 0, 0, 1, 1, 0, 0, 0, 2],
+            },
+            options,
             _tick: tick,
         }
     }
@@ -346,7 +391,14 @@ impl Render for Gallery {
                 ]),
                 cx,
             ),
+            section(11, "Tabs and choices", self.tabs_section(cx), cx),
         ];
+        let only = self.options.section;
+        let sections = sections
+            .into_iter()
+            .enumerate()
+            .filter(|(ix, _)| only.is_none_or(|section| section == ix + 1))
+            .map(|(_, section)| section);
 
         div()
             .id("gallery-scroll")
@@ -367,10 +419,30 @@ impl Render for Gallery {
                             v_flex()
                                 .gap_2()
                                 .child(
-                                    div()
-                                        .text_size(px(28.))
-                                        .font_semibold()
-                                        .child("Chat component gallery"),
+                                    h_flex()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_size(px(28.))
+                                                .font_semibold()
+                                                .child("Chat component gallery"),
+                                        )
+                                        .child(
+                                            Switch::new("gallery-dark")
+                                                .label("Dark")
+                                                .checked(cx.theme().mode.is_dark())
+                                                .on_click(|dark, window, cx| {
+                                                    theme::change_mode(
+                                                        if *dark {
+                                                            ThemeMode::Dark
+                                                        } else {
+                                                            ThemeMode::Light
+                                                        },
+                                                        Some(window),
+                                                        cx,
+                                                    )
+                                                }),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -382,6 +454,236 @@ impl Render for Gallery {
                         .children(sections),
                 ),
             )
+    }
+}
+
+impl Gallery {
+    fn tabs_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.tabs.selected;
+        let view = cx.entity();
+        let choose = move |bar: usize, ix: usize| {
+            let view = view.clone();
+            move |_: &mut Window, cx: &mut App| {
+                view.update(cx, |this, cx| {
+                    this.tabs.selected[bar] = ix;
+                    cx.notify();
+                })
+            }
+        };
+        let pick = |bar: usize, ix: usize, _: &mut Context<Self>| {
+            let choose = choose(bar, ix);
+            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| choose(window, cx)
+        };
+        let bar = |bar: usize,
+                   id: &'static str,
+                   items: Vec<(&'static str, Option<IconName>, Option<usize>)>,
+                   cx: &mut Context<Self>| {
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (label, icon, count))| {
+                    let item = TabItem::new((id, ix), label)
+                        .selected(selected[bar] == ix)
+                        .on_click(pick(bar, ix, cx));
+                    let item = match icon {
+                        Some(icon) => item.icon(icon),
+                        None => item,
+                    };
+                    match count {
+                        Some(count) => item.count(count),
+                        None => item,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let panel = vec![
+            ("Diff", Some(IconName::File), None),
+            ("Plan", Some(IconName::Map), None),
+            ("Agents", Some(IconName::Bot), Some(3)),
+            ("Pull requests", Some(IconName::GitPullRequest), Some(12)),
+        ];
+        let pr_views = vec![
+            ("Files", None, Some(24)),
+            ("Commits", None, Some(3)),
+            ("Conversation", None, Some(7)),
+        ];
+        let settings = vec![
+            ("General", Some(IconName::Settings), None),
+            ("Providers", Some(IconName::Bot), None),
+            ("Source control", Some(IconName::GitBranch), None),
+            ("Plugins", Some(IconName::Puzzle), Some(4)),
+            ("Remote access", Some(IconName::Globe), None),
+        ];
+        let long = vec![
+            ("Repository overview and activity", None, None),
+            ("Continuous integration pipelines", None, None),
+            ("Deployment environments", None, None),
+        ];
+        let terminals =
+            ["zsh", "cargo watch", "npm run dev"]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, label)| {
+                    TabItem::new(("gallery-terminal", ix), label)
+                        .selected(selected[4] == ix)
+                        .on_click(pick(4, ix, cx))
+                        .trailing(
+                            h_flex()
+                                .gap_1()
+                                .children((ix == 2).then(|| {
+                                    div().size(px(6.)).rounded_full().bg(cx.theme().warning)
+                                }))
+                                .child(
+                                    Button::new(("gallery-terminal-close", ix))
+                                        .ghost()
+                                        .compact()
+                                        .xsmall()
+                                        .icon(IconName::Close)
+                                        .tooltip("Close terminal"),
+                                ),
+                        )
+                })
+                .collect::<Vec<_>>();
+        let merge = ["Merge commit", "Squash and merge", "Rebase and merge"]
+            .into_iter()
+            .enumerate()
+            .map(|(ix, label)| {
+                Choice::new(("gallery-merge", ix), label)
+                    .selected(selected[5] == ix)
+                    .recommended(ix == 1)
+                    .disabled(ix == 2)
+                    .on_select(choose(5, ix))
+            })
+            .collect::<Vec<_>>();
+        let effort = ["Low", "Medium", "High", "Max"]
+            .into_iter()
+            .enumerate()
+            .map(|(ix, label)| {
+                Choice::new(("gallery-effort", ix), label)
+                    .selected(selected[8] == ix)
+                    .recommended(ix == 2)
+                    .on_select(choose(8, ix))
+            })
+            .collect::<Vec<_>>();
+        let label = |text: &'static str, cx: &App| {
+            div()
+                .text_size(px(13.))
+                .text_color(cx.theme().muted_foreground)
+                .child(text)
+        };
+
+        state_stack(vec![
+            state_card_full(
+                "UNDERLINE · ICONS + COUNT",
+                TabBar::new("gallery-underline")
+                    .aria_label("Panel")
+                    .items(bar(0, "gallery-panel", panel.clone(), cx))
+                    .into_any_element(),
+                cx,
+            ),
+            state_card_full(
+                "UNDERLINE · TRAILING CONTROLS",
+                TabBar::new("gallery-terminals")
+                    .aria_label("Terminals")
+                    .items(terminals)
+                    .into_any_element(),
+                cx,
+            ),
+            state_card_full(
+                "SEGMENTED",
+                TabBar::new("gallery-segmented")
+                    .segmented()
+                    .aria_label("Pull request view")
+                    .items(bar(1, "gallery-pr-view", pr_views.clone(), cx))
+                    .into_any_element(),
+                cx,
+            ),
+            state_row(vec![
+                state_card(
+                    "RAIL · TEXT",
+                    TabBar::new("gallery-rail")
+                        .rail()
+                        .aria_label("Settings")
+                        .w(px(220.))
+                        .items(bar(2, "gallery-settings", settings.clone(), cx))
+                        .into_any_element(),
+                    cx,
+                ),
+                state_card(
+                    "RAIL · ICON-ONLY",
+                    TabBar::new("gallery-rail-icons")
+                        .rail()
+                        .icon_only(true)
+                        .aria_label("Settings")
+                        .w(px(44.))
+                        .items(bar(3, "gallery-settings-icons", settings, cx))
+                        .into_any_element(),
+                    cx,
+                ),
+            ]),
+            state_card_full(
+                "CHOICE · RECOMMENDED + DISABLED",
+                v_flex()
+                    .gap(px(6.))
+                    .child(label("Merge method", cx))
+                    .child(
+                        ChoiceGroup::new("gallery-merge")
+                            .aria_label("Merge method")
+                            .choices(merge),
+                    )
+                    .child(div().h(px(8.)))
+                    .child(label("Reasoning effort", cx))
+                    .child(
+                        div().w(px(360.)).child(
+                            ChoiceGroup::new("gallery-effort")
+                                .aria_label("Reasoning effort")
+                                .choices(effort),
+                        ),
+                    )
+                    .into_any_element(),
+                cx,
+            ),
+            state_card_full(
+                "LONG LABELS · SCROLL",
+                v_flex()
+                    .w(px(320.))
+                    .gap_3()
+                    .child(
+                        TabBar::new("gallery-long-underline")
+                            .aria_label("Long")
+                            .items(bar(6, "gallery-long", long.clone(), cx)),
+                    )
+                    .child(
+                        TabBar::new("gallery-long-segmented")
+                            .segmented()
+                            .aria_label("Long")
+                            .items(bar(7, "gallery-long-seg", long, cx)),
+                    )
+                    .into_any_element(),
+                cx,
+            ),
+            state_card_full(
+                "COMPACT · 44PT TARGETS",
+                v_flex()
+                    .w(px(360.))
+                    .gap_3()
+                    .child(
+                        TabBar::new("gallery-compact-underline")
+                            .compact(true)
+                            .aria_label("Panel")
+                            .items(bar(0, "gallery-compact-panel", panel, cx)),
+                    )
+                    .child(
+                        TabBar::new("gallery-compact-segmented")
+                            .segmented()
+                            .compact(true)
+                            .aria_label("Pull request view")
+                            .items(bar(1, "gallery-compact-pr-view", pr_views, cx)),
+                    )
+                    .into_any_element(),
+                cx,
+            ),
+        ])
     }
 }
 
@@ -545,16 +847,41 @@ fn main() {
                 .expect("failed to register gallery fonts");
 
             theme::init(cx);
+            let flags = Options::parse();
+            if flags.dark {
+                theme::change_mode(ThemeMode::Dark, None, cx);
+            }
 
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(980.), px(820.)), cx)),
+                window_bounds: Some(WindowBounds::centered(
+                    size(px(flags.width.unwrap_or(980.)), px(820.)),
+                    cx,
+                )),
                 window_min_size: Some(size(px(760.), px(600.))),
                 ..Default::default()
             };
-            cx.open_window(options, |window, cx| {
-                let gallery = cx.new(Gallery::new);
-                cx.new(|cx| gpui_base::Root::new(gallery, window, cx))
-            })
-            .expect("failed to open component gallery window");
+            let window = cx
+                .open_window(options, |window, cx| {
+                    let gallery = cx.new(|cx| Gallery::new(flags, cx));
+                    cx.new(|cx| gpui_base::Root::new(gallery, window, cx))
+                })
+                .expect("failed to open component gallery window");
+            if flags.tab > 0 {
+                cx.spawn(async move |cx| {
+                    smol::Timer::after(Duration::from_millis(1500)).await;
+                    // Through the untyped handle: the typed one would hold the
+                    // root view the keystroke dispatches into.
+                    _ = cx.update_window(window.into(), |_, window, cx| {
+                        for _ in 0..flags.tab {
+                            // Root binds Tab only once something inside it has focus.
+                            let tab = gpui::Keystroke::parse("tab").unwrap();
+                            if !window.dispatch_keystroke(tab, cx) {
+                                window.focus_next(cx);
+                            }
+                        }
+                    });
+                })
+                .detach();
+            }
         });
 }

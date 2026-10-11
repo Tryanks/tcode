@@ -40,6 +40,7 @@ use crate::{
     widgets::{
         button::{Button, ButtonVariants as _},
         checkbox::Checkbox,
+        choice::{Choice, ChoiceGroup},
         spinner::Spinner,
         tooltip::Tooltip,
     },
@@ -706,6 +707,7 @@ fn map_content(
                 .xsmall()
                 .compact()
                 .icon(IconName::CircleQuestionMark)
+                .aria_label(tr("about"))
                 .tooltip(tr("about"))
                 .on_click({
                     let store = store.clone();
@@ -1842,20 +1844,24 @@ impl Render for MergeStackDialog {
                 let segments = state.merge_methods.iter().map(|method| {
                     let method = *method;
                     let view = view.clone();
-                    material::segment(
-                        SharedString::from(format!("pr-stack-merge-method-{method:?}")),
+                    Choice::new(
+                        SharedString::from(format!("pr-merge-method-{method:?}")),
                         super::lifecycle::segment_label(method),
-                        chosen == method,
-                        cx,
                     )
-                    .on_change(move |_, _, _, cx| {
+                    .selected(chosen == method)
+                    .on_select(move |_, cx| {
                         view.update(cx, |dialog, cx| {
                             dialog.method = Some(method);
                             cx.notify();
                         })
                     })
                 });
-                material::segmented_track("pr-stack-merge-method", segments, cx).into_any_element()
+                ChoiceGroup::new("pr-merge-method")
+                    .compact(target.window_state.read(cx).compact)
+                    .aria_label(crate::tr!("pull_requests.merge.method"))
+                    .w_full()
+                    .choices(segments)
+                    .into_any_element()
             }
             (Some(_), Some(chosen)) => div().child(method_label(chosen)).into_any_element(),
             (Some(_), None) => div().into_any_element(),
@@ -1886,13 +1892,19 @@ impl Render for MergeStackDialog {
                         })
                     })
             });
-        facts = facts.child(fact(
-            crate::tr!("pull_requests.merge.method").into_owned(),
-            v_flex().gap_2().child(method).children(default_box),
-            cx,
-        ));
-
-        let mut body = v_flex().gap_3().child(facts);
+        let mut body = v_flex().gap_3().child(facts).child(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .child(crate::tr!("pull_requests.merge.method").into_owned()),
+                )
+                .child(method)
+                .children(default_box),
+        );
         let mut ready = false;
         match &self.state {
             None => {

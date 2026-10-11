@@ -50,6 +50,8 @@ pub(crate) enum NavigationPanel {
     #[default]
     Diff,
     Plan,
+    Agents,
+    PullRequests,
     Preview,
 }
 
@@ -59,6 +61,8 @@ impl NavigationPanel {
             Self::Terminal => "terminal",
             Self::Diff => "diff",
             Self::Plan => "plan",
+            Self::Agents => "agents",
+            Self::PullRequests => "pr",
             Self::Preview => "preview",
         }
     }

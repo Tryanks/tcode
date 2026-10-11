@@ -717,7 +717,7 @@ impl Forge for Azure {
                     Some(credential)
                         if enabled
                             && credential.source == CredentialSource::Saved
-                            && !self.api.worked(&host, credential) =>
+                            && !self.api.verified(&host, credential) =>
                     {
                         Some(HostProblem::Unverified)
                     }
@@ -1116,5 +1116,21 @@ mod tests {
         ] {
             assert_eq!(cursor(foreign), None, "{foreign}");
         }
+    }
+    #[test]
+    fn saved_verification_survives_a_fresh_host() {
+        crate::forge::verification_tests::verification_survives_restart(
+            HostKind::Azure,
+            "dev.azure.com/fabrikam",
+            "project/repo",
+            |store, agent| {
+                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+                let mut host = Azure::new(store, Vec::new(), viewed);
+                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+                    .unwrap()
+                    .agent = agent;
+                host
+            },
+        );
     }
 }
