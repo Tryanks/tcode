@@ -2553,47 +2553,59 @@ impl AppShell {
         }
 
         // Chat and right-panel reading surfaces sit above the translucent canvas.
-        let docked_surface = div()
-            .debug_selector(|| "right-panel".into())
-            .size_full()
-            .bg(crate::material::content_surface(cx))
-            .shadow_sm()
-            .children(docked_panel);
-        // Expanded, the panel takes the chat's slot rather than its own: the
-        // slot grows into the whole strip, and the panel's own handle — which
-        // gpui-base draws for every visible panel after the first, with no
-        // way to turn it off — is not drawn, so no drag can move the width
-        // the panel returns to.
-        let (chat_slot, right_slot) = if chat_visible {
-            let chat = self
-                .attachment
-                .as_ref()
-                .expect("attachment checked above")
-                .chat
-                .clone();
-            let chat = v_flex()
-                .size_full()
-                .bg(crate::material::content_surface(cx))
-                .shadow_sm()
-                .child(div().flex_1().min_h_0().child(chat));
-            (chat.into_any_element(), Some(docked_surface))
-        } else {
-            (docked_surface.into_any_element(), None)
-        };
         let chat_panel = resizable_panel()
-            .when(right_docked && chat_visible, |panel| {
+            .visible(chat_visible)
+            .when(right_docked, |panel| {
                 panel.size_range(chat_min..Pixels::MAX)
             })
-            .child(chat_slot);
+            .child(
+                v_flex()
+                    .size_full()
+                    .bg(crate::material::content_surface(cx))
+                    .shadow_sm()
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            self.attachment
+                                .as_ref()
+                                .expect("attachment checked above")
+                                .chat
+                                .clone(),
+                        ),
+                    ),
+            );
         let attachment = self.attachment.as_ref().expect("attachment checked above");
-        // `flex_none`: whatever the group's sizes leave over or lack goes to the
-        // chat, so the panel is exactly the width restored above.
+        // Beside the chat, `flex_none`: whatever the group's sizes leave over or
+        // lack goes to the chat, so the panel is exactly the width restored
+        // above. Expanded, there is no chat, so the panel grows into it all.
         let right = resizable_panel()
-            .flex_none()
-            .visible(right_docked && chat_visible)
+            .when(chat_visible, |panel| panel.flex_none())
+            .visible(right_docked)
             .size(px(RIGHT_PANEL_WIDTH))
-            .size_range(px(RIGHT_PANEL_MIN_WIDTH)..px(1400.))
-            .children(right_slot);
+            .size_range(
+                px(RIGHT_PANEL_MIN_WIDTH)..if chat_visible { px(1400.) } else { Pixels::MAX },
+            )
+            .child(
+                div()
+                    .debug_selector(|| "right-panel".into())
+                    .size_full()
+                    .bg(crate::material::content_surface(cx))
+                    .shadow_sm()
+                    .children(docked_panel),
+            );
+        // Expanded, the panel's own handle has no chat to trade width with,
+        // and a drag on it would choose the width Restore returns to. gpui-base
+        // cannot switch a single handle off through its API, but a covered
+        // handle stays idle: occlude its band, 4pt either side of the
+        // panel's left edge.
+        let handle_cover = (!chat_visible).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left(sidebar_layout_width - px(5.))
+                .w(px(10.))
+                .h_full()
+                .occlude()
+        });
         let floating_right = floating_panel.map(|panel| {
             div()
                 .id("right-panel-overlay")
@@ -2671,6 +2683,7 @@ impl AppShell {
                 .relative()
                 .size_full()
                 .child(group("chat-diff-panels").child(chat_panel).child(right))
+                .children(handle_cover)
                 .children(floating_right)
                 // This fixed transparent strip only opens the overlay. Its
                 // inevitable false transition when the overlay occludes it is
@@ -2736,6 +2749,7 @@ impl AppShell {
                         .child(chat_panel)
                         .child(right),
                 )
+                .children(handle_cover)
                 .children(floating_right)
                 .into_any_element()
         };
@@ -6244,6 +6258,45 @@ mod tests {
         assert!(
             !store.read_with(cx, |store, _| store.panel_state().right_panel_open),
             "nothing covers the close button"
+        );
+    }
+
+    /// Expand and Restore lay the right panel out again without remounting it:
+    /// what its elements keep by their place in the tree — the focus a press
+    /// gives the Expand button, the scroll of a list — is still theirs after.
+    #[gpui::test]
+    fn expanding_the_right_panel_keeps_its_elements_state(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 1600.);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body", None);
+
+        let press_expand = |cx: &mut VisualTestContext| {
+            let expand = cx.debug_bounds("diff-expand").expect("the expand button");
+            cx.simulate_click(expand.center(), gpui::Modifiers::default());
+            draw(cx);
+            draw(cx);
+            cx.update(|window, cx| window.focused(cx))
+        };
+        let expanded = press_expand(cx);
+        assert!(
+            store.read_with(cx, |store, _| store.panel_state().right_panel_expanded),
+            "the press expands the panel"
+        );
+        assert!(
+            expanded.is_some(),
+            "the expanded panel's button keeps its focus"
+        );
+        let restored = press_expand(cx);
+        assert!(
+            !store.read_with(cx, |store, _| store.panel_state().right_panel_expanded),
+            "the second press restores it"
+        );
+        assert_eq!(
+            restored, expanded,
+            "the restored panel's button is the same one"
         );
     }
 
