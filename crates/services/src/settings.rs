@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 use agent::ProviderKind;
@@ -30,11 +31,45 @@ fn token_secrets(kind: HostKind) -> &'static str {
 
 /// The account email saved beside a token of a kind that takes one, by host.
 const EMAIL_SECRETS: &str = "@bitbucket-email";
+const VERIFIED_SECRETS: &str = "@source-control-verified";
+
+pub(crate) fn credential_fingerprint(token: &str, email: Option<&str>) -> String {
+    use sha2::Digest as _;
+    let mut hash = sha2::Sha256::new();
+    hash.update((token.len() as u64).to_be_bytes());
+    hash.update(token.as_bytes());
+    if let Some(email) = email {
+        hash.update([1]);
+        hash.update(email.as_bytes());
+    } else {
+        hash.update([0]);
+    }
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn saved_credential(all: &Secrets, kind: HostKind, host: &str) -> Option<(String, Option<String>)> {
+    let token = all.get(token_secrets(kind))?.get(host)?.clone();
+    let email = kind
+        .takes_email()
+        .then(|| all.get(EMAIL_SECRETS)?.get(host).cloned())
+        .flatten();
+    Some((token, email))
+}
+
+fn saved_fingerprint(all: &Secrets, kind: HostKind, host: &str) -> Option<String> {
+    let (token, email) = saved_credential(all, kind, host)?;
+    Some(credential_fingerprint(&token, email.as_deref()))
+}
+
+fn verification_key(kind: HostKind, host: &str) -> String {
+    format!("{}:{host}", token_secrets(kind))
+}
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
     secrets_path: PathBuf,
+    secrets_write: Arc<Mutex<()>>,
 }
 
 impl SettingsStore {
@@ -42,6 +77,7 @@ impl SettingsStore {
         Self {
             path: data_dir.join("settings.json"),
             secrets_path: data_dir.join("secrets.json"),
+            secrets_write: Arc::default(),
         }
     }
 
@@ -83,6 +119,7 @@ impl SettingsStore {
             all.remove(token_secrets(kind));
         }
         all.remove(EMAIL_SECRETS);
+        all.remove(VERIFIED_SECRETS);
         all
     }
 
@@ -99,13 +136,59 @@ impl SettingsStore {
             .remove(host)
     }
 
-    /// The account email saved with the host's token, which the token authenticates with.
-    pub(crate) fn email(&self, kind: HostKind, host: &str) -> Option<String> {
-        kind.takes_email().then_some(())?;
+    pub(crate) fn saved_credential(
+        &self,
+        kind: HostKind,
+        host: &str,
+    ) -> Option<(String, Option<String>)> {
+        saved_credential(&self.read_secrets().ok()?, kind, host)
+    }
+
+    pub(crate) fn credential_verified(
+        &self,
+        kind: HostKind,
+        host: &str,
+        fingerprint: &str,
+    ) -> bool {
         self.read_secrets()
-            .ok()?
-            .remove(EMAIL_SECRETS)?
-            .remove(host)
+            .ok()
+            .and_then(|all| {
+                all.get(VERIFIED_SECRETS)?
+                    .get(&verification_key(kind, host))
+                    .cloned()
+            })
+            .as_deref()
+            == Some(fingerprint)
+    }
+
+    /// A response may arrive after a replacement was saved; it only changes the credential
+    /// it was sent with. The same lock protects token and provider-secret writes.
+    pub(crate) fn record_verification(
+        &self,
+        kind: HostKind,
+        host: &str,
+        fingerprint: &str,
+        verified: bool,
+    ) -> std::io::Result<()> {
+        let _write = self.secrets_write.lock().unwrap();
+        let mut all = self.read_secrets()?;
+        if saved_fingerprint(&all, kind, host).as_deref() != Some(fingerprint) {
+            return Ok(());
+        }
+        let key = verification_key(kind, host);
+        let entries = all.entry(VERIFIED_SECRETS.to_owned()).or_default();
+        if verified {
+            if entries.get(&key).map(String::as_str) == Some(fingerprint) {
+                return Ok(());
+            }
+            entries.insert(key, fingerprint.to_owned());
+        } else if entries.remove(&key).is_none() {
+            return Ok(());
+        }
+        if entries.is_empty() {
+            all.remove(VERIFIED_SECRETS);
+        }
+        self.write_secrets(&all)
     }
 
     pub fn set_token(
@@ -134,7 +217,9 @@ impl SettingsStore {
         if email.is_some() && !kind.takes_email() {
             return Err(std::io::Error::other("this host takes no email"));
         }
+        let _write = self.secrets_write.lock().unwrap();
         let mut all = self.read_secrets()?;
+        let previous = saved_fingerprint(&all, kind, &host);
         // Only a token already sent with an email may keep going with another.
         let email_saved = all
             .get(EMAIL_SECRETS)
@@ -161,7 +246,7 @@ impl SettingsStore {
         let emails = all.entry(EMAIL_SECRETS.to_owned()).or_default();
         match email {
             Some(email) => {
-                emails.insert(host, email.to_owned());
+                emails.insert(host.clone(), email.to_owned());
             }
             None => {
                 emails.remove(&host);
@@ -169,6 +254,14 @@ impl SettingsStore {
         }
         if emails.is_empty() {
             all.remove(EMAIL_SECRETS);
+        }
+        if previous != saved_fingerprint(&all, kind, &host)
+            && let Some(entries) = all.get_mut(VERIFIED_SECRETS)
+        {
+            entries.remove(&verification_key(kind, &host));
+            if entries.is_empty() {
+                all.remove(VERIFIED_SECRETS);
+            }
         }
         self.write_secrets(&all)
     }
@@ -180,6 +273,7 @@ impl SettingsStore {
         name: &str,
         value: Option<&str>,
     ) -> std::io::Result<()> {
+        let _write = self.secrets_write.lock().unwrap();
         let mut all = self.read_secrets()?;
         let entry = all.entry(profile_id.to_string()).or_default();
         match value {
@@ -198,6 +292,7 @@ impl SettingsStore {
 
     /// Drop every secret stored for a profile id (used when deleting a profile).
     pub fn clear_profile_secrets(&self, profile_id: &str) -> std::io::Result<()> {
+        let _write = self.secrets_write.lock().unwrap();
         let mut all = self.read_secrets()?;
         if all.remove(profile_id).is_some() {
             return self.write_secrets(&all);

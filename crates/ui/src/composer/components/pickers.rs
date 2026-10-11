@@ -1,5 +1,11 @@
 use super::super::*;
-use crate::scroll::ScrollableElement as _;
+use crate::{
+    scroll::ScrollableElement as _,
+    widgets::{
+        choice::{Choice, ChoiceGroup},
+        tabs::{TabBar, TabItem},
+    },
+};
 use gpui_base::slider::{SliderEvent, SliderState};
 
 #[derive(Clone)]
@@ -634,30 +640,15 @@ fn render_model_pane(
     let muted = cx.theme().muted_foreground;
     let compact = composer.read(cx).compact;
 
-    // Left rail: favorites star + one glyph per profile. The `label` names the
-    // entry on hover so two profiles of the same kind (official vs third-party)
-    // are told apart even though they share a glyph.
     let rail_icon = |id: gpui::SharedString,
                      label: gpui::SharedString,
                      icon: Icon,
                      active: bool,
-                     target: PickerRail,
-                     cx: &mut Context<PopoverState>|
-     -> AnyElement {
+                     target: PickerRail| {
         let composer = composer.clone();
-        crate::material::tab(id, label.clone(), active, cx)
-            .flex_none()
-            .size(px(if compact { 44. } else { 28. }))
-            .rounded(cx.theme().tokens.radius.sm)
-            .when(active, |s| s.bg(cx.theme().muted))
-            .hover(|s| s.bg(cx.theme().muted))
-            .tooltip(move |window, cx| {
-                crate::widgets::tooltip::Tooltip::new(label.clone()).build(window, cx)
-            })
-            .child(
-                icon.small()
-                    .text_color(if active { cx.theme().foreground } else { muted }),
-            )
+        TabItem::new(id, label)
+            .icon(icon)
+            .selected(active)
             .on_click(move |_, _, cx| {
                 let target = target.clone();
                 composer.update(cx, |c, cx| {
@@ -665,24 +656,20 @@ fn render_model_pane(
                     cx.notify();
                 });
             })
-            .into_any_element()
     };
 
-    let mut rail_col = gpui_base::Tabs::new("model-provider-rail-tabs")
-        .flex()
-        .flex_col()
+    let mut rail_col = TabBar::new("model-provider-rail-tabs")
+        .rail()
+        .icon_only(true)
+        .compact(compact)
         .aria_label(crate::tr!("composer.model_sources"))
         .w_full()
-        .py_2()
-        .px_1p5()
-        .gap_1()
-        .child(rail_icon(
+        .item(rail_icon(
             "rail-fav".into(),
             crate::tr!("composer.favorites").into_owned().into(),
             Icon::new(IconName::Star),
             rail == PickerRail::Favorites,
             PickerRail::Favorites,
-            cx,
         ));
     // One entry per *enabled* native profile: every built-in plus any
     // user-created profiles whose switch is on. Each is its own rail.
@@ -702,23 +689,21 @@ fn render_model_pane(
     for id in profile_ids {
         let glyph = tinted_profile_glyph(&id, store_entity.read(cx));
         let label = store_entity.read(cx).provider_profile_display_name(&id);
-        rail_col = rail_col.child(rail_icon(
+        rail_col = rail_col.item(rail_icon(
             gpui::SharedString::from(format!("rail-profile-{id}")),
             label.into(),
             glyph,
             rail == PickerRail::Profile(id.clone()),
             PickerRail::Profile(id.clone()),
-            cx,
         ));
     }
     for (id, name) in acp_agents {
-        rail_col = rail_col.child(rail_icon(
+        rail_col = rail_col.item(rail_icon(
             gpui::SharedString::from(format!("rail-acp-{id}")),
             gpui::SharedString::from(name.clone()),
             Icon::empty().path("icons/box.svg"),
             rail == PickerRail::Acp(id.clone()),
             PickerRail::Acp(id.clone()),
-            cx,
         ));
     }
     let rail = div()
@@ -729,7 +714,7 @@ fn render_model_pane(
         .border_r_1()
         .border_color(cx.theme().border)
         .overflow_y_scroll_area()
-        .child(rail_col);
+        .child(div().w_full().py_2().px_1p5().child(rail_col));
 
     let list = div()
         .id("model-picker-list")
@@ -903,9 +888,7 @@ fn render_compact_model_footer(
             _ => None,
         });
 
-    let group = |label: gpui::SharedString,
-                 track: crate::scroll::ScrollArea<gpui::Stateful<gpui::Div>>,
-                 cx: &mut Context<PopoverState>| {
+    let group = |label: gpui::SharedString, track: ChoiceGroup, cx: &mut Context<PopoverState>| {
         v_flex()
             .gap(px(6.))
             .child(
@@ -930,13 +913,12 @@ fn render_compact_model_footer(
                 let selected = current.as_deref() == Some(option.value.as_str());
                 let store = store_entity.clone();
                 let value = option.value.clone();
-                crate::material::segment(
+                Choice::new(
                     gpui::SharedString::from(format!("compact-effort-{}", option.value)),
                     option.label.clone(),
-                    selected,
-                    cx,
                 )
-                .on_change(move |_, _, _, cx| {
+                .selected(selected)
+                .on_select(move |_, cx| {
                     let value = value.clone();
                     store.update(cx, |store, _cx| {
                         store.set_active_option(
@@ -947,7 +929,10 @@ fn render_compact_model_footer(
                 })
             })
             .collect::<Vec<_>>();
-        let track = crate::material::segmented_track("compact-effort", segments, cx);
+        let track = ChoiceGroup::new("compact-effort")
+            .compact(true)
+            .aria_label(label.clone())
+            .choices(segments);
         footer = footer.child(group(label.into(), track, cx));
     }
 
@@ -960,25 +945,24 @@ fn render_compact_model_footer(
                 let store = store_entity.clone();
                 let id = control.id.clone();
                 let value = row.value.clone();
-                crate::material::segment(
+                Choice::new(
                     gpui::SharedString::from(format!("compact-permission-{}", row.value)),
-                    if row.recommended {
-                        format!("{} ★", row.label)
-                    } else {
-                        row.label.clone()
-                    },
-                    shown == Some(&row.value),
-                    cx,
+                    row.label.clone(),
                 )
+                .selected(shown == Some(&row.value))
+                .recommended(row.recommended)
                 .disabled(row.unavailable.is_some())
-                .on_change(move |_, _, _, cx| {
+                .on_select(move |_, cx| {
                     store.update(cx, |store, _cx| {
                         store.set_active_option(id.clone(), Some(value.clone()))
                     });
                 })
             })
             .collect::<Vec<_>>();
-        let track = crate::material::segmented_track("compact-permission", segments, cx);
+        let track = ChoiceGroup::new("compact-permission")
+            .compact(true)
+            .aria_label(control.label.clone())
+            .choices(segments);
         let label = match (control.requested.is_some(), control.apply_hint()) {
             (true, Some(hint)) => {
                 format!(

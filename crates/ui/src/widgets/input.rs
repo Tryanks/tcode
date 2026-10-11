@@ -2,7 +2,7 @@
 mod input_configuration;
 
 use crate::{
-    sizing::{Sizable, Size},
+    material,
     theme::ActiveTheme as _,
     touch_selection::{EditMenuItem, TouchSelectionOverlay},
     widgets::menu::ContextMenuExt as _,
@@ -50,7 +50,6 @@ macro_rules! dispatch_state {
 pub struct Input {
     state: State,
     style: StyleRefinement,
-    size: Size,
     height: Option<DefiniteLength>,
     appearance: bool,
     bordered: bool,
@@ -72,7 +71,6 @@ impl Input {
         Self {
             state,
             style: StyleRefinement::default(),
-            size: Size::Medium,
             height: None,
             appearance: true,
             bordered: true,
@@ -95,10 +93,6 @@ impl Input {
         self.disabled = disabled;
         self
     }
-    pub fn h(mut self, height: impl Into<DefiniteLength>) -> Self {
-        self.height = Some(height.into());
-        self
-    }
     pub fn tab_index(mut self, tab_index: isize) -> Self {
         self.tab_index = tab_index;
         self
@@ -116,13 +110,6 @@ impl Input {
     /// language of that moment; given here, a language switch reaches it.
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = Some(placeholder.into());
-        self
-    }
-}
-
-impl Sizable for Input {
-    fn with_size(mut self, size: impl Into<Size>) -> Self {
-        self.size = size.into();
         self
     }
 }
@@ -228,6 +215,7 @@ impl Styled for Input {
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let multi_line = matches!(self.state, State::Textarea(_));
+        let compact = crate::window_seam::window_is_compact(window, cx);
         dispatch_state!(&self.state, |state| state
             .update(cx, |state, cx| state.prepare(window, cx)));
         if let Some(placeholder) = self.placeholder {
@@ -253,7 +241,12 @@ impl RenderOnce for Input {
                 ..Default::default()
             });
             state.set_editor_paddings(if multi_line {
-                Edges::all(px(8.))
+                Edges {
+                    left: px(10.),
+                    right: px(10.),
+                    top: px(8.),
+                    bottom: px(8.),
+                }
             } else {
                 Edges::default()
             });
@@ -321,23 +314,12 @@ impl RenderOnce for Input {
                 .flex()
                 .size_full()
                 .items_center()
-                // The editor inherits the ambient text style, so typography must
-                // be pinned here (upstream gpui-component convention): explicit
-                // per-size font size and a fixed line height, not one relative to
-                // whatever font size happens to cascade in.
+                // The editor inherits ambient typography unless the frame pins it.
                 .line_height(rems(1.25))
-                .map(|this| match self.size {
-                    Size::XSmall => this.text_xs(),
-                    Size::Small | Size::Medium => this.text_sm(),
-                    Size::Large => this.text_base(),
-                    Size::Size(v) => this.text_size(v * 0.875),
-                })
-                .when(!multi_line, |this| match self.size {
-                    Size::XSmall => this.h_5().px_1(),
-                    Size::Small => this.h_6().px_2(),
-                    Size::Large => this.h_10().px_3(),
-                    Size::Size(v) => this.h(v).px(v * 0.2),
-                    Size::Medium => this.h_8().px_2p5(),
+                .text_sm()
+                .rounded(material::radius_input(cx))
+                .when(!multi_line, |this| {
+                    this.h(px(material::input_height(compact))).px(px(10.))
                 })
                 // Multi-line insets come from the editor paddings above; padding
                 // the container as well doubles them.
@@ -346,11 +328,9 @@ impl RenderOnce for Input {
                         .when_some(self.height, |this, height| this.h(height))
                 })
                 .when(self.appearance, |this| {
-                    this.bg(theme.background)
-                        .rounded(theme.tokens.radius.md)
-                        .when(self.bordered, |this| {
-                            this.border_1().border_color(theme.input)
-                        })
+                    this.bg(theme.background).when(self.bordered, |this| {
+                        this.border_1().border_color(theme.input)
+                    })
                 })
                 .refine_style(&self.style)
                 .child(editor)
@@ -459,7 +439,7 @@ impl Textarea {
         self
     }
     pub fn h(mut self, value: impl Into<DefiniteLength>) -> Self {
-        self.input = self.input.h(value);
+        self.input.height = Some(value.into());
         self
     }
     pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
@@ -479,5 +459,53 @@ impl Styled for Textarea {
 impl RenderOnce for Textarea {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         self.input
+    }
+}
+
+/// The numeric form field; gpui-base owns stepping and keyboard handling.
+#[derive(IntoElement)]
+pub struct NumberInput {
+    state: Entity<InputState>,
+}
+
+impl NumberInput {
+    pub fn new(state: &Entity<InputState>) -> Self {
+        Self {
+            state: state.clone(),
+        }
+    }
+}
+
+impl RenderOnce for NumberInput {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
+        gpui_base::NumberInput::new(&self.state)
+            .controls_right()
+            .w(px(material::NUMBER_INPUT_WIDTH))
+            .h(px(material::input_height(compact)))
+            .rounded(material::radius_input(cx))
+            .bg(cx.theme().background)
+            .border_1()
+            .border_color(if focused {
+                cx.theme().ring
+            } else {
+                cx.theme().input
+            })
+            .input(Input::new(&self.state).appearance(false).h_full())
+            .increment_button(|button| {
+                button
+                    .w_4()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::icon::Icon::new(crate::icon::IconName::ChevronUp).size_3())
+            })
+            .decrement_button(|button| {
+                button
+                    .w_4()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::icon::Icon::new(crate::icon::IconName::ChevronDown).size_3())
+            })
     }
 }

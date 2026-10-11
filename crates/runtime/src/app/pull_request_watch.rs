@@ -366,7 +366,10 @@ impl AppState {
                 }
             }
             let _ = host
-                .enqueue_and_wait(|state, _| state.pull_request_watches.passing = false)
+                .enqueue_and_wait(|state, cx| {
+                    state.pull_request_watches.passing = false;
+                    state.refresh_host_credentials(cx);
+                })
                 .await;
         })
     }

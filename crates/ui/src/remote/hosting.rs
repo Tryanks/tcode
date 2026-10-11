@@ -769,11 +769,7 @@ impl HostingPanel {
                     .when(!compact, |field| {
                         field.w(px(240.)).min_w_0().flex_shrink(1.)
                     })
-                    .child(
-                        Input::new(&self.host_name_input)
-                            .small()
-                            .rounded(crate::material::radius_input(cx)),
-                    ),
+                    .child(Input::new(&self.host_name_input)),
             )
             .into_any_element();
         let traverse_rows = self.render_traverse(compact, cx);
@@ -909,14 +905,9 @@ impl HostingPanel {
                                 // line the field is on.
                                 .when(slot.is_some(), |controls| controls.flex_grow(1.))
                                 .child(
-                                    field(compact).child(
-                                        Input::new(input)
-                                            .placeholder(crate::tr!(
-                                                "remote.traverse.url_placeholder"
-                                            ))
-                                            .small()
-                                            .rounded(crate::material::radius_input(cx)),
-                                    ),
+                                    field(compact).child(Input::new(input).placeholder(
+                                        crate::tr!("remote.traverse.url_placeholder"),
+                                    )),
                                 )
                                 .child(remove)
                                 .children(slot)
@@ -966,9 +957,7 @@ impl HostingPanel {
                         .child(
                             field(compact).child(
                                 Input::new(&self.traverse_add_input)
-                                    .placeholder(crate::tr!("remote.traverse.url_placeholder"))
-                                    .small()
-                                    .rounded(crate::material::radius_input(cx)),
+                                    .placeholder(crate::tr!("remote.traverse.url_placeholder")),
                             ),
                         )
                         .child(

@@ -76,6 +76,10 @@ impl Clone for Icon {
 }
 
 impl Icon {
+    pub(crate) fn explicit_text_color(&self) -> Option<Hsla> {
+        self.text_color
+    }
+
     pub fn new(icon: impl Into<Icon>) -> Self {
         icon.into()
     }

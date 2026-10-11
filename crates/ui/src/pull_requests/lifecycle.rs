@@ -31,6 +31,7 @@ use crate::{
     widgets::{
         button::{Button, ButtonVariant, ButtonVariants as _},
         checkbox::Checkbox,
+        choice::{Choice, ChoiceGroup},
         menu::{OpenUrl, PopupMenu},
         spinner::Spinner,
     },
@@ -1287,20 +1288,24 @@ impl Render for MergeDialog {
                 let segments = state.merge_methods.iter().map(|method| {
                     let method = *method;
                     let view = view.clone();
-                    material::segment(
+                    Choice::new(
                         SharedString::from(format!("pr-merge-method-{method:?}")),
                         segment_label(method),
-                        chosen == method,
-                        cx,
                     )
-                    .on_change(move |_, _, _, cx| {
+                    .selected(chosen == method)
+                    .on_select(move |_, cx| {
                         view.update(cx, |dialog, cx| {
                             dialog.method = Some(method);
                             cx.notify();
                         })
                     })
                 });
-                material::segmented_track("pr-merge-method", segments, cx).into_any_element()
+                ChoiceGroup::new("pr-merge-method")
+                    .compact(target.window_state.read(cx).compact)
+                    .aria_label(crate::tr!("pull_requests.merge.method"))
+                    .w_full()
+                    .choices(segments)
+                    .into_any_element()
             }
             (Some(_), Some(chosen)) => div()
                 .text_size(px(13.))

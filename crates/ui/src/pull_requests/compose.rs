@@ -237,7 +237,9 @@ fn toast(
             Notification::error(message.into_owned())
         }
         PullRequestActionResult::Partial {
-            unapplied, failure, ..
+            applied,
+            unapplied,
+            failure,
         } => {
             let reason = match &**failure {
                 PullRequestActionResult::Rejected(rejection) => {
@@ -248,9 +250,14 @@ fn toast(
             // A host that sends a review as several requests stopped part way through it.
             if let Write::Review(_) = write {
                 return Some(
-                    Notification::warning(
-                        crate::tr!("pull_requests.result.review_partial_body", reason = reason)
-                            .into_owned(),
+                    Notification::error(
+                        crate::tr!(
+                            "pull_requests.result.review_partial_body",
+                            posted = applied.join(", "),
+                            not_posted = unapplied.join(", "),
+                            reason = reason
+                        )
+                        .into_owned(),
                     )
                     .title(
                         crate::tr!("pull_requests.result.review_partial", number = number)
@@ -866,9 +873,7 @@ impl PullRequestView {
                 .child(
                     Textarea::new(&input)
                         .disabled(submitting)
-                        .aria_label(spec.aria)
-                        .text_size(px(13.))
-                        .rounded(material::radius_input(cx)),
+                        .aria_label(spec.aria),
                 )
                 .when(conflict, |editor| {
                     editor.child(

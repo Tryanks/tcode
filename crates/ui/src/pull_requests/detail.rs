@@ -33,6 +33,7 @@ use crate::{
         button::{Button, ButtonVariants as _},
         input::Input,
         menu::DropdownMenu as _,
+        tabs::{TabBar, TabItem},
         tooltip::Tooltip,
     },
     window_state::WindowState,
@@ -869,32 +870,52 @@ impl PullRequestView {
                 );
             }
             let (base, head) = (snapshot.base_branch.clone(), snapshot.head_branch.clone());
-            line_two =
-                line_two
-                    .child(
-                        div()
-                            .id("pr-detail-branches")
-                            .min_w_0()
-                            .max_w(px(320.))
-                            .truncate()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            // gpui-base has no middle truncation; the tooltip holds the full pair.
-                            .child(format!("{base} ← {head}"))
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(
-                                    crate::tr!(
-                                        "pull_requests.detail.merging_into",
-                                        head = head.clone(),
-                                        base = base.clone()
-                                    )
-                                    .into_owned(),
+            line_two = line_two
+                .child(
+                    div()
+                        .id("pr-detail-branches")
+                        .min_w_0()
+                        .max_w(px(320.))
+                        .truncate()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        // gpui-base has no middle truncation; the tooltip holds the full pair.
+                        .child(format!("{base} ← {head}"))
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(
+                                crate::tr!(
+                                    "pull_requests.detail.merging_into",
+                                    head = head.clone(),
+                                    base = base.clone()
                                 )
-                                .build(window, cx)
-                            }),
+                                .into_owned(),
+                            )
+                            .build(window, cx)
+                        }),
+                )
+                .children(ago_rfc3339(&snapshot.updated_at).map(|ago| {
+                    crate::tr!(
+                        if self
+                            .store
+                            .read(cx)
+                            .settings()
+                            .source_control
+                            .kind(&key.host)
+                            == tcode_core::pull_request::HostKind::Azure
+                        {
+                            if snapshot.merged_at.is_some() {
+                                "pull_requests.conversation.merged"
+                            } else if snapshot.closed_at.is_some() {
+                                "pull_requests.conversation.closed"
+                            } else {
+                                "pull_requests.detail.created"
+                            }
+                        } else {
+                            "pull_requests.detail.updated"
+                        },
+                        ago = ago
                     )
-                    .children(ago_rfc3339(&snapshot.updated_at).map(|ago| {
-                        crate::tr!("pull_requests.detail.updated", ago = ago).into_owned()
-                    }));
+                    .into_owned()
+                }));
         }
         let mut chips = h_flex().gap(px(6.)).items_center().text_size(px(text));
         let mut has_chip = false;
@@ -1140,6 +1161,7 @@ impl PullRequestView {
             (state.can_update_branch && state.capabilities.update_branch && !self.read_only(cx))
                 .then(|| key.clone());
         let busy = offer.busy;
+        let compact = self.compact(cx);
         let chip = Button::new("pr-behind")
             .ghost()
             .compact()
@@ -1157,20 +1179,23 @@ impl PullRequestView {
                     };
                     let menu = menu.label(tooltip.clone());
                     let menu = if merges {
-                        menu.menu_with_enable(
+                        menu.menu_with_icon_and_enable(
                             crate::tr!("pull_requests.actions.update_branch").into_owned(),
+                            IconName::GitMerge,
                             item(super::lifecycle::Lifecycle::UpdateBranch),
                             !busy,
                         )
                     } else {
                         menu
                     };
-                    menu.menu_with_enable(
+                    menu.menu_with_icon_and_enable(
                         crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
+                        IconName::RefreshCw,
                         item(super::lifecycle::Lifecycle::UpdateRebase),
                         !busy,
                     )
                 })
+                .touch(compact)
                 .into_any_element(),
             // News, not an offer, for an account that may not update the branch.
             None => chip.tooltip(tooltip).into_any_element(),
@@ -1472,6 +1497,13 @@ impl PullRequestView {
                         .small()
                         .compact()
                         .icon(IconName::Ellipsis)
+                        .aria_label(
+                            crate::tr!(
+                                "pull_requests.actions_for",
+                                number = key.number.to_string()
+                            )
+                            .into_owned(),
+                        )
                         .tooltip(
                             crate::tr!(
                                 "pull_requests.actions_for",
@@ -1642,16 +1674,12 @@ impl PullRequestView {
         ]
         .into_iter()
         .map(|(id, label, segment)| {
-            material::segment(
-                SharedString::from(format!("pr-view-{id}")),
-                label,
-                tab == segment,
-                cx,
-            )
-            .on_change({
-                let view = cx.entity();
-                move |_, _, _, cx| view.update(cx, |view, cx| view.select_tab(segment, cx))
-            })
+            TabItem::new(SharedString::from(format!("pr-view-{id}")), label)
+                .selected(tab == segment)
+                .on_click({
+                    let view = cx.entity();
+                    move |_, _, cx| view.update(cx, |view, cx| view.select_tab(segment, cx))
+                })
         })
         .collect::<Vec<_>>();
         let stats = (tab == Tab::Files)
@@ -1677,7 +1705,8 @@ impl PullRequestView {
             });
         h_flex()
             .flex_none()
-            .h(px(if compact { material::TOUCH_TARGET } else { 36. }))
+            .when(compact, |row| row.py(px(8.)))
+            .when(!compact, |row| row.h(px(40.)))
             .px(px(if compact {
                 material::COMPACT_PAGE_INSET
             } else {
@@ -1686,10 +1715,12 @@ impl PullRequestView {
             .gap_2()
             .items_center()
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(material::segmented_track("pr-view", segments, cx)),
+                div().flex_1().min_w_0().child(
+                    TabBar::new("pr-view")
+                        .segmented()
+                        .compact(compact)
+                        .items(segments),
+                ),
             )
             .children(stats)
             .into_any_element()

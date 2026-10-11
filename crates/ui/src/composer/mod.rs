@@ -1310,14 +1310,11 @@ impl Render for Composer {
             )
             .when(has_terminal_contexts, |this| this.child(context_chips))
             .when(has_review_comments, |this| this.child(review_chips))
-            // Match sent-message typography while composing.
             .child(
                 Textarea::new(&self.input)
                     .placeholder(desired_placeholder)
                     .disabled(readonly)
-                    .appearance(false)
-                    .text_size(px(13.5))
-                    .line_height(px(21.)),
+                    .appearance(false),
             )
             .children(self.render_image_strip(cx))
             .child(control_row);

@@ -173,7 +173,7 @@ impl Render for ThreadDragView {
             .px(px(THREAD_ROW_PADDING_X))
             .gap_2()
             .items_center()
-            .rounded(cx.theme().tokens.radius.sm)
+            .rounded(cx.theme().tokens.radius.md)
             .bg(cx.theme().list_active)
             .shadow_lg()
             .text_color(cx.theme().sidebar_foreground)
@@ -909,6 +909,16 @@ impl SessionsSidebar {
         let rows = Rc::new(rows);
         v_flex()
             .size_full()
+            .child(
+                div()
+                    .debug_selector(|| "arrange-title".into())
+                    .flex_none()
+                    .px(px(COMPACT_PAGE_PADDING))
+                    .pt(px(8.))
+                    .text_size(px(22.))
+                    .font_semibold()
+                    .child(crate::tr!("sidebar.arrange_title")),
+            )
             .child(
                 div()
                     .flex_none()

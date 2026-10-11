@@ -11,6 +11,7 @@ use crate::{
     widgets::{
         Tooltip,
         button::{Button, ButtonVariant, ButtonVariants as _},
+        choice::{Choice, ChoiceGroup},
         input::{Input, InputEvent, InputState},
         menu::DropdownMenu as _,
         switch::Switch,
@@ -176,16 +177,9 @@ impl SourceControlPanel {
         self.with_email.clear();
     }
 
-    fn notice(&self, host: &str, kind: HostKind, problem: &HostProblem, cx: &App) -> AnyElement {
+    fn notice(&self, host: &str, problem: &HostProblem, cx: &App) -> Option<AnyElement> {
         let theme = cx.theme();
-        let warning = *problem != HostProblem::Unverified;
         let text = match problem {
-            // A host without a CLI is connected by a saved token alone.
-            HostProblem::NoCredential { tools_missing }
-                if tools_missing.is_empty() && kind.takes_email() =>
-            {
-                crate::tr!("source_control.notice_no_credential_email")
-            }
             HostProblem::NotSignedIn { tool, .. } => {
                 crate::tr!(
                     "source_control.notice_not_signed_in",
@@ -193,22 +187,7 @@ impl SourceControlPanel {
                     host = host
                 )
             }
-            HostProblem::NoCredential { tools_missing } => crate::tr!(
-                "source_control.notice_no_credential",
-                tools = tools_missing
-                    .iter()
-                    .cloned()
-                    .reduce(|first, second| crate::tr!(
-                        "source_control.tools_or",
-                        first = first,
-                        second = second
-                    )
-                    .into_owned())
-                    .unwrap_or_default()
-            ),
-            HostProblem::Unverified => {
-                crate::tr!("source_control.notice_unverified", host = host)
-            }
+            HostProblem::NoCredential { .. } | HostProblem::Unverified => return None,
         };
         let command = match problem {
             HostProblem::NotSignedIn {
@@ -219,66 +198,64 @@ impl SourceControlPanel {
         };
         let compact = self.window_state.read(cx).compact;
         let selector = format!("source-control-notice-{host}");
-        v_flex()
-            .debug_selector(move || selector)
-            .gap_1()
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .bg(theme.muted)
-            .text_size(px(12.))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .when(warning, |line| {
-                        line.child(
+        Some(
+            v_flex()
+                .debug_selector(move || selector)
+                .gap_1()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(theme.muted)
+                .text_size(px(12.))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
                             Icon::new(crate::icon::IconName::TriangleAlert)
                                 .size(px(12.))
                                 .text_color(theme.warning),
                         )
-                    })
-                    .child(div().flex_1().min_w_0().child(text.into_owned())),
-            )
-            .when_some(command, |notice, command| {
-                let copied = command.clone();
-                notice.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        // Wraps between words only, so a URL in the command stays whole.
-                        .child(
-                            h_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .flex_wrap()
-                                .px_1()
-                                .rounded_sm()
-                                .bg(theme.secondary)
-                                .font_family(theme.mono_font_family.clone())
-                                // Each word keeps the space after it, so the gaps are the
-                                // font's own and a line breaks only after one.
-                                .children(
-                                    command.split_inclusive(' ').map(|word| {
-                                        div().whitespace_nowrap().child(word.to_owned())
-                                    }),
-                                ),
-                        )
-                        .child(crate::widgets::copy::copy_button(
-                            &format!("source-control-command-{host}"),
-                            false,
-                            compact,
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    copied.clone(),
-                                ))
-                            },
-                            cx,
-                        )),
+                        .child(div().flex_1().min_w_0().child(text.into_owned())),
                 )
-            })
-            .into_any_element()
+                .when_some(command, |notice, command| {
+                    let copied = command.clone();
+                    notice.child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            // Wraps between words only, so a URL in the command stays whole.
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex_wrap()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(theme.secondary)
+                                    .font_family(theme.mono_font_family.clone())
+                                    // Each word keeps the space after it, so the gaps are the
+                                    // font's own and a line breaks only after one.
+                                    .children(command.split_inclusive(' ').map(|word| {
+                                        div().whitespace_nowrap().child(word.to_owned())
+                                    })),
+                            )
+                            .child(crate::widgets::copy::copy_button(
+                                &format!("source-control-command-{host}"),
+                                false,
+                                compact,
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        copied.clone(),
+                                    ))
+                                },
+                                cx,
+                            )),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn row(
@@ -300,6 +277,7 @@ impl SourceControlPanel {
         let toggle_host = host.to_owned();
         let switch = Switch::new(SharedString::from(format!("source-control-enabled-{host}")))
             .checked(choice.enabled)
+            .aria_label(crate::tr!("source_control.use_host", host = host).into_owned())
             .tooltip(crate::tr!("source_control.use_host", host = host).into_owned())
             .on_click(move |enabled, _, cx| {
                 store.update(cx, |store, cx| {
@@ -378,15 +356,31 @@ impl SourceControlPanel {
         row = row.child(
             div()
                 .id(SharedString::from(format!("source-control-source-{host}")))
+                .flex()
+                .flex_wrap()
+                .gap_1()
                 .text_size(px(13.))
                 .text_color(theme.muted_foreground)
                 .child(status_line(status.as_ref()))
+                .when(
+                    status
+                        .as_ref()
+                        .is_some_and(|status| status.problem == Some(HostProblem::Unverified)),
+                    |line| {
+                        let selector = format!("source-control-unverified-{host}");
+                        line.child(" · ").child(
+                            div()
+                                .debug_selector(move || selector)
+                                .child(crate::tr!("source_control.unverified").into_owned()),
+                        )
+                    },
+                )
                 .when(!order.is_empty(), |line| {
                     line.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 }),
         );
         if let Some(problem) = status.as_ref().and_then(|status| status.problem.as_ref()) {
-            row = row.child(self.notice(host, kind, problem, cx));
+            row = row.children(self.notice(host, problem, cx));
         }
         let accounts = status
             .as_ref()
@@ -463,16 +457,19 @@ impl SourceControlPanel {
         let store = self.store.clone();
         let clear_store = self.store.clone();
         let compact = self.window_state.read(cx).compact;
-        let field = div()
-            .min_w(px(120.))
-            .map(|field| {
-                if compact {
-                    field.w_full()
-                } else {
-                    field.flex_1()
-                }
-            })
-            .child(Input::new(&token).placeholder(placeholder).small());
+        let field =
+            div()
+                .min_w(px(120.))
+                .map(|field| {
+                    if compact {
+                        field.w_full()
+                    } else {
+                        field.flex_1()
+                    }
+                })
+                .child(Input::new(&token).placeholder(placeholder).aria_label(
+                    crate::tr!("source_control.token_label", host = host).into_owned(),
+                ));
         let mut buttons = h_flex()
             .gap_2()
             .child(
@@ -484,6 +481,7 @@ impl SourceControlPanel {
                 .compact()
                 .when(compact, |button| button.min_h(px(44.)))
                 .label(crate::tr!("source_control.set").into_owned())
+                .aria_label(crate::tr!("source_control.set_label", host = host).into_owned())
                 .on_click(move |_, window, cx| {
                     let value = input.read(cx).value().to_string();
                     if !value.trim().is_empty() {
@@ -503,6 +501,7 @@ impl SourceControlPanel {
                 .when(compact, |button| button.min_h(px(44.)))
                 .disabled(!token_set)
                 .label(crate::tr!("source_control.clear").into_owned())
+                .aria_label(crate::tr!("source_control.clear_label", host = host).into_owned())
                 .on_click(move |_, _, cx| {
                     clear_store.update(cx, |store, _| {
                         store.set_host_token(clear_host.clone(), None, None)
@@ -628,22 +627,21 @@ impl SourceControlPanel {
         let method = |id: &str, label: SharedString, chosen: bool| {
             let panel = panel.clone();
             let host = host.to_owned();
-            crate::material::segment(
+            Choice::new(
                 SharedString::from(format!("source-control-method-{id}-{host}")),
                 label,
-                with_email == chosen,
-                cx,
             )
-            .on_change(move |_, _, _, cx| {
+            .selected(with_email == chosen)
+            .on_select(move |_, cx| {
                 let _ = panel.update(cx, |panel, cx| {
                     panel.with_email.insert(host.clone(), chosen);
                     cx.notify();
                 });
             })
         };
-        let track = crate::material::segmented_track(
-            SharedString::from(format!("source-control-method-{host}")),
-            [
+        let track = ChoiceGroup::new(SharedString::from(format!("source-control-method-{host}")))
+            .compact(compact)
+            .choices([
                 method(
                     "api",
                     crate::tr!("source_control.bitbucket_api_token")
@@ -658,9 +656,7 @@ impl SourceControlPanel {
                         .into(),
                     false,
                 ),
-            ],
-            cx,
-        );
+            ]);
         let (description, link_label, link) = if with_email {
             (
                 crate::tr!("source_control.bitbucket_api_desc"),
@@ -708,6 +704,7 @@ impl SourceControlPanel {
         .compact()
         .when(compact, |button| button.min_h(px(44.)))
         .label(crate::tr!("source_control.set").into_owned())
+        .aria_label(crate::tr!("source_control.set_label", host = host).into_owned())
         .on_click(move |_, window, cx| {
             let token = set_token.read(cx).value().trim().to_owned();
             let token = (!token.is_empty()).then_some(token);
@@ -738,6 +735,7 @@ impl SourceControlPanel {
         .when(compact, |button| button.min_h(px(44.)))
         .disabled(!status.is_some_and(|status| status.token_set))
         .label(crate::tr!("source_control.clear").into_owned())
+        .aria_label(crate::tr!("source_control.clear_label", host = host).into_owned())
         .on_click(move |_, _, cx| {
             clear_store.update(cx, |store, _| {
                 store.set_host_token(clear_host.clone(), None, None)
@@ -750,14 +748,16 @@ impl SourceControlPanel {
             .child(description)
             .when(with_email, |editor| {
                 editor.child(
-                    div().w_full().child(
-                        Input::new(&email)
-                            .small()
-                            .aria_label(email_label.into_owned()),
-                    ),
+                    div()
+                        .w_full()
+                        .child(Input::new(&email).aria_label(email_label.into_owned())),
                 )
             })
-            .child(div().w_full().child(Input::new(&token).small()))
+            .child(
+                div().w_full().child(Input::new(&token).aria_label(
+                    crate::tr!("source_control.token_label", host = host).into_owned(),
+                )),
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -1085,16 +1085,25 @@ impl Render for AddHostDialog {
                 .into(),
             ))
             // A kind served from one host alone takes no other.
-            .child(
-                Input::new(&self.input)
-                    .small()
-                    .disabled(kind.fixed_host().is_some()),
-            )
+            .child(Input::new(&self.input).disabled(kind.fixed_host().is_some()))
             .child(
                 div()
                     .text_size(px(12.))
                     .text_color(theme.muted_foreground)
-                    .child(crate::tr!(&format!("source_control.note_{}", slug(kind))).into_owned()),
+                    .flex()
+                    .flex_wrap()
+                    .children(
+                        crate::tr!(&format!("source_control.note_{}", slug(kind)))
+                            .split_inclusive([' ', '。'])
+                            .map(|word| {
+                                div()
+                                    .min_w_0()
+                                    .when(word.is_ascii() || word.contains('.'), |fragment| {
+                                        fragment.whitespace_nowrap()
+                                    })
+                                    .child(word.to_owned())
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -1112,10 +1121,8 @@ mod tests {
     use gpui::TestAppContext;
     use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
 
-    /// A saved token the host has not seen work gets the row's one notice; a connected host with
-    /// nothing wrong gets none.
     #[gpui::test]
-    fn an_unverified_token_gets_its_notice(cx: &mut TestAppContext) {
+    fn credential_rows_show_only_actionable_notices(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         let status = |kind, source, problem| HostStatus {
@@ -1149,6 +1156,28 @@ mod tests {
                 status(HostKind::Gitlab, CredentialSource::Saved, None),
             ),
         ]);
+        let mut empty = status(
+            HostKind::Gitea,
+            CredentialSource::Saved,
+            Some(HostProblem::NoCredential {
+                tools_missing: vec!["tea".into()],
+            }),
+        );
+        empty.source = None;
+        empty.token_set = false;
+        settings
+            .source_control
+            .status
+            .insert("gitea.com".into(), empty.clone());
+        empty.kind = HostKind::Gitlab;
+        empty.problem = Some(HostProblem::NotSignedIn {
+            tool: "glab".into(),
+            command: Some("glab auth login --hostname gitlab.example.com".into()),
+        });
+        settings
+            .source_control
+            .status
+            .insert("gitlab.example.com".into(), empty);
         let (to_host, _requests) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         incoming
@@ -1188,7 +1217,16 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| _ = window.draw(cx));
         assert!(
+            cx.debug_bounds("source-control-unverified-bitbucket.org")
+                .is_some()
+        );
+        assert!(
             cx.debug_bounds("source-control-notice-bitbucket.org")
+                .is_none()
+        );
+        assert!(cx.debug_bounds("source-control-notice-gitea.com").is_none());
+        assert!(
+            cx.debug_bounds("source-control-notice-gitlab.example.com")
                 .is_some()
         );
         assert!(

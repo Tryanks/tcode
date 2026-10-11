@@ -17,6 +17,7 @@ pub(crate) use model::format_duration;
 mod residency;
 
 use crate::overlay::OverlayExt as _;
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::copy::CopiedMark;
@@ -100,6 +101,7 @@ const HEADER_PADDING: f32 = 16.;
 /// "+10" pull request badge measures 671pt in English, the widest shipped
 /// locale. [`header_extra_width`] adds what a thread's header holds beyond that.
 const HEADER_LABELS_MIN_WIDTH: f32 = 672.;
+pub(crate) const HEADER_COMPACT_MIN_WIDTH: f32 = 532.;
 /// The way back to the parent thread, each with the 8pt gap that follows it.
 /// Its arrow alone measures 20pt. With the parent's title cut to its
 /// 24-character maximum it measured 215pt for an ordinary title; 265pt leaves
@@ -2654,15 +2656,18 @@ impl ChatView {
             .when(hosts_caption, |this| this.pr_0())
             .gap_2()
             .items_center()
-            .on_prepaint(move |bounds, window, _| {
-                let width = Some(f32::from(bounds.size.width));
-                let previous = header_width.replace(width);
-                if header_labels_fit(previous, labelled_extra)
-                    != header_labels_fit(width, labelled_extra)
-                {
-                    window.request_animation_frame();
-                }
-            });
+            .min_w(px(HEADER_COMPACT_MIN_WIDTH
+                + header_extra_width(
+                    self.workspace_store.read(cx),
+                    collapsed,
+                    window.is_fullscreen(),
+                    false,
+                )
+                + if hosts_caption {
+                    window_caption::RIGHT_PANEL_CAPTION_WIDTH
+                } else {
+                    0.
+                }));
 
         // The sidebar toggle: the header's first control, immediately left of
         // the title. It lives here rather than in the sidebar because a
@@ -2766,7 +2771,7 @@ impl ChatView {
                 }
             }
         };
-        window_drag_area("chat-header-drag", base, window, cx)
+        let header = window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
             .children(parent_link)
             .child(
@@ -2929,7 +2934,24 @@ impl ChatView {
             })
             // Last child, so the header's own actions keep their places to the
             // left of it.
-            .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
+            .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)));
+        div()
+            .id("chat-header-scroll")
+            .debug_selector(|| "chat-header-scroll".into())
+            .flex_none()
+            .w_full()
+            .h(px(52.))
+            .on_prepaint(move |bounds, window, _| {
+                let width = Some(f32::from(bounds.size.width));
+                let previous = header_width.replace(width);
+                if header_labels_fit(previous, labelled_extra)
+                    != header_labels_fit(width, labelled_extra)
+                {
+                    window.request_animation_frame();
+                }
+            })
+            .child(header)
+            .overflow_x_scroll_area()
             .into_any_element()
     }
 

@@ -174,7 +174,6 @@ impl AcpAgentCard {
                     crate::tr!("providers.acp.args").into_owned(),
                     Input::new(&self.args)
                         .placeholder(crate::tr!("providers.acp.args_hint"))
-                        .xsmall()
                         .into_any_element(),
                     cx,
                 ),
@@ -186,9 +185,7 @@ impl AcpAgentCard {
                         .w_full()
                         .gap_2()
                         .child(
-                            Input::new(&self.env)
-                                .placeholder(crate::tr!("providers.acp.env_hint"))
-                                .xsmall(),
+                            Input::new(&self.env).placeholder(crate::tr!("providers.acp.env_hint")),
                         )
                         .child(
                             h_flex().w_full().justify_end().child(
@@ -500,11 +497,7 @@ impl AcpPanel {
             .flex_1()
             .min_h_0()
             .gap_3()
-            .child(
-                Input::new(&self.search)
-                    .placeholder(crate::tr!("providers.acp.search"))
-                    .small(),
-            )
+            .child(Input::new(&self.search).placeholder(crate::tr!("providers.acp.search")))
             .child(
                 v_flex()
                     .w_full()
@@ -714,21 +707,20 @@ impl AcpPanel {
             )
             .child(field(
                 crate::tr!("providers.third_party.name").into_owned(),
-                Input::new(&self.tp_name).xsmall().into_any_element(),
+                Input::new(&self.tp_name).into_any_element(),
             ))
             .child(field(
                 crate::tr!("providers.third_party.base_url").into_owned(),
-                Input::new(&self.tp_base_url).xsmall().into_any_element(),
+                Input::new(&self.tp_base_url).into_any_element(),
             ))
             .child(field(
                 crate::tr!("providers.third_party.model").into_owned(),
-                Input::new(&self.tp_model).xsmall().into_any_element(),
+                Input::new(&self.tp_model).into_any_element(),
             ))
             .child(field(
                 crate::tr!("providers.third_party.key").into_owned(),
                 Input::new(&self.tp_key)
                     .placeholder(crate::tr!("providers.third_party.key_hint"))
-                    .small()
                     .into_any_element(),
             ))
             .child(
@@ -807,10 +799,10 @@ impl AcpPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child(crate::tr!("providers.acp.custom_help").into_owned()),
             )
-            .child(Input::new(&self.custom_name).xsmall())
-            .child(Input::new(&self.custom_command).xsmall())
-            .child(Input::new(&self.custom_args).xsmall())
-            .child(Input::new(&self.custom_env).xsmall())
+            .child(Input::new(&self.custom_name))
+            .child(Input::new(&self.custom_command))
+            .child(Input::new(&self.custom_args))
+            .child(Input::new(&self.custom_env))
             .child(
                 h_flex()
                     .w_full()

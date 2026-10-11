@@ -932,10 +932,9 @@ impl OrchestrateSettingsPanel {
                             })
                     })
                     .child(
-                        Textarea::new(&row.description)
-                            .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
-                            .text_sm()
-                            .rounded(crate::material::radius_input(cx)),
+                        Textarea::new(&row.description).placeholder(crate::tr!(
+                            "orchestrate.children.description_placeholder"
+                        )),
                     )
                     .into_any_element(),
             );

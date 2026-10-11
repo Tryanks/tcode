@@ -1165,8 +1165,7 @@ impl PullRequestView {
                         .gap_1()
                         .child(
                             Input::new(&input)
-                                .placeholder(crate::tr!("pull_requests.files.filter"))
-                                .small(),
+                                .placeholder(crate::tr!("pull_requests.files.filter")),
                         )
                         .child(view.file_list("pr-file-jump-rows", &filter, true, cx))
                 })
@@ -1198,11 +1197,7 @@ impl PullRequestView {
                     .text_color(cx.theme().muted_foreground)
                     .child(count),
             )
-            .child(
-                Input::new(&input)
-                    .placeholder(crate::tr!("pull_requests.files.filter"))
-                    .small(),
-            )
+            .child(Input::new(&input).placeholder(crate::tr!("pull_requests.files.filter")))
             .child(self.file_list("pr-file-column-rows", &filter, false, cx))
             .into_any_element()
     }

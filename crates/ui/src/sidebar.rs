@@ -47,8 +47,8 @@ use arrange::{DraggedThread, DropZone, ThreadDrag};
 /// sized to the row height minus this vertical inset so it sits inside the row.
 const PROVIDER_MARK_ALPHA: f32 = 0.32;
 const PROVIDER_MARK_INSET: f32 = 8.;
-/// Horizontal padding of the grouped and flat thread rows (`px_2` / `pr_2`).
-const THREAD_ROW_PADDING_X: f32 = 8.;
+/// Right inset of provider marks, aligned with the selectable row content.
+const THREAD_ROW_PADDING_X: f32 = 10.;
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
@@ -61,7 +61,6 @@ const TRAFFIC_LIGHT_INSET: f32 = 8.;
 const FLAT_ROW_HEIGHT: f32 = 50.;
 /// The clickable row inside each flat slot (the slot adds 2px of spacing).
 const FLAT_ROW_INNER_HEIGHT: f32 = 48.;
-const GROUPED_ROW_HEIGHT: f32 = 30.;
 const SETTLED_HEADER_HEIGHT: f32 = 34.;
 
 /// A critically damped spring keeps reordering legible without bouncing rows
@@ -1235,22 +1234,33 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let key = key.to_owned();
-        Button::new(SharedString::from(format!("settled-more-{key}")))
-            .debug_selector({
-                let key = key.clone();
-                move || format!("settled-more-{key}")
-            })
-            .ghost()
-            .icon(IconName::Plus)
-            .label(crate::tr!("sidebar.show_more_settled", count = count))
-            .w_full()
-            .h(px(if self.compact(cx) { 44. } else { 34. }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                *this.settled_limits.entry(key.clone()).or_insert(10) += 25;
-                this.compact_model_dirty = true;
-                cx.notify();
-            }))
-            .into_any_element()
+        crate::material::accessible_clickable(
+            h_flex(),
+            SharedString::from(format!("settled-more-{key}")),
+            Role::Button,
+            crate::tr!("sidebar.show_more_settled", count = count),
+            cx,
+        )
+        .debug_selector({
+            let key = key.clone();
+            move || format!("settled-more-{key}")
+        })
+        .w_full()
+        .h(px(if self.compact(cx) { 44. } else { 34. }))
+        .px_2()
+        .gap_2()
+        .text_size(px(13.))
+        .text_color(cx.theme().muted_foreground)
+        .cursor_pointer()
+        .hover(|row| row.bg(cx.theme().list_hover))
+        .child(Icon::new(IconName::Plus).size(px(14.)))
+        .child(crate::tr!("sidebar.show_more_settled", count = count))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            *this.settled_limits.entry(key.clone()).or_insert(10) += 25;
+            this.compact_model_dirty = true;
+            cx.notify();
+        }))
+        .into_any_element()
     }
 
     fn render_active_empty(&self, cx: &App) -> gpui::AnyElement {
@@ -1694,24 +1704,20 @@ impl SessionsSidebar {
             .px(px(if compact { COMPACT_PAGE_PADDING } else { 8. }))
             .pb_1()
             .child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    "sidebar-hosts",
-                    Role::Button,
-                    crate::tr!("hosts.title"),
+                crate::material::selectable_row(
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        "sidebar-hosts",
+                        Role::Button,
+                        crate::tr!("hosts.title"),
+                        cx,
+                    ),
+                    active,
+                    compact,
                     cx,
                 )
-                .h(px(if compact { 44. } else { 32. }))
                 .debug_selector(|| "sidebar-feature-hosts".into())
-                .items_center()
-                .gap_2()
-                .px_2()
-                .rounded(cx.theme().tokens.radius.md)
                 .cursor_pointer()
-                .when(active, |row| row.bg(cx.theme().list_active))
-                .when(!active, |row| {
-                    row.hover(|s| s.bg(cx.theme().sidebar_accent))
-                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.window_state
                         .update(cx, |state, cx| state.go(Destination::Hosts, cx));
@@ -2175,7 +2181,9 @@ impl SessionsSidebar {
                     .as_ref()
                     .is_some_and(|drag| drag.session_id == meta.id)
                 {
-                    item.child(Self::render_drag_gap(GROUPED_ROW_HEIGHT))
+                    item.child(Self::render_drag_gap(
+                        crate::material::selectable_row_height(false),
+                    ))
                 } else {
                     item.child(self.render_thread(
                         meta,
@@ -2299,11 +2307,16 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let session_id = state.session_id.clone();
-        let row = crate::material::accessible_clickable(
-            base,
-            row_id,
-            Role::Button,
-            crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
+        let row = crate::material::selectable_row(
+            crate::material::accessible_clickable(
+                base,
+                row_id,
+                Role::Button,
+                crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
+                cx,
+            ),
+            is_active,
+            false,
             cx,
         )
         .aria_selected(is_active)
@@ -2313,10 +2326,6 @@ impl SessionsSidebar {
         })
         .group(state.row_key.clone())
         .cursor_pointer()
-        .when(is_active, |row| row.bg(cx.theme().list_active))
-        .when(!is_active, |row| {
-            row.hover(|row| row.bg(cx.theme().sidebar_accent))
-        })
         .on_click(cx.listener(move |this, _, _, cx| {
             let session_id = session_id.clone();
             this.compact_model_dirty = true;
@@ -2364,7 +2373,7 @@ impl SessionsSidebar {
                 .flex_1()
                 .min_w_0()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                .child(Input::new(input).small())
+                .child(Input::new(input))
                 .into_any_element()
         } else {
             truncated_sidebar_label()
@@ -2712,15 +2721,16 @@ impl SessionsSidebar {
                 is_active,
                 cx,
             )
-            .h(px(GROUPED_ROW_HEIGHT))
-            .items_center()
-            .gap_2()
+            // Indent threads beneath their project header's icon and chevron.
             .pl(px(30.))
-            .pr(px(THREAD_ROW_PADDING_X))
-            .rounded(cx.theme().tokens.radius.sm)
             // First child so the row's content paints over the mark.
             .when_some(
-                self.provider_mark(meta, GROUPED_ROW_HEIGHT, THREAD_ROW_PADDING_X, cx),
+                self.provider_mark(
+                    meta,
+                    crate::material::selectable_row_height(false),
+                    THREAD_ROW_PADDING_X,
+                    cx,
+                ),
                 |row, mark| row.relative().child(mark),
             )
             .when_some(
@@ -2884,11 +2894,11 @@ impl SessionsSidebar {
                 let id = session_id.clone();
                 move || format!("sidebar-thread-{id}")
             })
+            // Two lines need the taller flat slot; the rail supplies its surface.
             .h(px(FLAT_ROW_INNER_HEIGHT))
+            .items_stretch()
             .justify_center()
             .gap(px(2.))
-            .px(px(THREAD_ROW_PADDING_X))
-            .rounded(cx.theme().tokens.radius.sm)
             // First child so the row's content paints over the mark.
             .when_some(
                 self.provider_mark(meta, FLAT_ROW_INNER_HEIGHT, THREAD_ROW_PADDING_X, cx),
@@ -2910,7 +2920,7 @@ impl SessionsSidebar {
                 .w_full()
                 .min_w_0()
                 .items_center()
-                .gap_2()
+                .gap(px(6.))
                 .when_some(dot, |line, color| {
                     line.child(div().flex_none().size(px(6.)).rounded_full().bg(color))
                 })
@@ -4078,7 +4088,7 @@ impl Render for SessionsSidebar {
                             list.child(thread_list_scrollbar(
                                 "grouped-thread-scrollbar",
                                 &self.grouped_list_state,
-                                GROUPED_ROW_HEIGHT,
+                                crate::material::selectable_row_height(false),
                             ))
                         })
                         .into_any_element()

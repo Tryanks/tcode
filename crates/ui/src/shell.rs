@@ -19,11 +19,12 @@ use std::time::Duration;
 
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
+use crate::widgets::tabs::{TabBar, TabItem};
 use crate::window_state::{NavigationPanel, NavigationSnapshot};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Div,
-    ElementId, Entity, FocusHandle, Global, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Render, Role, SharedString,
+    ElementId, Entity, FocusHandle, Focusable as _, Global, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Role, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, actions,
     div, prelude::FluentBuilder as _, px,
 };
@@ -186,6 +187,9 @@ struct ShellAttachment {
     /// panel's own handle, then whatever they chose (for this run). A sidebar
     /// drag never changes it, even when it squeezes the panel.
     right_width: Rc<Cell<Pixels>>,
+    floating_split: Entity<ResizableState>,
+    floating_focus: Entity<gpui_base::PopoverState>,
+    floating_restore_pending: bool,
     /// Keep giving the docked right panel its width until the group reports
     /// it, then stop so the restore never fights a drag. Armed when the panel
     /// docks and on every window width change: the group rescales its panels
@@ -298,7 +302,7 @@ const RIGHT_PANEL_MIN_WIDTH: f32 = 320. + window_caption::RIGHT_PANEL_CAPTION_WI
 /// chevron, and five panel toggles measure 531pt. Where the chat's minimum and
 /// the panel's do not both fit beside the sidebar, the panel floats over the
 /// chat instead.
-const CHAT_MIN_WIDTH: f32 = 532.;
+const CHAT_MIN_WIDTH: f32 = crate::chat::HEADER_COMPACT_MIN_WIDTH;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
@@ -519,6 +523,8 @@ impl AppShell {
                         .map(|store| store.read(cx).panel_state().right_tab)
                     {
                         Some(RightTab::Plan) => NavigationPanel::Plan,
+                        Some(RightTab::Agents) => NavigationPanel::Agents,
+                        Some(RightTab::PullRequests) => NavigationPanel::PullRequests,
                         Some(RightTab::Preview) => NavigationPanel::Preview,
                         _ => NavigationPanel::Diff,
                     }
@@ -614,6 +620,8 @@ impl AppShell {
         } else {
             let tab = match pending.panel {
                 NavigationPanel::Plan => RightTab::Plan,
+                NavigationPanel::Agents => RightTab::Agents,
+                NavigationPanel::PullRequests => RightTab::PullRequests,
                 NavigationPanel::Preview => RightTab::Preview,
                 _ => RightTab::Diff,
             };
@@ -812,6 +820,18 @@ impl AppShell {
             sidebar,
             split: cx.new(|_| ResizableState::default()),
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
+            floating_split: cx.new(|_| ResizableState::default()),
+            floating_focus: cx.new(|cx| {
+                let mut focus = gpui_base::PopoverState::new(false, cx);
+                let store = link.store.downgrade();
+                focus.set_on_open_change(Some(Rc::new(move |open, _, cx| {
+                    if !open {
+                        _ = store.update(cx, |store, cx| store.close_diff_panel(cx));
+                    }
+                })));
+                focus
+            }),
+            floating_restore_pending: true,
             right_restore_pending: true,
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             sidebar_restore_pending: false,
@@ -1781,14 +1801,7 @@ impl AppShell {
             .debug_selector(|| "compact-arrange-page".into())
             .size_full()
             .bg(crate::material::content_surface(cx))
-            .child(nav_bar(
-                None,
-                crate::tr!("sidebar.arrange_title").into_owned().into(),
-                None,
-                vec![done],
-                window,
-                cx,
-            ))
+            .child(nav_bar(None, "".into(), None, vec![done], window, cx))
             .child(body)
             .into_any_element()
     }
@@ -1973,6 +1986,12 @@ impl AppShell {
             .as_ref()
             .map(|pending| pending.panel.id());
         let terminal = selected_panel.map_or(self.panel_shows_terminal, |id| id == "terminal");
+        let show_agents = store.active_session_id().is_some_and(|id| {
+            !crate::agents_panel::Agents::of(store, &id).is_empty()
+                || panel.right_tab == RightTab::Agents
+                || selected_panel == Some("agents")
+        });
+        let show_preview = store.scope().is_full();
         attachment.preview.update(cx, |preview, cx| {
             preview.set_compact_panel_selected(
                 self.pending_navigation_restore.is_none()
@@ -2003,6 +2022,21 @@ impl AppShell {
                 }),
             ),
             (
+                "agents",
+                crate::tr!("agents.title").into_owned(),
+                selected_panel.map_or(!terminal && panel.right_tab == RightTab::Agents, |id| {
+                    id == "agents"
+                }),
+            ),
+            (
+                "pr",
+                crate::tr!("pull_requests.title").into_owned(),
+                selected_panel.map_or(
+                    !terminal && panel.right_tab == RightTab::PullRequests,
+                    |id| id == "pr",
+                ),
+            ),
+            (
                 "preview",
                 crate::tr!("preview.title").into_owned(),
                 selected_panel.map_or(!terminal && panel.right_tab == RightTab::Preview, |id| {
@@ -2011,21 +2045,20 @@ impl AppShell {
             ),
         ]
         .into_iter()
-        .filter(|(id, _, _)| *id != "preview" || attachment.link.store.read(cx).scope().is_full())
+        .filter(|(id, _, _)| (*id != "preview" || show_preview) && (*id != "agents" || show_agents))
         .map(|(id, label, selected)| {
             let shell = shell.clone();
-            crate::material::segment(
-                SharedString::from(format!("compact-panel-{id}")),
-                label,
-                selected,
-                cx,
-            )
-            .on_change(move |_, _, _, cx| {
-                shell.update(cx, |shell, cx| shell.show_panel(id, cx));
-            })
+            TabItem::new(SharedString::from(format!("compact-panel-{id}")), label)
+                .selected(selected)
+                .on_click(move |_, _, cx| {
+                    shell.update(cx, |shell, cx| shell.show_panel(id, cx));
+                })
         })
         .collect::<Vec<_>>();
-        let segments = crate::material::segmented_track("compact-panel-track", segments, cx);
+        let segments = TabBar::new("compact-panel-track")
+            .segmented()
+            .compact(true)
+            .items(segments);
 
         let body: AnyElement = if self.pending_navigation_restore.is_some() {
             crate::material::loading_skeleton(cx)
@@ -2131,6 +2164,8 @@ impl AppShell {
             pending.panel = match id {
                 "terminal" => NavigationPanel::Terminal,
                 "plan" => NavigationPanel::Plan,
+                "agents" => NavigationPanel::Agents,
+                "pr" => NavigationPanel::PullRequests,
                 "preview" => NavigationPanel::Preview,
                 _ => NavigationPanel::Diff,
             };
@@ -2151,12 +2186,16 @@ impl AppShell {
             tab => {
                 let tab = match tab {
                     "plan" => RightTab::Plan,
+                    "agents" => RightTab::Agents,
+                    "pr" => RightTab::PullRequests,
                     "preview" => RightTab::Preview,
                     _ => RightTab::Diff,
                 };
                 if !(panel.right_panel_open && panel.right_tab == tab) {
                     match tab {
                         RightTab::Plan => store.toggle_plan_panel(cx),
+                        RightTab::Agents => store.toggle_agents_panel(cx),
+                        RightTab::PullRequests => store.toggle_pull_requests_panel(cx),
                         RightTab::Preview => store.toggle_preview_panel(cx),
                         _ => store.toggle_diff_panel(cx),
                     }
@@ -2512,6 +2551,33 @@ impl AppShell {
             ));
         let right_floats =
             diff_open && chat_visible && beside_sidebar < chat_min + px(RIGHT_PANEL_MIN_WIDTH);
+        attachment.floating_focus.update(cx, |focus, cx| {
+            focus.sync_open(right_floats, window, cx);
+        });
+        let floating_width = attachment
+            .right_width
+            .get()
+            .max(px(RIGHT_PANEL_MIN_WIDTH))
+            .min(beside_sidebar);
+        if !right_floats || layout_changed {
+            attachment.floating_restore_pending = true;
+        }
+        if right_floats && attachment.floating_restore_pending {
+            let restored =
+                attachment
+                    .floating_split
+                    .update(cx, |state, cx| match state.sizes().get(1) {
+                        Some(width) if (*width - floating_width).abs() > px(0.5) => {
+                            state.resize_panel(1, floating_width, window, cx);
+                            false
+                        }
+                        Some(_) => true,
+                        None => false,
+                    });
+            if restored && !layout_changed {
+                attachment.floating_restore_pending = false;
+            }
+        }
         let right_docked = diff_open && !right_floats;
         let (docked_panel, floating_panel) = if right_floats {
             (None, Some(right_panel))
@@ -2607,26 +2673,52 @@ impl AppShell {
                 .occlude()
         });
         let floating_right = floating_panel.map(|panel| {
+            let focus = attachment.floating_focus.read(cx).focus_handle(cx);
+            let remembered = attachment.right_width.clone();
             div()
-                .id("right-panel-overlay")
-                .debug_selector(|| "right-panel-overlay".into())
                 .absolute()
                 .top_0()
                 .right_0()
                 .h_full()
-                .w(attachment
-                    .right_width
-                    .get()
-                    .min(beside_sidebar)
-                    .max(px(RIGHT_PANEL_MIN_WIDTH)))
-                // Near-opaque, so the chat beneath does not bleed through the
-                // translucent content surface.
-                .bg(cx.theme().popover)
-                .shadow_lg()
-                .border_l_1()
-                .border_color(cx.theme().border)
-                .occlude()
-                .child(panel)
+                .w(beside_sidebar)
+                .child(
+                    h_resizable("floating-right-panels")
+                        .with_state(&attachment.floating_split)
+                        .on_resize(move |state, _, cx| {
+                            if let Some(width) = state.read(cx).sizes().get(1) {
+                                remembered.set(*width);
+                            }
+                        })
+                        .child(resizable_panel().size_range(px(0.)..Pixels::MAX))
+                        .child(
+                            resizable_panel()
+                                .flex_none()
+                                .size(floating_width)
+                                .size_range(
+                                    px(RIGHT_PANEL_MIN_WIDTH).min(beside_sidebar)..beside_sidebar,
+                                )
+                                .child(
+                                    div()
+                                        .id("right-panel-overlay")
+                                        .debug_selector(|| "right-panel-overlay".into())
+                                        .size_full()
+                                        .role(Role::Dialog)
+                                        .tab_group()
+                                        .track_focus(&focus)
+                                        .key_context("Popover")
+                                        .on_action(window.listener_for(
+                                            &attachment.floating_focus,
+                                            gpui_base::PopoverState::on_action_cancel,
+                                        ))
+                                        .bg(cx.theme().popover)
+                                        .shadow_lg()
+                                        .border_l_1()
+                                        .border_color(cx.theme().border)
+                                        .occlude()
+                                        .child(panel),
+                                ),
+                        ),
+                )
         });
 
         let remembered_right = attachment.right_width.clone();
@@ -2823,6 +2915,13 @@ impl Render for AppShell {
                 self.window_title = title;
             }
         }
+        if (self.compact(cx) || self.window_state.read(cx).route() != Route::Chat)
+            && let Some(attachment) = &self.attachment
+        {
+            attachment
+                .floating_focus
+                .update(cx, |focus, cx| focus.sync_open(false, window, cx));
+        }
         // The palette takes focus on the frame it opens, at either width.
         let (palette_open, focus_query) = {
             let state = self.window_state.read(cx);
@@ -2865,7 +2964,7 @@ impl Render for AppShell {
 mod tests {
     use std::cell::RefCell;
 
-    use gpui::{Focusable as _, TestAppContext, VisualTestContext, size};
+    use gpui::{TestAppContext, VisualTestContext, size};
     use tcode_client::host::Transport;
     use tcode_protocol::{
         ClientPayload, Command, EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic,
@@ -3658,68 +3757,78 @@ mod tests {
     #[gpui::test]
     fn cold_start_restores_the_selected_panel_after_session_status(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, client, cx) =
-            mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
-        restore_index(&shell, &host, true, cx);
-        restore_status(&shell, &host, cx);
-        assert!(
-            cx.debug_bounds("baseline-loading").is_some(),
-            "status alone is not the conversation baseline"
-        );
-        // The host's language is applied with its settings; the assertions
-        // read English.
-        let settings = tcode_core::settings::Settings {
-            language: Some(crate::LANGUAGE_ENGLISH.into()),
-            ..Default::default()
-        };
-        for (topic, event) in [
-            (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
-            (
-                Topic::SessionEvents {
-                    session_id: "thread-a".into(),
-                },
-                ServerEvent::SessionSnapshot {
-                    from: 0,
-                    end: 0,
-                    records: Vec::new(),
-                    total: 0,
-                    total_turns: 0,
-                    truncated: false,
-                },
-            ),
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        for (saved_panel, expected_tab) in [
+            ("plan", RightTab::Plan),
+            ("agents", RightTab::Agents),
+            ("pull_requests", RightTab::PullRequests),
         ] {
-            host.incoming
-                .try_send(
-                    encode_line(&HostMessage::Event(EventEnvelope {
-                        request_id: None,
-                        topic,
-                        event,
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
+            let (shell, host, client, cx) = mount_restored_at_width(
+                cx,
+                &["hosts", "threads", "thread", "panel"],
+                true,
+                393.,
+                saved_panel,
+            );
+            restore_index(&shell, &host, true, cx);
+            restore_status(&shell, &host, cx);
+            assert!(
+                cx.debug_bounds("baseline-loading").is_some(),
+                "status alone is not the conversation baseline"
+            );
+            let settings = tcode_core::settings::Settings {
+                language: Some(crate::LANGUAGE_ENGLISH.into()),
+                ..Default::default()
+            };
+            for (topic, event) in [
+                (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
+                (
+                    Topic::SessionEvents {
+                        session_id: "thread-a".into(),
+                    },
+                    ServerEvent::SessionSnapshot {
+                        from: 0,
+                        end: 0,
+                        records: Vec::new(),
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
+                    },
+                ),
+            ] {
+                host.incoming
+                    .try_send(
+                        encode_line(&HostMessage::Event(EventEnvelope {
+                            request_id: None,
+                            topic,
+                            event,
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            await_restore_update(&shell, cx, |store| !store.chat_loading());
+            shell.read_with(cx, |shell, cx| {
+                assert!(shell.pending_navigation_restore.is_none());
+                assert_eq!(
+                    shell.window_state.read(cx).history().last(),
+                    Some(&Destination::Panel)
+                );
+                assert_eq!(
+                    shell.store().unwrap().read(cx).panel_state().right_tab,
+                    expected_tab
+                );
+            });
+            // A preference changed during the debounce must survive the checkpoint.
+            client.preferences.borrow_mut().language = Some("zh-CN".into());
+            cx.executor().advance_clock(Duration::from_millis(151));
+            draw(cx);
+            assert_eq!(client.load_preferences().language.as_deref(), Some("zh-CN"));
+            assert_eq!(
+                client.load_preferences().navigation.unwrap()["panel"],
+                saved_panel
+            );
         }
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
-        shell.read_with(cx, |shell, cx| {
-            assert!(shell.pending_navigation_restore.is_none());
-            assert_eq!(
-                shell.window_state.read(cx).history().last(),
-                Some(&Destination::Panel)
-            );
-            assert_eq!(
-                shell.store().unwrap().read(cx).panel_state().right_tab,
-                RightTab::Plan
-            );
-        });
-        // A preference changed during the debounce must survive the checkpoint.
-        client.preferences.borrow_mut().language = Some("zh-CN".into());
-        cx.executor().advance_clock(Duration::from_millis(151));
-        draw(cx);
-        assert_eq!(client.load_preferences().language.as_deref(), Some("zh-CN"));
-        assert_eq!(
-            client.load_preferences().navigation.unwrap()["panel"],
-            "plan"
-        );
     }
 
     #[gpui::test]
@@ -6180,6 +6289,42 @@ mod tests {
 
         walk(cx, &[1600., 1200., 1600., 1140., 720., 1600., 1200.]);
 
+        resize(cx, 900.);
+        draw_until(&shell, cx, &host, "diff-body", None);
+        draw(cx);
+        let overlay = cx.debug_bounds("right-panel-overlay").unwrap();
+        let from = gpui::point(overlay.left(), px(400.));
+        let to = from + gpui::point(px(60.), px(0.));
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        for step in [from + gpui::point(px(5.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), gpui::Modifiers::default());
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        draw(cx);
+        let resized = cx.debug_bounds("right-panel-overlay").unwrap().size.width;
+        assert!(
+            resized < overlay.size.width,
+            "the floating edge shrinks the panel"
+        );
+        resize(cx, 1600.);
+        draw_until(&shell, cx, &host, "diff-body", None);
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("right-panel").unwrap().size.width,
+            resized,
+            "docking remembers the width chosen while floating"
+        );
+        // Return to the default for the remaining width walk.
+        shell.update(cx, |shell, _| {
+            let attachment = shell.attachment.as_mut().unwrap();
+            attachment.right_width.set(px(RIGHT_PANEL_WIDTH));
+            attachment.right_restore_pending = true;
+        });
+        resize(cx, 1200.);
+        draw(cx);
+        draw(cx);
+
         // At 1200pt the chat's minimum already holds the panel below the width
         // the user chose; a sidebar drag squeezes it further, but only a drag
         // of the panel's own handle chooses a width.
@@ -6259,6 +6404,79 @@ mod tests {
             !store.read_with(cx, |store, _| store.panel_state().right_panel_open),
             "nothing covers the close button"
         );
+    }
+
+    #[gpui::test]
+    fn floating_panel_takes_focus_and_returns_it_on_close(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 1600.);
+        let input = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx)
+        });
+        cx.update(|window, cx| input.focus(window, cx));
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body", None);
+        resize(cx, 720.);
+        draw(cx);
+        cx.update(|window, _| {
+            assert!(
+                !input.is_focused(window),
+                "the covered composer cannot keep focus"
+            )
+        });
+        let close = cx.debug_bounds("diff-close").unwrap();
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        draw(cx);
+        cx.update(|window, _| assert!(input.is_focused(window), "closing returns to the composer"));
+    }
+
+    #[gpui::test]
+    fn narrow_chat_header_scrolls_to_its_panel_controls(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 720.);
+        draw(cx);
+        draw(cx);
+        let header = cx.debug_bounds("chat-header-scroll").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: header.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-1000.), px(0.))),
+            ..Default::default()
+        });
+        draw(cx);
+        let toggle = cx.debug_bounds("diff-panel").unwrap();
+        assert!(
+            toggle.left() >= header.left() && toggle.right() <= header.right(),
+            "the last panel toggle must scroll into view"
+        );
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        draw_until(&shell, cx, &host, "diff-body", None);
+        assert!(store.read_with(cx, |store, _| store.panel_state().right_panel_open));
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_floating_panel(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 720.);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body", None);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(!store.read_with(cx, |store, _| store.panel_state().right_panel_open));
+        assert!(cx.debug_bounds("right-panel-overlay").is_none());
     }
 
     /// Expand and Restore lay the right panel out again without remounting it:

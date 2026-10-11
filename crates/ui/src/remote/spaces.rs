@@ -633,7 +633,7 @@ pub(crate) fn open_create(
                     v_flex()
                         .gap_3()
                         .debug_selector(|| "spaces-create".into())
-                        .child(Input::new(&field).rounded(crate::material::radius_input(cx)))
+                        .child(Input::new(&field))
                         .child(
                             div()
                                 .text_size(px(13.))
@@ -945,9 +945,7 @@ mod section {
                     .w(px(420.))
                     .title(crate::tr!("spaces.rename_title").into_owned())
                     .on_ok(move |_, window, cx| ok(window, cx))
-                    .content(move |content, _, cx| {
-                        content.child(Input::new(&field).rounded(crate::material::radius_input(cx)))
-                    })
+                    .content(move |content, _, _| content.child(Input::new(&field)))
                     .footer(
                         DialogActions::new()
                             .child(

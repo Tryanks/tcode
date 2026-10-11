@@ -31,6 +31,7 @@ use crate::{
     widgets::{
         Popover,
         button::{Button, ButtonVariants as _},
+        choice::{Choice, ChoiceGroup},
         input::{InputEvent, Textarea, TextareaState},
         menu::CopyText,
     },
@@ -987,14 +988,13 @@ impl PullRequestView {
                     ),
                 };
                 let view = view.clone();
-                material::segment(
+                Choice::new(
                     SharedString::from(format!("pr-verdict-{id}")),
                     crate::tr!(label).into_owned(),
-                    verdict == segment,
-                    cx,
                 )
+                .selected(verdict == segment)
                 .disabled(!verdicts.contains(&segment))
-                .on_change(move |_, _, _, cx| {
+                .on_select(move |_, cx| {
                     view.update(cx, |view, cx| {
                         if let Some(writes) = view.writes_mut() {
                             writes.review.verdict = Some(segment);
@@ -1137,12 +1137,13 @@ impl PullRequestView {
                 )
             })
             .children(summary.map(|input| {
-                Textarea::new(&input)
-                    .aria_label(crate::tr!("pull_requests.review.summary_label"))
-                    .text_size(px(13.))
-                    .rounded(material::radius_input(cx))
+                Textarea::new(&input).aria_label(crate::tr!("pull_requests.review.summary_label"))
             }))
-            .child(material::segmented_track("pr-verdict", segments, cx))
+            .child(
+                ChoiceGroup::new("pr-verdict")
+                    .compact(compact)
+                    .choices(segments),
+            )
             .child(
                 div()
                     .text_size(px(11.))

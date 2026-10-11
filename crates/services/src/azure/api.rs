@@ -48,6 +48,7 @@ pub(super) fn error(kind: ForgeErrorKind, description: impl Into<String>) -> For
 pub(super) struct Credential {
     /// The Authorization header's value.
     authorization: String,
+    verification: String,
     pub(super) source: CredentialSource,
 }
 
@@ -69,6 +70,7 @@ impl Credential {
             )
         };
         Some(Self {
+            verification: crate::settings::credential_fingerprint(token, None),
             authorization,
             source,
         })
@@ -161,9 +163,6 @@ pub(super) struct Api {
     paused: Mutex<HashMap<String, SystemTime>>,
     /// The account each credential reads as, by fingerprint, for a few minutes.
     viewers: Mutex<HashMap<String, Cached<Value>>>,
-    /// Each organization and the fingerprint of the last saved token it answered a request
-    /// with.
-    worked: Mutex<HashMap<String, String>>,
 }
 
 impl Api {
@@ -185,7 +184,6 @@ impl Api {
             az: Mutex::default(),
             paused: Mutex::default(),
             viewers: Mutex::default(),
-            worked: Mutex::default(),
         })
     }
 
@@ -241,9 +239,8 @@ impl Api {
         }))
     }
 
-    pub(super) fn forget(&self, authority: &str) {
+    pub(super) fn forget(&self, _: &str) {
         *self.az.lock().unwrap() = None;
-        self.worked.lock().unwrap().remove(authority);
     }
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
@@ -251,8 +248,9 @@ impl Api {
     }
 
     /// Whether the organization has answered a request sent with `credential`, a saved token.
-    pub(super) fn worked(&self, authority: &str, credential: &Credential) -> bool {
-        self.worked.lock().unwrap().get(authority) == Some(&credential.fingerprint())
+    pub(super) fn verified(&self, authority: &str, credential: &Credential) -> bool {
+        self.store
+            .credential_verified(HostKind::Azure, authority, &credential.verification)
     }
 
     /// The organization `AZURE_DEVOPS_EXT_PAT` is for, when both variables are set: by name, as
@@ -459,11 +457,14 @@ impl Api {
             if let Some(credential) = credential
                 .as_ref()
                 .filter(|credential| credential.source == CredentialSource::Saved)
+                && let Err(error) = self.store.record_verification(
+                    HostKind::Azure,
+                    authority,
+                    &credential.verification,
+                    true,
+                )
             {
-                self.worked
-                    .lock()
-                    .unwrap()
-                    .insert(authority.to_owned(), credential.fingerprint());
+                log::warn!("failed to save credential verification: {error}");
             }
             return Ok(Response { body, truncated });
         }
@@ -474,6 +475,16 @@ impl Api {
                 "Azure DevOps request needs a sign-in",
             ),
             203 | 300..=399 | 401 => {
+                if let Some(credential) = credential.as_ref()
+                    && let Err(error) = self.store.record_verification(
+                        HostKind::Azure,
+                        authority,
+                        &credential.verification,
+                        false,
+                    )
+                {
+                    log::warn!("failed to clear credential verification: {error}");
+                }
                 self.forget(authority);
                 error(
                     ForgeErrorKind::Unauthorized,

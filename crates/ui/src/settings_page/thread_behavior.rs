@@ -95,7 +95,9 @@ impl SettingsPage {
                         None,
                         cx,
                     ))
-                    .child(days_input(&self.auto_settle_input.state))
+                    .child(crate::widgets::input::NumberInput::new(
+                        &self.auto_settle_input.state,
+                    ))
                     .into_any_element(),
             );
         }
@@ -317,30 +319,6 @@ impl SettingsPage {
     }
 }
 
-// gpui-base NumberInput owns stepping, but its text and button slots are
-// unstyled; compose the existing input and icons for both days controls.
-fn days_input(state: &Entity<InputState>) -> gpui_base::NumberInput {
-    gpui_base::NumberInput::new(state)
-        .controls_right()
-        .w(px(88.))
-        .h(px(32.))
-        .input(Input::new(state).small())
-        .increment_button(|button| {
-            button
-                .w_4()
-                .items_center()
-                .justify_center()
-                .child(Icon::new(IconName::ChevronUp).size_3())
-        })
-        .decrement_button(|button| {
-            button
-                .w_4()
-                .items_center()
-                .justify_center()
-                .child(Icon::new(IconName::ChevronDown).size_3())
-        })
-}
-
 fn days_label(value: Option<f64>) -> SharedString {
     value.map_or_else(
         || crate::tr!("settings.auto_settle.never").into_owned().into(),
@@ -517,7 +495,7 @@ impl Render for ProjectRulesEditor {
                         .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!("settings.auto_settle.days")),
                 )
-                .child(days_input(&self.days));
+                .child(crate::widgets::input::NumberInput::new(&self.days));
         }
         content = content
             .child(

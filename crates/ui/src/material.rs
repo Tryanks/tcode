@@ -2,17 +2,16 @@
 //! Reading surfaces remain near-opaque over the translucent window canvas;
 //! semantic colors come from the active theme.
 
-use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
-    App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
+    App, BoxShadow, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement as _,
+    Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_base::{StyledExt as _, Tab, Toggle, ToggleGroup, v_flex};
+use gpui_base::{StyledExt as _, v_flex};
 
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
@@ -29,6 +28,12 @@ pub(crate) const LIST_ROW_MIN_HEIGHT: f32 = 56.;
 pub(crate) const CARD_INSET: f32 = 12.;
 /// The smallest square a finger can reliably hit.
 pub(crate) const TOUCH_TARGET: f32 = 44.;
+/// Width of numeric form fields, including their step controls.
+pub(crate) const NUMBER_INPUT_WIDTH: f32 = 96.;
+
+pub(crate) fn input_height(compact: bool) -> f32 {
+    if compact { TOUCH_TARGET } else { 32. }
+}
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -182,6 +187,30 @@ pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stat
         .active(|style| style.bg(cx.theme().list_active))
 }
 
+/// The height of a [`selectable_row`].
+pub(crate) fn selectable_row_height(compact: bool) -> f32 {
+    if compact { TOUCH_TARGET } else { 32. }
+}
+
+/// The surface of a selectable navigation row, the rail form of
+/// [`TabBar`](crate::widgets::tabs::TabBar): the selected row takes the active
+/// list fill, the rest a hover fill. Callers add the row's content, click and
+/// accessibility.
+pub(crate) fn selectable_row<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
+where
+    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+{
+    let (active, hover) = (cx.theme().list_active, cx.theme().list_hover);
+    el.h(px(selectable_row_height(compact)))
+        .flex()
+        .items_center()
+        .gap(px(if compact { 8. } else { 6. }))
+        .px(px(if compact { 12. } else { 10. }))
+        .rounded(cx.theme().tokens.radius.md)
+        .when(selected, |row| row.bg(active))
+        .when(!selected, |row| row.hover(move |style| style.bg(hover)))
+}
+
 /// The caption above one section of a navigable content list.
 pub fn list_caption(label: SharedString, cx: &App) -> Div {
     div()
@@ -289,78 +318,6 @@ pub fn empty_state(
         )
 }
 
-/// Track for [`segment`] controls: a gpui-base toggle group. Long labels
-/// scroll horizontally instead of clipping; shorter groups divide the
-/// available width.
-pub(crate) fn segmented_track(
-    id: impl Into<ElementId>,
-    segments: impl IntoIterator<Item = Toggle>,
-    cx: &App,
-) -> crate::scroll::ScrollArea<Stateful<Div>> {
-    let id = id.into();
-    div()
-        .id((id.clone(), "track"))
-        .h(px(40.))
-        .flex_none()
-        .overflow_x_scroll_area()
-        .child(
-            ToggleGroup::new(id)
-                .flex()
-                .items_center()
-                .h_full()
-                .min_w_full()
-                .flex_shrink_0()
-                .gap(px(2.))
-                .p(px(3.))
-                .rounded(cx.theme().tokens.radius.md)
-                .bg(cx.theme().secondary)
-                .children(segments),
-        )
-}
-
-/// One segment of a [`segmented_track`]. The selected segment is a T3 solid
-/// with a hairline; the rest are bare.
-pub fn segment(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    selected: bool,
-    cx: &App,
-) -> Toggle {
-    let label = label.into();
-    let ring = focus_ring(cx);
-    let (popover, border, foreground) =
-        (cx.theme().popover, cx.theme().border, cx.theme().foreground);
-    // Grows into spare width, never shrinks below its label: the track scrolls
-    // instead of ellipsizing (see `segmented_track`).
-    Toggle::new(id)
-        .pressed(selected)
-        .accessibility_label(label.clone())
-        .focus_visible(move |style| style.shadow(vec![ring]))
-        .flex_grow(1.)
-        .flex_shrink_0()
-        // Toggle sizes itself to its text; the pill keeps the height the
-        // label's default line height gave it.
-        .h(px(21.))
-        .px(px(6.))
-        .rounded(cx.theme().tokens.radius.md)
-        .cursor_pointer()
-        .text_size(px(13.))
-        .text_color(cx.theme().muted_foreground)
-        .styles(move |styles| {
-            styles
-                .pressed(move |style| {
-                    style
-                        .bg(popover)
-                        .border_1()
-                        .border_color(border)
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(foreground)
-                })
-                .disabled(|style| style.opacity(0.55))
-        })
-        .child(div().flex_none().child(label))
-}
-
 /// A panel toolbar's icon control. Compact toolbars owe a finger a
 /// [`TOUCH_TARGET`] square, so the icon is passed as a *child*: `Button` scales
 /// whatever `icon()` receives from its own size, which would blow a 44pt button
@@ -453,31 +410,19 @@ pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
         .aria_label(label)
 }
 
-/// A gpui-base tab that can take keyboard focus. Callers style it and put
-/// it in a [`gpui_base::Tabs`] list.
-pub fn tab(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    selected: bool,
-    cx: &App,
-) -> Tab {
-    let ring = focus_ring(cx);
-    Tab::new(id)
-        .selected(selected)
-        .accessibility_label(label)
-        .tab_index(0)
-        .focus_visible(move |style| style.shadow(vec![ring]))
-        .cursor_pointer()
-}
-
 /// The keyboard focus ring of a clickable that is not a `Button`.
-fn focus_ring(cx: &App) -> BoxShadow {
+///
+/// Inset: GPUI paints a drop shadow's whole rectangle beneath its element
+/// rather than only outside it, so an outset ring fills a transparent control.
+pub(crate) fn focus_ring(cx: &App) -> BoxShadow {
     let ring = cx.theme().ring.opacity(if cx.theme().mode.is_dark() {
         0.72
     } else {
         0.58
     });
-    BoxShadow::new(px(0.), px(0.), ring).spread_radius(px(2.))
+    BoxShadow::new(px(0.), px(0.), ring)
+        .spread_radius(px(2.))
+        .inset()
 }
 
 /// Neutral rows shared by unhydrated workspace and conversation views.
@@ -511,61 +456,4 @@ pub fn loading_skeleton(cx: &gpui::App) -> gpui::AnyElement {
                 )
         }))
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Context, Render, TestAppContext, Window};
-
-    struct Segments(Vec<&'static str>);
-
-    impl Render for Segments {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let segments = self
-                .0
-                .iter()
-                .enumerate()
-                .map(|(ix, label)| {
-                    segment(("segment", ix), *label, ix == 0, cx)
-                        .debug_selector(move || format!("segment-{ix}"))
-                })
-                .collect::<Vec<_>>();
-            div()
-                .w(px(320.))
-                .child(segmented_track("track", segments, cx).debug_selector(|| "track".into()))
-        }
-    }
-
-    fn segment_bounds(cx: &mut gpui::VisualTestContext) -> Vec<gpui::Bounds<Pixels>> {
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        ["segment-0", "segment-1", "segment-2"]
-            .into_iter()
-            .map(|selector| cx.debug_bounds(selector).unwrap())
-            .collect()
-    }
-
-    #[gpui::test]
-    fn short_segments_divide_the_track_and_long_ones_overflow_it(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| Segments(vec!["One", "Two", "Three"]));
-        let bounds = segment_bounds(cx);
-        let track = cx.debug_bounds("track").unwrap();
-        assert_eq!(track.size.width, px(320.));
-        assert_eq!(bounds[0].left(), track.left() + px(3.));
-        assert_eq!(bounds[2].right(), track.right() - px(3.));
-        assert!(
-            bounds
-                .windows(2)
-                .all(|pair| pair[1].left() == pair[0].right() + px(2.)),
-            "{bounds:?}"
-        );
-
-        let long = "A label too long to share a phone-width track";
-        let (_, cx) = cx.add_window_view(move |_, _| Segments(vec![long, long, long]));
-        let bounds = segment_bounds(cx);
-        let track = cx.debug_bounds("track").unwrap();
-        assert_eq!(track.size.width, px(320.));
-        assert!(bounds[2].right() > track.right(), "{bounds:?}");
-    }
 }

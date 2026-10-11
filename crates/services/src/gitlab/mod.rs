@@ -562,7 +562,7 @@ impl Forge for GitLab {
                     Some(credential)
                         if enabled
                             && credential.source == CredentialSource::Saved
-                            && !self.api.worked(&host, credential) =>
+                            && !self.api.verified(&host, credential) =>
                     {
                         Some(HostProblem::Unverified)
                     }
@@ -914,34 +914,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// A saved token reads as unverified until gitlab.com answers a request with it; the
-    /// environment's token, which Tcode does not keep, is not reported so.
     #[test]
-    fn a_saved_token_is_unverified_until_it_is_used() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-gitlab-saved-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let host = |environment: Vec<(String, String)>| {
-            GitLab::new(
-                SettingsStore::new(root.clone()),
-                environment,
-                Arc::new(ViewedMarks::new(root.join("viewed-marks.json"))),
-            )
-        };
-        let environment = host(vec![("GITLAB_TOKEN".into(), "secret".into())]);
-        assert_eq!(environment.credential_status()["gitlab.com"].problem, None);
-        SettingsStore::new(root.clone())
-            .set_token(HostKind::Gitlab, "gitlab.com", Some("saved"))
-            .unwrap();
-        let saved = host(Vec::new());
-        saved.configure(BTreeMap::from([(
-            "gitlab.com".to_owned(),
-            HostSettings::new(HostKind::Gitlab),
-        )]));
-        assert_eq!(
-            saved.credential_status()["gitlab.com"].problem,
-            Some(HostProblem::Unverified)
+    fn saved_verification_survives_a_fresh_host() {
+        crate::forge::verification_tests::verification_survives_restart(
+            HostKind::Gitlab,
+            "gitlab.com",
+            "team/repo",
+            |store, agent| {
+                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+                let mut host = GitLab::new(store, Vec::new(), viewed);
+                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+                    .unwrap()
+                    .agent = agent;
+                host
+            },
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 }

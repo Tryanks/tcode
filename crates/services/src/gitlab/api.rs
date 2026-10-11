@@ -47,16 +47,8 @@ pub(super) fn error(kind: ForgeErrorKind, description: impl Into<String>) -> For
 #[derive(Clone)]
 pub(super) struct Credential {
     token: String,
+    verification: String,
     pub(super) source: CredentialSource,
-}
-
-impl Credential {
-    /// Opaque, and different for each credential.
-    fn fingerprint(&self) -> String {
-        use sha2::Digest as _;
-        let digest = sha2::Sha256::digest(self.token.as_bytes());
-        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
-    }
 }
 
 #[derive(Debug)]
@@ -128,8 +120,6 @@ pub(super) struct Api {
     pub(super) agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     paused: Mutex<HashMap<String, SystemTime>>,
-    /// Each server and the fingerprint of the last saved token it answered a request with.
-    worked: Mutex<HashMap<String, String>>,
 }
 
 impl Api {
@@ -148,7 +138,6 @@ impl Api {
                 .build(),
             tokens: Mutex::default(),
             paused: Mutex::default(),
-            worked: Mutex::default(),
         })
     }
 
@@ -184,12 +173,14 @@ impl Api {
             .and_then(nonempty)
         {
             return Ok(Some(Credential {
+                verification: crate::settings::credential_fingerprint(&token, None),
                 token,
                 source: CredentialSource::Saved,
             }));
         }
         if let Some(token) = self.environment_token(authority) {
             return Ok(Some(Credential {
+                verification: crate::settings::credential_fingerprint(&token, None),
                 token,
                 source: CredentialSource::Env {
                     name: ENV_TOKEN.into(),
@@ -204,6 +195,7 @@ impl Api {
         let found = self.glab_token(authority);
         let ttl = if found.is_some() { 300 } else { 10 };
         let value = found.map(|token| Credential {
+            verification: crate::settings::credential_fingerprint(&token, None),
             token,
             source: CredentialSource::Cli {
                 tool: "glab".into(),
@@ -221,7 +213,6 @@ impl Api {
 
     pub(super) fn forget(&self, authority: &str) {
         self.tokens.lock().unwrap().remove(authority);
-        self.worked.lock().unwrap().remove(authority);
     }
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
@@ -232,8 +223,9 @@ impl Api {
     }
 
     /// Whether the server has answered a request sent with `credential`, a saved token.
-    pub(super) fn worked(&self, authority: &str, credential: &Credential) -> bool {
-        self.worked.lock().unwrap().get(authority) == Some(&credential.fingerprint())
+    pub(super) fn verified(&self, authority: &str, credential: &Credential) -> bool {
+        self.store
+            .credential_verified(HostKind::Gitlab, authority, &credential.verification)
     }
 
     fn environment_token(&self, authority: &str) -> Option<String> {
@@ -466,11 +458,14 @@ impl Api {
             if let Some(credential) = credential
                 .as_ref()
                 .filter(|credential| credential.source == CredentialSource::Saved)
+                && let Err(error) = self.store.record_verification(
+                    HostKind::Gitlab,
+                    authority,
+                    &credential.verification,
+                    true,
+                )
             {
-                self.worked
-                    .lock()
-                    .unwrap()
-                    .insert(authority.to_owned(), credential.fingerprint());
+                log::warn!("failed to save credential verification: {error}");
             }
             return Ok(Response {
                 body,
@@ -480,6 +475,16 @@ impl Api {
         }
         Err(match status {
             401 => {
+                if let Some(credential) = credential.as_ref()
+                    && let Err(error) = self.store.record_verification(
+                        HostKind::Gitlab,
+                        authority,
+                        &credential.verification,
+                        false,
+                    )
+                {
+                    log::warn!("failed to clear credential verification: {error}");
+                }
                 self.forget(authority);
                 error(
                     ForgeErrorKind::Unauthorized,

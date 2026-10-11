@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -18,7 +19,7 @@ use gpui::{
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
+use gpui_base::{PopoverState, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_core::settings::Settings;
@@ -309,7 +310,9 @@ impl Render for ProviderModelPicker {
                 };
 
                 // Keep profile tabs in the same order as the settings cards.
-                let mut tabs = h_flex().w_full().p_1().gap_1();
+                let mut tabs = TabBar::new("provider-model-picker-tabs")
+                    .segmented()
+                    .w_full();
                 for (tab_index, profile) in profiles.iter().enumerate() {
                     let is_selected = profile.id == current_profile;
                     let label = if Settings::is_builtin_profile_id(&profile.id) {
@@ -328,20 +331,10 @@ impl Render for ProviderModelPicker {
                     let profile_id = profile.id.clone();
                     let picker = picker.clone();
                     let popover = cx.entity();
-                    tabs = tabs.child(
-                        h_flex()
-                            .id(("settings-provider-tab", tab_index))
-                            .flex_1()
-                            .h(px(30.))
-                            .items_center()
-                            .justify_center()
-                            .gap_1p5()
-                            .rounded(crate::material::radius_button(cx))
-                            .cursor_pointer()
-                            .when(is_selected, |tab| tab.bg(cx.theme().accent).font_medium())
-                            .hover(|tab| tab.bg(cx.theme().accent))
-                            .child(tinted_glyph(&store, kind, Some(&profile.id), cx).xsmall())
-                            .child(div().text_size(px(13.)).child(label))
+                    tabs = tabs.item(
+                        TabItem::new(("settings-provider-tab", tab_index), label)
+                            .icon(tinted_glyph(&store, kind, Some(&profile.id), cx))
+                            .selected(is_selected)
                             .on_click(move |_, _, cx| {
                                 picker.update(cx, |picker, cx| {
                                     picker.selected_profile = profile_id.clone();

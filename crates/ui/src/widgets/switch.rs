@@ -19,6 +19,7 @@ pub struct Switch {
     checked: bool,
     disabled: bool,
     label: Option<SharedString>,
+    aria_label: Option<SharedString>,
     on_click: Option<super::ToggleHandler>,
     size: Size,
     color: Option<Hsla>,
@@ -33,6 +34,7 @@ impl Switch {
             checked: false,
             disabled: false,
             label: None,
+            aria_label: None,
             on_click: None,
             size: Size::Medium,
             color: None,
@@ -45,6 +47,10 @@ impl Switch {
     }
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
         self
     }
     pub fn on_click(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
@@ -90,9 +96,10 @@ impl RenderOnce for Switch {
         gpui_base::Switch::new(self.id.clone())
             .checked(checked)
             .disabled(self.disabled)
-            .when_some(self.label.clone(), |this, label| {
-                this.accessibility_label(label)
-            })
+            .when_some(
+                self.aria_label.or_else(|| self.label.clone()),
+                |this, label| this.accessibility_label(label),
+            )
             .when_some(self.on_click, |this, handler| {
                 this.on_change(move |next, _, window, cx| handler(&next, window, cx))
             })

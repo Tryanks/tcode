@@ -356,7 +356,7 @@ impl Render for CommitDialog {
                 .w_full()
                 .gap_1()
                 .child(message_header)
-                .child(Textarea::new(&self.message).rounded(crate::material::radius_input(cx))),
+                .child(Textarea::new(&self.message)),
         );
 
         crate::material::overlay_contour(

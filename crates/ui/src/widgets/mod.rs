@@ -3,6 +3,7 @@ pub(crate) type ToggleHandler = std::rc::Rc<dyn Fn(&bool, &mut gpui::Window, &mu
 
 pub mod button;
 pub mod checkbox;
+pub mod choice;
 pub(crate) mod copy;
 pub mod input;
 pub mod kbd;
@@ -13,6 +14,7 @@ pub(crate) mod ring;
 pub mod slider;
 pub mod spinner;
 pub mod switch;
+pub mod tabs;
 pub mod tooltip;
 
 pub use button::{Button, ButtonVariant, ButtonVariants};
