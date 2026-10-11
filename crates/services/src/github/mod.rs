@@ -6,6 +6,7 @@ mod forge;
 pub mod graphql;
 pub mod media;
 mod merge_message;
+pub(crate) use merge_message::remove_agent_credits;
 pub mod pull_request_actions;
 pub mod pull_request_reads;
 pub mod pull_request_watch;

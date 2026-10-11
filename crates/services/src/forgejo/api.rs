@@ -295,46 +295,15 @@ impl Api {
     }
 
     fn run_tea(&self, args: &[&str], input: Option<&str>) -> Option<String> {
-        use smol::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let mut command = crate::process::async_command(self.tea_program()?);
-        command
-            .args(args)
-            .env_clear()
-            .envs(&self.environment)
-            // tea would otherwise prefer these over its stored login.
-            .env_remove(ENV_TOKEN)
-            .env_remove(ENV_URL)
-            .stdin(if input.is_some() {
-                std::process::Stdio::piped()
-            } else {
-                std::process::Stdio::null()
-            })
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let mut child = command.spawn().ok()?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take()?;
-        futures_lite::future::block_on(smol::future::race(
-            async {
-                if let (Some(mut stdin), Some(input)) = (stdin, input) {
-                    stdin.write_all(input.as_bytes()).await.ok()?;
-                    drop(stdin);
-                }
-                let mut bytes = Vec::new();
-                stdout
-                    .take(1024 * 1024)
-                    .read_to_end(&mut bytes)
-                    .await
-                    .ok()?;
-                child.status().await.ok()?.success().then_some(())?;
-                String::from_utf8(bytes).ok()
-            },
-            async {
-                smol::Timer::after(Duration::from_secs(10)).await;
-                None
-            },
-        ))
+        // tea would otherwise prefer these over its stored login.
+        crate::forge::run_cli(
+            self.tea_program()?,
+            args,
+            input,
+            &self.environment,
+            &[ENV_TOKEN, ENV_URL],
+            true,
+        )
     }
 
     /// What the server runs, read once an hour.
@@ -526,110 +495,27 @@ impl Api {
 }
 
 impl Api {
-    /// An upload or avatar on the server, read with its token. A redirect may lead to object
-    /// storage that authorizes with its own signature, which never sees the token.
-    /// `authority` is the server the pull request is on, mount path included, whose credential
-    /// the URL's host is sent.
+    /// An upload or avatar on the server, read with its token. `authority` is the server the
+    /// pull request is on, mount path included, whose credential the URL's host is sent.
     pub(super) fn media(
         &self,
         authority: &str,
         url: &url::Url,
         validator: Option<&str>,
     ) -> Result<tcode_protocol::PullRequestMedia, ForgeError> {
-        use crate::github::media;
-        use tcode_protocol::{MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestMedia};
-        let failed = || error(ForgeErrorKind::Uncertain, "Forgejo media unreadable");
-        let token = self
+        let authorization = self
             .credential(authority)
             .ok()
             .flatten()
-            .map(|credential| credential.token);
-        let started = Instant::now();
-        let mut target = url.clone();
-        let mut response = None;
-        for _ in 0..=3 {
-            let remaining = DEADLINE.saturating_sub(started.elapsed());
-            let mut request = self
-                .agent
-                .get(target.as_str())
-                .timeout(remaining)
-                .set("User-Agent", "tcode")
-                .set("Accept-Encoding", "identity");
-            if let Some(token) = token.as_ref().filter(|_| same_origin(&target, url)) {
-                request = request.set("Authorization", &format!("token {token}"));
-            }
-            if let Some(validator) = validator {
-                let header = if validator.starts_with('"') || validator.starts_with("W/") {
-                    "If-None-Match"
-                } else {
-                    "If-Modified-Since"
-                };
-                request = request.set(header, validator);
-            }
-            let answer = match request.call() {
-                Ok(answer) => answer,
-                Err(ureq::Error::Status(404, _)) => {
-                    return Err(error(ForgeErrorKind::NotFound, "Forgejo media not found"));
-                }
-                Err(_) => return Err(failed()),
-            };
-            if (300..400).contains(&answer.status()) && answer.status() != 304 {
-                target = answer
-                    .header("location")
-                    .and_then(|location| target.join(location).ok())
-                    .filter(|next| next.scheme() == "https")
-                    .ok_or_else(failed)?;
-                continue;
-            }
-            response = Some(answer);
-            break;
-        }
-        let response = response.ok_or_else(failed)?;
-        let expires_at = (SystemTime::now() + Duration::from_secs(3600))
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if response.status() == 304 {
-            return Ok(PullRequestMedia::NotModified { expires_at });
-        }
-        let mime = response
-            .header("content-type")
-            .and_then(media::media_type)
-            .or_else(|| media::type_from_name(&target).map(str::to_owned))
-            .or_else(|| media::type_from_name(url).map(str::to_owned))
-            .ok_or_else(|| error(ForgeErrorKind::UnsupportedMedia, "not media"))?;
-        if !mime.starts_with("image/") {
-            return Ok(PullRequestMedia::External { mime });
-        }
-        let validator = response
-            .header("etag")
-            .or_else(|| response.header("last-modified"))
-            .map(str::to_owned);
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(MAX_PULL_REQUEST_MEDIA_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| failed())?;
-        if bytes.len() > MAX_PULL_REQUEST_MEDIA_BYTES {
-            return Err(error(ForgeErrorKind::TooLarge, "Forgejo media too large"));
-        }
-        media::bounded(&mime, &bytes)?;
-        Ok(PullRequestMedia::Image {
-            bytes,
-            mime,
+            .map(|credential| format!("token {}", credential.token));
+        crate::forge::media(
+            &self.agent,
+            url,
+            authorization.as_deref(),
             validator,
-            expires_at,
-        })
+            "Forgejo",
+        )
     }
-}
-
-/// Whether two URLs are one origin: scheme, host and port. A token goes nowhere else, so a
-/// redirect to another port of the same host never carries it.
-fn same_origin(left: &url::Url, right: &url::Url) -> bool {
-    left.scheme() == right.scheme()
-        && left.host_str() == right.host_str()
-        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 /// The page size asked for; a server may answer fewer.
@@ -648,30 +534,8 @@ fn nonempty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Server, same_origin};
+    use super::Server;
 
-    /// An upload's redirect keeps the token only on the server's own origin.
-    #[test]
-    fn a_redirect_off_the_servers_origin_drops_the_token() {
-        let url = |value: &str| url::Url::parse(value).unwrap();
-        let upload = url("https://git.acme.test/attachments/1");
-        assert!(same_origin(
-            &upload,
-            &url("https://git.acme.test:443/attachments/2")
-        ));
-        assert!(!same_origin(
-            &upload,
-            &url("https://git.acme.test:8443/attachments/1")
-        ));
-        assert!(!same_origin(
-            &upload,
-            &url("http://git.acme.test/attachments/1")
-        ));
-        assert!(!same_origin(
-            &upload,
-            &url("https://storage.acme.test/attachments/1")
-        ));
-    }
     /// `GITEA_TOKEN` goes only to the server `GITEA_INSTANCE_URL` names, and tea's token for one
     /// server never to another: tea is asked for each server by its own host.
     #[cfg(unix)]

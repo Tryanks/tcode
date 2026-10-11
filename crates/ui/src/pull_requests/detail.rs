@@ -1124,8 +1124,13 @@ impl PullRequestView {
             )
             .into_owned()
         };
+        let merges = super::lifecycle::merges_base(Some(state));
         let tooltip = crate::tr!(
-            "pull_requests.actions.update_tooltip",
+            if merges {
+                "pull_requests.actions.update_tooltip"
+            } else {
+                "pull_requests.actions.rebase_tooltip"
+            },
             base = base,
             head = snapshot.head_branch.clone(),
             host_name = self.host_name(cx)
@@ -1150,17 +1155,21 @@ impl PullRequestView {
                             kind,
                         })
                     };
-                    menu.label(tooltip.clone())
-                        .menu_with_enable(
+                    let menu = menu.label(tooltip.clone());
+                    let menu = if merges {
+                        menu.menu_with_enable(
                             crate::tr!("pull_requests.actions.update_branch").into_owned(),
                             item(super::lifecycle::Lifecycle::UpdateBranch),
                             !busy,
                         )
-                        .menu_with_enable(
-                            crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
-                            item(super::lifecycle::Lifecycle::UpdateRebase),
-                            !busy,
-                        )
+                    } else {
+                        menu
+                    };
+                    menu.menu_with_enable(
+                        crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
+                        item(super::lifecycle::Lifecycle::UpdateRebase),
+                        !busy,
+                    )
                 })
                 .into_any_element(),
             // News, not an offer, for an account that may not update the branch.
@@ -1647,7 +1656,8 @@ impl PullRequestView {
         let stats = (tab == Tab::Files)
             .then(|| link.as_ref().and_then(|link| link.snapshot.clone()))
             .flatten()
-            .map(|snapshot| {
+            .and_then(|snapshot| snapshot.additions.zip(snapshot.deletions))
+            .map(|(additions, deletions)| {
                 h_flex()
                     .flex_none()
                     .gap_1()
@@ -1656,12 +1666,12 @@ impl PullRequestView {
                     .child(
                         div()
                             .text_color(cx.theme().success)
-                            .child(format!("+{}", snapshot.additions)),
+                            .child(format!("+{additions}")),
                     )
                     .child(
                         div()
                             .text_color(cx.theme().danger)
-                            .child(format!("−{}", snapshot.deletions)),
+                            .child(format!("−{deletions}")),
                     )
             });
         h_flex()
