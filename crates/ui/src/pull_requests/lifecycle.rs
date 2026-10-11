@@ -631,16 +631,33 @@ impl Target {
                     cx,
                 )
             }
-            Lifecycle::Close => self.confirm(
-                crate::tr!("pull_requests.actions.close_title", number = number.clone()),
-                crate::tr!("pull_requests.actions.close_desc", number = number),
-                crate::tr!("pull_requests.actions.close_confirm"),
-                ButtonVariant::Danger,
-                PullRequestAction::Close,
-                kind,
-                window,
-                cx,
-            ),
+            Lifecycle::Close => {
+                // The consequence changes where the host never reopens what it closed.
+                let description = if self
+                    .offer
+                    .action
+                    .as_ref()
+                    .is_some_and(|action| !action.capabilities.reopen)
+                {
+                    crate::tr!(
+                        "pull_requests.actions.close_desc_final",
+                        number = number.clone(),
+                        host_name = self.host_name.clone()
+                    )
+                } else {
+                    crate::tr!("pull_requests.actions.close_desc", number = number.clone())
+                };
+                self.confirm(
+                    crate::tr!("pull_requests.actions.close_title", number = number),
+                    description,
+                    crate::tr!("pull_requests.actions.close_confirm"),
+                    ButtonVariant::Danger,
+                    PullRequestAction::Close,
+                    kind,
+                    window,
+                    cx,
+                )
+            }
             Lifecycle::Revert => self.confirm(
                 crate::tr!(
                     "pull_requests.actions.revert_title",
