@@ -659,20 +659,28 @@ impl OrchestrateSettingsPanel {
         title: impl Into<gpui::SharedString>,
         description: impl Into<gpui::SharedString>,
         action: Option<AnyElement>,
+        compact: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
-        h_flex()
-            .w_full()
-            .items_end()
-            .gap_3()
+        // A compact page has no room for the action beside the description,
+        // which would be squeezed to a word per line, so it goes underneath —
+        // the rule `SettingsPage::row_frame` applies.
+        let row = if compact {
+            v_flex().items_start().gap_2()
+        } else {
+            h_flex().items_end().gap_3()
+        };
+        row.w_full()
             .child(
                 v_flex()
-                    .flex_1()
+                    .when(compact, |text| text.w_full())
+                    .when(!compact, |text| text.flex_1())
                     .min_w_0()
                     .gap_0p5()
                     .child(div().text_size(px(15.)).font_semibold().child(title.into()))
                     .child(
                         div()
+                            .debug_selector(|| "orchestrate-section-description".into())
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .child(description.into()),
@@ -682,7 +690,7 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    fn render_children(&self, decision: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_children(&self, decision: bool, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let settings = self.store.read(cx).settings().orchestrate;
         let offset = if decision {
             0
@@ -720,6 +728,7 @@ impl OrchestrateSettingsPanel {
                     }
                     .into_any_element(),
                 ),
+                compact,
                 cx,
             ),
         );
@@ -956,6 +965,7 @@ impl Render for OrchestrateSettingsPanel {
                 });
             }
         }
+        let compact = crate::window_seam::window_is_compact(window, cx);
         v_flex()
             .w_full()
             .gap_6()
@@ -970,22 +980,21 @@ impl Render for OrchestrateSettingsPanel {
             .child(self.render_intro(cx))
             .child(self.render_child_approval(cx))
             .child(self.render_child_worktrees(cx))
-            .child(self.render_children(true, cx))
-            .child(self.render_children(false, cx))
+            .child(self.render_children(true, compact, cx))
+            .child(self.render_children(false, compact, cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
 
     use super::OrchestrateSettingsPanel;
     use crate::store::{WorkspaceAttachment, WorkspaceStore};
 
-    #[gpui::test]
-    fn switching_language_relocalizes_the_description_placeholder(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (Entity<OrchestrateSettingsPanel>, &mut VisualTestContext) {
         cx.update(crate::theme::init);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -1001,7 +1010,39 @@ mod tests {
             panel = Some(view.clone());
             gpui_base::Root::new(view, window, cx)
         });
-        let panel = panel.unwrap();
+        (panel.unwrap(), cx)
+    }
+
+    /// On a phone the long English "Add collaboration model" button sits
+    /// under the section description instead of squeezing it into a narrow
+    /// column beside it (#686).
+    #[gpui::test]
+    fn phone_section_heading_gives_the_description_the_row(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let (_panel, cx) = mount(cx);
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, true));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| {
+            window.refresh();
+            _ = window.draw(cx);
+        });
+
+        let description = cx
+            .debug_bounds("orchestrate-section-description")
+            .expect("the section description laid out");
+        assert!(
+            description.size.width >= px(393. * 0.6),
+            "the description keeps most of the row at 393pt, got {:?}",
+            description.size.width
+        );
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_description_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        let (panel, cx) = mount(cx);
         let placeholder = |cx: &mut gpui::VisualTestContext| {
             panel.read_with(cx, |panel, cx| {
                 panel.child_rows[0]
