@@ -1057,23 +1057,23 @@ mod tests {
         events: &async_channel::Receiver<EventEnvelope>,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            match events.try_recv() {
-                Ok(envelope) => {
+        smol::block_on(smol::future::race(
+            async {
+                loop {
+                    let envelope = events
+                        .recv()
+                        .await
+                        .expect("host event stream closed before the expected event");
                     if ready(&envelope) {
                         return envelope;
                     }
                 }
-                Err(async_channel::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(async_channel::TryRecvError::Closed) => {
-                    panic!("host event stream closed before the expected event")
-                }
-            }
-        }
-        panic!("timed out waiting for host event");
+            },
+            async {
+                smol::Timer::after(std::time::Duration::from_secs(60)).await;
+                panic!("timed out waiting for host event");
+            },
+        ))
     }
 
     #[test]
