@@ -379,6 +379,7 @@ impl AppState {
         let host = cx.clone();
         cx.spawn_background(async move {
             let answer = task.await;
+            host.enqueue(|state, cx| state.refresh_host_credentials(cx));
             if let (Ok((PullRequestReadResponse::Conversation(read), _)), Some((id, key, since))) =
                 (&answer, conversation)
             {
@@ -527,8 +528,35 @@ impl AppState {
                 // Comments are anchored at the draft's head, which is what the host must still be at.
                 let head = if comments.is_empty() { head } else { anchor };
                 let outcome = forge.submit_review(&writing, *verdict, head, &body, comments);
-                let ids: Vec<_> = comments.iter().map(|comment| comment.id).collect();
-                (Some((account, ids, body)), outcome)
+                let sent = match &outcome {
+                    PullRequestActionResult::Applied => Some((
+                        comments
+                            .iter()
+                            .map(|comment| comment.id)
+                            .collect::<Vec<_>>(),
+                        body,
+                    )),
+                    PullRequestActionResult::Partial { applied, .. } => {
+                        let mut posted = applied.clone();
+                        let ids = comments
+                            .iter()
+                            .filter_map(|comment| {
+                                let name = format!("{}:{}", comment.path, comment.end_line);
+                                let index = posted.iter().position(|posted| *posted == name)?;
+                                posted.remove(index);
+                                Some(comment.id)
+                            })
+                            .collect();
+                        let body = if posted.iter().any(|name| name == "summary") {
+                            body
+                        } else {
+                            String::new()
+                        };
+                        Some((ids, body))
+                    }
+                    _ => None,
+                };
+                (Some((account, sent)), outcome)
             }
             action => (None, forge.act(&writing, action)),
         });
@@ -537,7 +565,9 @@ impl AppState {
         cx.spawn_background(async move {
             let (review, outcome) = task.await;
             if !matches!(outcome, PullRequestActionResult::Rejected(_)) {
-                let applied = outcome == PullRequestActionResult::Applied;
+                let uncertain_review = matches!(outcome, PullRequestActionResult::Uncertain)
+                    || matches!(&outcome, PullRequestActionResult::Partial { failure, .. }
+                        if **failure == PullRequestActionResult::Uncertain);
                 let opened = match &outcome {
                     PullRequestActionResult::Opened { number, url } => Some((
                         PullRequestKey::new(&key.host, &key.repository, *number),
@@ -559,17 +589,27 @@ impl AppState {
                         {
                             log::warn!("the revert pull request was not linked: {error}");
                         }
-                        if let Some((account, ids, body)) = review {
+                        if let Some((account, sent)) = review {
                             state.pull_requests.submissions += 1;
-                            if let Some(mut meta) = state.find_meta(&id)
-                                && pull_request::submitted_review(
+                            if let Some(mut meta) = state.find_meta(&id) {
+                                let changed = pull_request::submitted_review(
                                     &mut meta.pull_request_reviews,
                                     &key,
                                     &account,
-                                    applied.then_some((ids.as_slice(), body.as_str())),
-                                )
-                            {
-                                state.save_pull_request_meta(meta, cx);
+                                    sent.as_ref()
+                                        .map(|(ids, body)| (ids.as_slice(), body.as_str())),
+                                );
+                                if uncertain_review {
+                                    pull_request::submitted_review(
+                                        &mut meta.pull_request_reviews,
+                                        &key,
+                                        &account,
+                                        None,
+                                    );
+                                }
+                                if changed {
+                                    state.save_pull_request_meta(meta, cx);
+                                }
                             }
                         }
                         state.request_pull_request_sync(key, cx);
@@ -1015,6 +1055,7 @@ impl AppState {
             let _ = host
                 .enqueue_and_wait(move |state, cx| {
                     state.pull_requests.syncing = false;
+                    state.refresh_host_credentials(cx);
                     if state
                         .pull_requests
                         .requested
@@ -1261,6 +1302,7 @@ impl AppState {
             let _ = host
                 .enqueue_and_wait(|state, cx| {
                     state.pull_requests.discovering = false;
+                    state.refresh_host_credentials(cx);
                     let pending = std::mem::take(&mut state.pull_requests.discover_again);
                     if !pending.is_empty() {
                         state.discover_pull_requests(Some(pending), cx).detach();

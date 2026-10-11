@@ -7,6 +7,8 @@ pub(crate) mod anchors;
 pub(crate) mod checkout;
 mod http;
 mod verdicts;
+#[cfg(test)]
+pub(crate) mod verification_tests;
 mod viewed;
 
 use crate::settings::SettingsStore;

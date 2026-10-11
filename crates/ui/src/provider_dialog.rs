@@ -460,9 +460,7 @@ impl ProviderDialog {
                     crate::tr!("providers.display_name_help")
                         .into_owned()
                         .into(),
-                    Input::new(&self.display_name)
-                        .rounded(crate::material::radius_input(cx))
-                        .into_any_element(),
+                    Input::new(&self.display_name).into_any_element(),
                     cx,
                 ),
                 self.field_block(
@@ -532,37 +530,27 @@ impl ProviderDialog {
                 )
                 .into_owned()
                 .into(),
-                Input::new(&self.binary)
-                    .rounded(crate::material::radius_input(cx))
-                    .into_any_element(),
+                Input::new(&self.binary).into_any_element(),
                 cx,
             ),
         ];
         if provider.caps().home_path {
             let [_, _, home_label, home_help, _, _] = provider_copy(provider);
-            blocks.push(
-                self.field_block(
-                    crate::tr!(home_label).into_owned().into(),
-                    crate::tr!(home_help).into_owned().into(),
-                    Input::new(&self.home)
-                        .rounded(crate::material::radius_input(cx))
-                        .into_any_element(),
-                    cx,
-                ),
-            );
+            blocks.push(self.field_block(
+                crate::tr!(home_label).into_owned().into(),
+                crate::tr!(home_help).into_owned().into(),
+                Input::new(&self.home).into_any_element(),
+                cx,
+            ));
         }
         blocks.push(self.render_env(cx));
         if provider.caps().launch_args {
-            blocks.push(
-                self.field_block(
-                    crate::tr!("providers.launch_args").into_owned().into(),
-                    crate::tr!("providers.launch_args_help").into_owned().into(),
-                    Input::new(&self.launch_args)
-                        .rounded(crate::material::radius_input(cx))
-                        .into_any_element(),
-                    cx,
-                ),
-            );
+            blocks.push(self.field_block(
+                crate::tr!("providers.launch_args").into_owned().into(),
+                crate::tr!("providers.launch_args_help").into_owned().into(),
+                Input::new(&self.launch_args).into_any_element(),
+                cx,
+            ));
         }
         if provider.caps().trust_project_extensions {
             blocks.push(
@@ -632,12 +620,8 @@ impl ProviderDialog {
                         .w_full()
                         .gap_2()
                         .items_center()
-                        .child(div().flex_1().min_w_0().child(
-                            Input::new(&row.name).rounded(crate::material::radius_input(cx)),
-                        ))
-                        .child(div().flex_1().min_w_0().child(
-                            Input::new(&row.value).rounded(crate::material::radius_input(cx)),
-                        ))
+                        .child(div().flex_1().min_w_0().child(Input::new(&row.name)))
+                        .child(div().flex_1().min_w_0().child(Input::new(&row.value)))
                         .child(
                             Switch::new(("env-sensitive", index))
                                 .checked(row.sensitive)
@@ -699,9 +683,12 @@ impl ProviderDialog {
                 .pt_2()
                 .gap_2()
                 .items_center()
-                .child(div().flex_1().min_w_0().child(
-                    Input::new(&self.custom_model).rounded(crate::material::radius_input(cx)),
-                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.custom_model)),
+                )
                 .child(
                     Button::new("add-custom-model")
                         .outline()

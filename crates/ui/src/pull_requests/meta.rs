@@ -564,7 +564,7 @@ impl PullRequestView {
             .p_1()
             .gap_1()
             .font_family(cx.theme().font_family.clone())
-            .child(div().p_1().child(Input::new(&picker.filter).small()))
+            .child(div().p_1().child(Input::new(&picker.filter)))
             .child(body)
             .when(!picker.complete, |body| {
                 body.child(

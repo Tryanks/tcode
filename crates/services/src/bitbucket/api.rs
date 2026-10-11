@@ -46,6 +46,7 @@ pub(super) fn error(kind: ForgeErrorKind, description: impl Into<String>) -> For
 pub(super) struct Credential {
     /// The Authorization header's value.
     authorization: String,
+    verification: String,
     pub(super) source: CredentialSource,
 }
 
@@ -66,6 +67,10 @@ impl Credential {
             None => format!("Bearer {token}"),
         };
         Some(Self {
+            verification: crate::settings::credential_fingerprint(
+                token,
+                email.map(str::trim).filter(|email| !email.is_empty()),
+            ),
             authorization,
             source,
         })
@@ -156,8 +161,6 @@ pub(super) struct Api {
     /// The account each credential reads as, by fingerprint, for a few minutes: every read
     /// that names the viewer would otherwise spend one of Bitbucket's hourly requests on it.
     viewers: Mutex<HashMap<String, (Instant, Option<Value>)>>,
-    /// The fingerprint of the last saved access token Bitbucket answered a request with.
-    worked: Mutex<Option<String>>,
 }
 
 impl Api {
@@ -177,7 +180,6 @@ impl Api {
                 .build(),
             paused: Mutex::default(),
             viewers: Mutex::default(),
-            worked: Mutex::default(),
         })
     }
 
@@ -209,8 +211,7 @@ impl Api {
                 "Bitbucket host turned off",
             ));
         }
-        if let Some(token) = self.store.token(HostKind::Bitbucket, HOST) {
-            let email = self.store.email(HostKind::Bitbucket, HOST);
+        if let Some((token, email)) = self.store.saved_credential(HostKind::Bitbucket, HOST) {
             let source = match &email {
                 Some(email) => CredentialSource::SavedBasic {
                     email: email.clone(),
@@ -235,12 +236,13 @@ impl Api {
     }
 
     /// Whether Bitbucket has answered a request sent with `credential`, a saved access token.
-    pub(super) fn worked(&self, credential: &Credential) -> bool {
-        self.worked.lock().unwrap().as_ref() == Some(&credential.fingerprint())
+    pub(super) fn verified(&self, credential: &Credential) -> bool {
+        self.store
+            .credential_verified(HostKind::Bitbucket, HOST, &credential.verification)
     }
 
     pub(super) fn forget(&self) {
-        *self.worked.lock().unwrap() = None;
+        self.viewers.lock().unwrap().clear();
     }
 
     pub(super) fn environment_names_host(&self) -> bool {
@@ -405,11 +407,17 @@ impl Api {
             ));
         }
         if (200..300).contains(&status) {
-            if credential
+            if let Some(credential) = credential
                 .as_ref()
-                .is_some_and(|credential| credential.source == CredentialSource::SavedBearer)
+                .filter(|credential| credential.source == CredentialSource::SavedBearer)
+                && let Err(error) = self.store.record_verification(
+                    HostKind::Bitbucket,
+                    HOST,
+                    &credential.verification,
+                    true,
+                )
             {
-                *self.worked.lock().unwrap() = Some(fingerprint);
+                log::warn!("failed to save credential verification: {error}");
             }
             return Ok(Response {
                 status,
@@ -418,10 +426,23 @@ impl Api {
             });
         }
         Err(match status {
-            401 => error(
-                ForgeErrorKind::Unauthorized,
-                "Bitbucket request failed (unauthorized)",
-            ),
+            401 => {
+                if let Some(credential) = credential.as_ref()
+                    && let Err(error) = self.store.record_verification(
+                        HostKind::Bitbucket,
+                        HOST,
+                        &credential.verification,
+                        false,
+                    )
+                {
+                    log::warn!("failed to clear credential verification: {error}");
+                }
+                self.forget();
+                error(
+                    ForgeErrorKind::Unauthorized,
+                    "Bitbucket request failed (unauthorized)",
+                )
+            }
             404 => error(
                 ForgeErrorKind::NotFound,
                 "Bitbucket request failed (not found)",

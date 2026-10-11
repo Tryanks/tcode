@@ -16,8 +16,7 @@ use agent::{
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Context, Entity, Hsla, InteractiveElement as _,
     IntoElement, ListAlignment, ListState, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, point,
-    prelude::FluentBuilder as _, px,
+    Styled as _, Subscription, Window, div, list, point, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Collapsible, ScrollableMask, Scrollbar, StyledExt as _, h_flex, v_flex};
 use tcode_core::settings::{PluginManagementSettings, ResolvedProfile};
@@ -37,6 +36,7 @@ use crate::widgets::Spinner;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::switch::Switch;
+use crate::widgets::tabs::{TabBar, TabItem};
 use crate::window_state::WindowState;
 
 const SCOPES: [PluginScope; 5] = [
@@ -341,7 +341,7 @@ impl PluginsSettingsPanel {
                                     .font_medium()
                                     .child(crate::tr!("providers.plugins.marketplace_source")),
                             )
-                            .child(Input::new(&field).small())
+                            .child(Input::new(&field))
                             .child(
                                 div()
                                     .text_size(px(12.))
@@ -385,62 +385,31 @@ impl PluginsSettingsPanel {
         selected: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (muted, foreground) = (cx.theme().muted_foreground, cx.theme().foreground);
-        let count = profiles.len();
-        let tabs: Vec<AnyElement> = profiles
+        let tabs = profiles
             .iter()
-            .enumerate()
-            .map(|(index, profile)| {
-                let name = SharedString::from(
-                    self.store
-                        .read(cx)
-                        .provider_profile_display_name(&profile.id),
-                );
-                let active = profile.id == selected;
-                let id = format!("plugins-tab-{}", profile.id);
+            .map(|profile| {
+                let name = self
+                    .store
+                    .read(cx)
+                    .provider_profile_display_name(&profile.id);
                 let profile_id = profile.id.clone();
-                material::tab(SharedString::from(id.clone()), name.clone(), active, cx)
-                    .debug_selector(move || id.clone())
-                    .set_position(index + 1, count)
-                    .h(px(36.))
-                    .px_3()
-                    .gap_2()
-                    .border_b_2()
-                    .border_color(if active {
-                        foreground
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .text_size(px(13.))
-                    .when(active, |tab| tab.font_medium())
-                    .when(!active, |tab| {
-                        tab.text_color(muted)
-                            .hover(move |tab| tab.text_color(foreground))
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(px(16.))
-                            .child(crate::provider_card::provider_glyph(profile.kind).small()),
-                    )
-                    .child(name)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected = Some(profile_id.clone());
-                        cx.notify();
-                    }))
-                    .into_any_element()
+                TabItem::new(
+                    SharedString::from(format!("plugins-tab-{}", profile.id)),
+                    name,
+                )
+                .icon(crate::provider_card::provider_glyph(profile.kind))
+                .selected(profile.id == selected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.selected = Some(profile_id.clone());
+                    cx.notify();
+                }))
             })
-            .collect();
-        gpui_base::Tabs::new("plugins-provider-tabs")
-            .flex()
-            .flex_wrap()
-            .items_end()
-            .aria_label(crate::tr!("settings.plugins"))
+            .collect::<Vec<_>>();
+        TabBar::new("plugins-provider-tabs")
+            .underline()
             .w_full()
-            .gap_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .children(tabs)
+            .aria_label(crate::tr!("settings.plugins"))
+            .items(tabs)
             .into_any_element()
     }
 
@@ -599,13 +568,12 @@ impl PluginsSettingsPanel {
             let panel = cx.entity().downgrade();
             let segments = views.into_iter().map(|(option, label)| {
                 let panel = panel.clone();
-                material::segment(
+                TabItem::new(
                     SharedString::from(format!("plugins-view-{}-{profile_id}", option.key())),
                     label.into_owned(),
-                    option == view,
-                    cx,
                 )
-                .on_change(move |_, _, _, cx| {
+                .selected(option == view)
+                .on_click(move |_, _, cx| {
                     _ = panel.update(cx, |this, cx| {
                         this.view = option;
                         cx.notify();
@@ -620,11 +588,11 @@ impl PluginsSettingsPanel {
                 })
                 .w(px(440.))
                 .max_w_full()
-                .child(material::segmented_track(
-                    SharedString::from(track_id),
-                    segments,
-                    cx,
-                ))
+                .child(
+                    TabBar::new(SharedString::from(track_id))
+                        .segmented()
+                        .items(segments),
+                )
         });
 
         let busy = !catalog.pending.is_empty();
@@ -1026,9 +994,7 @@ impl PluginsSettingsPanel {
             .gap_2()
             .when(!none_available, |col| {
                 col.child(
-                    Input::new(&self.search)
-                        .placeholder(crate::tr!("providers.plugins.search"))
-                        .small(),
+                    Input::new(&self.search).placeholder(crate::tr!("providers.plugins.search")),
                 )
             })
             .child(

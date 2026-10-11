@@ -13,15 +13,18 @@ use web_time::Instant;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _};
-use crate::{icon::IconName, sizing::Sizable as _};
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+    widgets::tabs::{TabBar, TabItem},
+};
 use gpui::{
     Action, AnyElement, App, AppContext as _, Bounds, ClipboardItem, ContentMask, Context, Entity,
     ExternalPaths, FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role,
-    ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point,
-    prelude::FluentBuilder as _, px, rgb, size,
+    ScrollWheelEvent, Styled as _, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    Window, canvas, div, fill, font, point, prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use tcode_protocol::terminal::{
@@ -1482,66 +1485,54 @@ impl Render for TerminalDrawer {
             self.marked_text = None;
         }
 
-        let mut tab_strip = gpui_base::Tabs::new("terminal-tab-list")
-            .flex()
-            .items_center()
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let mut tab_strip = TabBar::new("terminal-tab-list")
+            .underline()
+            .hairline(false)
+            .compact(compact)
+            .label_max_w(px(160.))
             .aria_label(crate::tr!("terminal.tabs"))
+            .flex_1()
             .min_w_0()
-            .gap(px(2.))
-            .overflow_hidden();
-        for (id, label, exited, bell) in &tabs {
+            .mb(px(-1.));
+        for (id, label, _, bell) in &tabs {
             let id = *id;
             let selected = active_id == Some(id);
             let close_id = id;
-            let tab_label = crate::tr!("terminal.tab", label = label.clone()).into_owned();
-            tab_strip = tab_strip.child(
-                crate::material::tab(("terminal-tab", id), tab_label, selected, cx)
-                    .justify_start()
-                    .h(px(25.))
-                    .gap(px(2.))
-                    .px_2()
-                    .rounded(material::radius_button(cx))
-                    .bg(if selected {
-                        cx.theme().list_active
-                    } else {
-                        cx.theme().background.opacity(0.)
-                    })
+            tab_strip = tab_strip.item(
+                TabItem::new(("terminal-tab", id), label.clone())
+                    .selected(selected)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.workspace_store
                             .update(cx, |store, _cx| store.activate_terminal(id));
                     }))
-                    .child(
-                        div()
-                            .max_w(px(92.))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_size(px(11.))
-                            .text_color(if *exited || !selected {
-                                cx.theme().muted_foreground
-                            } else {
-                                cx.theme().foreground
+                    .trailing(
+                        h_flex()
+                            .gap(px(2.))
+                            .when(*bell, |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().warning)
+                                        .child("●"),
+                                )
                             })
-                            .child(label.clone()),
-                    )
-                    .when(*bell, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().warning)
-                                .child("●"),
-                        )
-                    })
-                    .child(
-                        Button::new(("terminal-tab-close", close_id))
-                            .ghost()
-                            .compact()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .tooltip(crate::tr!("terminal.close_tab"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_store
-                                    .update(cx, |store, cx| store.close_terminal(close_id, cx));
-                            })),
+                            .child(
+                                Button::new(("terminal-tab-close", close_id))
+                                    .ghost()
+                                    .compact()
+                                    .xsmall()
+                                    .icon(
+                                        Icon::new(IconName::Close)
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .tooltip(crate::tr!("terminal.close_tab"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.close_terminal(close_id, cx)
+                                        });
+                                    })),
+                            ),
                     )
                     .context_menu({
                         let can_split = self
@@ -1591,7 +1582,6 @@ impl Render for TerminalDrawer {
         // A compact page gives the drawer one toolbar row on the page inset:
         // the tab strip, a new-terminal target, and everything else in an
         // overflow menu rather than five dense controls fighting for 393pt.
-        let compact = crate::window_seam::window_is_compact(window, cx);
         let new_tooltip = if at_limit {
             crate::tr!("terminal.max_reached", count = MAX_TERMINALS_PER_SESSION)
         } else {
@@ -1599,7 +1589,9 @@ impl Render for TerminalDrawer {
         };
         let mut header = h_flex()
             .flex_none()
-            .h(px(if compact { material::TOUCH_TARGET } else { 31. }))
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .h(px(if compact { material::TOUCH_TARGET } else { 40. }))
             .px(px(if compact {
                 material::COMPACT_PAGE_INSET
             } else {
@@ -1607,8 +1599,7 @@ impl Render for TerminalDrawer {
             }))
             .gap_1()
             .items_center()
-            .child(tab_strip)
-            .child(div().flex_1());
+            .child(tab_strip);
         if compact {
             header = header
                 .child(
@@ -1618,6 +1609,7 @@ impl Render for TerminalDrawer {
                         new_tooltip,
                         true,
                     )
+                    .flex_none()
                     .disabled(at_limit)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workspace_store
@@ -1631,6 +1623,7 @@ impl Render for TerminalDrawer {
                         crate::tr!("mobile.more_actions"),
                         true,
                     )
+                    .flex_none()
                     .dropdown_menu(move |menu, _, _| {
                         menu.menu_with_enable(
                             crate::tr!("terminal.split_horizontal").into_owned(),
@@ -1659,6 +1652,7 @@ impl Render for TerminalDrawer {
                 .when(active_exited, |this| {
                     this.child(
                         Button::new("terminal-restart")
+                            .flex_none()
                             .ghost()
                             .small()
                             .label(crate::tr!("terminal.restart"))
@@ -1670,6 +1664,7 @@ impl Render for TerminalDrawer {
                 })
                 .child(
                     Button::new("terminal-split-horizontal")
+                        .flex_none()
                         .ghost()
                         .small()
                         .compact()
@@ -1684,6 +1679,7 @@ impl Render for TerminalDrawer {
                 )
                 .child(
                     Button::new("terminal-split-vertical")
+                        .flex_none()
                         .ghost()
                         .small()
                         .compact()
@@ -1698,6 +1694,7 @@ impl Render for TerminalDrawer {
                 )
                 .child(
                     Button::new("terminal-new")
+                        .flex_none()
                         .ghost()
                         .small()
                         .compact()
@@ -1711,6 +1708,7 @@ impl Render for TerminalDrawer {
                 )
                 .child(
                     Button::new("terminal-close-drawer")
+                        .flex_none()
                         .ghost()
                         .small()
                         .compact()
