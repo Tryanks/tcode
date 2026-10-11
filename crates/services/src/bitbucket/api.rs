@@ -231,8 +231,8 @@ impl Api {
         self.environment.contains_key(ENV_TOKEN)
     }
 
-    /// The account the credential reads as, `None` anonymously or with an access token that
-    /// Bitbucket will not name an account for.
+    /// The account the credential reads as, `None` anonymously or with a credential Bitbucket
+    /// will not name an account for: an access token, or a token without the account scope.
     pub(super) fn viewer(&self) -> Result<Option<Value>, ForgeError> {
         let Some(credential) = self.credential(HOST)? else {
             return Ok(None);
@@ -248,8 +248,13 @@ impl Api {
             "Viewer",
         )) {
             Ok(response) => Some(response.json::<Value>()?),
+            // A token without the account scope may still read pull requests.
             Err(ForgeError {
-                kind: ForgeErrorKind::Unauthorized | ForgeErrorKind::Refused { .. },
+                kind: ForgeErrorKind::Refused { .. },
+                ..
+            }) => None,
+            Err(ForgeError {
+                kind: ForgeErrorKind::Unauthorized,
                 ..
             }) if credential.bearer() => None,
             Err(failure) => return Err(failure),
