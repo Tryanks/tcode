@@ -2055,10 +2055,16 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn an_expiry_reread_keeps_the_pages_read_after_page_one_and_the_scroll(
-        cx: &mut TestAppContext,
-    ) {
+    struct Mounted<'a> {
+        view: Entity<PullRequestView>,
+        requests: async_channel::Receiver<String>,
+        incoming: async_channel::Sender<String>,
+        _pump: gpui::Task<()>,
+        cx: &'a mut VisualTestContext,
+    }
+
+    /// A wide view showing octo/repo#7, its first reads asked for and unanswered.
+    fn mount(cx: &mut TestAppContext) -> Mounted<'_> {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
@@ -2066,7 +2072,7 @@ mod tests {
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump = link.clone();
         let executor = cx.background_executor.clone();
-        let _pump = cx.background_executor.spawn(async move {
+        let pump = cx.background_executor.spawn(async move {
             pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
                 .await;
         });
@@ -2093,7 +2099,69 @@ mod tests {
             )
         });
         settle(cx);
+        Mounted {
+            view,
+            requests,
+            incoming,
+            _pump: pump,
+            cx,
+        }
+    }
 
+    /// Answers a read other than a page of files, valid until `expires_at`.
+    fn answer_other(
+        incoming: &async_channel::Sender<String>,
+        id: u64,
+        read: PullRequestRead,
+        expires_at: u64,
+    ) {
+        let response = match read {
+            PullRequestRead::Conversation => {
+                PullRequestReadResponse::Conversation(Box::new(PullRequestConversation {
+                    description: PullRequestComment {
+                        id: "PR_7".into(),
+                        author: None,
+                        body: String::new(),
+                        created_at: "2026-10-01T00:00:00Z".into(),
+                        edited_at: None,
+                        url: None,
+                        review_state: None,
+                        reactions: Vec::new(),
+                        viewer_can_update: false,
+                        viewer_can_react: false,
+                    },
+                    comments: Vec::new(),
+                    threads: Vec::new(),
+                    complete: true,
+                    account: "account".into(),
+                    permissions: Default::default(),
+                    labels: Vec::new(),
+                    reviewers: Vec::new(),
+                    capabilities: PullRequestCapabilities::ALL,
+                }))
+            }
+            PullRequestRead::ViewedFiles => {
+                PullRequestReadResponse::ViewedFiles(PullRequestViewedFiles {
+                    files: Vec::new(),
+                    complete: true,
+                })
+            }
+            read => panic!("unexpected read {read:?}"),
+        };
+        answer(incoming, id, response, expires_at);
+    }
+
+    #[gpui::test]
+    fn an_expiry_reread_keeps_the_pages_read_after_page_one_and_the_scroll(
+        cx: &mut TestAppContext,
+    ) {
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
         let later = now() + 3600;
         let mut reread = None;
         for (id, read) in reads(&requests) {
@@ -2105,43 +2173,7 @@ mod tests {
                     PullRequestReadResponse::Files(files(0..100, Some("2"))),
                     now(),
                 ),
-                PullRequestRead::Conversation => answer(
-                    &incoming,
-                    id,
-                    PullRequestReadResponse::Conversation(Box::new(PullRequestConversation {
-                        description: PullRequestComment {
-                            id: "PR_7".into(),
-                            author: None,
-                            body: String::new(),
-                            created_at: "2026-10-01T00:00:00Z".into(),
-                            edited_at: None,
-                            url: None,
-                            review_state: None,
-                            reactions: Vec::new(),
-                            viewer_can_update: false,
-                            viewer_can_react: false,
-                        },
-                        comments: Vec::new(),
-                        threads: Vec::new(),
-                        complete: true,
-                        account: "account".into(),
-                        permissions: Default::default(),
-                        labels: Vec::new(),
-                        reviewers: Vec::new(),
-                        capabilities: PullRequestCapabilities::ALL,
-                    })),
-                    later,
-                ),
-                PullRequestRead::ViewedFiles => answer(
-                    &incoming,
-                    id,
-                    PullRequestReadResponse::ViewedFiles(PullRequestViewedFiles {
-                        files: Vec::new(),
-                        complete: true,
-                    }),
-                    later,
-                ),
-                read => panic!("unexpected read {read:?}"),
+                read => answer_other(&incoming, id, read, later),
             }
         }
         settle(cx);
@@ -2203,5 +2235,37 @@ mod tests {
             );
         });
         assert!(reads(&requests).is_empty());
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_file_filter_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let later = now() + 3600;
+        for (id, read) in reads(&requests) {
+            match read {
+                PullRequestRead::Files { cursor: None } => answer(
+                    &incoming,
+                    id,
+                    PullRequestReadResponse::Files(files(0..3, None)),
+                    later,
+                ),
+                read => answer_other(&incoming, id, read, later),
+            }
+        }
+        settle(cx);
+        crate::settings::assert_follows_language_switch(cx, "pull_requests.files.filter", |cx| {
+            view.read_with(cx, |view, cx| {
+                let (filter, _) = view.file_filter.as_ref().expect("the file column");
+                filter.read(cx).presentation().placeholder().to_string()
+            })
+        });
     }
 }

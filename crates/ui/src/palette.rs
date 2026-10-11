@@ -144,8 +144,7 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query =
-            cx.new(|cx| InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder")));
+        let query = cx.new(|cx| InputState::new(window, cx));
 
         let subscriptions = vec![
             cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
@@ -826,6 +825,7 @@ impl Render for CommandPalette {
                 .child(
                     div().flex_1().child(
                         Input::new(&self.query)
+                            .placeholder(crate::tr!("palette.placeholder"))
                             .appearance(false)
                             .rounded(crate::material::radius_input(cx)),
                     ),
@@ -1054,6 +1054,43 @@ mod tests {
         drop(palette);
         drop(workspace_store);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_query_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let (harness, cx) =
+            cx.add_window_view(move |window, cx| PaletteHarness::new(store, window, cx));
+        let (palette, window_state) = harness.read_with(cx, |harness, _| {
+            (harness.palette.clone(), harness.window_state.clone())
+        });
+        window_state.update(cx, |state, cx| {
+            state.palette_open = true;
+            cx.notify();
+        });
+        crate::settings::assert_follows_language_switch(cx, "palette.placeholder", |cx| {
+            palette.read_with(cx, |palette, cx| {
+                let query = palette.query.read(cx);
+                query.presentation().placeholder().to_string()
+            })
+        });
     }
 
     #[gpui::test]

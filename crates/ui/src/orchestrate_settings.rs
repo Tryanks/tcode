@@ -933,6 +933,7 @@ impl OrchestrateSettingsPanel {
                     })
                     .child(
                         Textarea::new(&row.description)
+                            .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
                             .text_sm()
                             .rounded(crate::material::radius_input(cx)),
                     )
@@ -947,24 +948,6 @@ impl OrchestrateSettingsPanel {
 
 impl Render for OrchestrateSettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The textarea state owns its placeholder, so it is refreshed here for
-        // a language switch to reach it.
-        let placeholder = crate::tr!("orchestrate.children.description_placeholder");
-        for row in &self.child_rows {
-            if row
-                .description
-                .read(cx)
-                .presentation()
-                .placeholder()
-                .as_ref()
-                != placeholder.as_ref()
-            {
-                let placeholder = placeholder.clone().into_owned();
-                row.description.update(cx, |input, cx| {
-                    input.set_placeholder(placeholder, window, cx)
-                });
-            }
-        }
         let compact = crate::window_seam::window_is_compact(window, cx);
         v_flex()
             .w_full()
@@ -1043,30 +1026,19 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
         let (panel, cx) = mount(cx);
-        let placeholder = |cx: &mut gpui::VisualTestContext| {
-            panel.read_with(cx, |panel, cx| {
-                panel.child_rows[0]
-                    .description
-                    .read(cx)
-                    .presentation()
-                    .placeholder()
-                    .to_string()
-            })
-        };
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-        let chinese = crate::tr!("orchestrate.children.description_placeholder").into_owned();
-        assert_eq!(placeholder(cx), chinese);
-
-        // The two calls the Settings language row makes.
-        cx.update(|window, cx| {
-            crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-            window.refresh();
-            _ = window.draw(cx);
-        });
-        let english = crate::tr!("orchestrate.children.description_placeholder").into_owned();
-        assert_ne!(english, chinese);
-        assert_eq!(placeholder(cx), english);
+        crate::settings::assert_follows_language_switch(
+            cx,
+            "orchestrate.children.description_placeholder",
+            |cx| {
+                panel.read_with(cx, |panel, cx| {
+                    panel.child_rows[0]
+                        .description
+                        .read(cx)
+                        .presentation()
+                        .placeholder()
+                        .to_string()
+                })
+            },
+        );
     }
 }

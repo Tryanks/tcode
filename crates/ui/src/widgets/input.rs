@@ -58,6 +58,7 @@ pub struct Input {
     tab_index: isize,
     role: RoleOverride,
     aria_label: Option<SharedString>,
+    placeholder: Option<SharedString>,
 }
 
 impl Input {
@@ -79,6 +80,7 @@ impl Input {
             tab_index: 0,
             role: RoleOverride::Implicit,
             aria_label: None,
+            placeholder: None,
         }
     }
     pub fn appearance(mut self, appearance: bool) -> Self {
@@ -107,6 +109,13 @@ impl Input {
     }
     pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.aria_label = Some(label.into());
+        self
+    }
+    /// The placeholder as of this frame. The state keeps the text it was
+    /// given, so a placeholder given only at construction stays in the
+    /// language of that moment; given here, a language switch reaches it.
+    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+        self.placeholder = Some(placeholder.into());
         self
     }
 }
@@ -221,6 +230,16 @@ impl RenderOnce for Input {
         let multi_line = matches!(self.state, State::Textarea(_));
         dispatch_state!(&self.state, |state| state
             .update(cx, |state, cx| state.prepare(window, cx)));
+        if let Some(placeholder) = self.placeholder {
+            dispatch_state!(&self.state, |base| {
+                // Setting notifies, so it is set only when it changed.
+                if base.read(cx).presentation().placeholder() != &placeholder {
+                    base.update(cx, |state, cx| {
+                        state.set_placeholder(placeholder, window, cx)
+                    });
+                }
+            });
+        }
         let theme = cx.theme().clone();
         dispatch_state!(&self.state, |base| base.update(cx, |state, cx| {
             state.set_editor_style(gpui_base::input::InputEditorStyle {
@@ -445,6 +464,10 @@ impl Textarea {
     }
     pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.input = self.input.aria_label(label);
+        self
+    }
+    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+        self.input = self.input.placeholder(placeholder);
         self
     }
 }

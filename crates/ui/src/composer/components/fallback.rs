@@ -248,6 +248,7 @@ impl Composer {
             .child(
                 div().flex_1().min_w_0().child(
                     Textarea::new(&self.fallback_review_input)
+                        .placeholder(crate::tr!("fallback.review_placeholder"))
                         .appearance(false)
                         .text_size(px(13.)),
                 ),

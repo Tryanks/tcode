@@ -41,14 +41,12 @@ impl AcpAgentCard {
         cx: &mut Context<Self>,
     ) -> Self {
         let args = cx.new(|cx| {
-            let mut input =
-                InputState::new(window, cx).placeholder(crate::tr!("providers.acp.args_hint"));
+            let mut input = InputState::new(window, cx);
             input.set_value(agent.launch_args.clone().unwrap_or_default(), window, cx);
             input
         });
         let env = cx.new(|cx| {
-            let mut input =
-                InputState::new(window, cx).placeholder(crate::tr!("providers.acp.env_hint"));
+            let mut input = InputState::new(window, cx);
             input.set_value(format_env(&agent.env), window, cx);
             input
         });
@@ -171,18 +169,27 @@ impl AcpAgentCard {
         let remove_id = self.agent_id.clone();
         v_flex()
             .w_full()
-            .child(self.field_block(
-                crate::tr!("providers.acp.args").into_owned(),
-                Input::new(&self.args).xsmall().into_any_element(),
-                cx,
-            ))
+            .child(
+                self.field_block(
+                    crate::tr!("providers.acp.args").into_owned(),
+                    Input::new(&self.args)
+                        .placeholder(crate::tr!("providers.acp.args_hint"))
+                        .xsmall()
+                        .into_any_element(),
+                    cx,
+                ),
+            )
             .child(
                 self.field_block(
                     crate::tr!("providers.acp.env").into_owned(),
                     v_flex()
                         .w_full()
                         .gap_2()
-                        .child(Input::new(&self.env).xsmall())
+                        .child(
+                            Input::new(&self.env)
+                                .placeholder(crate::tr!("providers.acp.env_hint"))
+                                .xsmall(),
+                        )
                         .child(
                             h_flex().w_full().justify_end().child(
                                 Button::new(gpui::SharedString::from(format!(
@@ -301,7 +308,7 @@ impl AcpPanel {
         let input = |placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };
-        let search = input(&crate::tr!("providers.acp.search"), window, cx);
+        let search = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
             observe_store_topics(&store, &[TopicKind::Providers], cx),
             cx.observe(&search, |_, _, cx| cx.notify()),
@@ -318,7 +325,7 @@ impl AcpPanel {
             tp_name: input(KIMI_NAME, window, cx),
             tp_base_url: input(KIMI_BASE_URL, window, cx),
             tp_model: input(KIMI_MODEL, window, cx),
-            tp_key: input(&crate::tr!("providers.third_party.key_hint"), window, cx),
+            tp_key: cx.new(|cx| InputState::new(window, cx)),
             market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
             market_ids: Vec::new(),
             _subscriptions: subscriptions,
@@ -493,7 +500,11 @@ impl AcpPanel {
             .flex_1()
             .min_h_0()
             .gap_3()
-            .child(Input::new(&self.search).small())
+            .child(
+                Input::new(&self.search)
+                    .placeholder(crate::tr!("providers.acp.search"))
+                    .small(),
+            )
             .child(
                 v_flex()
                     .w_full()
@@ -715,7 +726,10 @@ impl AcpPanel {
             ))
             .child(field(
                 crate::tr!("providers.third_party.key").into_owned(),
-                Input::new(&self.tp_key).small().into_any_element(),
+                Input::new(&self.tp_key)
+                    .placeholder(crate::tr!("providers.third_party.key_hint"))
+                    .small()
+                    .into_any_element(),
             ))
             .child(
                 h_flex()
@@ -985,5 +999,105 @@ mod tests {
             format_env(&pairs),
             "API_KEY=abc=def BASE_URL=https://x/y EMPTY="
         );
+    }
+
+    /// A store holding one installed agent, built while Simplified Chinese is
+    /// current.
+    fn store_with_agent(
+        cx: &mut TestAppContext,
+    ) -> (Entity<WorkspaceStore>, InstalledAcpAgent, gpui::Task<()>) {
+        use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
+
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        cx.update(crate::theme::init);
+        let agent = InstalledAcpAgent {
+            id: "agent".into(),
+            name: "Agent".into(),
+            version: "1.0.0".into(),
+            icon: None,
+            launch: agent::AcpLaunch::Custom {
+                command: "agent".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+            },
+            enabled: true,
+            env: Vec::new(),
+            launch_args: None,
+        };
+        let mut settings = crate::settings::Settings::default();
+        settings.acp_agents.insert(agent.id.clone(), agent.clone());
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::SettingsSnapshot(settings),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        (store, agent, pump)
+    }
+
+    fn placeholder(input: &Entity<InputState>, cx: &gpui::App) -> String {
+        input.read(cx).presentation().placeholder().to_string()
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_search_and_key_placeholders(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (store, _, _pump) = store_with_agent(cx);
+        let (panel, cx) = cx.add_window_view(|window, cx| AcpPanel::new(store, window, cx));
+        crate::settings::assert_follows_language_switch(cx, "providers.acp.search", |cx| {
+            panel.read_with(cx, |panel, cx| placeholder(&panel.search, cx))
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.view = PanelView::ThirdParty;
+            cx.notify();
+        });
+        crate::settings::assert_follows_language_switch(
+            cx,
+            "providers.third_party.key_hint",
+            |cx| panel.read_with(cx, |panel, cx| placeholder(&panel.tp_key, cx)),
+        );
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_agent_arguments_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (store, agent, _pump) = store_with_agent(cx);
+        let (card, cx) = cx.add_window_view(|window, cx| {
+            let mut card = AcpAgentCard::new(store, &agent, window, cx);
+            card.expanded = true;
+            card
+        });
+        crate::settings::assert_follows_language_switch(cx, "providers.acp.args_hint", |cx| {
+            card.read_with(cx, |card, cx| placeholder(&card.args, cx))
+        });
     }
 }

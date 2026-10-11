@@ -427,10 +427,7 @@ impl HostingPanel {
                 },
             })
             .collect();
-        let traverse_add_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(crate::tr!("remote.traverse.url_placeholder").into_owned())
-        });
+        let traverse_add_input = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
             edit_on_leave(&host_name_input, window, cx),
             // Enter adds the typed instance; the field repaints as the URL
@@ -480,11 +477,7 @@ fn url_input(
     window: &mut Window,
     cx: &mut Context<HostingPanel>,
 ) -> (Entity<InputState>, gpui::Subscription) {
-    let input = cx.new(|cx| {
-        InputState::new(window, cx)
-            .placeholder(crate::tr!("remote.traverse.url_placeholder").into_owned())
-            .default_value(url.to_owned())
-    });
+    let input = cx.new(|cx| InputState::new(window, cx).default_value(url.to_owned()));
     let subscription = edit_on_leave(&input, window, cx);
     (input, subscription)
 }
@@ -918,6 +911,9 @@ impl HostingPanel {
                                 .child(
                                     field(compact).child(
                                         Input::new(input)
+                                            .placeholder(crate::tr!(
+                                                "remote.traverse.url_placeholder"
+                                            ))
                                             .small()
                                             .rounded(crate::material::radius_input(cx)),
                                     ),
@@ -970,6 +966,7 @@ impl HostingPanel {
                         .child(
                             field(compact).child(
                                 Input::new(&self.traverse_add_input)
+                                    .placeholder(crate::tr!("remote.traverse.url_placeholder"))
                                     .small()
                                     .rounded(crate::material::radius_input(cx)),
                             ),
