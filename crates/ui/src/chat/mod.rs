@@ -90,18 +90,69 @@ pub(crate) use crate::material::{
 };
 /// Left padding on the chat header while the sidebar is collapsed, so its
 /// leading control clears the native macOS traffic lights (which end near x=72
-/// on macOS 26). Only applied on macOS: see `render_header`.
+/// on macOS 26). Only applied on macOS: see [`traffic_light_clearance`].
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
+/// The header's padding on either side, unless it clears the traffic lights.
+const HEADER_PADDING: f32 = 16.;
 /// Below this header width the git and Open split buttons drop their text and
-/// keep their icon and chevron. The header with its longest git label, five
-/// panel toggles and a title kept to a few words needs about this much in
-/// English, the widest shipped locale.
+/// keep their icon and chevron. At 16pt padding, the header with its longest
+/// git label, five panel toggles and a title kept to a few words beside a
+/// "+10" pull request badge measures 671pt in English, the widest shipped
+/// locale. [`header_extra_width`] adds what a thread's header holds beyond that.
 const HEADER_LABELS_MIN_WIDTH: f32 = 672.;
+/// The way back to the parent thread, each with the 8pt gap that follows it.
+/// Its arrow alone measures 20pt. With the parent's title cut to its
+/// 24-character maximum it measured 215pt for an ordinary title; 265pt leaves
+/// room for a title of wide letters.
+const PARENT_LINK_COMPACT_WIDTH: f32 = 28.;
+const PARENT_LINK_LABELLED_WIDTH: f32 = 273.;
 
-/// Whether a header last laid out `width` wide labels its split buttons.
-/// Before the first layout it does.
-fn header_labels_fit(width: Option<f32>) -> bool {
-    width.is_none_or(|width| width >= HEADER_LABELS_MIN_WIDTH)
+/// Whether a header last laid out `width` wide, `extra` of it beyond the plain
+/// header, labels its split buttons. Before the first layout it does.
+fn header_labels_fit(width: Option<f32>, extra: f32) -> bool {
+    width.is_none_or(|width| width - extra >= HEADER_LABELS_MIN_WIDTH)
+}
+
+/// The thread the active one was reached from: its id and title.
+fn parent_session(store: &WorkspaceStore) -> Option<(String, String)> {
+    let active = store.active_session_id()?;
+    let sessions = store.sidebar_sessions();
+    let parent_id = sessions
+        .iter()
+        .find(|meta| meta.id == active)?
+        .parent_session_id
+        .clone()?;
+    let parent = sessions.iter().find(|meta| meta.id == parent_id)?;
+    Some((parent_id, parent.title.clone()))
+}
+
+/// The header's left padding beyond [`HEADER_PADDING`]. Collapsed, the sidebar
+/// has zero width and the header starts at the window's left edge, where macOS
+/// draws the traffic lights — but only when it draws them: they are hidden in
+/// fullscreen, and other platforms never had them.
+fn traffic_light_clearance(sidebar_collapsed: bool, fullscreen: bool) -> f32 {
+    if cfg!(target_os = "macos") && sidebar_collapsed && !fullscreen {
+        TRAFFIC_LIGHT_INSET - HEADER_PADDING
+    } else {
+        0.
+    }
+}
+
+/// How much wider than the plain header the active thread's header is, with
+/// its split buttons labelled or not: the padding that clears the macOS
+/// traffic lights, and the parent link.
+pub(crate) fn header_extra_width(
+    store: &WorkspaceStore,
+    sidebar_collapsed: bool,
+    fullscreen: bool,
+    labelled: bool,
+) -> f32 {
+    let parent_link = match (parent_session(store), labelled) {
+        (None, _) => 0.,
+        (Some(_), true) => PARENT_LINK_LABELLED_WIDTH,
+        (Some(_), false) => PARENT_LINK_COMPACT_WIDTH,
+    };
+    traffic_light_clearance(sidebar_collapsed, fullscreen) + parent_link
 }
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
@@ -2367,19 +2418,14 @@ impl ChatView {
         )
     }
 
-    /// The way back from an agent to the thread it was reached from.
-    fn parent_link(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let store = self.workspace_store.read(cx);
-        let active = store.active_session_id()?;
-        let sessions = store.sidebar_sessions();
-        let parent_id = sessions
-            .iter()
-            .find(|meta| meta.id == active)?
-            .parent_session_id
-            .clone()?;
-        let parent = sessions.iter().find(|meta| meta.id == parent_id)?;
-        let title = parent.title.clone();
+    /// The way back from an agent to the thread it was reached from. Unlabelled,
+    /// it is its arrow, named by its tooltip and its accessibility label.
+    fn parent_link(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (parent_id, title) = parent_session(self.workspace_store.read(cx))?;
         let short = components::disclosure::truncate_chars(&title, 24);
+        let name: SharedString = crate::tr!("agents.back_to_parent", title = title)
+            .into_owned()
+            .into();
         Some(
             Button::new("agent-parent-link")
                 .debug_selector(|| "agent-parent-link".into())
@@ -2387,8 +2433,9 @@ impl ChatView {
                 .ghost()
                 .xsmall()
                 .icon(Icon::new(IconName::ArrowLeft).size(px(14.)))
-                .label(short)
-                .tooltip(crate::tr!("agents.back_to_parent", title = title))
+                .when(labelled, |link| link.label(short))
+                .aria_label(name.clone())
+                .tooltip(name)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let parent_id = parent_id.clone();
                     this.workspace_store
@@ -2541,14 +2588,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Collapsed, the sidebar has zero width and this header starts at the
-        // window's left edge. On macOS the native traffic lights sit there, so
-        // the row's leading content (the sidebar toggle) is inset past them —
-        // but only when the platform actually draws them: they are hidden in
-        // fullscreen, and other platforms never had them.
         let collapsed = self.window_state.read(cx).sidebar_collapsed;
-        let clears_traffic_lights =
-            cfg!(target_os = "macos") && collapsed && !window.is_fullscreen();
         // Windows: with no right panel open this header is the window's
         // top-right corner, so it hosts the caption buttons — flush to the
         // right edge, past the header's usual inset.
@@ -2559,22 +2599,32 @@ impl ChatView {
             right_panel_open,
             right_tab,
         );
-        let labelled = header_labels_fit(self.header_width.get());
+        let labelled_extra = header_extra_width(
+            self.workspace_store.read(cx),
+            collapsed,
+            window.is_fullscreen(),
+            true,
+        );
+        let labelled = header_labels_fit(self.header_width.get(), labelled_extra);
         let header_width = self.header_width.clone();
         let base = h_flex()
             .flex_shrink_0()
             .h(px(52.))
-            .px_4()
-            .when(clears_traffic_lights, |this| {
-                this.pl(px(TRAFFIC_LIGHT_INSET))
-            })
+            .px(px(HEADER_PADDING))
+            .pl(px(HEADER_PADDING
+                + traffic_light_clearance(
+                    collapsed,
+                    window.is_fullscreen(),
+                )))
             .when(hosts_caption, |this| this.pr_0())
             .gap_2()
             .items_center()
             .on_prepaint(move |bounds, window, _| {
                 let width = Some(f32::from(bounds.size.width));
                 let previous = header_width.replace(width);
-                if header_labels_fit(previous) != header_labels_fit(width) {
+                if header_labels_fit(previous, labelled_extra)
+                    != header_labels_fit(width, labelled_extra)
+                {
                     window.request_animation_frame();
                 }
             });
@@ -2608,7 +2658,7 @@ impl ChatView {
             }));
 
         // An agent's header leads back to the thread it was reached from.
-        let parent_link = self.parent_link(cx);
+        let parent_link = self.parent_link(labelled, cx);
 
         // A draft shows a muted "New thread" label; an open thread its title;
         // nothing active shows "No active thread". The title stretch carries no
