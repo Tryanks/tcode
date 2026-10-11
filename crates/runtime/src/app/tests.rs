@@ -4570,6 +4570,84 @@ fn profile_switch_within_one_provider_requires_a_relay() {
     });
 }
 
+/// Switching provider while the only turn is still streaming keeps what it
+/// produced: the switch arms a relay instead of silently dropping the cursor,
+/// and confirming it closes the abandoned turn so the handoff opens a new one.
+#[test]
+fn provider_switch_mid_turn_relays_the_partial_answer() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-mid-turn-relay-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new(store);
+        state.set_provider_launcher_for_test(ProviderLauncher(Arc::new(|_, _| {
+            Box::pin(std::future::pending())
+        })));
+        state
+    });
+    let (commands, _receiver) = smol::channel::unbounded();
+
+    state.update(cx, |state, cx| {
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.meta.id = "mid-turn-relay".into();
+        active.turn_in_flight = true;
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "codex-turn".into(),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "user-1".into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "compare them".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "assistant-1".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "They differ in".into(),
+                },
+            }),
+        ] {
+            active.timeline.apply_at(None, &event);
+        }
+        state.sessions.push(active.meta.clone());
+        state.install_selected(active);
+
+        state.set_active_model(
+            "mid-turn-relay",
+            ProviderKind::ClaudeCode,
+            Some("claude-opus-5-5".into()),
+            None,
+            cx,
+        );
+        let active = state.selected_session().unwrap();
+        assert!(active.pending_relay.is_some());
+        assert!(matches!(active.runtime, Runtime::Live(_)));
+        assert_eq!(
+            state.relay_confirmation("mid-turn-relay"),
+            Some(("Codex".into(), "Claude Code".into()))
+        );
+
+        state.confirm_relay_and_send("mid-turn-relay", "now review it".into(), Vec::new(), cx);
+        let active = state.selected_session().unwrap();
+        assert!(active.pending_relay.is_none());
+        assert_eq!(
+            active.timeline.turns[0].status,
+            Some(TurnStatus::Interrupted)
+        );
+        assert!(active.timeline.entries.iter().any(|entry| {
+            matches!(entry.content, EntryContent::ProviderRelay { .. }) && entry.turn == 1
+        }));
+        let transcript = active.queue[0].relay_transcript.as_deref().unwrap();
+        assert!(transcript.contains("They differ in"));
+        assert!(transcript.contains("still running when the conversation was handed over"));
+    });
+}
+
 /// A live session with `provider`, nothing queued, no turn in flight.
 fn live_session(
     provider: ProviderKind,

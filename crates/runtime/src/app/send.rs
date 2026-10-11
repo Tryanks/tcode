@@ -341,6 +341,32 @@ impl AppState {
         }
     }
 
+    /// Shutting a provider down drops its event pump, so a turn still running
+    /// loses the completion that would close it in the timeline and on the
+    /// clients' running indicators. Record that close here so the next turn
+    /// opens on its own instead of joining the abandoned one.
+    pub(super) fn close_abandoned_turn(&mut self, session_id: &str, cx: &mut HostCx) {
+        let Some(turn_id) = self.resident(session_id).and_then(|active| {
+            active
+                .timeline
+                .turns
+                .last()
+                .filter(|turn| turn.status.is_none() && turn.end_ts.is_none())
+                .map(|turn| turn.provider_turn_id.clone().unwrap_or_default())
+        }) else {
+            return;
+        };
+        self.on_event(
+            session_id,
+            AgentEvent::TurnCompleted {
+                turn_id,
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+            cx,
+        );
+    }
+
     pub(super) fn relay_confirmation(&self, target_id: &str) -> Option<(String, String)> {
         let active = self.resident(target_id)?;
         let pending = active.pending_relay.as_ref()?;
@@ -403,6 +429,7 @@ impl AppState {
         let meta = active.meta.clone();
 
         self.persist_meta(&meta, cx);
+        self.close_abandoned_turn(&session_id, cx);
         self.record_event(&session_id, &event, cx);
 
         let Some(active) = self.resident_mut(target_id) else {

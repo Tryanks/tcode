@@ -83,6 +83,7 @@ impl AppState {
                 from_model: active.meta.model.clone(),
                 from_profile: active.meta.profile_id.clone(),
             });
+            let mut abandoned = false;
             if active.pending_relay.is_some()
                 && source.from_provider == provider
                 && source.from_profile == profile_id
@@ -92,6 +93,7 @@ impl AppState {
                 active.pending_relay = Some(source);
             } else {
                 active.resume_cursor_for_fresh_provider();
+                abandoned = true;
             }
             active.meta.provider = provider;
             active.meta.acp_agent_id = None;
@@ -105,6 +107,9 @@ impl AppState {
             active.confirmed_option_selections.clear();
             if active.pending_relay.is_some() {
                 return;
+            }
+            if abandoned {
+                self.close_abandoned_turn(target_id, cx);
             }
             self.preview_draft_or_persist_active(target_id, cx);
             return;

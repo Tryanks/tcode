@@ -426,35 +426,19 @@ impl AppState {
                 ..
             } => {
                 if self.settings.abort_on_model_fallback {
-                    let stopped_turn = self
+                    let stopped = self
                         .residents
                         .live
                         .get_mut(session_id)
                         .filter(|active| active.meta.id == session_id)
                         .map(|active| {
-                            let turn_id = active
-                                .timeline
-                                .turns
-                                .last()
-                                .and_then(|turn| turn.provider_turn_id.clone())
-                                .unwrap_or_default();
                             active.queue.clear();
                             active.shutdown_to_idle();
-                            turn_id
-                        });
-                    if let Some(turn_id) = stopped_turn {
-                        // Shutdown drops the provider pump, so its completion cannot
-                        // close the persisted turn or the clients' running indicators.
+                        })
+                        .is_some();
+                    if stopped {
                         self.record_event(session_id, &event, cx);
-                        self.on_event(
-                            session_id,
-                            AgentEvent::TurnCompleted {
-                                turn_id,
-                                status: TurnStatus::Interrupted,
-                                usage: None,
-                            },
-                            cx,
-                        );
+                        self.close_abandoned_turn(session_id, cx);
                         self.emit_domain(
                             Topic::SessionStatus {
                                 session_id: session_id.to_owned(),
