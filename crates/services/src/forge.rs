@@ -632,6 +632,35 @@ impl Forge for Hosts {
 mod tests {
     use super::*;
 
+    /// A host that only rebases refuses a merge-style branch update before any request; a
+    /// rebase passes the gate and reaches the host, here one turned off in settings.
+    #[test]
+    fn a_merge_update_is_refused_where_the_host_only_rebases() {
+        let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let forge = connect(SettingsStore::new(root.clone()), []);
+        forge.configure(BTreeMap::from([(
+            "gitlab.acme.test".to_owned(),
+            HostSettings {
+                enabled: false,
+                ..HostSettings::new(HostKind::Gitlab)
+            },
+        )]));
+        let key = PullRequestKey::new("gitlab.acme.test", "team/app", 1);
+        let update = |rebase| {
+            forge.act(
+                &key,
+                &PullRequestAction::UpdateBranch {
+                    head: "abc".into(),
+                    rebase,
+                },
+            )
+        };
+        assert_eq!(update(false), Outcome::Rejected(Rejection::Unsupported));
+        assert_eq!(update(true), Outcome::Rejected(Rejection::HostDisabled));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A host is served by the kind settings give it; otherwise its name decides, and a host
     /// whose name says nothing is GitHub's, as every host was before hosts had kinds.
     #[test]
