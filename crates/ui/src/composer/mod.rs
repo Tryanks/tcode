@@ -775,7 +775,7 @@ impl Composer {
                 .child(Spinner::new().small().color(cx.theme().primary))
                 .into_any_element();
         }
-        let stopping = turn_running && !has_text;
+        let stopping = (turn_running || self.watching(cx)) && !has_text;
         let stop_pending = self.workspace_store.read(cx).composer_state().stopping;
         let (label, id): (_, &'static str) = if stopping {
             (crate::tr!("composer.stop"), "stop-turn")
@@ -851,6 +851,48 @@ impl Composer {
             .into_any_element()
     }
 
+    /// Stop also ends the thread's pull request watches, so a watched thread offers it between
+    /// turns.
+    fn watching(&self, cx: &App) -> bool {
+        let store = self.workspace_store.read(cx);
+        store.active_session_id().is_some_and(|id| {
+            tcode_core::pull_request::watched(store.pull_requests(&id))
+                .next()
+                .is_some()
+        })
+    }
+
+    fn render_stop(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        crate::material::accessible_clickable(
+            div(),
+            "stop-turn",
+            Role::Button,
+            crate::tr!("composer.stop"),
+            cx,
+        )
+        .debug_selector(|| "stop-turn".into())
+        .size(px(28.))
+        .rounded(crate::material::radius_input(cx))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(STOP_TINT))
+        .when(
+            !self.interactive(cx) || self.workspace_store.read(cx).composer_state().stopping,
+            |el| el.opacity(0.4),
+        )
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.9))
+        .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
+        .on_click(cx.listener(|this, _, _, cx| {
+            if !this.interactive(cx) {
+                return;
+            }
+            this.workspace_store
+                .update(cx, |store, _cx| store.interrupt());
+        }))
+    }
+
     fn render_send_or_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
         if self.compact {
             return self.render_compact_primary_action(turn_running, cx);
@@ -905,38 +947,7 @@ impl Composer {
                     })),
                 );
             }
-            return row
-                .child(
-                    crate::material::accessible_clickable(
-                        div(),
-                        "stop-turn",
-                        Role::Button,
-                        crate::tr!("composer.stop"),
-                        cx,
-                    )
-                    .size(px(28.))
-                    .rounded(crate::material::radius_input(cx))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgb(STOP_TINT))
-                    .when(
-                        !self.interactive(cx)
-                            || self.workspace_store.read(cx).composer_state().stopping,
-                        |el| el.opacity(0.4),
-                    )
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.9))
-                    .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.interactive(cx) {
-                            return;
-                        }
-                        this.workspace_store
-                            .update(cx, |store, _cx| store.interrupt());
-                    })),
-                )
-                .into_any_element();
+            return row.child(self.render_stop(cx)).into_any_element();
         }
 
         // First-send worktree preparation temporarily disables the send control.
@@ -960,6 +971,9 @@ impl Composer {
         }
 
         let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
+        if !has_text && self.watching(cx) {
+            return self.render_stop(cx).into_any_element();
+        }
         let (bg, fg) = if has_text {
             (cx.theme().primary, cx.theme().primary_foreground)
         } else {
@@ -972,6 +986,7 @@ impl Composer {
             crate::tr!("composer.send"),
             cx,
         )
+        .debug_selector(|| "send-message".into())
         .size(px(28.))
         .rounded(crate::material::radius_input(cx))
         .flex()
@@ -1518,6 +1533,88 @@ mod replica_tests {
         click(cx, "permission-row-0");
         cx.run_until_parked();
         assert_eq!(sent(), [(id, Some(serde_json::Value::String(chosen)))]);
+    }
+
+    /// Between turns, Stop is how the user ends the watches a thread is waiting on.
+    #[gpui::test]
+    fn a_thread_waiting_on_a_watch_offers_stop_between_turns(cx: &mut TestAppContext) {
+        use tcode_core::pull_request::{PullRequestKey, PullRequestSource, link_pull_request};
+        use tcode_protocol::{IndexSnapshot, IndexSummary};
+        let (store, incoming, outgoing, status) = attach(cx);
+        let session_id = status.session_id.clone();
+        let mut meta =
+            tcode_core::project::SessionMeta::new(status.provider, status.cwd.clone(), None);
+        meta.id = session_id.clone();
+        link_pull_request(
+            &mut meta.pull_requests,
+            PullRequestKey::new("github.com", "sample/project", 1),
+            "https://github.com/sample/project/pull/1".into(),
+            PullRequestSource::Agent,
+            1,
+            true,
+        );
+        meta.pull_requests[0].watch =
+            Some(tcode_core::pull_request_watch::PullRequestWatch::new(0));
+        let mut activity = status.activity.clone();
+        activity.waiting = true;
+        replace(
+            &incoming,
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary: IndexSummary {
+                    activity: [(session_id.clone(), activity)].into(),
+                    ..Default::default()
+                },
+                sessions: vec![meta],
+                projects: Vec::new(),
+            }),
+        );
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        while outgoing.try_recv().is_ok() {}
+        for compact in [false, true] {
+            composer.update(cx, |composer, cx| composer.set_compact(compact, cx));
+            cx.update(|window, cx| _ = window.draw(cx));
+            let stop = cx.debug_bounds("stop-turn").expect("Stop is offered");
+            assert!(cx.debug_bounds("send-message").is_none());
+            cx.simulate_click(stop.center(), Modifiers::default());
+            cx.run_until_parked();
+            let sent: Vec<_> = std::iter::from_fn(|| outgoing.try_recv().ok())
+                .map(|line| tcode_protocol::decode_client_line(&line).unwrap().payload)
+                .collect();
+            assert!(
+                matches!(
+                    &sent[..],
+                    [tcode_protocol::ClientPayload::Command(
+                        tcode_protocol::Command::Interrupt { session_id: stopped }
+                    )] if *stopped == session_id
+                ),
+                "{sent:?}"
+            );
+
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_input_text("Check the build".into(), window, cx)
+            });
+            cx.update(|window, cx| _ = window.draw(cx));
+            assert!(
+                cx.debug_bounds("send-message").is_some(),
+                "typed text sends rather than stops"
+            );
+            assert!(cx.debug_bounds("stop-turn").is_none());
+            composer.update_in(cx, |composer, window, cx| {
+                composer.set_input_text(String::new(), window, cx)
+            });
+        }
     }
 
     #[gpui::test]
