@@ -1,7 +1,6 @@
 //! The right-side diff panel view: scope controls, virtualized unified/split
 //! lists, expandable gaps, and line-anchored review comments.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -20,12 +19,12 @@ use crate::{
 };
 use agent::FileChange;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, HighlightStyle,
+    Action, AnyElement, App, AppContext as _, AvailableSpace, Context, Entity, HighlightStyle,
     InteractiveElement as _, IntoElement, ListOffset, ParentElement as _, Render, Role,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
+    prelude::FluentBuilder as _, px, size,
 };
-use gpui_base::{ElementExt as _, PopoverState, StyledExt as _, h_flex, v_flex};
+use gpui_base::{PopoverState, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use super::list::{
@@ -59,18 +58,6 @@ enum DiffViewOption {
     Wrap,
     Whitespace,
     Invisibles,
-}
-
-/// Below this tab strip width (caption buttons excluded) the tabs show their
-/// icons alone. All four tabs labelled, with two-digit counts, beside the
-/// panel's own controls fit in this much in English, the widest shipped
-/// locale, so no label is ever cut off; the default panel width is above it.
-const TAB_LABELS_MIN_WIDTH: f32 = 485.;
-
-/// Whether a strip last laid out `width` wide labels its tabs. Before the
-/// first layout it does.
-fn tab_labels_fit(width: Option<f32>, caption_width: f32) -> bool {
-    width.is_none_or(|width| width - caption_width >= TAB_LABELS_MIN_WIDTH)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -195,9 +182,6 @@ pub struct DiffPanel {
     render_loading_key: Option<RenderKey>,
     comment_input: Option<Entity<InputState>>,
     observed_review_comments: Vec<ReviewComment>,
-    /// The tab strip's laid-out width on the last frame, which decides whether
-    /// the next one labels its tabs.
-    strip_width: Rc<Cell<Option<f32>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -240,7 +224,6 @@ impl DiffPanel {
             render_loading_key: None,
             comment_input: None,
             observed_review_comments: Vec::new(),
-            strip_width: Rc::new(Cell::new(None)),
             _subscriptions: subscriptions,
         }
     }
@@ -600,60 +583,13 @@ impl DiffPanel {
         );
         let store = self.workspace_store.clone();
         let store_close = self.workspace_store.clone();
-        let store_diff = self.workspace_store.clone();
-        let store_plan = self.workspace_store.clone();
-        let store_pr = self.workspace_store.clone();
-        let store_agents = self.workspace_store.clone();
+        let tab_store = self.workspace_store.clone();
         let agents = {
             let store = self.workspace_store.read(cx);
             store.active_session_id().and_then(|id| {
                 let agents = Agents::of(store, &id);
                 (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
             })
-        };
-        let caption_width = if hosts_caption {
-            window_caption::CAPTION_CLUSTER_WIDTH
-        } else {
-            0.
-        };
-        let tabs = TabBar::new("right-panel-tabs")
-            .underline()
-            .hairline(false)
-            .aria_label(crate::tr!("diff.panel_tabs"))
-            .icon_only(!tab_labels_fit(self.strip_width.get(), caption_width))
-            .flex_1()
-            .min_w_0()
-            .mb(px(-1.))
-            .self_end()
-            .item(
-                TabItem::new("diff-tab", crate::tr!("diff.title").into_owned())
-                    .icon(IconName::File)
-                    .selected(active == RightTab::Diff)
-                    .on_click(move |_, _, cx| {
-                        store_diff.update(cx, |store, cx| store.set_right_tab(RightTab::Diff, cx));
-                    }),
-            )
-            .item(
-                TabItem::new("plan-tab", crate::tr!("tasks.tab").into_owned())
-                    .icon(IconName::Map)
-                    .selected(active == RightTab::Plan)
-                    .on_click(move |_, _, cx| {
-                        store_plan.update(cx, |store, cx| store.set_right_tab(RightTab::Plan, cx));
-                    }),
-            );
-        let tabs = if let Some(outstanding) = agents {
-            tabs.item(
-                TabItem::new("agents-tab", crate::tr!("agents.title").into_owned())
-                    .icon(IconName::Bot)
-                    .selected(active == RightTab::Agents)
-                    .count(outstanding)
-                    .on_click(move |_, _, cx| {
-                        store_agents
-                            .update(cx, |store, cx| store.set_right_tab(RightTab::Agents, cx));
-                    }),
-            )
-        } else {
-            tabs
         };
         let count = self
             .workspace_store
@@ -667,22 +603,95 @@ impl DiffPanel {
                     .filter(|link| link.visible())
                     .count()
             });
-        let tabs = tabs.item(
-            TabItem::new(
-                "pull-requests-tab",
-                crate::tr!("pull_requests.title").into_owned(),
+        let build_tabs = move |icon_only| {
+            let store_diff = tab_store.clone();
+            let store_plan = tab_store.clone();
+            let store_pr = tab_store.clone();
+            let store_agents = tab_store.clone();
+            let tabs = TabBar::new("right-panel-tabs")
+                .underline()
+                .hairline(false)
+                .aria_label(crate::tr!("diff.panel_tabs"))
+                .icon_only(icon_only)
+                .w_full()
+                .item(
+                    TabItem::new("diff-tab", crate::tr!("diff.title").into_owned())
+                        .icon(IconName::File)
+                        .selected(active == RightTab::Diff)
+                        .on_click(move |_, _, cx| {
+                            store_diff
+                                .update(cx, |store, cx| store.set_right_tab(RightTab::Diff, cx));
+                        }),
+                )
+                .item(
+                    TabItem::new("plan-tab", crate::tr!("tasks.tab").into_owned())
+                        .icon(IconName::Map)
+                        .selected(active == RightTab::Plan)
+                        .on_click(move |_, _, cx| {
+                            store_plan
+                                .update(cx, |store, cx| store.set_right_tab(RightTab::Plan, cx));
+                        }),
+                );
+            let tabs = if let Some(outstanding) = agents {
+                tabs.item(
+                    TabItem::new("agents-tab", crate::tr!("agents.title").into_owned())
+                        .icon(IconName::Bot)
+                        .selected(active == RightTab::Agents)
+                        .count(outstanding)
+                        .on_click(move |_, _, cx| {
+                            store_agents
+                                .update(cx, |store, cx| store.set_right_tab(RightTab::Agents, cx));
+                        }),
+                )
+            } else {
+                tabs
+            };
+            tabs.item(
+                TabItem::new(
+                    "pull-requests-tab",
+                    crate::tr!("pull_requests.title").into_owned(),
+                )
+                .icon(IconName::GitPullRequest)
+                .selected(active == RightTab::PullRequests)
+                .count(count)
+                .on_click(move |_, _, cx| {
+                    store_pr.update(cx, |store, cx| {
+                        store.set_right_tab(RightTab::PullRequests, cx)
+                    });
+                }),
             )
-            .icon(IconName::GitPullRequest)
-            .selected(active == RightTab::PullRequests)
-            .count(count)
-            .on_click(move |_, _, cx| {
-                store_pr.update(cx, |store, cx| {
-                    store.set_right_tab(RightTab::PullRequests, cx)
-                });
-            }),
-        );
-
-        let strip_width = self.strip_width.clone();
+        };
+        // Measure the labelled bar even when icons are shown, so growing the
+        // panel can restore labels without alternating between the two widths.
+        let tabs = canvas(
+            move |bounds, window, cx| {
+                let mut tabs = build_tabs(false).into_any_element();
+                let labelled = tabs.layout_as_root(
+                    size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+                    window,
+                    cx,
+                );
+                if labelled.width > bounds.size.width {
+                    tabs = build_tabs(true).into_any_element();
+                }
+                tabs.layout_as_root(
+                    size(
+                        AvailableSpace::Definite(bounds.size.width),
+                        AvailableSpace::Definite(bounds.size.height),
+                    ),
+                    window,
+                    cx,
+                );
+                tabs.prepaint_at(bounds.origin, window, cx);
+                tabs
+            },
+            |_, mut tabs, window, cx| tabs.paint(window, cx),
+        )
+        .flex_1()
+        .min_w_0()
+        .h(px(40.))
+        .mb(px(-1.))
+        .self_end();
         h_flex()
             .flex_none()
             .border_b_1()
@@ -696,13 +705,6 @@ impl DiffPanel {
             .px_2()
             .when(hosts_caption, |strip| strip.pr_0())
             .gap_1()
-            .on_prepaint(move |bounds, window, _| {
-                let width = Some(f32::from(bounds.size.width));
-                let previous = strip_width.replace(width);
-                if tab_labels_fit(previous, caption_width) != tab_labels_fit(width, caption_width) {
-                    window.request_animation_frame();
-                }
-            })
             .child(tabs)
             // The gap between the tabs and the icon cluster holds nothing, so
             // it doubles as the window's drag handle: `window_drag_area` for the
