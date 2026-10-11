@@ -10848,10 +10848,6 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "log",
- "mcp-host",
- "orchestrate-mcp",
- "preview-mcp",
- "pull-request-mcp",
  "smol",
  "tcode-client",
  "tcode-protocol",
@@ -10915,10 +10911,6 @@ name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "mcp-host",
- "orchestrate-mcp",
- "preview-mcp",
- "pull-request-mcp",
  "qrcode",
  "serde",
  "serde_json",

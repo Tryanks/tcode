@@ -5,9 +5,7 @@ use gpui::{
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
     prelude::FluentBuilder as _,
 };
-use gpui::{
-    Focusable as _, Role, SharedString, StatefulInteractiveElement as _, deferred, div, px,
-};
+use gpui::{Focusable as _, Role, SharedString, StatefulInteractiveElement, deferred, div, px};
 use gpui_base::StyledExt as _;
 use std::rc::Rc;
 
@@ -32,7 +30,9 @@ pub struct Popover {
     on_open_change: Option<super::ToggleHandler>,
 }
 
-type TriggerBuilder = Box<dyn FnOnce(bool, &Window, &App) -> AnyElement>;
+/// Builds the trigger; a sheet hands it the toggle it opens with.
+type TriggerBuilder = Box<dyn FnOnce(bool, Option<SheetToggle>, &Window, &App) -> AnyElement>;
+pub(crate) type SheetToggle = Rc<dyn Fn(&mut Window, &mut App)>;
 type ContentBuilder =
     Box<dyn FnOnce(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> AnyElement>;
 
@@ -95,13 +95,14 @@ impl Popover {
         self.on_open_change = Some(Rc::new(callback));
         self
     }
-    pub fn trigger<T>(mut self, trigger: T) -> Self
-    where
-        T: gpui_base::Selectable + IntoElement + 'static,
-    {
-        self.trigger = Some(Box::new(move |open, _, _| {
-            let is_open = trigger.is_open();
-            trigger.open(is_open || open).into_any_element()
+    pub fn trigger(mut self, trigger: super::Button) -> Self {
+        self.trigger = Some(Box::new(move |open, toggle, _, _| {
+            let is_open = gpui_base::Selectable::is_open(&trigger);
+            let trigger = gpui_base::Selectable::open(trigger, is_open || open);
+            match toggle {
+                Some(toggle) => trigger.press_action(toggle).into_any_element(),
+                None => trigger.into_any_element(),
+            }
         }));
         self
     }
@@ -109,7 +110,9 @@ impl Popover {
         mut self,
         trigger: impl FnOnce(bool, &Window, &App) -> AnyElement + 'static,
     ) -> Self {
-        self.trigger = Some(Box::new(trigger));
+        self.trigger = Some(Box::new(move |open, _, window, cx| {
+            trigger(open, window, cx)
+        }));
         self
     }
     pub fn content<F, E>(mut self, builder: F) -> Self
@@ -162,7 +165,7 @@ impl RenderOnce for Popover {
             .when_some(self.trigger, |base, trigger| {
                 base.trigger_with(move |open, window, cx| {
                     div()
-                        .child(trigger(open, window, cx))
+                        .child(trigger(open, None, window, cx))
                         .child(release.release_listener())
                         .into_any_element()
                 })
@@ -225,16 +228,24 @@ impl Popover {
         .sample(window, cx);
         let progress = presence.progress;
         let parent = window.current_view();
-        let toggle = state.clone();
+        let toggle: SheetToggle = Rc::new({
+            let state = state.clone();
+            move |window, cx| {
+                state.update(cx, |state, cx| state.toggle_open(window, cx));
+                cx.notify(parent);
+            }
+        });
         let mut root = div()
             .id(self.id)
-            .on_click(move |_, window, cx| {
-                crate::widgets::stop_click_propagation(window, cx);
-                toggle.update(cx, |state, cx| state.toggle_open(window, cx));
-                cx.notify(parent);
+            .on_click({
+                let toggle = toggle.clone();
+                move |_, window, cx| {
+                    crate::widgets::stop_click_propagation(window, cx);
+                    toggle(window, cx)
+                }
             })
             .when_some(self.trigger, |el, trigger| {
-                el.child(trigger(open, window, cx))
+                el.child(trigger(open, Some(toggle), window, cx))
             })
             .child(dismissal.release_listener());
         // Presence initially samples a closed sheet as a zero-opacity exit.
