@@ -514,14 +514,77 @@ fn reactions(awards: &Value, viewer: Option<&str>) -> Vec<PullRequestReaction> {
 
 /// A body with its project's uploads named in full: GitLab writes them relative to the project,
 /// as `/uploads/<secret>/<file>`, which no reader outside GitLab's own page can resolve. Markdown
-/// links and images, reference definitions and HTML `src`/`href` attributes are rewritten.
+/// links and images, reference definitions and quoted HTML `src`/`href` attributes are
+/// rewritten; text in fenced code blocks and inline code spans stays as written, since it shows
+/// Markdown rather than linking. Forms not listed stay relative, and their media is not read.
 pub(super) fn absolute_uploads(body: &str, authority: &str, project: &str) -> String {
     let base = format!("https://{authority}/{project}/uploads/");
-    let mut body = body.to_owned();
-    for lead in ["](", "]: ", "src=\"", "src='", "href=\"", "href='"] {
-        body = body.replace(&format!("{lead}/uploads/"), &format!("{lead}{base}"));
+    let mut out = String::with_capacity(body.len());
+    // The open fence's character and length, while inside a fenced block.
+    let mut fence: Option<(char, usize)> = None;
+    for line in body.split_inclusive('\n') {
+        match (fence, fence_of(line)) {
+            (None, Some((mark, len, _))) => fence = Some((mark, len)),
+            (Some((open, open_len)), Some((mark, len, bare)))
+                if mark == open && len >= open_len && bare =>
+            {
+                fence = None
+            }
+            (Some(_), _) => {}
+            (None, None) => {
+                out.push_str(&outside_code(line, &base));
+                continue;
+            }
+        }
+        out.push_str(line);
     }
-    body
+    out
+}
+
+/// A fence line's character, its length, and whether nothing follows it: up to three spaces,
+/// then three or more backticks or tildes.
+fn fence_of(line: &str) -> Option<(char, usize, bool)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[indent..];
+    let mark = rest.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = rest.chars().take_while(|c| *c == mark).count();
+    (indent <= 3 && len >= 3).then(|| (mark, len, rest[len..].trim().is_empty()))
+}
+
+/// One line with its inline code spans kept: a run of backticks closes at the next run of the
+/// same length; without one, the backticks are text.
+fn outside_code(line: &str, base: &str) -> String {
+    let rewrite = |text: &str| {
+        let mut text = text.to_owned();
+        for lead in ["](", "]: ", "src=\"", "src='", "href=\"", "href='"] {
+            text = text.replace(&format!("{lead}/uploads/"), &format!("{lead}{base}"));
+        }
+        text
+    };
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('`') {
+        let run = rest[start..].bytes().take_while(|b| *b == b'`').count();
+        let after = &rest[start + run..];
+        let close = after.char_indices().map(|(at, _)| at).find(|&at| {
+            after[at..].starts_with(&"`".repeat(run))
+                && !after[at + run..].starts_with('`')
+                && (at == 0 || !after[..at].ends_with('`'))
+        });
+        match close {
+            Some(at) => {
+                out.push_str(&rewrite(&rest[..start]));
+                out.push_str(&rest[start..start + run + at + run]);
+                rest = &after[at + run..];
+            }
+            None => {
+                out.push_str(&rewrite(&rest[..start + run]));
+                rest = after;
+            }
+        }
+    }
+    out.push_str(&rewrite(rest));
+    out
 }
 
 fn comment(
@@ -837,14 +900,21 @@ mod tests {
     }
 
     /// GitLab names a note's uploads below its project; the conversation names them on the
-    /// server, so the client can draw them and the media read finds them named. Absolute links
-    /// and text that only mentions `/uploads/` stay as written.
+    /// server, so the client can draw them and the media read finds them named. Absolute links,
+    /// text that only mentions `/uploads/`, and code stay as written.
     #[test]
     fn uploads_are_named_on_their_server() {
         let body = "![shot](/uploads/ab12/shot.png) and [log](/uploads/cd34/log.txt)\n\n[ref]: /uploads/ef56/a.png\n<img src=\"/uploads/0a/b.png\">\nsee /uploads/ in docs, ![x](https://cdn.test/uploads/x.png)";
         assert_eq!(
             absolute_uploads(body, "code.acme.test:8443", "team/apps/web"),
             "![shot](https://code.acme.test:8443/team/apps/web/uploads/ab12/shot.png) and [log](https://code.acme.test:8443/team/apps/web/uploads/cd34/log.txt)\n\n[ref]: https://code.acme.test:8443/team/apps/web/uploads/ef56/a.png\n<img src=\"https://code.acme.test:8443/team/apps/web/uploads/0a/b.png\">\nsee /uploads/ in docs, ![x](https://cdn.test/uploads/x.png)"
+        );
+        // Code shows Markdown rather than linking: a fenced block and an inline span stay as
+        // written, and the link after the span is still named.
+        let code = "```md\n![shot](/uploads/ab12/shot.png)\n```\n~~~~\n[ref]: /uploads/ef56/a.png\n~~~~\nwrite `![x](/uploads/a/x.png)` for ![x](/uploads/a/x.png), `bärenhunger`";
+        assert_eq!(
+            absolute_uploads(code, "gitlab.com", "a/b"),
+            "```md\n![shot](/uploads/ab12/shot.png)\n```\n~~~~\n[ref]: /uploads/ef56/a.png\n~~~~\nwrite `![x](/uploads/a/x.png)` for ![x](https://gitlab.com/a/b/uploads/a/x.png), `bärenhunger`"
         );
     }
 
