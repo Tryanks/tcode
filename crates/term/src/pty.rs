@@ -39,6 +39,8 @@ use crate::{
 
 #[cfg(unix)]
 const READ_BUFFER_SIZE: usize = 0x10_0000;
+#[cfg(unix)]
+const COMMAND_TOKEN: Token = Token(0);
 
 fn initial_window_size() -> WindowSize {
     WindowSize {
@@ -150,6 +152,11 @@ impl PtyHandle {
         let command_sender = {
             let (sender, receiver) = channel::channel();
             let poll = Poll::new()?;
+            // corcovado's channel drops the wakeup of a send that races its
+            // registration, so register before the handle can send anything.
+            poll.register(&receiver, COMMAND_TOKEN, Ready::readable(), PollOpt::edge())?;
+            let mut tokens = (COMMAND_TOKEN.0 + 1..).map(Token::from);
+            pty.register(&poll, &mut tokens, Ready::readable(), PollOpt::level())?;
             let command_sender = PtyCommandSender { sender };
             let event_loop = RawPtyEventLoop {
                 pty,
@@ -336,30 +343,7 @@ struct RawPtyEventLoop {
 #[cfg(unix)]
 impl RawPtyEventLoop {
     fn run(mut self) {
-        let mut tokens = (0..).map(Token::from);
-        let channel_token = tokens.next().unwrap();
-        if self
-            .poll
-            .register(
-                &self.receiver,
-                channel_token,
-                Ready::readable(),
-                PollOpt::edge(),
-            )
-            .is_err()
-        {
-            return;
-        }
         let poll_options = PollOpt::level();
-        if self
-            .pty
-            .register(&self.poll, &mut tokens, Ready::readable(), poll_options)
-            .is_err()
-        {
-            let _ = self.poll.deregister(&self.receiver);
-            return;
-        }
-
         let mut events = Events::with_capacity(1024);
         let mut writes = VecDeque::new();
         let mut current_write = None;
@@ -380,7 +364,7 @@ impl RawPtyEventLoop {
 
             for event in events.iter() {
                 let token = event.token();
-                if token == channel_token {
+                if token == COMMAND_TOKEN {
                     continue;
                 }
                 if token == self.pty.child_event_token() {
