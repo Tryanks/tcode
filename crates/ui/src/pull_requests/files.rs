@@ -1491,11 +1491,15 @@ impl DiffListHost for PullRequestView {
             .font_weight(gpui::FontWeight::MEDIUM)
             .children(entry.previous_path.as_ref().map(|previous| {
                 div()
+                    .min_w_0()
+                    .truncate()
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{previous} →"))
             }))
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .text_color(cx.theme().foreground)
                     .child(entry.path.clone()),
             )

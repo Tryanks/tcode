@@ -13,10 +13,6 @@ web = []
 
 [dependencies]
 env_logger = "0.11"
-mcp-host = { path = "../mcp-host" }
-orchestrate-mcp = { path = "../orchestrate-mcp" }
-preview-mcp = { path = "../preview-mcp" }
-pull-request-mcp = { path = "../pull-request-mcp" }
 qrcode = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
