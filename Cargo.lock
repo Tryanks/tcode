@@ -10987,6 +10987,7 @@ dependencies = [
  "flate2",
  "futures-lite",
  "image",
+ "imara-diff",
  "log",
  "serde",
  "serde_json",

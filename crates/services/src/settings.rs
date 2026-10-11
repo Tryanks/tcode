@@ -23,6 +23,8 @@ fn token_secrets(kind: HostKind) -> &'static str {
         HostKind::Forgejo | HostKind::Gitea => "@forgejo",
         HostKind::Gitlab => "@gitlab",
         HostKind::Bitbucket => "@bitbucket",
+        // One token per organization, keyed by its host, `dev.azure.com/{organization}`.
+        HostKind::Azure => "@azure",
     }
 }
 

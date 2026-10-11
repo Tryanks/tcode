@@ -187,8 +187,75 @@ fn bitbucket_pull_request_url(value: &str) -> bool {
         && number.parse::<u64>().is_ok_and(|number| number > 0)
 }
 
+pub const AZURE: HostTerms = HostTerms {
+    name: "Azure DevOps",
+    clis: "az repos",
+    stacks: None,
+    // `az repos pr` completes and abandons through `update --status`, with no merge or close
+    // verb to match.
+    merge_commands: &[],
+    pull_request_url: |value| azure_pull_request(value).is_some(),
+    named_by_host: false,
+    mark: "icons/azure-devops.svg",
+    conflicts_page: None,
+    checks_page: None,
+};
+
+/// The organization, project, repository and number of an Azure DevOps pull request's web URL:
+/// `https://dev.azure.com/org/project/_git/repository/pullrequest/N`, or the older
+/// `https://org.visualstudio.com[/DefaultCollection]/project/_git/repository/pullrequest/N`. A
+/// repository named like its project may leave the project out. Names stay percent-encoded.
+pub fn azure_pull_request(value: &str) -> Option<(String, String, String, u64)> {
+    let value = value.trim().split(['?', '#']).next()?;
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))?;
+    let parts: Vec<_> = rest.split('/').collect();
+    let (organization, path) = match parts.as_slice() {
+        [host, organization, path @ ..] if host.eq_ignore_ascii_case(AZURE_HOST) => {
+            (*organization, path)
+        }
+        [host, path @ ..] => {
+            let host = host.to_ascii_lowercase();
+            let organization = host.strip_suffix(".visualstudio.com")?;
+            let path = match path {
+                [collection, path @ ..] if collection.eq_ignore_ascii_case("defaultcollection") => {
+                    path
+                }
+                path => path,
+            };
+            (&rest[..organization.len()], path)
+        }
+        _ => return None,
+    };
+    let (project, repository, number) = match path {
+        [project, "_git", repository, "pullrequest", number, ..] => (*project, *repository, number),
+        ["_git", repository, "pullrequest", number, ..] => (*repository, *repository, number),
+        _ => return None,
+    };
+    let number = number.parse::<u64>().ok().filter(|number| *number > 0)?;
+    (azure_organization(organization).is_some() && !project.is_empty() && !repository.is_empty())
+        .then(|| {
+            (
+                organization.to_ascii_lowercase(),
+                project.to_owned(),
+                repository.to_owned(),
+                number,
+            )
+        })
+}
+
+/// Azure DevOps Services' one web host; each organization is a host below it.
+pub const AZURE_HOST: &str = "dev.azure.com";
+
+/// An Azure DevOps organization's name, lowercased: letters, digits and inner hyphens.
+fn azure_organization(name: &str) -> Option<String> {
+    (!name.is_empty() && name.len() <= 50 && dns_name(name) && !name.contains('.'))
+        .then(|| name.to_ascii_lowercase())
+}
+
 /// Every host Tcode reads pull requests from.
-pub const HOSTS: &[&HostTerms] = &[&GITHUB, &FORGEJO, &GITEA, &GITLAB, &BITBUCKET];
+pub const HOSTS: &[&HostTerms] = &[&GITHUB, &FORGEJO, &GITEA, &GITLAB, &BITBUCKET, &AZURE];
 
 /// The software a source-control host runs, which decides how Tcode talks to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -200,6 +267,8 @@ pub enum HostKind {
     Gitlab,
     /// Bitbucket Cloud, which is bitbucket.org alone.
     Bitbucket,
+    /// Azure DevOps Services, where each organization on dev.azure.com is a host.
+    Azure,
 }
 
 /// Why an authority cannot be a host of a kind.
@@ -216,12 +285,13 @@ pub enum HostRefusal {
 }
 
 impl HostKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Github,
         Self::Forgejo,
         Self::Gitea,
         Self::Gitlab,
         Self::Bitbucket,
+        Self::Azure,
     ];
 
     pub fn terms(self) -> &'static HostTerms {
@@ -231,6 +301,7 @@ impl HostKind {
             Self::Gitea => &GITEA,
             Self::Gitlab => &GITLAB,
             Self::Bitbucket => &BITBUCKET,
+            Self::Azure => &AZURE,
         }
     }
 
@@ -242,6 +313,7 @@ impl HostKind {
             Self::Gitea => "gitea.com",
             Self::Gitlab => "gitlab.com",
             Self::Bitbucket => "bitbucket.org",
+            Self::Azure => AZURE_HOST,
         }
     }
 
@@ -254,6 +326,12 @@ impl HostKind {
     /// authenticates with, or alone, as a bearer.
     pub fn takes_email(self) -> bool {
         self == Self::Bitbucket
+    }
+
+    /// Whether a host of the kind is one organization on the kind's public host, named by the
+    /// organization alone.
+    pub fn organizations(self) -> bool {
+        self == Self::Azure
     }
 
     /// The kind a host's name says it runs: a public host, or a whole DNS label naming the
@@ -269,7 +347,7 @@ impl HostKind {
                             Self::Forgejo => Some("forgejo"),
                             Self::Gitea => Some("gitea"),
                             Self::Gitlab => Some("gitlab"),
-                            Self::Bitbucket => None,
+                            Self::Bitbucket | Self::Azure => None,
                         }
                 })
         })
@@ -291,12 +369,15 @@ impl HostKind {
             ),
             Self::Gitlab => "Use a GitLab host name in lowercase, with its port if the server has one, without a URL scheme or path.".into(),
             Self::Bitbucket => "Use bitbucket.org: Tcode reads Bitbucket Cloud only.".into(),
+            Self::Azure => "Use dev.azure.com/ and the organization's name, in lowercase.".into(),
         }
     }
 
     /// An authority as settings keep it: lowercase, without a scheme or trailing slashes.
-    /// Forgejo and Gitea servers take a port and a mount path, GitLab servers a port alone, and
-    /// Bitbucket is only its public host.
+    /// Forgejo and Gitea servers take a port and a mount path, GitLab servers a port alone,
+    /// Bitbucket is only its public host, and an Azure DevOps organization is
+    /// `dev.azure.com/{organization}`, given as that, its name alone, or its older
+    /// `{organization}.visualstudio.com`.
     pub fn authority(self, raw: &str) -> Result<String, HostRefusal> {
         let value = raw.trim().to_ascii_lowercase();
         let value = value
@@ -306,6 +387,19 @@ impl HostKind {
             .trim_end_matches('/');
         if value.is_empty() {
             return Err(HostRefusal::Blank);
+        }
+        if self == Self::Azure {
+            let host = value.split('/').next().unwrap_or(value);
+            let organization = if host == AZURE_HOST {
+                value.split('/').nth(1).ok_or(HostRefusal::Blank)?
+            } else if let Some(organization) = host.strip_suffix(".visualstudio.com") {
+                organization
+            } else {
+                value
+            };
+            return azure_organization(organization)
+                .map(|organization| format!("{AZURE_HOST}/{organization}"))
+                .ok_or(HostRefusal::Invalid);
         }
         let (host_port, path) = value.split_once('/').unwrap_or((value, ""));
         let (host, port) = match host_port.split_once(':') {
@@ -1538,6 +1632,16 @@ mod tests {
         assert!(
             linking_instructions(&bitbucket).contains("This applies to gh, gh stack, other CLIs")
         );
+        // `az repos pr` has no merge or close verb, so no command of it is taken for one.
+        let azure = hosts_in([HostKind::Azure]);
+        assert_eq!(host_names(&azure), "GitHub or Azure DevOps");
+        assert!(
+            linking_instructions(&azure)
+                .contains("This applies to gh, gh stack, az repos, other CLIs")
+        );
+        assert!(!merges_or_closes(
+            "az repos pr update --id 3 --status completed"
+        ));
         assert!(
             strip_linking_instructions(&format!("{}typed", linking_instructions(&all)))
                 == Some("typed")
@@ -1601,6 +1705,40 @@ mod tests {
         }
         assert_eq!(HostKind::detect("bitbucket.org"), Some(HostKind::Bitbucket));
         assert_eq!(HostKind::detect("bitbucket.acme.test"), None);
+        // An Azure DevOps host is an organization, however it is written.
+        for organization in [
+            "Fabrikam",
+            "https://dev.azure.com/Fabrikam/",
+            "dev.azure.com/fabrikam/Project",
+            "fabrikam.visualstudio.com",
+        ] {
+            assert_eq!(
+                HostKind::Azure.authority(organization),
+                Ok("dev.azure.com/fabrikam".to_owned()),
+                "{organization}"
+            );
+        }
+        assert_eq!(
+            HostKind::Azure.authority("https://dev.azure.com/"),
+            Err(HostRefusal::Blank)
+        );
+        for invalid in [
+            "git.acme.test",
+            "fab rikam",
+            "-fabrikam",
+            "dev.azure.com/a.b",
+        ] {
+            assert_eq!(
+                HostKind::Azure.authority(invalid),
+                Err(HostRefusal::Invalid),
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            HostKind::detect("dev.azure.com/fabrikam"),
+            Some(HostKind::Azure)
+        );
+        assert_eq!(AZURE.display_name("dev.azure.com/fabrikam"), "Azure DevOps");
         assert_eq!(
             FORGEJO.display_name("git.acme.test:3000/forge"),
             "git.acme.test"

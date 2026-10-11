@@ -42,9 +42,19 @@ struct ChooseKind {
     kind: HostKind,
 }
 
-/// A host kind's name in keys: `github`, `forgejo`, `gitea`.
+/// A host kind's name in keys: `github`, `forgejo`, `gitea`, `azure_devops`.
 fn slug(kind: HostKind) -> String {
-    kind.terms().name.to_ascii_lowercase()
+    kind.terms().name.to_ascii_lowercase().replace(' ', "_")
+}
+
+/// What Add host's input holds for a kind before anything is typed: its public host, or
+/// nothing where a host is an organization the user names.
+fn prefill(kind: HostKind) -> &'static str {
+    if kind.organizations() {
+        ""
+    } else {
+        kind.public_host()
+    }
 }
 
 fn mark(kind: HostKind, size: f32) -> Icon {
@@ -829,7 +839,7 @@ impl AddHostDialog {
                 )))
             });
             input.update(cx, |input, cx| {
-                input.set_value(kind.public_host(), window, cx);
+                input.set_value(prefill(kind), window, cx);
                 input.focus(window, cx);
             });
             let subscription = cx.subscribe_in(
@@ -901,6 +911,16 @@ impl AddHostDialog {
         let name = self.kind.terms().name;
         let host = match self.kind.authority(&typed) {
             Ok(host) => host,
+            Err(HostRefusal::Blank) if self.kind.organizations() => {
+                self.error =
+                    Some(crate::tr!("source_control.error_blank_organization").into_owned());
+                return cx.notify();
+            }
+            Err(HostRefusal::Invalid) if self.kind.organizations() => {
+                self.error =
+                    Some(crate::tr!("source_control.error_invalid_organization").into_owned());
+                return cx.notify();
+            }
             Err(HostRefusal::Blank) => {
                 self.error = Some(crate::tr!("source_control.error_blank").into_owned());
                 return cx.notify();
@@ -954,7 +974,7 @@ impl AddHostDialog {
                 cx,
             );
             if typed.is_empty() || typed == previous.public_host() || kind.fixed_host().is_some() {
-                input.set_value(kind.public_host(), window, cx);
+                input.set_value(prefill(kind), window, cx);
             }
         });
         cx.notify();
@@ -1008,7 +1028,13 @@ impl Render for AddHostDialog {
                     }),
             )
             .child(label(
-                crate::tr!("source_control.host_label").into_owned().into(),
+                if kind.organizations() {
+                    crate::tr!("source_control.organization_label")
+                } else {
+                    crate::tr!("source_control.host_label")
+                }
+                .into_owned()
+                .into(),
             ))
             // A kind served from one host alone takes no other.
             .child(
