@@ -814,8 +814,11 @@ impl PullRequestsPanel {
                     .overflow_hidden()
                     .child(div().flex_none().child(source.clone()))
                     // The author gives way first, whole: a line too narrow for it wraps it onto
-                    // a second line this one-line box clips. gpui has no setter for a shrink
-                    // value, hence the reach into the style.
+                    // a second line this one-line box clips. The box sets its own line height
+                    // and is exactly one such line tall (16 for line 2's 11px text); stretching
+                    // it to the row would not do, as a stretched box takes its wrapped content's
+                    // two lines. gpui has no setter for a shrink value, hence the reach into the
+                    // style.
                     .when_some(author, |line, author| {
                         line.child(
                             h_flex()
