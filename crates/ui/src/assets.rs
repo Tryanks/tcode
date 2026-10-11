@@ -108,6 +108,12 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/bitbucket.svg",
         include_bytes!("../../../assets/icons/bitbucket.svg"),
     ),
+    // Azure DevOps' mark, drawn in one colour (Simple Icons 9.0.0, CC0; later releases dropped
+    // it).
+    (
+        "icons/azure-devops.svg",
+        include_bytes!("../../../assets/icons/azure-devops.svg"),
+    ),
     (
         "icons/ruler.svg",
         include_bytes!("../../../assets/icons/ruler.svg"),
