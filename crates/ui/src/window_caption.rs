@@ -41,6 +41,15 @@ const CAPTION_BUTTON_WIDTH: f32 = 46.;
 pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");
+/// What the caption cluster takes from an open right panel's top strip. With
+/// the panel open the workspace's top-right corner is the panel's, docked or
+/// floating, so on a build that draws its own caption buttons they always sit
+/// in its strip.
+pub(crate) const RIGHT_PANEL_CAPTION_WIDTH: f32 = if CLIENT_DECORATED {
+    CAPTION_CLUSTER_WIDTH
+} else {
+    0.
+};
 
 /// Left inset a top strip keeps clear of the native macOS traffic lights,
 /// which the system draws over the window's top-left outside full screen.
