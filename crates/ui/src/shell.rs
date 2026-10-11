@@ -2574,13 +2574,16 @@ impl AppShell {
                     ),
             );
         let attachment = self.attachment.as_ref().expect("attachment checked above");
-        // `flex_none`: whatever the group's sizes leave over or lack goes to the
-        // chat, so the panel is exactly the width restored above.
+        // Beside the chat, `flex_none`: whatever the group's sizes leave over or
+        // lack goes to the chat, so the panel is exactly the width restored
+        // above. Expanded, there is no chat, so the panel grows into it all.
         let right = resizable_panel()
-            .flex_none()
+            .when(chat_visible, |panel| panel.flex_none())
             .visible(right_docked)
             .size(px(RIGHT_PANEL_WIDTH))
-            .size_range(px(RIGHT_PANEL_MIN_WIDTH)..px(1400.))
+            .size_range(
+                px(RIGHT_PANEL_MIN_WIDTH)..if chat_visible { px(1400.) } else { Pixels::MAX },
+            )
             .child(
                 div()
                     .debug_selector(|| "right-panel".into())
@@ -6083,8 +6086,9 @@ mod tests {
     /// less whatever the chat needs for its minimum — more while the header
     /// clears the macOS traffic lights or links to its parent — and it comes
     /// back to that width after the window narrows and widens again, after it
-    /// floated, and after a sidebar drag squeezed it; the header's last toggle
-    /// ends before the panel starts. At every width no tab label is cut off and
+    /// floated, after a sidebar drag squeezed it, and after it was expanded to
+    /// everything beside the sidebar; the header's last toggle ends before the
+    /// panel starts. At every width no tab label is cut off and
     /// the close button is on screen and closes the panel.
     #[gpui::test]
     fn the_right_panel_keeps_its_width_and_leaves_the_chat_header_clear(cx: &mut TestAppContext) {
@@ -6186,6 +6190,31 @@ mod tests {
             }) > px(SIDEBAR_WIDTH),
             "the drag moved the sidebar"
         );
+        walk(cx, &[1600.]);
+
+        // Expanded, the panel takes everything beside the sidebar, however
+        // wide the window; restored, it is back at the width the user chose.
+        store.update(cx, |store, cx| store.toggle_diff_expanded(cx));
+        for width in [1600., 2000.] {
+            resize(cx, width);
+            draw_until(&shell, cx, &host, "diff-body", None);
+            draw(cx);
+            let sidebar = shell.read_with(cx, |shell, _| {
+                shell
+                    .attachment
+                    .as_ref()
+                    .expect("attached")
+                    .sidebar_width
+                    .get()
+            });
+            let panel = cx.debug_bounds("right-panel").expect("the expanded panel");
+            assert_eq!(
+                (panel.left(), panel.right()),
+                (sidebar, px(width)),
+                "{width}pt: the expanded panel spans the window beside the sidebar"
+            );
+        }
+        store.update(cx, |store, cx| store.toggle_diff_expanded(cx));
         walk(cx, &[1600.]);
 
         window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
