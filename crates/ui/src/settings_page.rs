@@ -553,15 +553,10 @@ impl SettingsPage {
         // Editable fields start empty and are seeded by `hydrate_inputs` once
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
-        let home_url_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!("browser.home_url.placeholder"))
-        });
+        let home_url_input = cx.new(|cx| InputState::new(window, cx));
         let device_name = store.read(cx).client_device_name();
-        let device_name_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(crate::tr!("settings.device_name.placeholder"))
-                .default_value(device_name.clone())
-        });
+        let device_name_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(device_name.clone()));
         let remote_attachment_limit = remote_attachment_limit_value(store.read(cx));
         let remote_attachment_limit_input =
             cx.new(|cx| InputState::new(window, cx).default_value(remote_attachment_limit.clone()));
@@ -1689,6 +1684,7 @@ impl SettingsPage {
                     .when(!compact, |field| field.w(px(240.)))
                     .child(
                         Input::new(&self.device_name_input.state)
+                            .placeholder(crate::tr!("settings.device_name.placeholder"))
                             .small()
                             .rounded(crate::material::radius_input(cx)),
                     ),
@@ -2538,6 +2534,7 @@ impl SettingsPage {
             .child(
                 div().w(px(240.)).child(
                     Input::new(&self.home_url_input.state)
+                        .placeholder(crate::tr!("browser.home_url.placeholder"))
                         .small()
                         .rounded(crate::material::radius_input(cx)),
                 ),
@@ -3586,5 +3583,38 @@ mod tests {
 
         host.shutdown_blocking().expect("stop host");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_device_name_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        crate::settings::assert_follows_language_switch(
+            cx,
+            "settings.device_name.placeholder",
+            |cx| {
+                page.read_with(cx, |page, cx| {
+                    let input = page.device_name_input.state.read(cx);
+                    input.presentation().placeholder().to_string()
+                })
+            },
+        );
     }
 }

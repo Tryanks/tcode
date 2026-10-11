@@ -356,6 +356,7 @@ impl Composer {
             .child(
                 div().flex_1().min_w_0().child(
                     Textarea::new(&self.user_input_custom)
+                        .placeholder(crate::tr!("userinput.custom_placeholder"))
                         .appearance(false)
                         .text_size(px(13.)),
                 ),

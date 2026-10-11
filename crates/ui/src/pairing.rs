@@ -39,14 +39,8 @@ pub struct PairForm {
 impl PairForm {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
-            invitation: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(crate::tr!("hosts.pair.invitation_placeholder").into_owned())
-            }),
-            address: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(crate::tr!("hosts.pair.address_placeholder").into_owned())
-            }),
+            invitation: cx.new(|cx| InputState::new(window, cx)),
+            address: cx.new(|cx| InputState::new(window, cx)),
             busy: false,
             error: None,
             generation: 0,

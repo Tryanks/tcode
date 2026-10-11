@@ -1124,9 +1124,7 @@ impl PullRequestView {
         if let Some((input, _)) = &self.file_filter {
             return input.clone();
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!("pull_requests.files.filter"))
-        });
+        let input = cx.new(|cx| InputState::new(window, cx));
         let subscription = cx.observe(&input, |_, _, cx| cx.notify());
         self.file_filter = Some((input.clone(), subscription));
         input
@@ -1165,7 +1163,11 @@ impl PullRequestView {
                         .max_h(px(420.))
                         .p_1()
                         .gap_1()
-                        .child(Input::new(&input).small())
+                        .child(
+                            Input::new(&input)
+                                .placeholder(crate::tr!("pull_requests.files.filter"))
+                                .small(),
+                        )
                         .child(view.file_list("pr-file-jump-rows", &filter, true, cx))
                 })
             })
@@ -1196,7 +1198,11 @@ impl PullRequestView {
                     .text_color(cx.theme().muted_foreground)
                     .child(count),
             )
-            .child(Input::new(&input).small())
+            .child(
+                Input::new(&input)
+                    .placeholder(crate::tr!("pull_requests.files.filter"))
+                    .small(),
+            )
             .child(self.file_list("pr-file-column-rows", &filter, false, cx))
             .into_any_element()
     }

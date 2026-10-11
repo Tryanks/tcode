@@ -813,6 +813,7 @@ impl RemotePanel {
                 )
                 .child(
                     Input::new(&self.form.address)
+                        .placeholder(crate::tr!("hosts.pair.address_placeholder"))
                         .large()
                         .rounded(crate::material::radius_input(cx)),
                 )
@@ -877,6 +878,7 @@ impl RemotePanel {
                     )
                     .child(
                         Input::new(&self.form.invitation)
+                            .placeholder(crate::tr!("hosts.pair.invitation_placeholder"))
                             .large()
                             .rounded(crate::material::radius_input(cx)),
                     ),

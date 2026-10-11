@@ -810,7 +810,11 @@ fn render_model_pane(
                 .pb_1()
                 .border_b_1()
                 .border_color(cx.theme().border)
-                .child(Input::new(model_search).appearance(false)),
+                .child(
+                    Input::new(model_search)
+                        .placeholder(crate::tr!("composer.search_models"))
+                        .appearance(false),
+                ),
         )
         .child(list);
     if pending_restart {
