@@ -802,8 +802,10 @@ impl PullRequestsPanel {
                     line.child(div().min_w_0().truncate().child(lead)),
                     layer.clone(),
                 )
-                .child(dot())
-                .child(div().flex_none().child(format!("{} {}", stat.0, stat.1)))
+                .when_some(stat.as_ref(), |line, (additions, deletions)| {
+                    line.child(dot())
+                        .child(div().flex_none().child(format!("{additions} {deletions}")))
+                })
                 .into_any_element()
             } else {
                 // Spacing is each part's leading margin, so a part that gives way takes its
