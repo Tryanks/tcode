@@ -82,6 +82,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
                         initial_pairing_error: None,
                         client_host: Some(host),
                         local: None,
+                        local_failure: None,
                         seed_blocking: false,
                         restore_navigation: true,
                     },
