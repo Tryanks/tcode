@@ -75,12 +75,12 @@ pub(crate) struct OpenFileDiff {
 use self::components::changed_files::InlineDiffCache;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
-    ListSync, RowPart, RowRenderArgs, Segment, TimelineContinuity, TimelineRow, TurnIndexCache,
-    activity_run_duration_ms, displayed_error_text, divergent_served_model,
-    format_elapsed_deciseconds, latest_message_ids, live_edit_counts, live_edit_rows,
-    partition_activity_run, plain_text_as_markdown, row_of_entry, rows_of_turn, segment_entries,
-    start_hub_projects, timeline_overdraw, user_content, user_visible_text, work_log_capsule_label,
-    work_log_counts, work_log_key, work_log_outcome,
+    LimitResumeAction, ListSync, RowPart, RowRenderArgs, Segment, TimelineContinuity, TimelineRow,
+    TurnIndexCache, activity_run_duration_ms, displayed_error_text, divergent_served_model,
+    format_elapsed_deciseconds, latest_message_ids, limit_resume_action, live_edit_counts,
+    live_edit_rows, partition_activity_run, plain_text_as_markdown, row_of_entry, rows_of_turn,
+    segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
+    work_log_capsule_label, work_log_counts, work_log_key, work_log_outcome,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_row_window, viewport_row_window,
@@ -1527,37 +1527,72 @@ impl ChatView {
                             ..
                         } => {
                             let resets_at = *resets_at;
-                            let queued_id = self
-                                .workspace_store
-                                .read(cx)
+                            let store = self.workspace_store.read(cx);
+                            let queued: Vec<_> = store
                                 .composer_state()
                                 .queue
                                 .into_iter()
                                 .flat_map(|queue| queue.messages)
+                                .collect();
+                            let queued_id = queued
+                                .iter()
                                 .find(|message| message.fire_at_unix_secs == Some(resets_at))
                                 .map(|message| message.id);
-                            if let Some(id) = queued_id {
-                                Some(components::error_card::LimitResume::Scheduled {
-                                    remaining_secs: resets_at.saturating_sub(now_secs()),
+                            let queue_empty = queued.is_empty();
+                            let ends_thread = store
+                                .with_active_timeline(|timeline| {
+                                    !timeline.turn_running && index + 1 == timeline.turns.len()
+                                })
+                                .unwrap_or(false);
+                            match limit_resume_action(
+                                resets_at,
+                                queued_id,
+                                now_secs(),
+                                ends_thread,
+                                queue_empty,
+                            ) {
+                                LimitResumeAction::Scheduled {
+                                    queued_id: id,
+                                    remaining_secs,
+                                } => Some(components::error_card::LimitResume::Scheduled {
+                                    remaining_secs,
                                     on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
                                         this.workspace_store
                                             .update(cx, |store, _| store.drop_queued(id));
                                     })),
-                                })
-                            } else if resets_at > now_secs() {
-                                Some(components::error_card::LimitResume::Offer {
-                                    on_schedule: Box::new(cx.listener(move |this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, _| {
-                                            store.schedule_turn(
-                                                tcode_core::session::RESUME_PROMPT.to_string(),
-                                                vec![],
-                                                resets_at,
-                                            )
-                                        });
-                                    })),
-                                })
-                            } else {
-                                None
+                                }),
+                                LimitResumeAction::Schedule => {
+                                    Some(components::error_card::LimitResume::Offer {
+                                        on_schedule: Box::new(cx.listener(
+                                            move |this, _, _, cx| {
+                                                this.workspace_store.update(cx, |store, _| {
+                                                    store.schedule_turn(
+                                                        tcode_core::session::RESUME_PROMPT
+                                                            .to_string(),
+                                                        vec![],
+                                                        resets_at,
+                                                    )
+                                                });
+                                            },
+                                        )),
+                                    })
+                                }
+                                LimitResumeAction::ContinueNow => {
+                                    Some(components::error_card::LimitResume::Continue {
+                                        on_continue: Box::new(cx.listener(
+                                            move |this, _, _, cx| {
+                                                this.workspace_store.update(cx, |store, _| {
+                                                    store.send_turn(
+                                                        tcode_core::session::RESUME_PROMPT
+                                                            .to_string(),
+                                                        vec![],
+                                                    )
+                                                });
+                                            },
+                                        )),
+                                    })
+                                }
+                                LimitResumeAction::None => None,
                             }
                         }
                         _ => None,
