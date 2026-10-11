@@ -90,6 +90,7 @@ chat:
     resumes_in: "将在 %{countdown} 后继续"
     cancel: "取消"
     schedule: "额度恢复后继续"
+    continue_now: "继续"
   steering: "引导中…"
   steered: "已引导"
   orchestrate_skill: "编排技能"
