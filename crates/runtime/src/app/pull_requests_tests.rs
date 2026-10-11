@@ -844,8 +844,10 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
     }));
 }
 
+/// The model reads the linking block once: the first turn after the tools are registered carries
+/// it, a native `/command` never does, and once a turn carrying it is accepted no later one does.
 #[test]
-fn registered_tools_prefix_each_turn_except_a_native_command() {
+fn registered_tools_prefix_the_first_turn_except_a_native_command() {
     let store = TestStore::new("tcode-pr-instructions");
     let mut cx = TestAppContext::default();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -928,6 +930,29 @@ fn registered_tools_prefix_each_turn_except_a_native_command() {
             disclosed.and_then(pull_request::strip_linking_instructions),
             instructed.then_some(""),
             "the disclosure holds exactly the pull request instructions"
+        );
+        state.update(&mut cx, |state, cx| {
+            state.on_event(id, turn_completed(), cx);
+            state
+                .resident_mut(id)
+                .unwrap()
+                .push_queued("and the tests".into(), Vec::new());
+            assert_eq!(state.dispatch_next_queued(id, cx), Ok(true));
+        });
+        let Ok(SessionCommand::SendTurn { text, .. }) = delivered.try_recv() else {
+            panic!("expected a second provider delivery")
+        };
+        assert_eq!(
+            text,
+            if instructed {
+                "and the tests".to_owned()
+            } else {
+                format!(
+                    "{}and the tests",
+                    pull_request::linking_instructions(&pull_request::hosts_in([]))
+                )
+            },
+            "the block is read once, on the first turn that can carry it"
         );
     }
 }

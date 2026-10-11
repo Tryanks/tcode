@@ -615,14 +615,15 @@ fn stop_discards_a_read_in_flight_and_refuses_a_late_agent_start() {
         state.select_session("thread", cx);
         state.mcp.pull_request_registrations.insert(
             "thread".into(),
-            (
-                agent::McpRegistration {
+            crate::app::orchestrate::PullRequestRegistration {
+                registration: agent::McpRegistration {
                     name: "tcode_pull_requests".into(),
                     url: "http://127.0.0.1/pull-requests".into(),
                     bearer_token: "token".into(),
                 },
-                "GitHub".into(),
-            ),
+                hosts: "GitHub".into(),
+                instructed: false,
+            },
         );
     });
     harness.state.dispatch_command(
