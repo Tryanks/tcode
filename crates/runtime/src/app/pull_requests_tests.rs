@@ -608,7 +608,12 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
     state.update(&mut cx, |state, cx| {
         state.discover_pull_requests_for("active", true, cx)
     });
-    let sent = requested.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut sent = None;
+    cx.run_until(|_| {
+        sent = sent.take().or_else(|| requested.try_recv().ok());
+        sent.is_some()
+    });
+    let sent = sent.unwrap();
     assert!(
         sent["variables"]
             .as_object()
@@ -623,6 +628,61 @@ fn discovery_answers_local_branches_and_drops_a_linked_worktree_result_after_bra
         state.read(|state| state.find_meta("active").unwrap().pull_requests.is_empty()),
         "a reply for the previous branch must not be linked"
     );
+}
+
+/// Windows refuses to rename a directory that is a process's current
+/// directory, so a project move waits while discovery runs git in its root.
+#[test]
+fn a_project_move_waits_for_discovery_to_leave_its_root() {
+    let store = TestStore::new("tcode-pr-discovery-move");
+    let root = checkout(&store);
+    git(&root, &["switch", "-c", "topic"]);
+    git(&root, &["update-ref", "refs/remotes/origin/topic", "HEAD"]);
+    let fixture = fixture::Fixture::new();
+    let api = client(&store, &fixture);
+    let (arrived, requested) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel::<()>();
+    let held = Mutex::new(Some((arrived, resume)));
+    let _server = fixture.serve(move |exchange| {
+        if let Some((arrived, resume)) = held.lock().unwrap().take() {
+            arrived.send(()).unwrap();
+            resume.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        exchange.reply(200, "", br#"{"data":{"repository":{"h0":{"nodes":[]}}}}"#);
+    });
+    let project = Project::from_root(root.clone());
+    let project_id = project.id.clone();
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(&mut cx, |state, cx| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        let mut meta = linked_meta("active", false);
+        meta.pull_requests.clear();
+        meta.cwd = root.clone();
+        meta.project_id = Some(project_id.clone());
+        state.projects.push(project);
+        state.sessions.push(meta);
+        state.discover_pull_requests(None, cx).detach();
+    });
+    let mut in_flight = false;
+    cx.run_until(|_| {
+        in_flight |= requested.try_recv().is_ok();
+        in_flight
+    });
+    let moved = store.root().join("moved");
+    state.update(&mut cx, |state, cx| {
+        state
+            .set_project_root(&project_id, moved.clone(), true, cx)
+            .detach()
+    });
+    cx.run_until_parked();
+    assert!(
+        root.exists() && !moved.exists(),
+        "the move waits for the discovery read in its root"
+    );
+    release.send(()).unwrap();
+    cx.run_until(|state| state.projects[0].root == moved);
+    assert!(!root.exists() && moved.join(".git").exists());
 }
 
 #[test]
