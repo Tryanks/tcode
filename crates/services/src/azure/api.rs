@@ -511,8 +511,6 @@ pub(super) fn messages(body: &[u8]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// A saved token belongs to its organization alone. `AZURE_DEVOPS_EXT_PAT` goes only to the
     /// organization `AZURE_DEVOPS_ORG` names, however it is written, and nowhere without it;
     /// az's token goes as a bearer to an organization with neither. A token is sent as Basic
@@ -520,6 +518,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_token_goes_only_to_the_organization_it_is_for() {
+        use super::*;
         use base64::Engine as _;
         use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("tcode-azure-token-{}", uuid::Uuid::new_v4()));
