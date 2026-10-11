@@ -8,7 +8,8 @@ use std::sync::Arc;
 use agent::{FileChange, ItemContent, ItemStatus, TurnStatus};
 use tcode_core::project::{Project, SessionMeta};
 use tcode_core::session::{
-    EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming, parse_orchestrate_callback,
+    EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming,
+    parse_orchestrate_callback,
 };
 
 /// The row, its turn, the entries it renders (a Work Log header's whole run),
@@ -1154,7 +1155,7 @@ fn index_rows_from(
                     // A disclosure row (orchestrate context / callback) grows a tall
                     // scroll card when expanded, so its toggle state must change the
                     // row fingerprint or the list keeps the collapsed measurement.
-                    if let Some(key) = disclosure_key(&entry.content, &entry.id) {
+                    for key in disclosure_keys(&entry.content, &entry.id) {
                         expanded.contains(&key).hash(&mut content);
                     }
                 }
@@ -1259,19 +1260,25 @@ pub(crate) fn work_log_key(turn: usize, segment_id: &str) -> String {
     format!("worklog-{turn}-{segment_id}")
 }
 
-/// The per-entry expansion key for a user message that renders as a disclosure
-/// row rather than a bubble: an orchestrate context split (annotated with a
-/// `context_len`) or a child-thread callback (whose text parses as one). `None`
-/// for an ordinary user message, which stays a plain bubble.
-fn disclosure_key(content: &EntryContent, entry_id: &str) -> Option<String> {
+/// The child-thread callback a user message holds, read past any injected context the turn
+/// carried (the pull request instructions precede a callback like any other queued message).
+pub(crate) fn user_callback(content: &EntryContent) -> Option<OrchestrateCallback> {
     let (text, _, context_len, _) = user_content(content)?;
-    if context_len.is_some() {
-        Some(format!("orchestrate-context-{entry_id}"))
-    } else if parse_orchestrate_callback(text).is_some() {
-        Some(format!("orchestrate-callback-{entry_id}"))
-    } else {
-        None
+    parse_orchestrate_callback(user_visible_text(text, context_len))
+}
+
+/// The per-entry expansion keys of a user message's disclosure rows: its injected context
+/// (annotated with a `context_len`) and its child-thread callback. Empty for an ordinary user
+/// message, which stays a plain bubble.
+fn disclosure_keys(content: &EntryContent, entry_id: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    if user_content(content).is_some_and(|(_, _, context_len, _)| context_len.is_some()) {
+        keys.push(format!("orchestrate-context-{entry_id}"));
     }
+    if user_callback(content).is_some() {
+        keys.push(format!("orchestrate-callback-{entry_id}"));
+    }
+    keys
 }
 
 /// Hash only data that can alter a turn's layout. Text lengths make streaming
@@ -1585,6 +1592,33 @@ fn list_sync_with<'a>(
 mod tests {
     use super::*;
     use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind};
+
+    /// A child's callback dispatched behind the pull request instructions is still the callback
+    /// (a disclosure row), not the user's words (a bubble), and both of its rows have keys.
+    #[test]
+    fn a_callback_behind_injected_context_is_still_a_callback() {
+        let context = "<pull_request_linking>\nlink it\n</pull_request_linking>\n\n";
+        let callback = "[orchestrate] thread child-7 (\"Fix the build\") completed. tokens: input 5, output 3, total 8.\nDone.";
+        let content = EntryContent::Item(ItemContent::UserMessage {
+            text: format!("{context}{callback}"),
+            context_len: Some(context.len()),
+            attachments: Vec::new(),
+        });
+        let parsed = user_callback(&content).expect("the visible text is the callback");
+        assert_eq!(parsed.child_id, "child-7");
+        assert_eq!(parsed.body, "Done.");
+        assert_eq!(
+            disclosure_keys(&content, "u1"),
+            ["orchestrate-context-u1", "orchestrate-callback-u1"]
+        );
+        let plain = EntryContent::Item(ItemContent::UserMessage {
+            text: format!("{context}fix the build"),
+            context_len: Some(context.len()),
+            attachments: Vec::new(),
+        });
+        assert!(user_callback(&plain).is_none());
+        assert_eq!(disclosure_keys(&plain, "u2"), ["orchestrate-context-u2"]);
+    }
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
