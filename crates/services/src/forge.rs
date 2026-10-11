@@ -3,6 +3,8 @@
 //! it; what crosses is Tcode's own model. Each host of a kind is served by that kind's
 //! implementation. Call blocking entries via HostCx::unblock.
 
+pub(crate) mod anchors;
+pub(crate) mod checkout;
 mod http;
 mod verdicts;
 mod viewed;
@@ -30,7 +32,7 @@ use tcode_protocol::{
     PullRequestReviewVerdict, PullRequestStackHead,
 };
 pub(crate) use verdicts::Verdicts;
-pub(crate) use viewed::ViewedMarks;
+pub(crate) use viewed::{ViewedMarks, revisions};
 
 /// The hosts Tcode reads pull requests from, with credentials from `store` and the launch
 /// environment.
