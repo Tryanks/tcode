@@ -1,6 +1,7 @@
 //! GPUI-free infrastructure services shared by the tcode application layers.
 
 pub mod acp_registry;
+pub mod azure;
 pub mod bitbucket;
 pub mod desktop;
 pub mod export;

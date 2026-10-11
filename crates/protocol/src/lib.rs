@@ -165,6 +165,8 @@ pub use wire::{
 // Unreleased: a source-control host's kind may be bitbucket; a credential source
 // may be saved_basic, with the email it is sent with, or saved_bearer;
 // SetHostToken carries an optional email.
+// Unreleased: a source-control host's kind may be azure, whose hosts are
+// organizations, dev.azure.com/{organization}.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]
