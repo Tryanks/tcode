@@ -715,7 +715,8 @@ impl Forge for Azure {
                         tools_missing: vec!["az".into()],
                     }),
                     Some(credential)
-                        if credential.source == CredentialSource::Saved
+                        if enabled
+                            && credential.source == CredentialSource::Saved
                             && !self.api.worked(&host, credential) =>
                     {
                         Some(HostProblem::Unverified)
@@ -751,8 +752,8 @@ impl Forge for Azure {
             .collect()
     }
 
-    fn forget_credential(&self, _: &str) {
-        self.api.forget();
+    fn forget_credential(&self, host: &str) {
+        self.api.forget(host);
         self.branches.lock().unwrap().clear();
     }
 

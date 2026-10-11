@@ -1548,7 +1548,7 @@ source_control:
   notice_not_signed_in: "%{tool} isn't signed in to %{host}."
   notice_no_credential: "Paste a token, or install %{tools} and sign in."
   notice_no_credential_email: "Save an API token or an access token below."
-  notice_unverified: "Saved. Tcode checks the token when it first reads a pull request on %{host}."
+  notice_unverified: "Tcode hasn't used this token yet. It checks it on the first pull request it reads on %{host}."
   create_token: "Create a token"
   token_scopes: "Needs the scopes %{scopes}."
   bitbucket_api_token: "API token"

@@ -567,7 +567,8 @@ impl Forge for Bitbucket {
                 tools_missing: Vec::new(),
             }),
             Some(credential)
-                if credential.source == CredentialSource::SavedBearer
+                if enabled
+                    && credential.source == CredentialSource::SavedBearer
                     && !self.api.worked(credential) =>
             {
                 Some(HostProblem::Unverified)
@@ -604,6 +605,7 @@ impl Forge for Bitbucket {
     // The credential is read from the store on every request; what was read with the one
     // before is dropped, as reads kept longer while anonymous would otherwise outlive a token.
     fn forget_credential(&self, _: &str) {
+        self.api.forget();
         self.summaries.lock().unwrap().clear();
         self.branches.lock().unwrap().clear();
     }

@@ -2242,11 +2242,16 @@ mod tests {
         assert!(reads(&requests).is_empty());
     }
 
-    /// The meta block lists a host's labels only where the host has labels: on one without them
-    /// (Bitbucket) there is no Labels row, not even an empty one, beside the reviewers.
+    /// The meta block has a Labels row where the host has labels: on one without them
+    /// (Bitbucket) there is none, not even an empty one, beside the reviewers, unless the host
+    /// still reports labels on the pull request.
     #[gpui::test]
     fn the_labels_row_is_absent_where_the_host_has_no_labels(cx: &mut TestAppContext) {
-        for labels in [true, false] {
+        for (labels, applied, shown) in [
+            (true, false, true),
+            (false, false, false),
+            (false, true, true),
+        ] {
             let Mounted {
                 view,
                 requests,
@@ -2268,6 +2273,15 @@ mod tests {
                                 avatar_url: None,
                                 verdict: None,
                             }],
+                            labels: applied
+                                .then(|| tcode_protocol::PullRequestLabel {
+                                    id: "bug".into(),
+                                    name: "bug".into(),
+                                    color: None,
+                                    description: None,
+                                })
+                                .into_iter()
+                                .collect(),
                             capabilities: PullRequestCapabilities {
                                 labels,
                                 ..PullRequestCapabilities::ALL
@@ -2289,7 +2303,11 @@ mod tests {
             view.update(cx, |view, cx| view.select_tab(Tab::Conversation, cx));
             settle(cx);
             assert!(cx.debug_bounds("pr-meta-reviewers").is_some());
-            assert_eq!(cx.debug_bounds("pr-meta-labels").is_some(), labels);
+            assert_eq!(
+                cx.debug_bounds("pr-meta-labels").is_some(),
+                shown,
+                "labels offered: {labels}, applied: {applied}"
+            );
         }
     }
 

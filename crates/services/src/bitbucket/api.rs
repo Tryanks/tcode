@@ -8,7 +8,7 @@ use crate::{
 };
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     io::Read as _,
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime},
@@ -156,8 +156,8 @@ pub(super) struct Api {
     /// The account each credential reads as, by fingerprint, for a few minutes: every read
     /// that names the viewer would otherwise spend one of Bitbucket's hourly requests on it.
     viewers: Mutex<HashMap<String, (Instant, Option<Value>)>>,
-    /// The fingerprints of the credentials Bitbucket has answered a request with.
-    worked: Mutex<HashSet<String>>,
+    /// The fingerprint of the last saved access token Bitbucket answered a request with.
+    worked: Mutex<Option<String>>,
 }
 
 impl Api {
@@ -234,12 +234,13 @@ impl Api {
         self.store.token(HostKind::Bitbucket, HOST).is_some()
     }
 
-    /// Whether Bitbucket has answered a request sent with `credential`.
+    /// Whether Bitbucket has answered a request sent with `credential`, a saved access token.
     pub(super) fn worked(&self, credential: &Credential) -> bool {
-        self.worked
-            .lock()
-            .unwrap()
-            .contains(&credential.fingerprint())
+        self.worked.lock().unwrap().as_ref() == Some(&credential.fingerprint())
+    }
+
+    pub(super) fn forget(&self) {
+        *self.worked.lock().unwrap() = None;
     }
 
     pub(super) fn environment_names_host(&self) -> bool {
@@ -404,8 +405,11 @@ impl Api {
             ));
         }
         if (200..300).contains(&status) {
-            if credential.is_some() {
-                self.worked.lock().unwrap().insert(fingerprint);
+            if credential
+                .as_ref()
+                .is_some_and(|credential| credential.source == CredentialSource::SavedBearer)
+            {
+                *self.worked.lock().unwrap() = Some(fingerprint);
             }
             return Ok(Response {
                 status,

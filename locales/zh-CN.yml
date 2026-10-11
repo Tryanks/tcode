@@ -1541,7 +1541,7 @@ source_control:
   notice_not_signed_in: "%{tool} 尚未登录 %{host}。"
   notice_no_credential: "请粘贴令牌，或安装 %{tools} 并登录。"
   notice_no_credential_email: "请在下方保存 API 令牌或访问令牌。"
-  notice_unverified: "已保存。Tcode 会在首次读取 %{host} 上的拉取请求时检查该令牌。"
+  notice_unverified: "Tcode 尚未使用过此令牌，会在读取 %{host} 上的第一个拉取请求时检查它。"
   create_token: "创建令牌"
   token_scopes: "需要以下权限范围：%{scopes}。"
   bitbucket_api_token: "API 令牌"

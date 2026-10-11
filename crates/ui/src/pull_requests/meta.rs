@@ -240,7 +240,7 @@ impl PullRequestView {
             labelled && permissions.label && !read_only,
         );
         if conversation.reviewers.is_empty()
-            && (!labelled || conversation.labels.is_empty())
+            && conversation.labels.is_empty()
             && !can_review
             && !can_label
         {
@@ -380,7 +380,8 @@ impl PullRequestView {
                     reviewers_edit,
                     cx,
                 ))
-                .when(labelled, |block| {
+                // A host without labels may still report some, which show read-only.
+                .when(labelled || !conversation.labels.is_empty(), |block| {
                     block.child(row(
                         "pr-meta-labels",
                         IconName::Tag,

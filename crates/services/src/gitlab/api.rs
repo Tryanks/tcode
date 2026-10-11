@@ -7,7 +7,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     io::Read as _,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
@@ -128,8 +128,8 @@ pub(super) struct Api {
     pub(super) agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     paused: Mutex<HashMap<String, SystemTime>>,
-    /// Each server and the fingerprints of the credentials it has answered a request with.
-    worked: Mutex<HashSet<(String, String)>>,
+    /// Each server and the fingerprint of the last saved token it answered a request with.
+    worked: Mutex<HashMap<String, String>>,
 }
 
 impl Api {
@@ -221,6 +221,7 @@ impl Api {
 
     pub(super) fn forget(&self, authority: &str) {
         self.tokens.lock().unwrap().remove(authority);
+        self.worked.lock().unwrap().remove(authority);
     }
 
     pub(super) fn token_saved(&self, authority: &str) -> bool {
@@ -230,12 +231,9 @@ impl Api {
             .is_some()
     }
 
-    /// Whether the server has answered a request sent with `credential`.
+    /// Whether the server has answered a request sent with `credential`, a saved token.
     pub(super) fn worked(&self, authority: &str, credential: &Credential) -> bool {
-        self.worked
-            .lock()
-            .unwrap()
-            .contains(&(authority.to_owned(), credential.fingerprint()))
+        self.worked.lock().unwrap().get(authority) == Some(&credential.fingerprint())
     }
 
     fn environment_token(&self, authority: &str) -> Option<String> {
@@ -465,11 +463,14 @@ impl Api {
             ));
         }
         if (200..300).contains(&status) {
-            if let Some(credential) = &credential {
+            if let Some(credential) = credential
+                .as_ref()
+                .filter(|credential| credential.source == CredentialSource::Saved)
+            {
                 self.worked
                     .lock()
                     .unwrap()
-                    .insert((authority.to_owned(), credential.fingerprint()));
+                    .insert(authority.to_owned(), credential.fingerprint());
             }
             return Ok(Response {
                 body,
