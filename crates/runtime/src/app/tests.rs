@@ -11215,6 +11215,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         Command::SetHostToken {
             host: "GITHUB.COM".into(),
             token: Some("github-writer-secret".into()),
+            email: None,
         },
     );
     cx.run_until(|_| persisted()["@github"]["github.com"] == "github-writer-secret");
@@ -11291,6 +11292,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         Command::SetHostToken {
             host: "github.com".into(),
             token: None,
+            email: None,
         },
     );
     cx.run_until(|_| persisted().get("@github").is_none());
@@ -11327,6 +11329,7 @@ fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
         Command::SetHostToken {
             host: "github.com".into(),
             token: Some("replacement".into()),
+            email: None,
         },
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

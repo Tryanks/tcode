@@ -156,8 +156,39 @@ fn gitlab_pull_request_url(value: &str) -> bool {
     })
 }
 
+pub const BITBUCKET: HostTerms = HostTerms {
+    name: "Bitbucket",
+    clis: "",
+    stacks: None,
+    merge_commands: &[],
+    pull_request_url: bitbucket_pull_request_url,
+    named_by_host: false,
+    mark: "icons/bitbucket.svg",
+    conflicts_page: None,
+    checks_page: None,
+};
+
+/// `https://bitbucket.org/workspace/repository/pull-requests/N`.
+fn bitbucket_pull_request_url(value: &str) -> bool {
+    let value = value.split(['?', '#']).next().unwrap_or_default();
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let parts: Vec<_> = rest.split('/').collect();
+    let [host, workspace, repository, "pull-requests", number, ..] = parts.as_slice() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case(HostKind::Bitbucket.public_host())
+        && !workspace.is_empty()
+        && !repository.is_empty()
+        && number.parse::<u64>().is_ok_and(|number| number > 0)
+}
+
 /// Every host Tcode reads pull requests from.
-pub const HOSTS: &[&HostTerms] = &[&GITHUB, &FORGEJO, &GITEA, &GITLAB];
+pub const HOSTS: &[&HostTerms] = &[&GITHUB, &FORGEJO, &GITEA, &GITLAB, &BITBUCKET];
 
 /// The software a source-control host runs, which decides how Tcode talks to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -167,6 +198,8 @@ pub enum HostKind {
     Forgejo,
     Gitea,
     Gitlab,
+    /// Bitbucket Cloud, which is bitbucket.org alone.
+    Bitbucket,
 }
 
 /// Why an authority cannot be a host of a kind.
@@ -178,10 +211,18 @@ pub enum HostRefusal {
     PortOrPath,
     /// A path on a kind whose hosts take a port but no path.
     Path,
+    /// Another host than the one a kind is served from.
+    Fixed,
 }
 
 impl HostKind {
-    pub const ALL: [Self; 4] = [Self::Github, Self::Forgejo, Self::Gitea, Self::Gitlab];
+    pub const ALL: [Self; 5] = [
+        Self::Github,
+        Self::Forgejo,
+        Self::Gitea,
+        Self::Gitlab,
+        Self::Bitbucket,
+    ];
 
     pub fn terms(self) -> &'static HostTerms {
         match self {
@@ -189,6 +230,7 @@ impl HostKind {
             Self::Forgejo => &FORGEJO,
             Self::Gitea => &GITEA,
             Self::Gitlab => &GITLAB,
+            Self::Bitbucket => &BITBUCKET,
         }
     }
 
@@ -199,22 +241,35 @@ impl HostKind {
             Self::Forgejo => "codeberg.org",
             Self::Gitea => "gitea.com",
             Self::Gitlab => "gitlab.com",
+            Self::Bitbucket => "bitbucket.org",
         }
     }
 
+    /// The one host a kind is served from, which is never typed.
+    pub fn fixed_host(self) -> Option<&'static str> {
+        (self == Self::Bitbucket).then(|| self.public_host())
+    }
+
+    /// Whether a saved token of the kind may come with the account's email, which it then
+    /// authenticates with, or alone, as a bearer.
+    pub fn takes_email(self) -> bool {
+        self == Self::Bitbucket
+    }
+
     /// The kind a host's name says it runs: a public host, or a whole DNS label naming the
-    /// software.
+    /// software. A `bitbucket` label names Bitbucket Data Center, which Tcode does not read.
     pub fn detect(authority: &str) -> Option<Self> {
         let host = host_name(authority).to_ascii_lowercase();
         Self::ALL.into_iter().find(|kind| {
             host == kind.public_host()
                 || host.split('.').any(|label| {
-                    label
+                    Some(label)
                         == match kind {
-                            Self::Github => "github",
-                            Self::Forgejo => "forgejo",
-                            Self::Gitea => "gitea",
-                            Self::Gitlab => "gitlab",
+                            Self::Github => Some("github"),
+                            Self::Forgejo => Some("forgejo"),
+                            Self::Gitea => Some("gitea"),
+                            Self::Gitlab => Some("gitlab"),
+                            Self::Bitbucket => None,
                         }
                 })
         })
@@ -235,11 +290,13 @@ impl HostKind {
                 self.terms().name
             ),
             Self::Gitlab => "Use a GitLab host name in lowercase, with its port if the server has one, without a URL scheme or path.".into(),
+            Self::Bitbucket => "Use bitbucket.org: Tcode reads Bitbucket Cloud only.".into(),
         }
     }
 
     /// An authority as settings keep it: lowercase, without a scheme or trailing slashes.
-    /// Forgejo and Gitea servers take a port and a mount path, GitLab servers a port alone.
+    /// Forgejo and Gitea servers take a port and a mount path, GitLab servers a port alone, and
+    /// Bitbucket is only its public host.
     pub fn authority(self, raw: &str) -> Result<String, HostRefusal> {
         let value = raw.trim().to_ascii_lowercase();
         let value = value
@@ -257,6 +314,13 @@ impl HostKind {
         };
         if !dns_name(host) {
             return Err(HostRefusal::Invalid);
+        }
+        if let Some(fixed) = self.fixed_host() {
+            return if value == fixed {
+                Ok(value.to_owned())
+            } else {
+                Err(HostRefusal::Fixed)
+            };
         }
         if port.is_none() && path.is_empty() {
             return Ok(value.to_owned());
@@ -323,7 +387,7 @@ pub fn host_names(hosts: &[&HostTerms]) -> String {
 pub fn linking_instructions(hosts: &[&HostTerms]) -> String {
     let mut clis: Vec<_> = Vec::new();
     for terms in hosts {
-        if !clis.contains(&terms.clis) {
+        if !terms.clis.is_empty() && !clis.contains(&terms.clis) {
             clis.push(terms.clis);
         }
     }
@@ -1468,6 +1532,12 @@ mod tests {
             linking_instructions(&gitlab)
                 .contains("This applies to gh, gh stack, glab, other CLIs")
         );
+        // Bitbucket has no CLI to name, so the list stays GitHub's.
+        let bitbucket = hosts_in([HostKind::Bitbucket]);
+        assert_eq!(host_names(&bitbucket), "GitHub or Bitbucket");
+        assert!(
+            linking_instructions(&bitbucket).contains("This applies to gh, gh stack, other CLIs")
+        );
         assert!(
             strip_linking_instructions(&format!("{}typed", linking_instructions(&all)))
                 == Some("typed")
@@ -1513,6 +1583,24 @@ mod tests {
             Some(HostKind::Gitea)
         );
         assert_eq!(HostKind::detect("ghost.acme.test"), None);
+        // Bitbucket Cloud is bitbucket.org alone; a `bitbucket` label is Data Center's.
+        assert_eq!(
+            HostKind::Bitbucket.authority("https://Bitbucket.org/"),
+            Ok("bitbucket.org".to_owned())
+        );
+        for other in [
+            "bitbucket.acme.test",
+            "bitbucket.org:8443",
+            "bitbucket.org/x",
+        ] {
+            assert_eq!(
+                HostKind::Bitbucket.authority(other),
+                Err(HostRefusal::Fixed),
+                "{other}"
+            );
+        }
+        assert_eq!(HostKind::detect("bitbucket.org"), Some(HostKind::Bitbucket));
+        assert_eq!(HostKind::detect("bitbucket.acme.test"), None);
         assert_eq!(
             FORGEJO.display_name("git.acme.test:3000/forge"),
             "git.acme.test"
@@ -1633,10 +1721,14 @@ mod tests {
         assert!(is_pull_request_url(
             "https://code.acme.test:8443/group/sub/project/-/merge_requests/4/diffs"
         ));
+        assert!(is_pull_request_url(
+            "https://bitbucket.org/sample/project/pull-requests/9/diff"
+        ));
         for ordinary in [
             "https://github.com/sample/project/issues/123",
             "https://github.com/sample/project/pull/0",
             "https://gitlab.com/project/-/merge_requests/4",
+            "https://bitbucket.acme.test/sample/project/pull-requests/9",
             "https://example.test",
             "#123",
         ] {

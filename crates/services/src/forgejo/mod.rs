@@ -426,7 +426,7 @@ impl Forgejo {
             files: self.viewed.states(
                 &self.account_of(viewer.as_deref(), key),
                 key,
-                &reads::revisions(&diff),
+                &crate::forge::revisions(&diff),
             ),
             complete: true,
         })
@@ -960,7 +960,13 @@ impl Forge for Forgejo {
             .diff(key)?
             .ok_or_else(|| error(ForgeErrorKind::TooLarge, "Forgejo diff too large"))?;
         self.viewed
-            .set(&account, key, &reads::revisions(&diff), paths, viewed)
+            .set(
+                &account,
+                key,
+                &crate::forge::revisions(&diff),
+                paths,
+                viewed,
+            )
             .map_err(|_| error(ForgeErrorKind::Uncertain, "viewed marks not saved"))
     }
 
@@ -993,17 +999,13 @@ impl Forge for Forgejo {
         side: ReviewSide,
         lines: (u32, u32),
     ) -> Result<Anchoring, ForgeError> {
-        let files = self.files(key, None)?;
-        if files.head != head {
-            return Ok(Anchoring::Moved);
-        }
-        Ok(
-            if crate::github::pull_request_actions::in_hunks(&files.files, path, side, lines) {
-                Anchoring::InDiff
-            } else {
-                Anchoring::OutsideDiff
-            },
-        )
+        Ok(crate::forge::anchors::anchoring(
+            &self.files(key, None)?,
+            head,
+            path,
+            side,
+            lines,
+        ))
     }
 
     fn reanchor(
@@ -1011,38 +1013,9 @@ impl Forge for Forgejo {
         key: &PullRequestKey,
         comments: &[PullRequestReviewDraftComment],
     ) -> Result<(String, Vec<Moved>), ForgeError> {
-        let files = self.files(key, None)?;
-        let lines = |revision: &str, comment: &PullRequestReviewDraftComment| {
-            Ok::<_, ForgeError>(match self.file_text(key, revision, &comment.path)? {
-                PullRequestFileText::Text(text) => {
-                    let lines: Vec<_> = text.lines().collect();
-                    lines
-                        .get(comment.start_line as usize - 1..comment.end_line as usize)
-                        .map(|lines| lines.join("\n"))
-                }
-                _ => None,
-            })
-        };
-        let mut moved = Vec::new();
-        for comment in comments {
-            let revision = match comment.side {
-                ReviewSide::Old => &files.base,
-                ReviewSide::New => &files.head,
-            };
-            let kept = comment.placed
-                && crate::github::pull_request_actions::in_hunks(
-                    &files.files,
-                    &comment.path,
-                    comment.side,
-                    (comment.start_line, comment.end_line),
-                )
-                && (comment.revision == *revision || {
-                    let before = lines(&comment.revision, comment)?;
-                    before.is_some() && before == lines(revision, comment)?
-                });
-            moved.push((comment.id, kept.then(|| revision.clone())));
-        }
-        Ok((files.head, moved))
+        crate::forge::anchors::reanchor(self.files(key, None)?, comments, |revision, path| {
+            self.file_text(key, revision, path)
+        })
     }
 
     fn watch_detail(&self, key: &PullRequestKey) -> Result<PullRequestWatchRead, ForgeError> {

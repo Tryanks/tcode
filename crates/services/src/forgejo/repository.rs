@@ -151,33 +151,9 @@ pub(super) fn remote(known: &[String], value: &str) -> Option<Repository> {
     repository(&authority, owner, name)
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Option<String> {
-    crate::github::repository::git_read(cwd, args)
-}
-
-/// The fetch remotes of the checkout that name a repository here, by remote name.
-pub(super) fn remotes(known: &[String], cwd: &Path) -> Vec<(String, Repository)> {
-    git(cwd, &["remote", "-v"])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let name = parts.next()?;
-            let url = parts.next()?;
-            (parts.next()? == "(fetch)").then_some(())?;
-            Some((name.to_owned(), remote(known, url)?))
-        })
-        .collect()
-}
-
 /// The checkout's repository: `upstream`, then `origin`, then the first remote here.
 pub(super) fn resolve(known: &[String], cwd: &Path) -> Option<Repository> {
-    let remotes = remotes(known, cwd);
-    ["upstream", "origin"]
-        .iter()
-        .find_map(|name| remotes.iter().find(|(remote, _)| remote == name))
-        .or_else(|| remotes.first())
-        .map(|(_, repository)| repository.clone())
+    crate::forge::checkout::resolve(cwd, |url| remote(known, url))
 }
 
 /// The checked-out branch and where it is pushed: the head owner and branch a pull request
@@ -189,20 +165,11 @@ pub(super) struct Branch {
 }
 
 pub(super) fn branch(known: &[String], cwd: &Path) -> Option<Branch> {
-    let branch = git(cwd, &["symbolic-ref", "--short", "HEAD"])?;
-    let remote = git(cwd, &["config", &format!("branch.{branch}.remote")])?;
-    let merge = git(cwd, &["config", &format!("branch.{branch}.merge")])?;
-    let head = remotes(known, cwd)
-        .into_iter()
-        .find(|(name, _)| *name == remote)?
-        .1;
+    let found = crate::forge::checkout::branch(cwd, |url| remote(known, url))?;
     Some(Branch {
-        head_owner: head.locator.split('/').next()?.to_owned(),
-        head_branch: merge
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&merge)
-            .to_owned(),
-        branch,
+        head_owner: found.source.locator.split('/').next()?.to_owned(),
+        head_branch: found.source_branch,
+        branch: found.branch,
     })
 }
 

@@ -9,6 +9,25 @@ use tcode_protocol::PullRequestViewedState;
 /// Marks by account, then pull request, then path, each with the revision it was viewed at.
 type Marks = BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>;
 
+/// Each changed path's blob at the head side, from the diff's `index` lines.
+pub(crate) fn revisions(diff: &str) -> BTreeMap<String, String> {
+    let mut revisions = BTreeMap::new();
+    let mut path: Option<String> = None;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            path = rest.rsplit_once(" b/").map(|(_, path)| path.to_owned());
+        } else if let Some(renamed) = line.strip_prefix("rename to ") {
+            path = Some(renamed.to_owned());
+        } else if let (Some(range), Some(path)) = (line.strip_prefix("index "), &path) {
+            let range = range.split_whitespace().next().unwrap_or_default();
+            if let Some((_, head)) = range.split_once("..") {
+                revisions.insert(path.clone(), head.to_owned());
+            }
+        }
+    }
+    revisions
+}
+
 pub(crate) struct ViewedMarks {
     path: PathBuf,
     marks: Mutex<Option<Marks>>,
