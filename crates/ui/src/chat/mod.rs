@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub(crate) mod components;
-mod model;
+pub(crate) mod model;
 pub(crate) use model::format_duration;
 mod residency;
 
@@ -38,9 +38,7 @@ use gpui_base::{ElementExt as _, Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use tcode_core::git::GitAction;
-use tcode_core::session::{
-    EntryContent, OrchestrateCallback, Timeline, TimelineEntry, parse_orchestrate_callback,
-};
+use tcode_core::session::{EntryContent, OrchestrateCallback, Timeline, TimelineEntry};
 use tcode_core::ui::RightTab;
 
 use crate::commit_dialog::CommitDialog;
@@ -80,8 +78,8 @@ use self::model::{
     TurnIndexCache, activity_run_duration_ms, displayed_error_text, divergent_served_model,
     format_elapsed_deciseconds, latest_message_ids, limit_resume_action, live_edit_counts,
     live_edit_rows, partition_activity_run, plain_text_as_markdown, row_of_entry, rows_of_turn,
-    segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
-    work_log_capsule_label, work_log_counts, work_log_key, work_log_outcome,
+    segment_entries, start_hub_projects, timeline_overdraw, user_callback, user_content,
+    user_visible_text, work_log_capsule_label, work_log_counts, work_log_key, work_log_outcome,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_row_window, viewport_row_window,
@@ -1517,14 +1515,22 @@ impl ChatView {
                 Segment::User(entry) => {
                     let (text, steering, context_len, attachments) =
                         user_content(&entry.content).expect("user segment");
-                    // A child-thread callback (never annotated with a split) is a
-                    // centered disclosure row, not a bubble, and carries no
-                    // action row.
-                    if let Some(callback) = context_len
-                        .is_none()
-                        .then(|| parse_orchestrate_callback(text))
-                        .flatten()
-                    {
+                    // A child-thread callback is a centered disclosure row, not a
+                    // bubble, and carries no action row; any context the turn
+                    // injected before it is disclosed above it.
+                    if let Some(callback) = user_callback(&entry.content) {
+                        if let Some(context) = context_len
+                            .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
+                            .map(|len| &text[..len])
+                        {
+                            column = column.child(self.compose_disclosure(
+                                index,
+                                format!("orchestrate-context-{}", entry.id),
+                                injected_context_label(context).into(),
+                                context,
+                                cx,
+                            ));
+                        }
                         column = column
                             .child(self.compose_callback_row(index, &entry.id, &callback, cx));
                     } else if let Some((number, notice)) =

@@ -477,7 +477,7 @@ pub fn host_names(hosts: &[&HostTerms]) -> String {
     names.join(" or ")
 }
 
-/// Prepended to each turn while the pull request tools are registered; the transcript shows it.
+/// Prepended to the first turn after the pull request tools are registered; the transcript shows it.
 pub fn linking_instructions(hosts: &[&HostTerms]) -> String {
     let mut clis: Vec<_> = Vec::new();
     for terms in hosts {
@@ -1600,7 +1600,7 @@ mod tests {
         }
     }
 
-    /// The model reads this text on every turn: with only GitHub hosts configured it is what
+    /// The model reads this text once per registration: with only GitHub hosts configured it is what
     /// it was before other hosts existed, word for word, and a configured Forgejo or Gitea host
     /// adds its CLI and name, once for the two.
     #[test]
