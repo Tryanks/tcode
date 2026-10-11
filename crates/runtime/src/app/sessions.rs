@@ -1026,7 +1026,6 @@ impl AppState {
         };
         if !meta.is_settled() {
             meta.settled_at = Some(timestamp);
-            meta.updated_at = now_secs();
         }
         if let Some(input) = self
             .resident(id)
@@ -1071,7 +1070,6 @@ impl AppState {
         meta.settled_override = Some(SettledOverride::Active);
         meta.settled_at = None;
         meta.unsettled_at = Some(now_secs());
-        meta.updated_at = now_secs();
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1153,7 +1151,6 @@ impl AppState {
             return;
         }
         meta.auto_settle_disabled_at = (!enabled).then(now_secs);
-        meta.updated_at = now_secs();
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
