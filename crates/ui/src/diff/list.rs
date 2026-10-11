@@ -602,13 +602,13 @@ fn render_file_header<H: DiffListHost>(
         )
     });
     let menu = host.file_menu(file_index, cx);
-    h_flex()
+    let header = h_flex()
         .id(("diff-file-header", file_index))
         // A header spans what the list shows and moves with it, not with its lines, so the path,
         // the counts and the menu stay in view however far a long line reaches.
         .map(|header| {
             if viewport_width > px(0.) {
-                header.w(viewport_width).left(scrolled)
+                header.w(viewport_width).ml(scrolled)
             } else {
                 header.min_w_full()
             }
@@ -666,8 +666,9 @@ fn render_file_header<H: DiffListHost>(
         )
         .children(host.header_trailing(file_index, cx))
         .on_click(cx.listener(move |host, _, _, cx| host.header_clicked(file_index, cx)))
-        .context_menu(move |popup, window, cx| (menu)(popup, window, cx))
-        .into_any_element()
+        .context_menu(move |popup, window, cx| (menu)(popup, window, cx));
+    // A list item is laid out as its own root, so the header's offset is a margin inside it.
+    div().min_w_full().child(header).into_any_element()
 }
 
 fn render_gap<H: DiffListHost>(
