@@ -1593,16 +1593,29 @@ impl PullRequestView {
             .into()
     }
 
+    /// The Files tab's label, counted by the files read once it answers and by the snapshot
+    /// before that; a host that gives no count shows none rather than zero.
+    fn files_label(&self, cx: &App) -> String {
+        let read = self
+            .page()
+            .and_then(|page| page.files.data.as_ref())
+            .map(|files| files.changed_files);
+        let count = read.or_else(|| {
+            self.link(cx)
+                .and_then(|link| link.snapshot.as_ref().and_then(|s| s.changed_files))
+        });
+        count_label(
+            "pull_requests.detail.files",
+            "pull_requests.detail.files_count",
+            count,
+        )
+    }
+
     fn switch(&self, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.compact(cx);
         let tab = self.tab(cx);
         let page = self.page();
-        let files = page.and_then(|page| page.files.data.as_ref());
         let link = self.link(cx);
-        let file_count = files.map(|files| files.changed_files).or_else(|| {
-            link.as_ref()
-                .and_then(|link| link.snapshot.as_ref().map(|s| s.changed_files))
-        });
         let conversation_count =
             page.and_then(|page| page.conversation.data.as_ref())
                 .map(|conversation| {
@@ -1615,23 +1628,11 @@ impl PullRequestView {
                         })
                         .count()
                 });
-        let label = |plain: &str, counted: &str, count: Option<u64>| match count {
-            Some(count) => crate::tr!(counted, count = count.to_string()).into_owned(),
-            None => crate::tr!(plain).into_owned(),
-        };
         let segments = [
-            (
-                "files",
-                label(
-                    "pull_requests.detail.files",
-                    "pull_requests.detail.files_count",
-                    file_count,
-                ),
-                Tab::Files,
-            ),
+            ("files", self.files_label(cx), Tab::Files),
             (
                 "conversation",
-                label(
+                count_label(
                     "pull_requests.detail.conversation",
                     "pull_requests.detail.conversation_count",
                     conversation_count.map(|count| count as u64),
@@ -1986,6 +1987,13 @@ impl Render for PullRequestView {
     }
 }
 
+fn count_label(plain: &str, counted: &str, count: Option<u64>) -> String {
+    match count {
+        Some(count) => crate::tr!(counted, count = count.to_string()).into_owned(),
+        None => crate::tr!(plain).into_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2235,6 +2243,94 @@ mod tests {
             );
         });
         assert!(reads(&requests).is_empty());
+    }
+
+    /// A host that gives no count of changed files (Bitbucket, Azure DevOps) shows the Files tab
+    /// without a number until the files read answers with one, never "Files 0".
+    #[gpui::test]
+    fn a_snapshot_without_a_file_count_labels_the_files_tab_without_one(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let Mounted {
+            view,
+            requests,
+            incoming,
+            _pump,
+            cx,
+        } = mount(cx);
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            "/tmp/tcode-pr".into(),
+            None,
+        );
+        meta.id = "session".into();
+        meta.pull_requests = vec![ThreadPullRequestLink {
+            key: PullRequestKey::new("github.com", "octo/repo", 7),
+            url: "https://github.com/octo/repo/pull/7".into(),
+            source: PullRequestSource::Manual,
+            linked_at: None,
+            snapshot: Some(tcode_core::pull_request::PullRequestSnapshot {
+                state: PullRequestState::Open,
+                title: "Change".into(),
+                head_branch: "feature".into(),
+                base_branch: "main".into(),
+                is_draft: false,
+                updated_at: "2026-10-01T00:00:00Z".into(),
+                synced_at: 1,
+                closed_at: None,
+                merged_at: None,
+                author: None,
+                additions: None,
+                deletions: None,
+                changed_files: None,
+                review_decision: None,
+                checks_state: None,
+                mergeability: Mergeability::Unknown,
+            }),
+            stack: Default::default(),
+            sync_error: None,
+            watch: None,
+        }];
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(tcode_protocol::EventEnvelope {
+                    request_id: None,
+                    topic: tcode_protocol::Topic::Index,
+                    event: tcode_protocol::ServerEvent::IndexSnapshot(
+                        tcode_protocol::IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: vec![meta],
+                            projects: Vec::new(),
+                        },
+                    ),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        settle(cx);
+        let store = view.read_with(cx, |view, _| view.store.clone());
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        settle(cx);
+        let label =
+            |cx: &mut VisualTestContext| view.read_with(cx, |view, cx| view.files_label(cx));
+        assert_eq!(label(cx), "Files");
+
+        let later = now() + 3600;
+        let (id, _) = reads(&requests)
+            .into_iter()
+            .find(|(_, read)| *read == PullRequestRead::Files { cursor: None })
+            .expect("the first page of files is read");
+        answer(
+            &incoming,
+            id,
+            PullRequestReadResponse::Files(files(0..3, None)),
+            later,
+        );
+        settle(cx);
+        assert_eq!(
+            label(cx),
+            "Files 150",
+            "the files read's count once it answers"
+        );
     }
 
     #[gpui::test]
