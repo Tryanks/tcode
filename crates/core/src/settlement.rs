@@ -36,8 +36,7 @@ impl ThreadActivity {
         activity
     }
 
-    /// Whether the record moves a clock: the latest of these, and what follows
-    /// it, is all the fold needs from a log.
+    /// Whether the record can move a clock; the fold passes over every other.
     pub fn moves_clock(event: &AgentEvent) -> bool {
         matches!(
             event,
@@ -85,6 +84,20 @@ impl ThreadActivity {
             }
             _ => {}
         }
+    }
+
+    /// Every clock is set, so this fold of a log's last records holds the
+    /// latest record of each and no earlier record can change it. The clocks
+    /// are independent: a run's records can bury the message that began it.
+    pub fn complete(&self) -> bool {
+        [
+            self.last_message_at,
+            self.last_human_message_at,
+            self.last_run_started_at,
+            self.last_run_completed_at,
+        ]
+        .iter()
+        .all(Option::is_some)
     }
 
     pub fn last_activity_at(&self) -> Option<u64> {

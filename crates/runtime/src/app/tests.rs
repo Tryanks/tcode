@@ -10192,6 +10192,131 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     restarted.stopped.recv_blocking().unwrap();
 }
 
+/// A thread whose PR merged before the human resumed it stays open after a
+/// restart, however many records the resumed run wrote after the message.
+#[test]
+fn startup_activity_keeps_a_human_message_older_than_the_log_tail() {
+    use tcode_core::pull_request::{
+        Mergeability, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestState,
+        link_pull_request,
+    };
+    use tcode_core::settlement::ThreadActivity;
+    use tcode_services::store::Mutation;
+
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("startup-human-clock");
+    let hour = 3_600_000;
+    let created = now_millis() - 10 * hour;
+    let merged = created + 2 * hour;
+    let resumed = created + 4 * hour;
+    let completed = created + 5 * hour;
+    let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    meta.id = "resumed".into();
+    meta.created_at = created / 1000;
+    link_pull_request(
+        &mut meta.pull_requests,
+        PullRequestKey::new("github.com", "sample/project", 1),
+        "https://github.com/sample/project/pull/1".into(),
+        PullRequestSource::Agent,
+        created / 1000,
+        true,
+    );
+    let merged_at = chrono::DateTime::from_timestamp_millis(merged as i64)
+        .unwrap()
+        .to_rfc3339();
+    meta.pull_requests[0].snapshot = Some(PullRequestSnapshot {
+        state: PullRequestState::Merged,
+        title: "Sample change".into(),
+        head_branch: "sample-change".into(),
+        base_branch: "main".into(),
+        is_draft: false,
+        updated_at: merged_at.clone(),
+        synced_at: merged / 1000,
+        closed_at: Some(merged_at.clone()),
+        merged_at: Some(merged_at),
+        author: None,
+        additions: Some(1),
+        deletions: Some(1),
+        changed_files: Some(1),
+        review_decision: None,
+        checks_state: None,
+        mergeability: Mergeability::Unknown,
+    });
+    store.upsert_meta(&meta).unwrap();
+    let mut log = vec![
+        (
+            resumed,
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "resume".into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "One more change".into(),
+                    context_len: None,
+                    attachments: vec![],
+                },
+            }),
+        ),
+        (
+            resumed + 1,
+            AgentEvent::TurnStarted {
+                turn_id: "resumed-run".into(),
+            },
+        ),
+    ];
+    log.extend((0..300).map(|step| {
+        (
+            resumed + 2 + step,
+            persisted_assistant_event(&format!("step {step}")),
+        )
+    }));
+    log.push((
+        completed,
+        AgentEvent::TurnCompleted {
+            turn_id: "resumed-run".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+    ));
+    let mutations: Vec<_> = log
+        .iter()
+        .map(|(ts, event)| {
+            let origin = matches!(
+                event,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::UserMessage { .. },
+                    ..
+                })
+            )
+            .then_some(MessageOrigin::Human);
+            Mutation::append_authored_event("resumed", *ts, event, None, origin).unwrap()
+        })
+        .collect();
+    store.apply(&mutations).unwrap();
+
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        state.settings.auto_settle_after_days = None;
+        state.settings.auto_settle_on_merge = true;
+        assert!(state.resident("resumed").is_none());
+        state.start_settlement_sweeps(cx);
+    });
+    cx.run_until(|state| state.thread_activity.contains_key("resumed"));
+    state.read(|state| {
+        assert_eq!(
+            state.thread_activity["resumed"],
+            ThreadActivity {
+                last_message_at: Some(resumed),
+                last_human_message_at: Some(resumed),
+                last_run_started_at: Some(resumed + 1),
+                last_run_completed_at: Some(completed),
+                failed: false,
+                interrupted: false,
+            }
+        );
+        assert!(!state.find_meta("resumed").unwrap().is_settled());
+    });
+}
+
 #[test]
 fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_admission() {
     let cx = &mut TestAppContext::default();

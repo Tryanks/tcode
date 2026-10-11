@@ -7,7 +7,7 @@ impl AppState {
     }
 
     /// Evaluate every thread: project activity for threads that have none
-    /// from the tail of their logs, then settle the ones that are due. Repeats
+    /// from the end of their logs, then settle the ones that are due. Repeats
     /// one minute after it drains.
     pub(super) fn request_settlement_sweep(&mut self, cx: &mut HostCx) {
         if self.settlement_sweep_running {
@@ -45,9 +45,7 @@ impl AppState {
                         missing
                             .into_iter()
                             .map(|(id, has_parent, revision)| {
-                                let activity = read_activity_tail(&store, &id).map(|records| {
-                                    ThreadActivity::fold_stored(&records, has_parent)
-                                });
+                                let activity = read_activity(&store, &id, has_parent);
                                 (id, revision, activity)
                             })
                             .collect::<Vec<_>>()
@@ -170,23 +168,27 @@ impl AppState {
     }
 }
 
-/// The end of a log from its latest record that moves an activity clock:
-/// read backwards a page at a time until a page holds one. The clocks need
-/// no earlier record.
-fn read_activity_tail(store: &SessionStore, id: &str) -> std::io::Result<Vec<SessionEventRecord>> {
+/// The activity of a log, read backwards a page at a time until every clock
+/// is set or the log's start shows a clock has no record.
+fn read_activity(
+    store: &SessionStore,
+    id: &str,
+    has_parent: bool,
+) -> std::io::Result<ThreadActivity> {
     let mut low = store.next_row(id)?;
     let mut records = Vec::new();
-    while low > 0 {
+    loop {
+        let activity = ThreadActivity::fold_stored(&records, has_parent);
+        if low == 0 || activity.complete() {
+            return Ok(activity);
+        }
         let from = low.saturating_sub(history::TAIL_ROWS);
         let page = store.read_rows(id, from..low)?.records;
-        let found = page
-            .iter()
-            .any(|record| ThreadActivity::moves_clock(&record.event));
-        records.splice(0..0, page);
+        records.splice(
+            0..0,
+            page.into_iter()
+                .filter(|record| ThreadActivity::moves_clock(&record.event)),
+        );
         low = from;
-        if found {
-            break;
-        }
     }
-    Ok(records)
 }
