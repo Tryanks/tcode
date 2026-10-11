@@ -78,9 +78,16 @@ fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
     listed
 }
 
+/// Where Atlassian makes the API tokens a Basic credential takes, and where it explains the
+/// access tokens a Bearer credential is.
+const API_TOKENS_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
+const ACCESS_TOKENS_URL: &str = "https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/";
+
 fn source_slot(source: &CredentialSource) -> String {
     match source {
-        CredentialSource::Saved => crate::tr!("source_control.order_saved").into_owned(),
+        CredentialSource::Saved
+        | CredentialSource::SavedBasic { .. }
+        | CredentialSource::SavedBearer => crate::tr!("source_control.order_saved").into_owned(),
         CredentialSource::Env { name } => name.clone(),
         CredentialSource::Cli { tool } => {
             crate::tr!("source_control.order_cli", tool = tool).into_owned()
@@ -91,6 +98,12 @@ fn source_slot(source: &CredentialSource) -> String {
 fn status_line(status: Option<&HostStatus>) -> String {
     match status.and_then(|status| status.source.as_ref()) {
         Some(CredentialSource::Saved) => crate::tr!("source_control.using_saved").into_owned(),
+        Some(CredentialSource::SavedBasic { email }) => {
+            crate::tr!("source_control.using_saved_basic", email = email).into_owned()
+        }
+        Some(CredentialSource::SavedBearer) => {
+            crate::tr!("source_control.using_saved_bearer").into_owned()
+        }
         Some(CredentialSource::Env { name }) => {
             crate::tr!("source_control.using_env", name = name).into_owned()
         }
@@ -105,6 +118,10 @@ pub struct SourceControlPanel {
     store: Entity<WorkspaceStore>,
     window_state: Entity<crate::window_state::WindowState>,
     tokens: BTreeMap<String, Entity<InputState>>,
+    /// The account email beside the token, for hosts whose tokens may take one.
+    emails: BTreeMap<String, Entity<InputState>>,
+    /// Whether the token being typed is one sent with the email, for those hosts.
+    with_email: BTreeMap<String, bool>,
     visible: bool,
     _subscription: Subscription,
 }
@@ -124,6 +141,8 @@ impl SourceControlPanel {
             store,
             window_state,
             tokens: BTreeMap::new(),
+            emails: BTreeMap::new(),
+            with_email: BTreeMap::new(),
             visible: false,
             _subscription: subscription,
         }
@@ -138,11 +157,19 @@ impl SourceControlPanel {
     pub fn hide(&mut self) {
         self.visible = false;
         self.tokens.clear();
+        self.emails.clear();
+        self.with_email.clear();
     }
 
-    fn notice(&self, host: &str, problem: &HostProblem, cx: &App) -> AnyElement {
+    fn notice(&self, host: &str, kind: HostKind, problem: &HostProblem, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let text = match problem {
+            // A host without a CLI is connected by a saved token alone.
+            HostProblem::NoCredential { tools_missing }
+                if tools_missing.is_empty() && kind.takes_email() =>
+            {
+                crate::tr!("source_control.notice_no_credential_email")
+            }
             HostProblem::NotSignedIn { tool, .. } => {
                 crate::tr!(
                     "source_control.notice_not_signed_in",
@@ -336,7 +363,7 @@ impl SourceControlPanel {
                 }),
         );
         if let Some(problem) = status.as_ref().and_then(|status| status.problem.as_ref()) {
-            row = row.child(self.notice(host, problem, cx));
+            row = row.child(self.notice(host, kind, problem, cx));
         }
         let accounts = status
             .as_ref()
@@ -391,6 +418,11 @@ impl SourceControlPanel {
                     .child(crate::tr!("source_control.env_override").into_owned()),
             );
         }
+        if kind.takes_email() {
+            return row
+                .child(self.email_editor(host, status.as_ref(), window, cx))
+                .into_any_element();
+        }
         let token_set = status.as_ref().is_some_and(|status| status.token_set);
         let placeholder = if token_set {
             crate::tr!("source_control.token_placeholder_saved")
@@ -436,7 +468,7 @@ impl SourceControlPanel {
                     let value = input.read(cx).value().to_string();
                     if !value.trim().is_empty() {
                         store.update(cx, |store, _| {
-                            store.set_host_token(set_host.clone(), Some(value))
+                            store.set_host_token(set_host.clone(), Some(value), None)
                         });
                         input.update(cx, |input, cx| input.set_value("", window, cx));
                     }
@@ -453,7 +485,7 @@ impl SourceControlPanel {
                 .label(crate::tr!("source_control.clear").into_owned())
                 .on_click(move |_, _, cx| {
                     clear_store.update(cx, |store, _| {
-                        store.set_host_token(clear_host.clone(), None)
+                        store.set_host_token(clear_host.clone(), None, None)
                     })
                 }),
             );
@@ -481,6 +513,212 @@ impl SourceControlPanel {
             h_flex().w_full().gap_2().child(field).child(buttons)
         };
         row.child(editor).into_any_element()
+    }
+}
+
+impl SourceControlPanel {
+    /// The editor of a host whose token is either an API token sent with the account's email
+    /// or an access token sent alone: one is chosen, and saving it replaces the other.
+    fn email_editor(
+        &mut self,
+        host: &str,
+        status: Option<&HostStatus>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let compact = self.window_state.read(cx).compact;
+        let saved = status.and_then(|status| status.source.clone());
+        let saved_email = match &saved {
+            Some(CredentialSource::SavedBasic { email }) => Some(email.clone()),
+            _ => None,
+        };
+        let bearer_saved = saved == Some(CredentialSource::SavedBearer);
+        let with_email = *self
+            .with_email
+            .entry(host.to_owned())
+            .or_insert(!bearer_saved);
+        let token_saved = if with_email {
+            saved_email.is_some()
+        } else {
+            bearer_saved
+        };
+        let token = self
+            .tokens
+            .entry(host.to_owned())
+            .or_insert_with(|| cx.new(|cx| InputState::new(window, cx).masked(true)))
+            .clone();
+        token.update(cx, |input, cx| {
+            input.set_placeholder(
+                if token_saved {
+                    crate::tr!("source_control.token_placeholder_saved")
+                } else {
+                    crate::tr!("source_control.token_placeholder")
+                }
+                .into_owned(),
+                window,
+                cx,
+            )
+        });
+        let email = match self.emails.get(host) {
+            Some(email) => email.clone(),
+            None => {
+                let email = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(crate::tr!("source_control.bitbucket_email"))
+                });
+                if let Some(saved_email) = &saved_email {
+                    email.update(cx, |input, cx| input.set_value(saved_email, window, cx));
+                }
+                self.emails.insert(host.to_owned(), email.clone());
+                email
+            }
+        };
+        let panel = cx.entity().downgrade();
+        let method = |id: &str, label: SharedString, chosen: bool| {
+            let panel = panel.clone();
+            let host = host.to_owned();
+            crate::material::segment(
+                SharedString::from(format!("source-control-method-{id}-{host}")),
+                label,
+                with_email == chosen,
+                cx,
+            )
+            .on_change(move |_, _, _, cx| {
+                let _ = panel.update(cx, |panel, cx| {
+                    panel.with_email.insert(host.clone(), chosen);
+                    cx.notify();
+                });
+            })
+        };
+        let track = crate::material::segmented_track(
+            SharedString::from(format!("source-control-method-{host}")),
+            [
+                method(
+                    "api",
+                    crate::tr!("source_control.bitbucket_api_token")
+                        .into_owned()
+                        .into(),
+                    true,
+                ),
+                method(
+                    "access",
+                    crate::tr!("source_control.bitbucket_access_token")
+                        .into_owned()
+                        .into(),
+                    false,
+                ),
+            ],
+            cx,
+        );
+        let (description, link_label, link) = if with_email {
+            (
+                crate::tr!("source_control.bitbucket_api_desc"),
+                crate::tr!("source_control.bitbucket_api_link"),
+                API_TOKENS_URL,
+            )
+        } else {
+            (
+                crate::tr!("source_control.bitbucket_access_desc"),
+                crate::tr!("source_control.bitbucket_access_link"),
+                ACCESS_TOKENS_URL,
+            )
+        };
+        let description = v_flex()
+            .w_full()
+            .items_start()
+            .gap_1()
+            .text_size(px(12.))
+            .text_color(theme.muted_foreground)
+            .child(div().w_full().child(description.into_owned()))
+            .child(
+                Button::new(SharedString::from(format!(
+                    "source-control-method-link-{host}"
+                )))
+                .ghost()
+                .xsmall()
+                .icon(crate::icon::IconName::ExternalLink)
+                .label(link_label.into_owned())
+                .on_click(move |_, _, cx| cx.open_url(link)),
+            );
+        let replaces = match (with_email, &saved) {
+            (true, Some(CredentialSource::SavedBearer)) => {
+                Some(crate::tr!("source_control.bitbucket_replaces_access"))
+            }
+            (false, Some(CredentialSource::SavedBasic { .. })) => {
+                Some(crate::tr!("source_control.bitbucket_replaces_api"))
+            }
+            _ => None,
+        };
+        let store = self.store.clone();
+        let set_host = host.to_owned();
+        let (set_token, set_email) = (token.clone(), email.clone());
+        let set = Button::new(SharedString::from(format!(
+            "source-control-token-set-{host}"
+        )))
+        .ghost()
+        .outline()
+        .compact()
+        .when(compact, |button| button.min_h(px(44.)))
+        .label(crate::tr!("source_control.set").into_owned())
+        .on_click(move |_, window, cx| {
+            let token = set_token.read(cx).value().trim().to_owned();
+            let token = (!token.is_empty()).then_some(token);
+            let email = with_email
+                .then(|| set_email.read(cx).value().trim().to_owned())
+                .filter(|email| !email.is_empty());
+            // An API token needs its email, and either a new token or the one saved with
+            // an email; an access token needs a new token.
+            let ready = match (with_email, &email, &token) {
+                (true, None, _) => false,
+                (true, Some(_), token) => token.is_some() || token_saved,
+                (false, _, token) => token.is_some(),
+            };
+            if ready {
+                store.update(cx, |store, _| {
+                    store.set_host_token(set_host.clone(), token, email)
+                });
+                set_token.update(cx, |input, cx| input.set_value("", window, cx));
+            }
+        });
+        let clear_store = self.store.clone();
+        let clear_host = host.to_owned();
+        let clear = Button::new(SharedString::from(format!(
+            "source-control-token-clear-{host}"
+        )))
+        .ghost()
+        .compact()
+        .when(compact, |button| button.min_h(px(44.)))
+        .disabled(!status.is_some_and(|status| status.token_set))
+        .label(crate::tr!("source_control.clear").into_owned())
+        .on_click(move |_, _, cx| {
+            clear_store.update(cx, |store, _| {
+                store.set_host_token(clear_host.clone(), None, None)
+            })
+        });
+        let field = |input: &Entity<InputState>| div().w_full().child(Input::new(input).small());
+        v_flex()
+            .gap_2()
+            .child(track)
+            .child(description)
+            .when(with_email, |editor| editor.child(field(&email)))
+            .child(field(&token))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .children(replaces.map(|replaces| replaces.into_owned())),
+                    )
+                    .child(h_flex().gap_2().child(clear).child(set)),
+            )
+            .into_any_element()
     }
 }
 
@@ -684,6 +922,17 @@ impl AddHostDialog {
                     Some(crate::tr!("source_control.error_path", kind = name).into_owned());
                 return cx.notify();
             }
+            Err(HostRefusal::Fixed) => {
+                self.error = Some(
+                    crate::tr!(
+                        "source_control.error_fixed",
+                        kind = name,
+                        host = self.kind.public_host()
+                    )
+                    .into_owned(),
+                );
+                return cx.notify();
+            }
         };
         if self.listed.contains(&host) {
             self.error = Some(crate::tr!("source_control.error_exists", host = &host).into_owned());
@@ -707,7 +956,7 @@ impl AddHostDialog {
                 window,
                 cx,
             );
-            if typed.is_empty() || typed == previous.public_host() {
+            if typed.is_empty() || typed == previous.public_host() || kind.fixed_host().is_some() {
                 input.set_value(kind.public_host(), window, cx);
             }
         });
@@ -764,7 +1013,12 @@ impl Render for AddHostDialog {
             .child(label(
                 crate::tr!("source_control.host_label").into_owned().into(),
             ))
-            .child(Input::new(&self.input).small())
+            // A kind served from one host alone takes no other.
+            .child(
+                Input::new(&self.input)
+                    .small()
+                    .disabled(kind.fixed_host().is_some()),
+            )
             .child(
                 div()
                     .text_size(px(12.))

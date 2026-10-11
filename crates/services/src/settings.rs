@@ -22,8 +22,12 @@ fn token_secrets(kind: HostKind) -> &'static str {
         // One API and one token per server, whichever of the two it runs.
         HostKind::Forgejo | HostKind::Gitea => "@forgejo",
         HostKind::Gitlab => "@gitlab",
+        HostKind::Bitbucket => "@bitbucket",
     }
 }
+
+/// The account email saved beside a token of a kind that takes one, by host.
+const EMAIL_SECRETS: &str = "@bitbucket-email";
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
@@ -76,6 +80,7 @@ impl SettingsStore {
         for kind in HostKind::ALL {
             all.remove(token_secrets(kind));
         }
+        all.remove(EMAIL_SECRETS);
         all
     }
 
@@ -92,21 +97,57 @@ impl SettingsStore {
             .remove(host)
     }
 
+    /// The account email saved with the host's token, which the token authenticates with.
+    pub(crate) fn email(&self, kind: HostKind, host: &str) -> Option<String> {
+        kind.takes_email().then_some(())?;
+        self.read_secrets()
+            .ok()?
+            .remove(EMAIL_SECRETS)?
+            .remove(host)
+    }
+
     pub fn set_token(
         &self,
         kind: HostKind,
         host: &str,
         token: Option<&str>,
     ) -> std::io::Result<()> {
+        self.set_credential(kind, host, token, None)
+    }
+
+    /// Saves (`Some`) or clears (`None`) the host's token. With `email`, the token is one sent
+    /// with that email, and `None` keeps the token already saved; without, any saved email is
+    /// cleared, so one method never outlives the other.
+    pub fn set_credential(
+        &self,
+        kind: HostKind,
+        host: &str,
+        token: Option<&str>,
+        email: Option<&str>,
+    ) -> std::io::Result<()> {
         let host = kind
             .authority(host)
             .map_err(|refusal| std::io::Error::other(format!("{refusal:?}")))?;
+        let email = email.map(str::trim).filter(|email| !email.is_empty());
+        if email.is_some() && !kind.takes_email() {
+            return Err(std::io::Error::other("this host takes no email"));
+        }
         let mut all = self.read_secrets()?;
+        // Only a token already sent with an email may keep going with another.
+        let email_saved = all
+            .get(EMAIL_SECRETS)
+            .is_some_and(|emails| emails.contains_key(&host));
         let secrets = token_secrets(kind);
         let tokens = all.entry(secrets.to_owned()).or_default();
         match token.map(str::trim).filter(|token| !token.is_empty()) {
             Some(token) => {
-                tokens.insert(host, token.to_owned());
+                tokens.insert(host.clone(), token.to_owned());
+            }
+            None if email.is_some() && email_saved && tokens.contains_key(&host) => {}
+            None if email.is_some() => {
+                return Err(std::io::Error::other(
+                    "no saved token to send with the email",
+                ));
             }
             None => {
                 tokens.remove(&host);
@@ -114,6 +155,18 @@ impl SettingsStore {
         }
         if tokens.is_empty() {
             all.remove(secrets);
+        }
+        let emails = all.entry(EMAIL_SECRETS.to_owned()).or_default();
+        match email {
+            Some(email) => {
+                emails.insert(host, email.to_owned());
+            }
+            None => {
+                emails.remove(&host);
+            }
+        }
+        if emails.is_empty() {
+            all.remove(EMAIL_SECRETS);
         }
         self.write_secrets(&all)
     }

@@ -1052,6 +1052,7 @@ mod tests {
             Command::SetHostToken {
                 host: "github.com".into(),
                 token: Some("fixture-private-token".into()),
+                email: None,
             },
             Command::SetProfileSecret {
                 profile_id: "claude".into(),
@@ -1099,7 +1100,8 @@ mod tests {
         assert!(
             link.dispatch(Command::SetHostToken {
                 host: "github.com".into(),
-                token: Some("fixture-private-token".into())
+                token: Some("fixture-private-token".into()),
+                email: None,
             })
             .is_err()
         );

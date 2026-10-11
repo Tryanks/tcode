@@ -30,6 +30,7 @@ impl AppState {
         &mut self,
         host: String,
         token: Option<String>,
+        email: Option<String>,
         cx: &mut HostCx,
     ) -> HostTask<Result<CommandResponse, ProtocolError>> {
         let host = host.trim().to_ascii_lowercase();
@@ -40,6 +41,7 @@ impl AppState {
                 kind,
                 host: host.clone(),
                 token,
+                email,
                 completion,
             },
             cx,

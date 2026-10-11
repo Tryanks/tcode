@@ -849,8 +849,10 @@ impl WorkspaceStore {
     pub fn refresh_host_credentials(&mut self) {
         self.dispatch(Command::RefreshHostCredentials);
     }
-    pub fn set_host_token(&mut self, host: String, token: Option<String>) {
-        self.dispatch(Command::SetHostToken { host, token });
+    /// Saves (`Some`) or clears (`None`) the host's token; `email` names the account a host
+    /// that takes one authenticates it with.
+    pub fn set_host_token(&mut self, host: String, token: Option<String>, email: Option<String>) {
+        self.dispatch(Command::SetHostToken { host, token, email });
     }
     pub fn patch_source_control_host(
         &mut self,
@@ -871,6 +873,7 @@ impl WorkspaceStore {
         self.dispatch(Command::SetHostToken {
             host: host.clone(),
             token: None,
+            email: None,
         });
         self.patch_settings(SettingsPatch::RemoveSourceControlHost { host });
     }

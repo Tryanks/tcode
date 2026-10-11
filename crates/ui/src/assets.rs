@@ -103,6 +103,11 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/gitlab.svg",
         include_bytes!("../../../assets/icons/gitlab.svg"),
     ),
+    // Bitbucket's mark, drawn in one colour (Simple Icons, CC0).
+    (
+        "icons/bitbucket.svg",
+        include_bytes!("../../../assets/icons/bitbucket.svg"),
+    ),
     (
         "icons/ruler.svg",
         include_bytes!("../../../assets/icons/ruler.svg"),

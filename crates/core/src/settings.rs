@@ -78,6 +78,12 @@ pub struct LegacyGitHubHost {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CredentialSource {
     Saved,
+    /// A saved token sent with the account's email, as the host's API tokens are.
+    SavedBasic {
+        email: String,
+    },
+    /// A saved token sent alone, as the host's access tokens are.
+    SavedBearer,
     /// The environment variable's name.
     Env {
         name: String,

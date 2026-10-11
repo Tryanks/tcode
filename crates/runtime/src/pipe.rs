@@ -522,8 +522,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             ));
         }
         Command::RefreshHostCredentials => app.refresh_host_credentials(cx),
-        Command::SetHostToken { host, token } => {
-            return CommandOutcome::Pending(app.set_host_token(host, token, cx));
+        Command::SetHostToken { host, token, email } => {
+            return CommandOutcome::Pending(app.set_host_token(host, token, email, cx));
         }
         Command::SetProfileSecret {
             profile_id,

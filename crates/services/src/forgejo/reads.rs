@@ -450,25 +450,6 @@ pub(super) fn reviewer_states(pr: &Value, reviews: &[Value]) -> Vec<PullRequestR
     states
 }
 
-/// Each changed path's blob at the head side, from the diff's `index` lines.
-pub(super) fn revisions(diff: &str) -> BTreeMap<String, String> {
-    let mut revisions = BTreeMap::new();
-    let mut path: Option<String> = None;
-    for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            path = rest.rsplit_once(" b/").map(|(_, path)| path.to_owned());
-        } else if let Some(renamed) = line.strip_prefix("rename to ") {
-            path = Some(renamed.to_owned());
-        } else if let (Some(range), Some(path)) = (line.strip_prefix("index "), &path) {
-            let range = range.split_whitespace().next().unwrap_or_default();
-            if let Some((_, head)) = range.split_once("..") {
-                revisions.insert(path.clone(), head.to_owned());
-            }
-        }
-    }
-    revisions
-}
-
 pub(super) fn files(diff: &str) -> Option<Vec<PullRequestFile>> {
     crate::github::pull_request_reads::diff_files(diff)
 }
