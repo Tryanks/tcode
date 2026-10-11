@@ -3,7 +3,12 @@
 //! it; what crosses is Tcode's own model. Each host of a kind is served by that kind's
 //! implementation. Call blocking entries via HostCx::unblock.
 
+mod http;
+mod verdicts;
+mod viewed;
+
 use crate::settings::SettingsStore;
+pub(crate) use http::{Step, answered, in_order, media, run_cli};
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
@@ -24,6 +29,8 @@ use tcode_protocol::{
     PullRequestRead, PullRequestReadResponse, PullRequestRejection as Rejection,
     PullRequestReviewVerdict, PullRequestStackHead,
 };
+pub(crate) use verdicts::Verdicts;
+pub(crate) use viewed::ViewedMarks;
 
 /// The hosts Tcode reads pull requests from, with credentials from `store` and the launch
 /// environment.
@@ -35,8 +42,11 @@ pub fn connect(
     let github = crate::github::GitHub::new(crate::github::GitHubApi::host(
         crate::github::Credentials::new(store.clone(), environment.clone()),
     ));
-    let forgejo = crate::forgejo::Forgejo::new(store, environment);
-    Hosts::new(github, forgejo)
+    // One file, so a host's marks never overwrite another's.
+    let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+    let forgejo = crate::forgejo::Forgejo::new(store.clone(), environment.clone(), viewed.clone());
+    let gitlab = crate::gitlab::GitLab::new(store, environment, viewed);
+    Hosts::new(github, forgejo, gitlab)
 }
 
 /// A pull request host. Each entry answers for the host the key names.
@@ -344,7 +354,9 @@ fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -
         PullRequestAction::ReadyForReview | PullRequestAction::ConvertToDraft => capabilities.draft,
         PullRequestAction::Reopen => capabilities.reopen,
         PullRequestAction::Revert => capabilities.revert,
-        PullRequestAction::UpdateBranch { .. } => capabilities.update_branch,
+        PullRequestAction::UpdateBranch { rebase, .. } => {
+            capabilities.update_branch && (*rebase || capabilities.update_merge)
+        }
         PullRequestAction::DisableAutoMerge | PullRequestAction::Merge { auto: true, .. } => {
             capabilities.auto_merge
         }
@@ -357,16 +369,27 @@ fn offered(capabilities: &PullRequestCapabilities, action: &PullRequestAction) -
 struct Hosts {
     github: Arc<dyn Forge>,
     forgejo: Arc<dyn Forge>,
+    gitlab: Arc<dyn Forge>,
     kinds: RwLock<BTreeMap<String, HostKind>>,
 }
 
 impl Hosts {
-    fn new(github: Arc<dyn Forge>, forgejo: Arc<dyn Forge>) -> Arc<Self> {
+    fn new(github: Arc<dyn Forge>, forgejo: Arc<dyn Forge>, gitlab: Arc<dyn Forge>) -> Arc<Self> {
         Arc::new(Self {
             github,
             forgejo,
+            gitlab,
             kinds: RwLock::default(),
         })
+    }
+
+    /// Every kind's implementation, the one a host falls back to first.
+    fn all(&self) -> [&dyn Forge; 3] {
+        [
+            self.github.as_ref(),
+            self.forgejo.as_ref(),
+            self.gitlab.as_ref(),
+        ]
     }
 
     fn kind(&self, host: &str) -> HostKind {
@@ -377,6 +400,7 @@ impl Hosts {
         match kind {
             HostKind::Github => self.github.as_ref(),
             HostKind::Forgejo | HostKind::Gitea => self.forgejo.as_ref(),
+            HostKind::Gitlab => self.gitlab.as_ref(),
         }
     }
 
@@ -410,12 +434,19 @@ impl Forge for Hosts {
             );
         }
         self.github.configure(hosts.clone());
-        self.forgejo.configure(hosts);
+        self.forgejo.configure(hosts.clone());
+        self.gitlab.configure(hosts);
     }
 
     fn credential_status(&self) -> BTreeMap<String, HostStatus> {
         let mut status = self.forgejo.credential_status();
-        // A host GitHub also lists, such as one a gh login names, stays the kind settings say.
+        // A host two kinds list, such as one a gh login and a glab login both name, stays the
+        // kind settings say.
+        for (host, gitlab) in self.gitlab.credential_status() {
+            if !status.contains_key(&host) || self.kind(&host) == HostKind::Gitlab {
+                status.insert(host, gitlab);
+            }
+        }
         for (host, github) in self.github.credential_status() {
             if self.kind(&host) == HostKind::Github {
                 status.insert(host, github);
@@ -433,23 +464,19 @@ impl Forge for Hosts {
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
-        [self.github.as_ref(), self.forgejo.as_ref()]
-            .into_iter()
-            .find_map(|forge| {
-                forge
-                    .pull_request_url(url)
-                    .filter(|(key, _)| self.serves(forge, &key.host))
-            })
+        self.all().into_iter().find_map(|forge| {
+            forge
+                .pull_request_url(url)
+                .filter(|(key, _)| self.serves(forge, &key.host))
+        })
     }
 
     fn checkout_repository(&self, cwd: &Path) -> Option<Repository> {
-        [self.github.as_ref(), self.forgejo.as_ref()]
-            .into_iter()
-            .find_map(|forge| {
-                forge
-                    .checkout_repository(cwd)
-                    .filter(|repository| self.serves(forge, &repository.host))
-            })
+        self.all().into_iter().find_map(|forge| {
+            forge
+                .checkout_repository(cwd)
+                .filter(|repository| self.serves(forge, &repository.host))
+        })
     }
 
     fn repository(&self, name: &str, host: &str) -> Option<Repository> {
@@ -571,7 +598,7 @@ impl Forge for Hosts {
         keys: &[PullRequestKey],
     ) -> Vec<Result<Option<Fingerprint>, ForgeError>> {
         let mut answers: Vec<_> = keys.iter().map(|_| Ok(None)).collect();
-        for forge in [self.github.as_ref(), self.forgejo.as_ref()] {
+        for forge in self.all() {
             let (indices, own): (Vec<_>, Vec<_>) = keys
                 .iter()
                 .enumerate()
@@ -605,6 +632,35 @@ impl Forge for Hosts {
 mod tests {
     use super::*;
 
+    /// A host that only rebases refuses a merge-style branch update before any request; a
+    /// rebase passes the gate and reaches the host, here one turned off in settings.
+    #[test]
+    fn a_merge_update_is_refused_where_the_host_only_rebases() {
+        let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let forge = connect(SettingsStore::new(root.clone()), []);
+        forge.configure(BTreeMap::from([(
+            "gitlab.acme.test".to_owned(),
+            HostSettings {
+                enabled: false,
+                ..HostSettings::new(HostKind::Gitlab)
+            },
+        )]));
+        let key = PullRequestKey::new("gitlab.acme.test", "team/app", 1);
+        let update = |rebase| {
+            forge.act(
+                &key,
+                &PullRequestAction::UpdateBranch {
+                    head: "abc".into(),
+                    rebase,
+                },
+            )
+        };
+        assert_eq!(update(false), Outcome::Rejected(Rejection::Unsupported));
+        assert_eq!(update(true), Outcome::Rejected(Rejection::HostDisabled));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A host is served by the kind settings give it; otherwise its name decides, and a host
     /// whose name says nothing is GitHub's, as every host was before hosts had kinds.
     #[test]
@@ -612,15 +668,43 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let forge = connect(SettingsStore::new(root.clone()), []);
-        forge.configure(BTreeMap::from([(
-            "gitea.acme.test".to_owned(),
-            HostSettings::new(HostKind::Github),
-        )]));
+        forge.configure(BTreeMap::from([
+            (
+                "gitea.acme.test".to_owned(),
+                HostSettings::new(HostKind::Github),
+            ),
+            (
+                "gitlab.acme.test".to_owned(),
+                HostSettings::new(HostKind::Forgejo),
+            ),
+            (
+                "code.acme.test:8443".to_owned(),
+                HostSettings::new(HostKind::Gitlab),
+            ),
+        ]));
         let name = |host: &str| forge.terms(&PullRequestKey::new(host, "a/b", 1)).name;
         assert_eq!(name("gitea.acme.test"), "GitHub");
         assert_eq!(name("codeberg.org"), "Forgejo");
         assert_eq!(name("gitea.com"), "Gitea");
         assert_eq!(name("git.example.com"), "GitHub");
+        assert_eq!(name("gitlab.com"), "GitLab");
+        assert_eq!(name("gitlab.example.com"), "GitLab");
+        assert_eq!(name("gitlab.acme.test"), "Forgejo");
+        assert_eq!(name("code.acme.test:8443"), "GitLab");
+        assert_eq!(
+            forge
+                .pull_request_url("https://code.acme.test:8443/team/apps/web/-/merge_requests/5")
+                .map(|(key, _)| key),
+            Some(PullRequestKey::new(
+                "code.acme.test:8443",
+                "team/apps/web",
+                5
+            ))
+        );
+        assert_eq!(
+            forge.pull_request_url("https://gitlab.acme.test/team/web/-/merge_requests/5"),
+            None
+        );
         assert_eq!(
             forge
                 .pull_request_url("https://codeberg.org/a/b/pulls/2")

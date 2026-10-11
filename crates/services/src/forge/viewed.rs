@@ -9,7 +9,7 @@ use tcode_protocol::PullRequestViewedState;
 /// Marks by account, then pull request, then path, each with the revision it was viewed at.
 type Marks = BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>;
 
-pub(super) struct ViewedMarks {
+pub(crate) struct ViewedMarks {
     path: PathBuf,
     marks: Mutex<Option<Marks>>,
 }
@@ -19,7 +19,7 @@ fn pull_request(key: &PullRequestKey) -> String {
 }
 
 impl ViewedMarks {
-    pub(super) fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path,
             marks: Mutex::new(None),
@@ -38,7 +38,7 @@ impl ViewedMarks {
     }
 
     /// Each current file's state, given the revision each path is at now.
-    pub(super) fn states(
+    pub(crate) fn states(
         &self,
         account: &str,
         key: &PullRequestKey,
@@ -62,7 +62,7 @@ impl ViewedMarks {
         })
     }
 
-    pub(super) fn set(
+    pub(crate) fn set(
         &self,
         account: &str,
         key: &PullRequestKey,

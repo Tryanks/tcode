@@ -679,6 +679,11 @@ impl AddHostDialog {
                     Some(crate::tr!("source_control.error_port_path", kind = name).into_owned());
                 return cx.notify();
             }
+            Err(HostRefusal::Path) => {
+                self.error =
+                    Some(crate::tr!("source_control.error_path", kind = name).into_owned());
+                return cx.notify();
+            }
         };
         if self.listed.contains(&host) {
             self.error = Some(crate::tr!("source_control.error_exists", host = &host).into_owned());

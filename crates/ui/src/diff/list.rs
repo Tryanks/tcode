@@ -17,8 +17,8 @@ use agent::FileChangeKind;
 use gpui::{
     Action, AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement, ListAlignment,
     ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Window, div, list,
-    prelude::FluentBuilder as _, px,
+    ScrollHandle, StatefulInteractiveElement as _, Styled as _, StyledText, Window, canvas, div,
+    list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -153,6 +153,8 @@ pub(crate) struct DiffList {
     pub(crate) unified_list: ListState,
     pub(crate) split_list: ListState,
     pub(crate) selection: Option<LineSelection>,
+    /// The viewport that scrolls the rows sideways; a file header spans it and stays in it.
+    horizontal: ScrollHandle,
 }
 
 impl DiffList {
@@ -171,6 +173,7 @@ impl DiffList {
             unified_content_width,
             split_content_width,
             selection: None,
+            horizontal: ScrollHandle::new(),
         }
     }
 
@@ -348,6 +351,8 @@ pub(crate) trait DiffListHost: Sized + 'static {
             .map(|file| file.path.clone())
             .unwrap_or_default();
         div()
+            .min_w_0()
+            .truncate()
             .text_size(px(13.))
             .line_height(px(18.))
             .font_medium()
@@ -431,6 +436,8 @@ pub(crate) fn render_list<H: DiffListHost>(
     } else {
         (diff.unified_list.clone(), diff.unified_content_width)
     };
+    let horizontal = diff.horizontal.clone();
+    let shown = (horizontal.bounds().size.width, horizontal.offset().x);
     let entity = cx.entity();
     let mut rows = list(list_state.clone(), move |index, _, cx| {
         entity.update(cx, |host, cx| render_item(host, index, split, wrap, cx))
@@ -455,12 +462,27 @@ pub(crate) fn render_list<H: DiffListHost>(
         .flex_1()
         .min_h_0()
         .overflow_x_scroll()
+        .track_scroll(&diff.horizontal)
         .lock_scroll_axis()
         .child(crate::scroll::page_viewport(
             "diff-body-bounce",
             crate::wheel_easing::Handle::List(list_state),
             rows,
         ))
+        // Draws again once the viewport's width or offset settles elsewhere than the headers
+        // were placed for.
+        .child(
+            canvas(
+                move |_, window, _| {
+                    if (horizontal.bounds().size.width, horizontal.offset().x) != shown {
+                        window.request_animation_frame();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
         .into_any_element()
 }
 
@@ -573,10 +595,24 @@ fn render_file_header<H: DiffListHost>(
         FileChangeKind::Rename => Some((crate::tr!("diff.renamed"), cx.theme().info_foreground)),
         FileChangeKind::Modify => None,
     };
+    let (viewport_width, scrolled) = host.diff_list().map_or((px(0.), px(0.)), |list| {
+        (
+            list.horizontal.bounds().size.width,
+            -list.horizontal.offset().x,
+        )
+    });
     let menu = host.file_menu(file_index, cx);
-    h_flex()
+    let header = h_flex()
         .id(("diff-file-header", file_index))
-        .min_w_full()
+        // A header spans what the list shows and moves with it, not with its lines, so the path,
+        // the counts and the menu stay in view however far a long line reaches.
+        .map(|header| {
+            if viewport_width > px(0.) {
+                header.w(viewport_width).ml(scrolled)
+            } else {
+                header.min_w_full()
+            }
+        })
         .h(px(34.))
         .px_3()
         .gap_2()
@@ -603,6 +639,7 @@ fn render_file_header<H: DiffListHost>(
         .when_some(kind_label, |this, (label, foreground)| {
             this.child(
                 div()
+                    .flex_none()
                     .text_size(px(11.))
                     .line_height(px(18.))
                     .text_color(foreground)
@@ -629,8 +666,9 @@ fn render_file_header<H: DiffListHost>(
         )
         .children(host.header_trailing(file_index, cx))
         .on_click(cx.listener(move |host, _, _, cx| host.header_clicked(file_index, cx)))
-        .context_menu(move |popup, window, cx| (menu)(popup, window, cx))
-        .into_any_element()
+        .context_menu(move |popup, window, cx| (menu)(popup, window, cx));
+    // A list item is laid out as its own root, so the header's offset is a margin inside it.
+    div().min_w_full().child(header).into_any_element()
 }
 
 fn render_gap<H: DiffListHost>(

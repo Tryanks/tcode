@@ -256,8 +256,13 @@ impl Offer {
                 .stack
                 .as_ref()
                 .is_none_or(|stack| stack.operation_here().is_none());
-        let write = |menu: PopupMenu, label: &str, kind: Lifecycle| {
-            menu.menu_with_enable(crate::tr!(label).into_owned(), self.item(kind), free)
+        let write = |menu: PopupMenu, label: &str, icon: IconName, kind: Lifecycle| {
+            menu.menu_with_icon_and_enable(
+                crate::tr!(label).into_owned(),
+                icon,
+                self.item(kind),
+                free,
+            )
         };
         let mut menu = menu.separator();
         if let (PullRequestStackRoute::Layer { .. }, Some(stack)) = (self.route, &self.stack) {
@@ -265,9 +270,19 @@ impl Offer {
         }
         if open && may(|action| action.can_update && action.capabilities.draft) {
             if !self.draft {
-                menu = write(menu, "pull_requests.actions.draft", Lifecycle::Draft);
+                menu = write(
+                    menu,
+                    "pull_requests.actions.draft",
+                    IconName::GitPullRequestDraft,
+                    Lifecycle::Draft,
+                );
             } else if primary != Some(Primary::Ready) {
-                menu = write(menu, "pull_requests.actions.ready", Lifecycle::Ready);
+                menu = write(
+                    menu,
+                    "pull_requests.actions.ready",
+                    IconName::GitPullRequest,
+                    Lifecycle::Ready,
+                );
             }
         }
         if open
@@ -278,14 +293,18 @@ impl Offer {
             && action.can_update_branch
             && action.capabilities.update_branch
         {
-            menu = write(
-                menu,
-                "pull_requests.actions.update_branch",
-                Lifecycle::UpdateBranch,
-            );
+            if merges_base(Some(action)) {
+                menu = write(
+                    menu,
+                    "pull_requests.actions.update_branch",
+                    IconName::ArrowUpDown,
+                    Lifecycle::UpdateBranch,
+                );
+            }
             menu = write(
                 menu,
                 "pull_requests.actions.update_rebase_menu",
+                IconName::ArrowUpDown,
                 Lifecycle::UpdateRebase,
             );
         }
@@ -300,8 +319,9 @@ impl Offer {
                         let blocked = action.is_some_and(|action| {
                             action.merge_state == PullRequestMergeState::Blocked
                         });
-                        menu = menu.menu_with_enable(
+                        menu = menu.menu_with_icon_and_enable(
                             crate::tr!("pull_requests.actions.merge_now").into_owned(),
+                            IconName::GitMerge,
                             self.item(Lifecycle::Merge),
                             !self.busy && !blocked,
                         );
@@ -315,6 +335,7 @@ impl Offer {
                             menu = write(
                                 menu,
                                 "pull_requests.actions.disable_auto_merge",
+                                IconName::GitMerge,
                                 Lifecycle::DisableAutoMerge,
                             );
                         } else if action.auto_merge_allowed
@@ -325,6 +346,7 @@ impl Offer {
                             menu = write(
                                 menu,
                                 "pull_requests.actions.enable_auto_merge_menu",
+                                IconName::GitMerge,
                                 Lifecycle::EnableAutoMerge,
                             );
                         }
@@ -348,8 +370,9 @@ impl Offer {
                 PullRequestStackRoute::Layer { .. } => {}
                 PullRequestStackRoute::Unknown => {
                     menu = menu
-                        .menu_with_enable(
+                        .menu_with_icon_and_enable(
                             crate::tr!("pull_requests.actions.merge_now").into_owned(),
+                            IconName::GitMerge,
                             self.item(Lifecycle::Merge),
                             false,
                         )
@@ -362,18 +385,31 @@ impl Offer {
         }
         menu = menu.separator();
         match self.state {
-            PullRequestState::Open if may(|action| action.can_update) => {
-                write(menu, "pull_requests.actions.close_menu", Lifecycle::Close)
-            }
+            PullRequestState::Open if may(|action| action.can_update) => write(
+                menu,
+                "pull_requests.actions.close_menu",
+                IconName::GitPullRequestClosed,
+                Lifecycle::Close,
+            ),
             PullRequestState::Closed
                 if may(|action| action.can_update && action.capabilities.reopen) =>
             {
-                write(menu, "pull_requests.actions.reopen", Lifecycle::Reopen)
+                write(
+                    menu,
+                    "pull_requests.actions.reopen",
+                    IconName::RotateCcw,
+                    Lifecycle::Reopen,
+                )
             }
             PullRequestState::Merged
                 if may(|action| action.can_merge && action.capabilities.revert) =>
             {
-                write(menu, "pull_requests.actions.revert_menu", Lifecycle::Revert)
+                write(
+                    menu,
+                    "pull_requests.actions.revert_menu",
+                    IconName::Undo2,
+                    Lifecycle::Revert,
+                )
             }
             _ => menu,
         }
@@ -389,22 +425,26 @@ impl Offer {
         let items = [
             (
                 super::stack::merge_count_label(stack),
+                IconName::GitMerge,
                 stack.merge(action),
                 Lifecycle::MergeStack,
             ),
             (
                 super::stack::rebase_menu_label(),
+                IconName::RefreshCw,
                 stack.rebase(action),
                 Lifecycle::RebaseStack,
             ),
         ];
-        for (label, avail, kind) in items {
+        for (label, icon, avail, kind) in items {
             match avail {
                 Avail::Hidden => {}
-                Avail::Enabled => menu = menu.menu_with_enable(label, self.item(kind), !self.busy),
+                Avail::Enabled => {
+                    menu = menu.menu_with_icon_and_enable(label, icon, self.item(kind), !self.busy)
+                }
                 Avail::Disabled(reason) => {
                     menu = menu
-                        .menu_with_enable(label, self.item(kind), false)
+                        .menu_with_icon_and_enable(label, icon, self.item(kind), false)
                         .label(reason)
                 }
             }
@@ -969,6 +1009,18 @@ impl Target {
                 };
                 open_on_host(Notification::warning(message).title(title))
             }
+            // A host that rebases in the background has only started it.
+            PullRequestActionResult::RebaseStarted if updating => Notification::success(
+                crate::tr!(
+                    "pull_requests.result.rebase_started_body",
+                    host_name = self.host_name.clone()
+                )
+                .into_owned(),
+            )
+            .title(crate::tr!(
+                "pull_requests.result.rebase_started",
+                head = head
+            )),
             // A stack write's answers are the stack's own words.
             PullRequestActionResult::Partial { .. }
             | PullRequestActionResult::Pending { .. }
@@ -984,6 +1036,7 @@ impl Target {
                 | PullRequestActionResult::Queued { .. }
                 | PullRequestActionResult::AutoMergeEnabled { .. }
                 | PullRequestActionResult::Opened { .. }
+                | PullRequestActionResult::RebaseStarted
         );
         Some(note.autohide(settled))
     }
@@ -1655,6 +1708,22 @@ pub(super) fn primary_element(
                 .to_vec();
             super::stack::operation_chip(Some(target.clone()), operation, &links, compact, cx)
         }
+        // A host that only rebases offers its rebase, which asks first.
+        Primary::UpdateBranch if !merges_base(target.offer.action.as_ref()) => button(
+            IconName::ArrowUpDown,
+            crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
+        )
+        .tooltip(
+            crate::tr!(
+                "pull_requests.actions.rebase_tooltip",
+                base = target.base_branch.clone(),
+                head = target.head_branch.clone(),
+                host_name = target.host_name.clone()
+            )
+            .into_owned(),
+        )
+        .on_click(run(Lifecycle::UpdateRebase))
+        .into_any_element(),
         Primary::UpdateBranch => button(
             IconName::ArrowUpDown,
             crate::tr!("pull_requests.actions.update_branch").into_owned(),
@@ -1687,4 +1756,10 @@ pub(super) fn primary_element(
         .on_click(run(Lifecycle::Merge))
         .into_any_element(),
     }
+}
+
+/// Whether the host brings the base in by a merge commit as well as by a rebase; an unread
+/// state is taken as yes, as before hosts said.
+pub(super) fn merges_base(action: Option<&PullRequestActionState>) -> bool {
+    action.is_none_or(|action| action.capabilities.update_merge)
 }

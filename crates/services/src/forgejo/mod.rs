@@ -6,11 +6,11 @@ mod actions;
 mod api;
 mod reads;
 mod repository;
-mod viewed;
 
 use crate::{
     forge::{
-        Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
+        Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
+        Tails, Verdicts, ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -55,26 +55,27 @@ type Branches = HashMap<(String, String), (Instant, Option<Discovered>)>;
 
 pub struct Forgejo {
     api: Arc<Api>,
-    viewed: viewed::ViewedMarks,
+    viewed: Arc<ViewedMarks>,
     /// The servers known by settings, a CLI login or the environment, with their kind.
     known: RwLock<BTreeMap<String, HostKind>>,
     reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
     branches: Mutex<Branches>,
-    verdicts: reads::Verdicts,
+    verdicts: Verdicts,
 }
 
 impl Forgejo {
-    pub fn new(
+    pub(crate) fn new(
         store: SettingsStore,
         environment: impl IntoIterator<Item = (String, String)>,
+        viewed: Arc<ViewedMarks>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            viewed: viewed::ViewedMarks::new(store.data_file("viewed-marks.json")),
+            viewed,
             api: Api::new(store, environment),
             known: RwLock::default(),
             reads: Mutex::default(),
             branches: Mutex::default(),
-            verdicts: reads::Verdicts::default(),
+            verdicts: Verdicts::default(),
         })
     }
 
@@ -115,6 +116,20 @@ impl Forgejo {
         reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
         reads.insert(slot, (Instant::now(), response.clone()));
         Ok((response, SystemTime::now() + ttl))
+    }
+
+    /// `mergeable` as a watch may act on it: a false is a conflict once it holds at one head.
+    fn mergeability(
+        &self,
+        key: &PullRequestKey,
+        pr: &Value,
+    ) -> tcode_core::pull_request::Mergeability {
+        self.verdicts.read(
+            key,
+            pr["head"]["sha"].as_str(),
+            reads::mergeability(pr),
+            Instant::now(),
+        )
     }
 
     fn account_of(&self, viewer: Option<&str>, key: &PullRequestKey) -> String {
@@ -531,7 +546,7 @@ impl Forgejo {
         let merge_state = if pr["draft"].as_bool() == Some(true) {
             PullRequestMergeState::Draft
         } else {
-            match self.verdicts.read(key, &pr, Instant::now()) {
+            match self.mergeability(key, &pr) {
                 tcode_core::pull_request::Mergeability::Conflicting => PullRequestMergeState::Dirty,
                 tcode_core::pull_request::Mergeability::Unknown => PullRequestMergeState::Unknown,
                 tcode_core::pull_request::Mergeability::Clean
@@ -834,13 +849,10 @@ impl Forge for Forgejo {
         let head = text(&pr["head"], "sha").unwrap_or_default();
         let checks = reads::checks_state(&pull.checks(&head)?);
         Ok(Summary {
-            snapshot: reads::snapshot(
-                &pr,
-                checks,
-                self.verdicts.read(key, &pr, Instant::now()),
-                Self::now(),
-            )
-            .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Forgejo pull request unreadable"))?,
+            snapshot: reads::snapshot(&pr, checks, self.mergeability(key, &pr), Self::now())
+                .ok_or_else(|| {
+                    error(ForgeErrorKind::Uncertain, "Forgejo pull request unreadable")
+                })?,
             stack_number: None,
         })
     }
@@ -1047,7 +1059,7 @@ impl Forge for Forgejo {
             head_sha: head,
             base_branch: text(&pr["base"], "ref").unwrap_or_default(),
             checks,
-            mergeability: self.verdicts.read(key, &pr, Instant::now()),
+            mergeability: self.mergeability(key, &pr),
             viewer: pull.viewer()?,
             author: text(&pr["user"], "login"),
         })

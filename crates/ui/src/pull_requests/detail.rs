@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ListAlignment, ListState, ParentElement as _, Render, SharedString,
+    ListAlignment, ListState, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -25,6 +25,7 @@ use crate::{
     icon::{Icon, IconName},
     material,
     overlay::{Notification, OverlayExt as _},
+    scroll::ScrollableElement as _,
     sizing::Sizable as _,
     store::{TopicKind, WorkspaceStore, observe_store_topics},
     theme::ActiveTheme as _,
@@ -172,6 +173,8 @@ pub struct PullRequestView {
     pub(super) show_invisibles: bool,
     pub(super) file_column: bool,
     pub(super) file_filter: Option<(Entity<crate::widgets::input::InputState>, Subscription)>,
+    /// The phone header's chip row, which scrolls sideways.
+    chips_scroll: ScrollHandle,
     wake: Option<(u64, Task<()>)>,
     _subscriptions: [Subscription; 2],
 }
@@ -238,6 +241,7 @@ impl PullRequestView {
             show_invisibles: false,
             file_column: true,
             file_filter: None,
+            chips_scroll: ScrollHandle::new(),
             wake: None,
             _subscriptions: subscriptions,
         }
@@ -1027,10 +1031,55 @@ impl PullRequestView {
             .child(line_two)
             .when(has_chip, |header| {
                 header.child(if compact {
+                    let handle = self.chips_scroll.clone();
+                    let surface = material::content_surface(cx);
                     div()
-                        .id("pr-detail-chips")
-                        .overflow_x_scroll()
-                        .child(chips)
+                        .relative()
+                        .w_full()
+                        .child(
+                            h_flex()
+                                .id("pr-detail-chips")
+                                .w_full()
+                                .overflow_x_scroll_area()
+                                .track_scroll(&self.chips_scroll)
+                                .child(chips.flex_none()),
+                        )
+                        // gpui-base has no scroll-edge cue: an edge with more chips past it fades.
+                        .child(
+                            gpui::canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, _| {
+                                    let (offset, max) = (handle.offset().x, handle.max_offset().x);
+                                    let clear = surface.opacity(0.);
+                                    let fade = px(24.).min(bounds.size.width / 2.);
+                                    let edges = [
+                                        (offset < px(0.), bounds.origin, 270.),
+                                        (
+                                            -offset < max,
+                                            gpui::point(bounds.right() - fade, bounds.top()),
+                                            90.,
+                                        ),
+                                    ];
+                                    for (shown, origin, angle) in edges {
+                                        if shown {
+                                            window.paint_quad(gpui::fill(
+                                                gpui::Bounds::new(
+                                                    origin,
+                                                    gpui::size(fade, bounds.size.height),
+                                                ),
+                                                gpui::linear_gradient(
+                                                    angle,
+                                                    gpui::linear_color_stop(surface, 1.),
+                                                    gpui::linear_color_stop(clear, 0.),
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
                         .into_any_element()
                 } else {
                     chips.flex_wrap().into_any_element()
@@ -1075,8 +1124,13 @@ impl PullRequestView {
             )
             .into_owned()
         };
+        let merges = super::lifecycle::merges_base(Some(state));
         let tooltip = crate::tr!(
-            "pull_requests.actions.update_tooltip",
+            if merges {
+                "pull_requests.actions.update_tooltip"
+            } else {
+                "pull_requests.actions.rebase_tooltip"
+            },
             base = base,
             head = snapshot.head_branch.clone(),
             host_name = self.host_name(cx)
@@ -1101,17 +1155,21 @@ impl PullRequestView {
                             kind,
                         })
                     };
-                    menu.label(tooltip.clone())
-                        .menu_with_enable(
+                    let menu = menu.label(tooltip.clone());
+                    let menu = if merges {
+                        menu.menu_with_enable(
                             crate::tr!("pull_requests.actions.update_branch").into_owned(),
                             item(super::lifecycle::Lifecycle::UpdateBranch),
                             !busy,
                         )
-                        .menu_with_enable(
-                            crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
-                            item(super::lifecycle::Lifecycle::UpdateRebase),
-                            !busy,
-                        )
+                    } else {
+                        menu
+                    };
+                    menu.menu_with_enable(
+                        crate::tr!("pull_requests.actions.update_rebase_menu").into_owned(),
+                        item(super::lifecycle::Lifecycle::UpdateRebase),
+                        !busy,
+                    )
                 })
                 .into_any_element(),
             // News, not an offer, for an account that may not update the branch.
@@ -1509,14 +1567,16 @@ impl PullRequestView {
                         .dropdown_menu(move |menu_state, window, cx| {
                             let menu_state = (menu)(menu_state, window, cx);
                             if edit_title {
-                                menu_state.separator().menu(
+                                menu_state.separator().menu_with_icon(
                                     crate::tr!("pull_requests.compose.edit_title").into_owned(),
+                                    IconName::Pencil,
                                     Box::new(EditTitle),
                                 )
                             } else {
                                 menu_state
                             }
-                        }),
+                        })
+                        .touch(true),
                     )
                     .into_any_element(),
             );
@@ -1596,7 +1656,8 @@ impl PullRequestView {
         let stats = (tab == Tab::Files)
             .then(|| link.as_ref().and_then(|link| link.snapshot.clone()))
             .flatten()
-            .map(|snapshot| {
+            .and_then(|snapshot| snapshot.additions.zip(snapshot.deletions))
+            .map(|(additions, deletions)| {
                 h_flex()
                     .flex_none()
                     .gap_1()
@@ -1605,12 +1666,12 @@ impl PullRequestView {
                     .child(
                         div()
                             .text_color(cx.theme().success)
-                            .child(format!("+{}", snapshot.additions)),
+                            .child(format!("+{additions}")),
                     )
                     .child(
                         div()
                             .text_color(cx.theme().danger)
-                            .child(format!("−{}", snapshot.deletions)),
+                            .child(format!("−{deletions}")),
                     )
             });
         h_flex()

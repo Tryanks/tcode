@@ -548,22 +548,25 @@ fn row_menu(
     let source_is_stack = link.is_some_and(|link| link.source == PullRequestSource::Stack);
     std::rc::Rc::new(
         move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
-            menu.menu(
+            menu.menu_with_icon(
                 crate::tr!("pull_requests.open_on_host", host_name = &host_name).into_owned(),
+                IconName::ExternalLink,
                 Box::new(OpenUrl(url.clone())),
             )
-            .menu(
+            .menu_with_icon(
                 crate::tr!("pull_requests.copy_link").into_owned(),
+                IconName::Copy,
                 Box::new(CopyText(url.clone())),
             )
             .when(watched || can_watch, |menu| {
-                menu.menu(
-                    crate::tr!(if watched {
-                        "pull_requests.stop_watching"
-                    } else {
-                        "pull_requests.watch"
-                    })
-                    .into_owned(),
+                let (label, icon) = if watched {
+                    ("pull_requests.stop_watching", IconName::EyeOff)
+                } else {
+                    ("pull_requests.watch", IconName::Eye)
+                };
+                menu.menu_with_icon(
+                    crate::tr!(label).into_owned(),
+                    icon,
                     Box::new(ChangeWatch {
                         key: key.clone(),
                         watching: !watched,
@@ -572,7 +575,7 @@ fn row_menu(
             })
             .when_some(offer(cx), |menu, offer| offer.menu(menu))
             .separator()
-            .menu(
+            .menu_with_icon(
                 crate::tr!(if action.linking {
                     "pull_requests.relink"
                 } else if source_is_stack {
@@ -581,6 +584,11 @@ fn row_menu(
                     "pull_requests.unlink"
                 })
                 .into_owned(),
+                if action.linking {
+                    IconName::Link
+                } else {
+                    IconName::Unlink
+                },
                 Box::new(action.clone()),
             )
         },
@@ -766,88 +774,137 @@ impl PullRequestsPanel {
             .into_owned()
         });
         let dot = || div().flex_none().child("·");
+        // The layer and the diff stat never give way; the parts before them do.
+        let tail_layer = |line: gpui::Div, layer: Option<String>| {
+            line.when_some(layer, |line, layer| {
+                line.child(dot()).child(div().flex_none().child(layer))
+            })
+        };
         let mut detail = vec![source.clone()];
         let line_two = if let Some(snapshot) = snapshot {
             let author = snapshot.author.as_ref().map(|author| author.login.clone());
             let branches = format!("{} → {}", snapshot.head_branch, snapshot.base_branch);
-            let stat = (
-                format!("+{}", snapshot.additions),
-                format!("−{}", snapshot.deletions),
-            );
+            // A host that counts no lines shows no stat rather than zeros.
+            let stat = snapshot
+                .additions
+                .zip(snapshot.deletions)
+                .map(|(additions, deletions)| (format!("+{additions}"), format!("−{deletions}")));
             detail.extend(author.clone());
             detail.push(branches.clone());
+            detail.retain(|part| !part.is_empty());
+            let lead = detail.join(" · ");
             detail.extend(layer.clone());
-            detail.push(format!("{} {}", stat.0, stat.1));
+            detail.extend(stat.as_ref().map(|stat| format!("{} {}", stat.0, stat.1)));
             detail.retain(|part| !part.is_empty());
             if compact {
-                // The phone sheet has no room for parts that give way, so the line truncates whole.
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .child(detail.join(" · "))
-                    .into_any_element()
+                let line = h_flex().gap_1().items_center().min_w_0().overflow_hidden();
+                tail_layer(
+                    line.child(div().min_w_0().truncate().child(lead)),
+                    layer.clone(),
+                )
+                .when_some(stat.as_ref(), |line, (additions, deletions)| {
+                    line.child(dot())
+                        .child(div().flex_none().child(format!("{additions} {deletions}")))
+                })
+                .into_any_element()
             } else {
-                // The author gives way first, so the source and the branches stay readable.
+                // Spacing is each part's leading margin, so a part that gives way takes its
+                // separator and its spacing with it.
+                let sep = || div().flex_none().ml_1().child("·");
+                let mono = cx.theme().mono_font_family.clone();
                 h_flex()
-                    .gap_1()
                     .items_center()
                     .min_w_0()
                     .overflow_hidden()
                     .child(div().flex_none().child(source.clone()))
+                    // The author gives way first, whole: a line too narrow for it wraps it onto
+                    // a second line this one-line box clips. The box sets its own line height
+                    // and is exactly one such line tall (16 for line 2's 11px text); stretching
+                    // it to the row would not do, as a stretched box takes its wrapped content's
+                    // two lines. gpui has no setter for a shrink value, hence the reach into the
+                    // style.
                     .when_some(author, |line, author| {
-                        line.child(dot())
-                            .child(div().min_w_0().truncate().child(author))
+                        line.child(
+                            h_flex()
+                                .flex_wrap()
+                                .h(px(16.))
+                                .line_height(px(16.))
+                                .min_w_0()
+                                .overflow_hidden()
+                                .map(|mut group| {
+                                    group.style().flex_shrink = Some(1000.);
+                                    group
+                                })
+                                // An empty first item, so the author wraps rather than overflows.
+                                .child(div().h_full())
+                                .child(
+                                    h_flex()
+                                        .flex_none()
+                                        .child(sep())
+                                        .child(div().ml_1().child(author)),
+                                ),
+                        )
                     })
-                    .child(dot())
+                    .child(sep())
                     // gpui-base has no middle truncation; the row tooltip holds the full pair.
                     .child(
                         div()
-                            .flex_shrink_0()
+                            .ml_1()
+                            .min_w_0()
                             .max_w(gpui::relative(0.5))
                             .truncate()
-                            .font_family(cx.theme().mono_font_family.clone())
+                            .font_family(mono.clone())
                             .child(branches),
                     )
                     .when_some(layer.clone(), |line, layer| {
-                        line.child(dot()).child(div().flex_none().child(layer))
+                        line.child(sep())
+                            .child(div().flex_none().ml_1().child(layer))
                     })
-                    .child(dot())
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_color(cx.theme().success)
-                            .child(stat.0),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_color(cx.theme().danger)
-                            .child(stat.1),
-                    )
+                    .when_some(stat, |line, (additions, deletions)| {
+                        line.child(sep())
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml_1()
+                                    .font_family(mono.clone())
+                                    .text_color(cx.theme().success)
+                                    .child(additions),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml_1()
+                                    .font_family(mono)
+                                    .text_color(cx.theme().danger)
+                                    .child(deletions),
+                            )
+                    })
                     .into_any_element()
             }
         } else {
-            if let Some(link) = link.filter(|_| visible) {
+            let layer = if let Some(link) = link.filter(|_| visible) {
                 detail.insert(
                     0,
                     sync_error(link, &host_name(self.store.read(cx), &key.host)),
                 );
+                None
             } else {
                 detail.push(crate::tr!(&format!("{state_label}_lower")).into_owned());
-                detail.extend(layer.clone());
-            }
-            h_flex()
+                layer.clone()
+            };
+            let lead = detail.join(" · ");
+            detail.extend(layer.clone());
+            let line = h_flex()
                 .gap_1()
                 .items_center()
                 .min_w_0()
+                .overflow_hidden()
                 .when(
                     link.is_some_and(|link| link.source == PullRequestSource::Dismissed),
                     |line| line.child(Icon::new(IconName::Unlink).size(px(12.))),
                 )
-                .child(div().min_w_0().truncate().child(detail.join(" · ")))
-                .into_any_element()
+                .child(div().min_w_0().truncate().child(lead));
+            tail_layer(line, layer).into_any_element()
         };
         let detail = detail.join(" · ");
         let menu = row_menu(
@@ -1213,7 +1270,8 @@ impl PullRequestsPanel {
                     .dropdown_menu({
                         let menu = menu.clone();
                         move |state, window, cx| (menu)(state, window, cx)
-                    }),
+                    })
+                    .touch(compact),
                 ),
         );
 
