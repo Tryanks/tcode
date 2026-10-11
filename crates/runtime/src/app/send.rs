@@ -501,6 +501,7 @@ impl AppState {
             let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
+        self.note_pull_request_instructed(session_id, &message.text);
         self.clear_pull_request_watch_stop(session_id);
         if let QueuedMessageKind::PullRequestWake { key, id } = &message.kind {
             self.acknowledge_pull_request_wake(session_id, key, id, cx);
