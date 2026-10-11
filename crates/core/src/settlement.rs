@@ -403,7 +403,7 @@ mod tests {
                     author: None,
                     additions: Some(1),
                     deletions: Some(1),
-                    changed_files: 1,
+                    changed_files: Some(1),
                     review_decision: None,
                     checks_state: None,
                     mergeability: Mergeability::Unknown,

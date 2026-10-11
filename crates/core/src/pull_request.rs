@@ -624,7 +624,9 @@ pub struct PullRequestSnapshot {
     pub additions: Option<u64>,
     #[serde(default)]
     pub deletions: Option<u64>,
-    pub changed_files: u64,
+    /// `None` where the host gave no count of changed files.
+    #[serde(default)]
+    pub changed_files: Option<u64>,
     pub review_decision: Option<ReviewDecision>,
     pub checks_state: Option<ChecksState>,
     #[serde(default)]
@@ -1765,7 +1767,7 @@ mod tests {
                 author: None,
                 additions: Some(0),
                 deletions: Some(0),
-                changed_files: 0,
+                changed_files: Some(0),
                 review_decision: None,
                 checks_state: None,
                 mergeability: Mergeability::Unknown,
@@ -1776,15 +1778,29 @@ mod tests {
         }
     }
     /// A snapshot thread metadata kept before counts could be absent still reads its counts; a
-    /// host that gives none is read as giving none, not as zero lines.
+    /// host that gives none is read as giving none, not as zero lines or files.
     #[test]
-    fn a_kept_snapshot_reads_its_line_counts() {
+    fn a_kept_snapshot_reads_its_counts() {
         let kept = r#"{"state":"open","title":"Change","head_branch":"feature","base_branch":"main","is_draft":false,"updated_at":"2026-10-08T00:00:00Z","synced_at":1,"closed_at":null,"merged_at":null,"author":null,"additions":3,"deletions":1,"changed_files":2,"review_decision":null,"checks_state":null,"mergeability":"clean"}"#;
         let snapshot: PullRequestSnapshot = serde_json::from_str(kept).unwrap();
-        assert_eq!((snapshot.additions, snapshot.deletions), (Some(3), Some(1)));
-        let uncounted = kept.replace(r#""additions":3,"deletions":1,"#, "");
+        assert_eq!(
+            (
+                snapshot.additions,
+                snapshot.deletions,
+                snapshot.changed_files
+            ),
+            (Some(3), Some(1), Some(2))
+        );
+        let uncounted = kept.replace(r#""additions":3,"deletions":1,"changed_files":2,"#, "");
         let snapshot: PullRequestSnapshot = serde_json::from_str(&uncounted).unwrap();
-        assert_eq!((snapshot.additions, snapshot.deletions), (None, None));
+        assert_eq!(
+            (
+                snapshot.additions,
+                snapshot.deletions,
+                snapshot.changed_files
+            ),
+            (None, None, None)
+        );
     }
     #[test]
     fn badge_distinguishes_unknown_drafts_terminal_and_related_links() {

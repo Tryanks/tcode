@@ -167,6 +167,8 @@ pub use wire::{
 // SetHostToken carries an optional email.
 // Unreleased: a source-control host's kind may be azure, whose hosts are
 // organizations, dev.azure.com/{organization}.
+// Unreleased: a pull request snapshot's changed_files may be absent (null) where
+// the host counts no files.
 pub const PROTOCOL_VERSION: u32 = 10;
 
 #[cfg(test)]

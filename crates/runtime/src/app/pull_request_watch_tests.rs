@@ -828,7 +828,7 @@ fn agent_starts_are_refused_where_the_parent_owns_the_pull_request_or_it_merged(
         author: None,
         additions: Some(0),
         deletions: Some(0),
-        changed_files: 0,
+        changed_files: Some(0),
         review_decision: None,
         checks_state: None,
         mergeability: Default::default(),

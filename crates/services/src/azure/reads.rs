@@ -449,7 +449,7 @@ pub(super) fn snapshot(
         // Azure counts no lines; only the files read with both sides of each would.
         additions: None,
         deletions: None,
-        changed_files: 0,
+        changed_files: None,
         review_decision: review_decision(pr),
         checks_state: checks_state(checks),
         mergeability,
