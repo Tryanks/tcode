@@ -276,6 +276,9 @@ pub struct AppShell {
     /// Viewport width and sidebar collapse last seen by render; a change in
     /// either re-lays the split out, which arms the sidebar and panel restores.
     last_split_layout: Option<(Pixels, bool)>,
+    /// The title last given to the OS window. The title is in the current
+    /// language, and a language switch reaches the shell only as a redraw.
+    window_title: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -418,6 +421,7 @@ impl AppShell {
             palette_was_open: false,
             keyboard_focus: None,
             last_split_layout: None,
+            window_title: String::new(),
             _subscriptions: subscriptions,
             setup,
         };
@@ -687,14 +691,12 @@ impl AppShell {
         if let Some(id) = &pending_session {
             store.update(cx, |store, _| store.select_session(id.clone()));
         }
-        window.set_window_title(&store.read(cx).shell_window_title());
         let preview =
             cx.new(|cx| PreviewPanel::new(store.clone(), self.window_state.clone(), window, cx));
         let sidebar =
             cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let subscriptions = vec![
             cx.observe_in(&store, window, move |this, store, window, cx| {
-                window.set_window_title(&store.read(cx).shell_window_title());
                 this.stamp_connected(cx);
                 let selected = store.read(cx).active_session_id();
                 if let Some(attachment) = &mut this.attachment
@@ -2762,6 +2764,13 @@ impl Render for AppShell {
         // The window may have been resized without a bounds notification (a
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
+        if let Some(attachment) = &self.attachment {
+            let title = attachment.link.store.read(cx).shell_window_title();
+            if title != self.window_title {
+                window.set_window_title(&title);
+                self.window_title = title;
+            }
+        }
         // The palette takes focus on the frame it opens, at either width.
         let (palette_open, focus_query) = {
             let state = self.window_state.read(cx);
@@ -5650,6 +5659,35 @@ mod tests {
         store.update(cx, |store, _| store.select_session(session.into()));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+    }
+
+    #[gpui::test]
+    fn switching_language_retitles_the_window(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        let (shell, host, cx) = mount(cx);
+        let session = "draft-1";
+        let mut status = session_status(session, std::path::Path::new("/tmp/tcode-title"));
+        status.draft = true;
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: session.into(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(Box::new(status)),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, _| store.select_session(session.into()));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::settings::assert_follows_language_switch(cx, "chat.new_thread", |cx| {
+            cx.window_title().expect("the shell titles its window")
+        });
     }
 
     /// The panel first asks the host for each changed file's current text, then
