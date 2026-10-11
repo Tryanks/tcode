@@ -92,6 +92,17 @@ pub(crate) use crate::material::{
 /// leading control clears the native macOS traffic lights (which end near x=72
 /// on macOS 26). Only applied on macOS: see `render_header`.
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
+/// Below this header width the git and Open split buttons drop their text and
+/// keep their icon and chevron. The header with its longest git label, five
+/// panel toggles and a title kept to a few words needs about this much in
+/// English, the widest shipped locale.
+const HEADER_LABELS_MIN_WIDTH: f32 = 672.;
+
+/// Whether a header last laid out `width` wide labels its split buttons.
+/// Before the first layout it does.
+fn header_labels_fit(width: Option<f32>) -> bool {
+    width.is_none_or(|width| width >= HEADER_LABELS_MIN_WIDTH)
+}
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 32.;
@@ -402,6 +413,10 @@ pub struct ChatView {
     /// The rows the timeline paints in the frame being drawn: GPUI's list
     /// prepaints only the rows on screen.
     painted_rows: Rc<Cell<Option<(usize, usize)>>>,
+    /// The header's laid-out width on the last frame, which decides whether the
+    /// next one labels its split buttons. The header is as wide as the chat
+    /// column whatever it holds, so the choice cannot feed back into it.
+    header_width: Rc<Cell<Option<f32>>>,
     /// The first row painted while following the tail.
     painted_tail_start: Option<usize>,
     /// Open/closed keys for collapsibles other than activity details.
@@ -708,6 +723,7 @@ impl ChatView {
             markdown_visible_rows: 0..0,
             markdown_scroll_top: None,
             painted_rows: Rc::default(),
+            header_width: Rc::default(),
             painted_tail_start: None,
             expanded: HashSet::new(),
             auto_activity_expansions: AutoActivityExpansions::default(),
@@ -2543,6 +2559,8 @@ impl ChatView {
             right_panel_open,
             right_tab,
         );
+        let labelled = header_labels_fit(self.header_width.get());
+        let header_width = self.header_width.clone();
         let base = h_flex()
             .flex_shrink_0()
             .h(px(52.))
@@ -2552,7 +2570,14 @@ impl ChatView {
             })
             .when(hosts_caption, |this| this.pr_0())
             .gap_2()
-            .items_center();
+            .items_center()
+            .on_prepaint(move |bounds, window, _| {
+                let width = Some(f32::from(bounds.size.width));
+                let previous = header_width.replace(width);
+                if header_labels_fit(previous) != header_labels_fit(width) {
+                    window.request_animation_frame();
+                }
+            });
 
         // The sidebar toggle: the header's first control, immediately left of
         // the title. It lives here rather than in the sidebar because a
@@ -2698,8 +2723,11 @@ impl ChatView {
                     ),
             )
             .when(show_actions, |this| {
-                this.children(self.render_git_button(cx))
-                    .children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
+                this.children(self.render_git_button(labelled, cx))
+                    .children(
+                        cwd.clone()
+                            .map(|cwd| self.render_open_button(cwd, labelled, cx)),
+                    )
                     .child(
                         h_flex()
                             .flex_none()
@@ -2822,7 +2850,9 @@ impl ChatView {
 
     /// Git quick-action split button whose primary action and dropdown choices
     /// follow the current git status.
-    fn render_git_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Unlabelled, the main part is its icon, named by its tooltip (or the
+    /// disabled hint) and its accessibility label.
+    fn render_git_button(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (quick, items) = self.workspace_store.read(cx).chat_git_controls()?;
         let border = cx.theme().border;
 
@@ -2858,7 +2888,7 @@ impl ChatView {
             } else {
                 cx.theme().foreground
             }))
-            .child(label);
+            .when(labelled, |main| main.child(label.clone()));
         if quick.disabled {
             main = main.text_color(cx.theme().muted_foreground);
             if let Some(hint) = quick.hint {
@@ -2867,6 +2897,9 @@ impl ChatView {
             }
         } else if let Some(action) = quick.action {
             main = main
+                .when(!labelled, |main| {
+                    main.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                })
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().accent))
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -2993,7 +3026,14 @@ impl ChatView {
     }
 
     /// Open the session cwd in Zed, or choose a directory action from the menu.
-    fn render_open_button(&self, cwd: PathBuf, cx: &mut Context<Self>) -> AnyElement {
+    /// Unlabelled, the main part is its icon, named by its tooltip and its
+    /// accessibility label.
+    fn render_open_button(
+        &self,
+        cwd: PathBuf,
+        labelled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let border = cx.theme().border;
         let main_cwd = cwd.clone();
         let menu_cwd = cwd;
@@ -3105,7 +3145,15 @@ impl ChatView {
                         .xsmall()
                         .text_color(cx.theme().muted_foreground),
                 )
-                .child(crate::tr!("chat.open"))
+                .map(|main| {
+                    if labelled {
+                        main.child(crate::tr!("chat.open"))
+                    } else {
+                        main.tooltip(|window, cx| {
+                            Tooltip::new(crate::tr!("chat.open").into_owned()).build(window, cx)
+                        })
+                    }
+                })
                 .on_click(cx.listener(move |_, _, window, cx| {
                     open_in_zed(&main_cwd, window, cx);
                 })),

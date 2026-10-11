@@ -65,7 +65,7 @@ enum DiffViewOption {
 /// icons alone. All four tabs labelled, with two-digit counts, beside the
 /// panel's own controls fit in this much in English, the widest shipped
 /// locale, so no label is ever cut off; the default panel width is above it.
-const TAB_LABELS_MIN_WIDTH: f32 = 540.;
+const TAB_LABELS_MIN_WIDTH: f32 = 485.;
 
 /// Whether a strip last laid out `width` wide labels its tabs. Before the
 /// first layout it does.
