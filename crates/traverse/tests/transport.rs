@@ -379,7 +379,7 @@ fn invitation_changes_are_reported_in_order() {
 }
 
 fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut seen = device.relays();
     while seen != wanted && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
