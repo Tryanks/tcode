@@ -2553,45 +2553,47 @@ impl AppShell {
         }
 
         // Chat and right-panel reading surfaces sit above the translucent canvas.
+        let docked_surface = div()
+            .debug_selector(|| "right-panel".into())
+            .size_full()
+            .bg(crate::material::content_surface(cx))
+            .shadow_sm()
+            .children(docked_panel);
+        // Expanded, the panel takes the chat's slot rather than its own: the
+        // slot grows into the whole strip, and the panel's own handle — which
+        // gpui-base draws for every visible panel after the first, with no
+        // way to turn it off — is not drawn, so no drag can move the width
+        // the panel returns to.
+        let (chat_slot, right_slot) = if chat_visible {
+            let chat = self
+                .attachment
+                .as_ref()
+                .expect("attachment checked above")
+                .chat
+                .clone();
+            let chat = v_flex()
+                .size_full()
+                .bg(crate::material::content_surface(cx))
+                .shadow_sm()
+                .child(div().flex_1().min_h_0().child(chat));
+            (chat.into_any_element(), Some(docked_surface))
+        } else {
+            (docked_surface.into_any_element(), None)
+        };
         let chat_panel = resizable_panel()
-            .visible(chat_visible)
-            .when(right_docked, |panel| {
+            .when(right_docked && chat_visible, |panel| {
                 panel.size_range(chat_min..Pixels::MAX)
             })
-            .child(
-                v_flex()
-                    .size_full()
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .child(
-                        div().flex_1().min_h_0().child(
-                            self.attachment
-                                .as_ref()
-                                .expect("attachment checked above")
-                                .chat
-                                .clone(),
-                        ),
-                    ),
-            );
+            .child(chat_slot);
         let attachment = self.attachment.as_ref().expect("attachment checked above");
-        // Beside the chat, `flex_none`: whatever the group's sizes leave over or
-        // lack goes to the chat, so the panel is exactly the width restored
-        // above. Expanded, there is no chat, so the panel grows into it all.
+        // `flex_none`: whatever the group's sizes leave over or lack goes to the
+        // chat, so the panel is exactly the width restored above.
         let right = resizable_panel()
-            .when(chat_visible, |panel| panel.flex_none())
-            .visible(right_docked)
+            .flex_none()
+            .visible(right_docked && chat_visible)
             .size(px(RIGHT_PANEL_WIDTH))
-            .size_range(
-                px(RIGHT_PANEL_MIN_WIDTH)..if chat_visible { px(1400.) } else { Pixels::MAX },
-            )
-            .child(
-                div()
-                    .debug_selector(|| "right-panel".into())
-                    .size_full()
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .children(docked_panel),
-            );
+            .size_range(px(RIGHT_PANEL_MIN_WIDTH)..px(1400.))
+            .children(right_slot);
         let floating_right = floating_panel.map(|panel| {
             div()
                 .id("right-panel-overlay")
@@ -6087,9 +6089,9 @@ mod tests {
     /// clears the macOS traffic lights or links to its parent — and it comes
     /// back to that width after the window narrows and widens again, after it
     /// floated, after a sidebar drag squeezed it, and after it was expanded to
-    /// everything beside the sidebar; the header's last toggle ends before the
-    /// panel starts. At every width no tab label is cut off and
-    /// the close button is on screen and closes the panel.
+    /// everything beside the sidebar and dragged there; the header's last
+    /// toggle ends before the panel starts. At every width no tab label is cut
+    /// off and the close button is on screen and closes the panel.
     #[gpui::test]
     fn the_right_panel_keeps_its_width_and_leaves_the_chat_header_clear(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -6213,6 +6215,20 @@ mod tests {
                 (sidebar, px(width)),
                 "{width}pt: the expanded panel spans the window beside the sidebar"
             );
+        }
+        // Drags on the expanded panel's left edge do not choose a width for
+        // the docked panel.
+        for _ in 0..2 {
+            let edge = cx.debug_bounds("right-panel").expect("the expanded panel");
+            let from = gpui::point(edge.left(), px(400.));
+            let to = gpui::point(edge.left() + px(12.), px(400.));
+            cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+            for step in [from + gpui::point(px(5.), px(0.)), to] {
+                cx.simulate_mouse_move(step, Some(MouseButton::Left), gpui::Modifiers::default());
+                draw(cx);
+            }
+            cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+            draw(cx);
         }
         store.update(cx, |store, cx| store.toggle_diff_expanded(cx));
         walk(cx, &[1600.]);
