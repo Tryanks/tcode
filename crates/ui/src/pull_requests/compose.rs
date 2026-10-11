@@ -245,6 +245,19 @@ fn toast(
                 }
                 _ => crate::tr!("pull_requests.result.connection_lost").into_owned(),
             };
+            // A host that sends a review as several requests stopped part way through it.
+            if let Write::Review(_) = write {
+                return Some(
+                    Notification::warning(
+                        crate::tr!("pull_requests.result.review_partial_body", reason = reason)
+                            .into_owned(),
+                    )
+                    .title(
+                        crate::tr!("pull_requests.result.review_partial", number = number)
+                            .into_owned(),
+                    ),
+                );
+            }
             Notification::warning(
                 crate::tr!(
                     "pull_requests.result.partial_body",

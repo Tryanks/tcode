@@ -8,6 +8,7 @@ pub mod forgejo;
 pub mod fs_tree;
 pub mod git;
 pub mod github;
+pub mod gitlab;
 pub mod import;
 pub mod process;
 pub mod project_config;

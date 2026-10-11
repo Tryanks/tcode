@@ -784,24 +784,28 @@ impl PullRequestsPanel {
         let line_two = if let Some(snapshot) = snapshot {
             let author = snapshot.author.as_ref().map(|author| author.login.clone());
             let branches = format!("{} → {}", snapshot.head_branch, snapshot.base_branch);
-            let stat = (
-                format!("+{}", snapshot.additions),
-                format!("−{}", snapshot.deletions),
-            );
+            // A host that counts no lines shows no stat rather than zeros.
+            let stat = snapshot
+                .additions
+                .zip(snapshot.deletions)
+                .map(|(additions, deletions)| (format!("+{additions}"), format!("−{deletions}")));
             detail.extend(author.clone());
             detail.push(branches.clone());
             detail.retain(|part| !part.is_empty());
             let lead = detail.join(" · ");
             detail.extend(layer.clone());
-            detail.push(format!("{} {}", stat.0, stat.1));
+            detail.extend(stat.as_ref().map(|stat| format!("{} {}", stat.0, stat.1)));
+            detail.retain(|part| !part.is_empty());
             if compact {
                 let line = h_flex().gap_1().items_center().min_w_0().overflow_hidden();
                 tail_layer(
                     line.child(div().min_w_0().truncate().child(lead)),
                     layer.clone(),
                 )
-                .child(dot())
-                .child(div().flex_none().child(format!("{} {}", stat.0, stat.1)))
+                .when_some(stat.as_ref(), |line, (additions, deletions)| {
+                    line.child(dot())
+                        .child(div().flex_none().child(format!("{additions} {deletions}")))
+                })
                 .into_any_element()
             } else {
                 // Spacing is each part's leading margin, so a part that gives way takes its
@@ -856,23 +860,25 @@ impl PullRequestsPanel {
                         line.child(sep())
                             .child(div().flex_none().ml_1().child(layer))
                     })
-                    .child(sep())
-                    .child(
-                        div()
-                            .flex_none()
-                            .ml_1()
-                            .font_family(mono.clone())
-                            .text_color(cx.theme().success)
-                            .child(stat.0),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .ml_1()
-                            .font_family(mono)
-                            .text_color(cx.theme().danger)
-                            .child(stat.1),
-                    )
+                    .when_some(stat, |line, (additions, deletions)| {
+                        line.child(sep())
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml_1()
+                                    .font_family(mono.clone())
+                                    .text_color(cx.theme().success)
+                                    .child(additions),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml_1()
+                                    .font_family(mono)
+                                    .text_color(cx.theme().danger)
+                                    .child(deletions),
+                            )
+                    })
                     .into_any_element()
             }
         } else {

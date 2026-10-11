@@ -21,6 +21,7 @@ fn token_secrets(kind: HostKind) -> &'static str {
         HostKind::Github => "@github",
         // One API and one token per server, whichever of the two it runs.
         HostKind::Forgejo | HostKind::Gitea => "@forgejo",
+        HostKind::Gitlab => "@gitlab",
     }
 }
 

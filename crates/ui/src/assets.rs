@@ -98,6 +98,11 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/forgejo.svg",
         include_bytes!("../../../assets/icons/forgejo.svg"),
     ),
+    // GitLab's mark, drawn in one colour (Simple Icons, CC0).
+    (
+        "icons/gitlab.svg",
+        include_bytes!("../../../assets/icons/gitlab.svg"),
+    ),
     (
         "icons/ruler.svg",
         include_bytes!("../../../assets/icons/ruler.svg"),

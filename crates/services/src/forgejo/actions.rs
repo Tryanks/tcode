@@ -5,7 +5,7 @@ use super::{
     api::{Request, Response},
     reads::{PULL_REQUEST, Pull, reaction_name, text},
 };
-use crate::forge::{ForgeError, ForgeErrorKind};
+use crate::forge::{ForgeError, ForgeErrorKind, Step, answered, in_order};
 use serde_json::{Value, json};
 use tcode_core::{
     pull_request::{PullRequestMergeMethod, PullRequestReviewDraftComment},
@@ -15,48 +15,6 @@ use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestRejection as Rejection,
     PullRequestReviewVerdict,
 };
-
-/// The answer to a write that was sent. Without an answer, or with a server failure, the
-/// server may have applied it; a refusal or a rate limit says it did not.
-fn answered(result: Result<Response, ForgeError>) -> Outcome {
-    match result {
-        Ok(_) => Outcome::Applied,
-        Err(ForgeError {
-            kind: ForgeErrorKind::Uncertain | ForgeErrorKind::Deadline | ForgeErrorKind::TooLarge,
-            ..
-        }) => Outcome::Uncertain,
-        Err(error) => Outcome::Rejected(error.rejection()),
-    }
-}
-
-/// Sends the steps in order until one is not applied; when some went through before it, the
-/// answer is [`Outcome::Partial`] by the names each covers.
-/// One request of a write made of several, and the names it covers.
-type Step<'a> = (Vec<String>, Box<dyn FnOnce() -> Outcome + 'a>);
-
-fn in_order(steps: Vec<Step<'_>>) -> Outcome {
-    let mut applied = Vec::new();
-    let mut steps = steps.into_iter();
-    while let Some((names, send)) = steps.next() {
-        let outcome = send();
-        if outcome == Outcome::Applied {
-            applied.extend(names);
-            continue;
-        }
-        if applied.is_empty() {
-            return outcome;
-        }
-        return Outcome::Partial {
-            applied,
-            unapplied: names
-                .into_iter()
-                .chain(steps.flat_map(|(names, _)| names))
-                .collect(),
-            failure: Box::new(outcome),
-        };
-    }
-    Outcome::Applied
-}
 
 impl Pull<'_> {
     fn write(
