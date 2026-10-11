@@ -10,7 +10,7 @@ mod verdicts;
 mod viewed;
 
 use crate::settings::SettingsStore;
-pub(crate) use http::{Step, answered, in_order, media, run_cli};
+pub(crate) use http::{Step, answered, in_order, media, run_cli, same_origin};
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
@@ -47,8 +47,9 @@ pub fn connect(
     // One file, so a host's marks never overwrite another's.
     let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
     let forgejo = crate::forgejo::Forgejo::new(store.clone(), environment.clone(), viewed.clone());
-    let gitlab = crate::gitlab::GitLab::new(store, environment, viewed);
-    Hosts::new(github, forgejo, gitlab)
+    let gitlab = crate::gitlab::GitLab::new(store.clone(), environment.clone(), viewed.clone());
+    let bitbucket = crate::bitbucket::Bitbucket::new(store, environment, viewed);
+    Hosts::new(github, forgejo, gitlab, bitbucket)
 }
 
 /// A pull request host. Each entry answers for the host the key names.
@@ -372,25 +373,33 @@ struct Hosts {
     github: Arc<dyn Forge>,
     forgejo: Arc<dyn Forge>,
     gitlab: Arc<dyn Forge>,
+    bitbucket: Arc<dyn Forge>,
     kinds: RwLock<BTreeMap<String, HostKind>>,
 }
 
 impl Hosts {
-    fn new(github: Arc<dyn Forge>, forgejo: Arc<dyn Forge>, gitlab: Arc<dyn Forge>) -> Arc<Self> {
+    fn new(
+        github: Arc<dyn Forge>,
+        forgejo: Arc<dyn Forge>,
+        gitlab: Arc<dyn Forge>,
+        bitbucket: Arc<dyn Forge>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             github,
             forgejo,
             gitlab,
+            bitbucket,
             kinds: RwLock::default(),
         })
     }
 
     /// Every kind's implementation, the one a host falls back to first.
-    fn all(&self) -> [&dyn Forge; 3] {
+    fn all(&self) -> [&dyn Forge; 4] {
         [
             self.github.as_ref(),
             self.forgejo.as_ref(),
             self.gitlab.as_ref(),
+            self.bitbucket.as_ref(),
         ]
     }
 
@@ -403,6 +412,7 @@ impl Hosts {
             HostKind::Github => self.github.as_ref(),
             HostKind::Forgejo | HostKind::Gitea => self.forgejo.as_ref(),
             HostKind::Gitlab => self.gitlab.as_ref(),
+            HostKind::Bitbucket => self.bitbucket.as_ref(),
         }
     }
 
@@ -437,7 +447,8 @@ impl Forge for Hosts {
         }
         self.github.configure(hosts.clone());
         self.forgejo.configure(hosts.clone());
-        self.gitlab.configure(hosts);
+        self.gitlab.configure(hosts.clone());
+        self.bitbucket.configure(hosts);
     }
 
     fn credential_status(&self) -> BTreeMap<String, HostStatus> {
@@ -447,6 +458,11 @@ impl Forge for Hosts {
         for (host, gitlab) in self.gitlab.credential_status() {
             if !status.contains_key(&host) || self.kind(&host) == HostKind::Gitlab {
                 status.insert(host, gitlab);
+            }
+        }
+        for (host, bitbucket) in self.bitbucket.credential_status() {
+            if !status.contains_key(&host) || self.kind(&host) == HostKind::Bitbucket {
+                status.insert(host, bitbucket);
             }
         }
         for (host, github) in self.github.credential_status() {
@@ -663,6 +679,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Bitbucket closes by declining, which it never undoes: a reopen is refused before any
+    /// request, as a capability the host lacks rather than a permission.
+    #[test]
+    fn a_declined_bitbucket_pull_request_is_not_reopened() {
+        let root = std::env::temp_dir().join(format!("tcode-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let forge = connect(SettingsStore::new(root.clone()), []);
+        let key = PullRequestKey::new("bitbucket.org", "team/web", 8);
+        assert!(!forge.capabilities(&key).reopen);
+        assert_eq!(
+            forge.act(&key, &PullRequestAction::Reopen),
+            Outcome::Rejected(Rejection::Unsupported)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// A host is served by the kind settings give it; otherwise its name decides, and a host
     /// whose name says nothing is GitHub's, as every host was before hosts had kinds.
     #[test]
@@ -693,6 +725,15 @@ mod tests {
         assert_eq!(name("gitlab.example.com"), "GitLab");
         assert_eq!(name("gitlab.acme.test"), "Forgejo");
         assert_eq!(name("code.acme.test:8443"), "GitLab");
+        assert_eq!(name("bitbucket.org"), "Bitbucket");
+        // Bitbucket Data Center is not read as Bitbucket.
+        assert_eq!(name("bitbucket.acme.test"), "GitHub");
+        assert_eq!(
+            forge
+                .pull_request_url("https://bitbucket.org/team/web/pull-requests/8/diff")
+                .map(|(key, _)| key),
+            Some(PullRequestKey::new("bitbucket.org", "team/web", 8))
+        );
         assert_eq!(
             forge
                 .pull_request_url("https://code.acme.test:8443/team/apps/web/-/merge_requests/5")
