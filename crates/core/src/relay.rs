@@ -9,13 +9,42 @@ use crate::session::{EntryContent, Timeline, TimelineEntry};
 pub const RELAY_TRANSCRIPT_MAX_CHARS: usize = 60_000;
 pub const RELAY_PREAMBLE: &str = "You are taking over an ongoing conversation another agent worked on. The transcript follows; continue seamlessly, do not re-introduce yourself or re-do completed work.";
 
-/// True when at least one provider turn completed successfully. Drafts and
-/// histories containing only an opening/failed turn do not require a relay.
+/// True when the timeline carries work worth handing over: a turn that
+/// completed, or one that produced provider work before it was interrupted,
+/// failed, or was still running when the user switched provider. A draft, or a
+/// history whose only turn holds the opening user message and nothing back,
+/// needs no relay.
 pub fn has_meaningful_history(timeline: &Timeline) -> bool {
-    timeline
-        .turns
-        .iter()
-        .any(|turn| turn.status == Some(agent::TurnStatus::Completed))
+    timeline.turns.iter().enumerate().any(|(index, turn)| {
+        turn.status == Some(agent::TurnStatus::Completed)
+            || timeline
+                .entries
+                .iter()
+                .any(|entry| entry.turn == index && is_provider_work(&entry.content))
+    })
+}
+
+fn is_provider_work(content: &EntryContent) -> bool {
+    match content {
+        EntryContent::Item(ItemContent::AssistantMessage { text }) => !text.trim().is_empty(),
+        EntryContent::Item(
+            ItemContent::CommandExecution { .. }
+            | ItemContent::FileChange { .. }
+            | ItemContent::ToolCall { .. }
+            | ItemContent::Subagent { .. }
+            | ItemContent::ImageRead { .. }
+            | ItemContent::WebSearch { .. }
+            | ItemContent::Other { .. },
+        ) => true,
+        EntryContent::Item(ItemContent::UserMessage { .. } | ItemContent::Reasoning { .. })
+        | EntryContent::Steer { .. }
+        | EntryContent::Error { .. }
+        | EntryContent::ProviderStartError { .. }
+        | EntryContent::ProviderRelay { .. }
+        | EntryContent::ContextCompacted(_)
+        | EntryContent::ContextWindowChanged { .. }
+        | EntryContent::ModelChanged { .. } => false,
+    }
 }
 
 /// Render the canonical folded timeline as a compact markdown handoff.
@@ -64,10 +93,25 @@ pub fn render_relay_transcript(
             .filter(|entry| entry.turn == turn)
             .map(AsRef::as_ref)
             .collect();
-        let block = render_turn(turn + 1, &entries);
-        if !block.is_empty() {
-            turn_blocks.push(block);
+        let mut block = render_turn(turn + 1, &entries);
+        if block.is_empty() {
+            continue;
         }
+        match timeline.turns[turn].status {
+            Some(agent::TurnStatus::Completed) => {}
+            Some(agent::TurnStatus::Interrupted) => {
+                block.push_str("> This turn was interrupted before it completed.\n\n");
+            }
+            Some(agent::TurnStatus::Failed) => {
+                block.push_str("> This turn failed before it completed.\n\n");
+            }
+            None => {
+                block.push_str(
+                    "> This turn was still running when the conversation was handed over.\n\n",
+                );
+            }
+        }
+        turn_blocks.push(block);
     }
 
     if !timeline.plan_steps.is_empty() {
@@ -477,5 +521,41 @@ mod tests {
 
         let incomplete = Timeline::fold_events([user("u1", "not completed")]);
         assert_eq!(render(&incomplete, 60_000), "");
+    }
+
+    /// Switching provider while the only turn is still streaming, or after it
+    /// was interrupted, hands over what that turn produced and says it was
+    /// cut short; an opening message that got nothing back hands over nothing.
+    #[test]
+    fn an_unfinished_turn_with_provider_work_is_relayed_with_a_note() {
+        let started = AgentEvent::TurnStarted {
+            turn_id: "t1".into(),
+        };
+        let running = Timeline::fold_events([
+            started.clone(),
+            user("u1", "compare them"),
+            assistant("a1", "They differ in"),
+        ]);
+        assert!(has_meaningful_history(&running));
+        let transcript = render(&running, 60_000);
+        assert!(transcript.contains("They differ in"));
+        assert!(transcript.contains("still running when the conversation was handed over"));
+
+        let interrupted = Timeline::fold_events([
+            started.clone(),
+            user("u1", "compare them"),
+            assistant("a1", "They differ in"),
+            AgentEvent::TurnCompleted {
+                turn_id: "t1".into(),
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+        ]);
+        assert!(has_meaningful_history(&interrupted));
+        assert!(render(&interrupted, 60_000).contains("interrupted before it completed"));
+
+        let opening = Timeline::fold_events([started, user("u1", "compare them")]);
+        assert!(!has_meaningful_history(&opening));
+        assert_eq!(render(&opening, 60_000), "");
     }
 }
