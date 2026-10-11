@@ -9,14 +9,23 @@ use tcode_core::settlement::AgentDelivery;
 /// regardless of what the orchestrator wrote.
 pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_result tool is the only channel through which your work reaches the orchestrator that dispatched you; it cannot see your transcript. When your work is complete, send your complete final report through it, then end your turn. Make the report self-contained: for a discussion, give your reasoning, recommendations, disagreements, and open questions; for execution, include files changed and commands actually run with their outcomes. Include the evidence behind your conclusions. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback, truncated when long.";
 
+/// A thread's pull request tool registration.
+pub(super) struct PullRequestRegistration {
+    pub(super) registration: agent::McpRegistration,
+    /// The host names the tools were described with.
+    pub(super) hosts: String,
+    /// Whether a turn carrying the linking instructions has been accepted; the model reads them
+    /// once per registration, not on every turn.
+    pub(super) instructed: bool,
+}
+
 #[derive(Default)]
 pub(super) struct McpWiring {
     pub(super) pull_request_url: Option<String>,
     pub(super) pull_request_tokens: Option<pull_request_mcp::TokenRegistry>,
     /// The hosts the pull request tools' descriptions name.
     pub(super) pull_request_hosts: Option<pull_request_mcp::HostNames>,
-    /// Each thread's registration, with the host names its tools were described with.
-    pub(super) pull_request_registrations: HashMap<String, (agent::McpRegistration, String)>,
+    pub(super) pull_request_registrations: HashMap<String, PullRequestRegistration>,
     pub(super) preview_url: Option<String>,
     pub(super) preview_tokens: Option<preview_mcp::TokenRegistry>,
     pub(super) preview_registrations: HashMap<String, agent::McpRegistration>,

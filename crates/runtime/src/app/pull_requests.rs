@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::orchestrate::PullRequestRegistration;
 use tcode_core::pull_request::{
     self, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestStackState,
     PullRequestState, PullRequestSyncError,
@@ -136,8 +137,8 @@ impl AppState {
         &mut self,
         meta: &SessionMeta,
     ) -> Option<agent::McpRegistration> {
-        if let Some((registration, _)) = self.mcp.pull_request_registrations.get(&meta.id) {
-            return Some(registration.clone());
+        if let Some(existing) = self.mcp.pull_request_registrations.get(&meta.id) {
+            return Some(existing.registration.clone());
         }
         let url = self.mcp.pull_request_url.clone()?;
         let bearer_token = self.mcp.pull_request_tokens.as_ref()?.register(&meta.id);
@@ -152,21 +153,36 @@ impl AppState {
             url,
             bearer_token,
         };
-        self.mcp
-            .pull_request_registrations
-            .insert(meta.id.clone(), (registration.clone(), names));
+        self.mcp.pull_request_registrations.insert(
+            meta.id.clone(),
+            PullRequestRegistration {
+                registration: registration.clone(),
+                hosts: names,
+                instructed: false,
+            },
+        );
         Some(registration)
     }
     /// Whether a provider of this kind receives the pull request tools when it starts.
     pub(super) fn pull_request_tools_offered(&self, provider: ProviderKind) -> bool {
         provider.caps().mcp_servers && self.mcp.pull_request_url.is_some()
     }
-    /// Turns carry the linking block while the tools are registered, the same gate as launch.
+    /// The first turn after the tools are registered carries the linking block, the same gate as
+    /// launch; later turns do not, since the model has already read it.
     pub(super) fn pull_request_instructions(&self, session_id: &str) -> Option<String> {
         self.mcp
             .pull_request_registrations
-            .contains_key(session_id)
+            .get(session_id)
+            .is_some_and(|existing| !existing.instructed)
             .then(|| pull_request::linking_instructions(&self.pull_request_hosts()))
+    }
+    /// A turn leading with the linking block reached the provider.
+    pub(super) fn note_pull_request_instructed(&mut self, session_id: &str, text: &str) {
+        if pull_request::strip_linking_instructions(text).is_some()
+            && let Some(existing) = self.mcp.pull_request_registrations.get_mut(session_id)
+        {
+            existing.instructed = true;
+        }
     }
     /// The host names the thread's pull request tools are described with: its registration's,
     /// else the ones a registration made now would have.
@@ -174,7 +190,7 @@ impl AppState {
         self.mcp
             .pull_request_registrations
             .get(session_id)
-            .map(|(_, names)| names.clone())
+            .map(|existing| existing.hosts.clone())
             .unwrap_or_else(|| pull_request::host_names(&self.pull_request_hosts()))
     }
     /// The hosts whose terms Tcode's text to the model names: GitHub's, and every configured
@@ -189,10 +205,10 @@ impl AppState {
         )
     }
     pub(super) fn revoke_pull_request_registration(&mut self, session_id: &str) {
-        if let Some((registration, _)) = self.mcp.pull_request_registrations.remove(session_id)
+        if let Some(existing) = self.mcp.pull_request_registrations.remove(session_id)
             && let Some(tokens) = &self.mcp.pull_request_tokens
         {
-            tokens.revoke(&registration.bearer_token);
+            tokens.revoke(&existing.registration.bearer_token);
         }
     }
     pub(super) fn handle_pull_request_request(

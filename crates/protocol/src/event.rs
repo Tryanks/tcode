@@ -481,8 +481,8 @@ pub struct SessionStatus {
     pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
-    /// The pull request tools and per-turn instructions this thread's provider is given, while
-    /// they are registered for it.
+    /// The pull request tools and the instructions this thread's provider is given with them,
+    /// while they are registered for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_tools: Option<InjectedPullRequestTools>,
 }
