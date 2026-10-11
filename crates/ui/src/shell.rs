@@ -281,11 +281,11 @@ pub struct AppShell {
 const RIGHT_PANEL_WIDTH: f32 = 560.;
 const RIGHT_PANEL_MIN_WIDTH: f32 = 320.;
 /// The chat column never gets narrower than this beside the right panel. Its
-/// compact header fits: a title kept to a few words with no pull request badge,
-/// the git and Open split buttons as icon and chevron, and five panel toggles
-/// measure 518pt. Where this and the panel's minimum do not both fit beside the
-/// sidebar, the panel floats over the chat instead.
-const CHAT_MIN_WIDTH: f32 = 520.;
+/// compact header fits: a title kept to a few words beside a "+10" pull request
+/// badge, the git and Open split buttons as icon and chevron, and five panel
+/// toggles measure 531pt. Where this and the panel's minimum do not both fit
+/// beside the sidebar, the panel floats over the chat instead.
+const CHAT_MIN_WIDTH: f32 = 532.;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
@@ -5838,7 +5838,7 @@ mod tests {
             (1600., Some(RIGHT_PANEL_WIDTH)),
             (1200., Some(1200. - SIDEBAR_WIDTH - CHAT_MIN_WIDTH)),
             (1600., Some(RIGHT_PANEL_WIDTH)),
-            (1100., Some(1100. - SIDEBAR_WIDTH - CHAT_MIN_WIDTH)),
+            (1110., Some(1110. - SIDEBAR_WIDTH - CHAT_MIN_WIDTH)),
             (720., None),
             (1600., Some(RIGHT_PANEL_WIDTH)),
             (720., None),
