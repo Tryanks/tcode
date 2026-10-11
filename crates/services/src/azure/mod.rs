@@ -75,6 +75,14 @@ pub struct Azure {
     verdicts: Verdicts,
 }
 
+/// Files of the latest push, the push's id, and Azure's change entries of those files, which a
+/// thread on their lines names.
+struct Latest {
+    files: PullRequestFiles,
+    iteration: u64,
+    changes: Vec<Change>,
+}
+
 /// Where a files read carries on: the iteration it reads, so a push in between does not
 /// renumber the list under it, and the index of the next file.
 fn cursor(raw: &str) -> Option<(u64, usize)> {
@@ -311,11 +319,7 @@ impl Azure {
     }
 
     /// The latest push's files at `paths`, with their hunks.
-    fn files_at(
-        &self,
-        key: &PullRequestKey,
-        paths: &[&str],
-    ) -> Result<PullRequestFiles, ForgeError> {
+    fn files_at(&self, key: &PullRequestKey, paths: &[&str]) -> Result<Latest, ForgeError> {
         let iteration = self.latest(key)?;
         let changes = self.changes(key, iteration.id)?;
         let wanted: Vec<_> = changes
@@ -324,13 +328,17 @@ impl Azure {
             .filter(|change| paths.contains(&change.path.as_str()))
             .cloned()
             .collect();
-        Ok(PullRequestFiles {
-            files: self.built(key, &iteration, &wanted)?,
-            next_cursor: None,
-            complete: changes.1,
-            changed_files: changes.0.len() as u64,
-            base: iteration.base,
-            head: iteration.head,
+        Ok(Latest {
+            files: PullRequestFiles {
+                files: self.built(key, &iteration, &wanted)?,
+                next_cursor: None,
+                complete: changes.1,
+                changed_files: changes.0.len() as u64,
+                base: iteration.base,
+                head: iteration.head,
+            },
+            iteration: iteration.id,
+            changes: wanted,
         })
     }
 
@@ -443,7 +451,16 @@ impl Azure {
     ) -> Result<PullRequestLabelCandidates, ForgeError> {
         let pr = self.pr(key);
         let applied = pr.labels()?;
-        let tags = pr.get(pr.project_path("/_apis/wit/tags"), "Tags");
+        let tags = self
+            .api
+            .send(
+                pr.authority(),
+                Request {
+                    version: api::PREVIEW,
+                    ..Request::get(pr.project_path("/_apis/wit/tags"), "Tags")
+                },
+            )
+            .and_then(|response| response.json::<Value>());
         let (tags, complete) = match tags {
             Ok(tags) => (tags["value"].as_array().cloned().unwrap_or_default(), true),
             Err(ForgeError {
@@ -594,7 +611,7 @@ impl Azure {
         })
     }
 
-    /// Attachments of the pull request's repository that the conversation names, read with the
+    /// Attachments anywhere in the organization that the conversation names, read with the
     /// organization's credential; anything else, avatars included, the client draws by its URL.
     fn media(
         &self,
@@ -951,19 +968,26 @@ impl Forge for Azure {
         comments: &[PullRequestReviewDraftComment],
     ) -> Outcome {
         self.drop_reads(key);
-        let files = if comments.is_empty() {
-            Vec::new()
+        let latest = if comments.is_empty() {
+            None
         } else {
             let paths: Vec<_> = comments
                 .iter()
                 .map(|comment| comment.path.as_str())
                 .collect();
             match self.files_at(key, &paths) {
-                Ok(files) => files.files,
+                Ok(latest) => Some(latest),
                 Err(error) => return Outcome::Rejected(error.rejection()),
             }
         };
-        let outcome = actions::submit_review(&self.pr(key), &files, verdict, head, body, comments);
+        let outcome = actions::submit_review(
+            &self.pr(key),
+            latest.as_ref(),
+            verdict,
+            head,
+            body,
+            comments,
+        );
         self.drop_reads(key);
         outcome
     }
@@ -977,7 +1001,7 @@ impl Forge for Azure {
         lines: (u32, u32),
     ) -> Result<Anchoring, ForgeError> {
         Ok(crate::forge::anchors::anchoring(
-            &self.files_at(key, &[path])?,
+            &self.files_at(key, &[path])?.files,
             head,
             path,
             side,
@@ -994,9 +1018,11 @@ impl Forge for Azure {
             .iter()
             .map(|comment| comment.path.as_str())
             .collect();
-        crate::forge::anchors::reanchor(self.files_at(key, &paths)?, comments, |revision, path| {
-            self.file_text(key, revision, path)
-        })
+        crate::forge::anchors::reanchor(
+            self.files_at(key, &paths)?.files,
+            comments,
+            |revision, path| self.file_text(key, revision, path),
+        )
     }
 
     /// The pull request with its statuses and policy evaluations.

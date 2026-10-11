@@ -205,6 +205,13 @@ impl Api {
     /// is the one `AZURE_DEVOPS_ORG` names, then az's signed-in account. `None` reads
     /// anonymously. One organization's token never goes to another.
     pub(super) fn credential(&self, authority: &str) -> Result<Option<Credential>, ForgeError> {
+        // Every request asks for its credential first, so no other authority is ever reached.
+        if HostKind::Azure.authority(authority).as_deref() != Ok(authority) {
+            return Err(error(
+                ForgeErrorKind::InvalidInput,
+                "not an Azure DevOps organization",
+            ));
+        }
         if !self.enabled(authority) {
             return Err(error(
                 ForgeErrorKind::HostDisabled,
@@ -576,6 +583,21 @@ mod tests {
         );
         assert_eq!(read(&named, "dev.azure.com/fabrikam"), env);
         assert_eq!(read(&named, "dev.azure.com/tailspin"), cli);
+        // A host that is no organization's never gets one, whatever the key carries.
+        for elsewhere in [
+            "dev.azure.com:x@evil.test",
+            "evil.test",
+            "dev.azure.com/Contoso",
+        ] {
+            assert_eq!(
+                named
+                    .credential(elsewhere)
+                    .map(|_| ())
+                    .map_err(|error| error.kind),
+                Err(ForgeErrorKind::InvalidInput),
+                "{elsewhere}"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

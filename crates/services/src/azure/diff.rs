@@ -12,6 +12,9 @@ pub(super) struct Change {
     pub(super) kind: agent::FileChangeKind,
     /// The file's blob at the head; `None` for a deleted file.
     pub(super) object: Option<String>,
+    /// Azure's id for the file across the pull request's pushes, which a thread on its lines
+    /// names.
+    pub(super) tracking: Option<u64>,
 }
 
 /// Azure writes paths from the repository root with a leading slash.
@@ -43,6 +46,7 @@ pub(super) fn change(entry: &Value) -> Option<Change> {
         .map(relative)
         .filter(|previous| *previous != path && kind == agent::FileChangeKind::Rename);
     Some(Change {
+        tracking: entry["changeTrackingId"].as_u64(),
         object: (kind != agent::FileChangeKind::Delete)
             .then(|| item["objectId"].as_str().map(str::to_ascii_lowercase))
             .flatten(),
@@ -172,6 +176,7 @@ mod tests {
     fn changes_read_as_files_with_hunks_between_their_texts() {
         let renamed = change(&json!({
             "changeType": "rename, edit",
+            "changeTrackingId": 4,
             "originalPath": "/src/old.rs",
             "item": {"path": "/src/new.rs", "objectId": "AB12"},
         }))
@@ -180,6 +185,7 @@ mod tests {
         assert_eq!(renamed.previous_path.as_deref(), Some("src/old.rs"));
         assert_eq!(renamed.kind, agent::FileChangeKind::Rename);
         assert_eq!(renamed.object.as_deref(), Some("ab12"));
+        assert_eq!(renamed.tracking, Some(4));
         let deleted = change(&json!({
             "changeType": "delete",
             "item": {"path": "/gone.txt", "objectId": "CD34"},

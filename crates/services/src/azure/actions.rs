@@ -65,14 +65,7 @@ impl Pr<'_> {
             .ok_or(Rejection::NoCredential)
     }
 
-    fn new_thread(&self, body: &str, context: Option<Value>, operation: &'static str) -> Outcome {
-        let mut thread = json!({
-            "comments": [{ "parentCommentId": 0, "content": body, "commentType": 1 }],
-            "status": 1,
-        });
-        if let Some(context) = context {
-            thread["threadContext"] = context;
-        }
+    fn new_thread(&self, thread: Value, operation: &'static str) -> Outcome {
         answered(self.write("POST", self.path("/threads"), Some(thread), operation))
     }
 
@@ -84,13 +77,9 @@ impl Pr<'_> {
         remove_credits: bool,
     ) -> Result<Outcome, Rejection> {
         let pr = self.at_head(at)?;
-        let mut options = json!({
-            "mergeStrategy": merge_strategy(method),
-            "deleteSourceBranch": pr["completionOptions"]["deleteSourceBranch"].as_bool().unwrap_or(false),
-        });
         // Rebasing keeps each commit's own message. Azure's page offers the title and the
-        // description as the message; one with agents' credits in it is sent without them.
-        if remove_credits && method != PullRequestMergeMethod::Rebase {
+        // description as the message, which is sent without agents' credits.
+        let message = (remove_credits && method != PullRequestMergeMethod::Rebase).then(|| {
             let mut message = format!(
                 "Merged PR {}: {}",
                 self.key.number,
@@ -102,11 +91,9 @@ impl Pr<'_> {
                 message.push_str("\n\n");
                 message.push_str(&description);
             }
-            let cleaned = crate::github::remove_agent_credits(&message);
-            if cleaned != message {
-                options["mergeCommitMessage"] = json!(cleaned);
-            }
-        }
+            crate::github::remove_agent_credits(&message)
+        });
+        let options = completion_options(&pr, method, message);
         if auto {
             let viewer = self.viewer_id()?;
             return Ok(
@@ -208,6 +195,71 @@ impl Pr<'_> {
     }
 }
 
+/// The completion options a merge or auto-complete sends: the ones the pull request holds, so
+/// the author's choices (deleting the source branch, completing work items) stay, with `method`
+/// and, when given, `message`. A policy bypass is never sent on the author's behalf, and the
+/// legacy `squashMerge` would contradict the strategy.
+fn completion_options(
+    pr: &Value,
+    method: PullRequestMergeMethod,
+    message: Option<String>,
+) -> Value {
+    let mut options = pr["completionOptions"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for dropped in ["bypassPolicy", "bypassReason", "squashMerge"] {
+        options.remove(dropped);
+    }
+    options.insert("mergeStrategy".into(), json!(merge_strategy(method)));
+    if let Some(message) = message {
+        options.insert("mergeCommitMessage".into(), json!(message));
+    }
+    Value::Object(options)
+}
+
+/// A thread opening with `body`, on no file's lines.
+fn thread(body: &str) -> Value {
+    json!({
+        "comments": [{ "parentCommentId": 0, "content": body, "commentType": 1 }],
+        "status": 1,
+    })
+}
+
+/// A thread on a pending comment's lines, compared at push `iteration` against the common
+/// commit (as Tcode's hunks are), on the file Azure tracks as `tracking`, so a read of it
+/// later anchors it at that push and knows it outdated after another.
+fn line_thread(
+    comment: &PullRequestReviewDraftComment,
+    files: &[PullRequestFile],
+    iteration: u64,
+    tracking: Option<u64>,
+) -> Value {
+    let (start, end) = match comment.side {
+        ReviewSide::New => ("rightFileStart", "rightFileEnd"),
+        ReviewSide::Old => ("leftFileStart", "leftFileEnd"),
+    };
+    // Offsets are columns from 1; the range ends after the last line's last character.
+    let end_offset =
+        line_length(files, &comment.path, comment.side, comment.end_line).unwrap_or(0) + 1;
+    let mut opened = thread(&comment.body);
+    opened["threadContext"] = json!({
+        "filePath": format!("/{}", comment.path),
+        start: { "line": comment.start_line, "offset": 1 },
+        end: { "line": comment.end_line, "offset": end_offset },
+    });
+    opened["pullRequestThreadContext"] = json!({
+        "iterationContext": {
+            "firstComparingIteration": iteration,
+            "secondComparingIteration": iteration,
+        },
+    });
+    if let Some(tracking) = tracking {
+        opened["pullRequestThreadContext"]["changeTrackingId"] = json!(tracking);
+    }
+    opened
+}
+
 /// An identity id as a path segment: Azure's are GUIDs.
 fn identity(id: &str) -> Result<&str, Rejection> {
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
@@ -235,7 +287,7 @@ pub(super) fn act(pr: &Pr<'_>, action: &PullRequestAction) -> Outcome {
                 if blank(body) {
                     return Err(Rejection::Invalid);
                 }
-                pr.new_thread(body, None, "Comment")
+                pr.new_thread(thread(body), "Comment")
             }
             // The path names the pull request, so Azure answers not found for another's thread.
             PullRequestAction::ReplyToThread { thread_id, body } => {
@@ -387,7 +439,7 @@ fn line_length(
 /// cut short is never an approval. One that stops part way is [`Outcome::Partial`].
 pub(super) fn submit_review(
     pr: &Pr<'_>,
-    files: &[PullRequestFile],
+    latest: Option<&super::Latest>,
     verdict: PullRequestReviewVerdict,
     at: &str,
     body: &str,
@@ -406,33 +458,30 @@ pub(super) fn submit_review(
     };
     let mut steps: Vec<Step> = Vec::new();
     for comment in comments {
+        let Some(latest) = latest else {
+            return Outcome::Rejected(Rejection::Failed);
+        };
+        let files = &latest.files.files;
         let lines = (comment.start_line, comment.end_line);
         if !crate::github::pull_request_actions::in_hunks(files, &comment.path, comment.side, lines)
         {
             return Outcome::Rejected(Rejection::Invalid);
         }
-        let (start, end) = match comment.side {
-            ReviewSide::New => ("rightFileStart", "rightFileEnd"),
-            ReviewSide::Old => ("leftFileStart", "leftFileEnd"),
-        };
-        // Offsets are columns from 1; the range ends after the last line's last character.
-        let end_offset =
-            line_length(files, &comment.path, comment.side, comment.end_line).unwrap_or(0) + 1;
-        let context = json!({
-            "filePath": format!("/{}", comment.path),
-            start: { "line": comment.start_line, "offset": 1 },
-            end: { "line": comment.end_line, "offset": end_offset },
-        });
-        let text = comment.body.clone();
+        let tracking = latest
+            .changes
+            .iter()
+            .find(|change| change.path == comment.path)
+            .and_then(|change| change.tracking);
+        let opened = line_thread(comment, files, latest.iteration, tracking);
         steps.push((
             vec![format!("{}:{}", comment.path, comment.end_line)],
-            Box::new(move || pr.new_thread(&text, Some(context), "ReviewComment")),
+            Box::new(move || pr.new_thread(opened, "ReviewComment")),
         ));
     }
     if !blank(body) {
         steps.push((
             vec!["summary".into()],
-            Box::new(move || pr.new_thread(body, None, "ReviewSummary")),
+            Box::new(move || pr.new_thread(thread(body), "ReviewSummary")),
         ));
     }
     if let Some((viewer, vote)) = voter {
@@ -462,5 +511,82 @@ mod tests {
         assert_eq!(vote(PullRequestReviewVerdict::Approve), Some(10));
         assert_eq!(vote(PullRequestReviewVerdict::RequestChanges), Some(-5));
         assert_eq!(vote(PullRequestReviewVerdict::Comment), None);
+    }
+
+    /// A line comment opens a thread at the push Tcode read, compared against the common
+    /// commit, on the file Azure tracks, ending after its last line's text.
+    #[test]
+    fn a_line_comment_names_the_push_and_the_file_it_was_written_on() {
+        let files = [PullRequestFile {
+            path: "src/lib.rs".into(),
+            previous_path: None,
+            kind: agent::FileChangeKind::Modify,
+            additions: 1,
+            deletions: 1,
+            patch: PullRequestPatch::Hunks("@@ -1,2 +1,2 @@\n keep\n-old\n+brand new\n".into()),
+        }];
+        let comment = PullRequestReviewDraftComment {
+            id: 1,
+            path: "src/lib.rs".into(),
+            side: ReviewSide::New,
+            start_line: 1,
+            end_line: 2,
+            body: "why?".into(),
+            revision: "h3".into(),
+            placed: true,
+        };
+        assert_eq!(
+            line_thread(&comment, &files, 3, Some(7)),
+            json!({
+                "comments": [{ "parentCommentId": 0, "content": "why?", "commentType": 1 }],
+                "status": 1,
+                "threadContext": {
+                    "filePath": "/src/lib.rs",
+                    "rightFileStart": { "line": 1, "offset": 1 },
+                    "rightFileEnd": { "line": 2, "offset": 10 },
+                },
+                "pullRequestThreadContext": {
+                    "iterationContext": { "firstComparingIteration": 3, "secondComparingIteration": 3 },
+                    "changeTrackingId": 7,
+                },
+            })
+        );
+    }
+
+    /// A merge keeps the completion options the pull request holds, the author's choices
+    /// included, with the method and the cleaned message Tcode sends; a policy bypass and the
+    /// legacy squash flag are never sent, and without a message the author's own stays.
+    #[test]
+    fn a_merge_keeps_the_authors_completion_options() {
+        let pr = json!({"completionOptions": {
+            "deleteSourceBranch": true,
+            "transitionWorkItems": true,
+            "mergeCommitMessage": "theirs",
+            "bypassPolicy": true,
+            "bypassReason": "hotfix",
+            "squashMerge": true,
+            "mergeStrategy": "squash",
+        }});
+        assert_eq!(
+            completion_options(
+                &pr,
+                PullRequestMergeMethod::Merge,
+                Some("Merged PR 3: x".into())
+            ),
+            json!({
+                "deleteSourceBranch": true,
+                "transitionWorkItems": true,
+                "mergeCommitMessage": "Merged PR 3: x",
+                "mergeStrategy": "noFastForward",
+            })
+        );
+        assert_eq!(
+            completion_options(&pr, PullRequestMergeMethod::Rebase, None)["mergeCommitMessage"],
+            "theirs"
+        );
+        assert_eq!(
+            completion_options(&json!({}), PullRequestMergeMethod::Squash, None),
+            json!({"mergeStrategy": "squash"})
+        );
     }
 }
