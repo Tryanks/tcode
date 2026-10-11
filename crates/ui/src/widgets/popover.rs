@@ -5,9 +5,7 @@ use gpui::{
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
     prelude::FluentBuilder as _,
 };
-use gpui::{
-    ClickEvent, Focusable as _, Role, SharedString, StatefulInteractiveElement, deferred, div, px,
-};
+use gpui::{Focusable as _, Role, SharedString, StatefulInteractiveElement, deferred, div, px};
 use gpui_base::StyledExt as _;
 use std::rc::Rc;
 
@@ -34,7 +32,7 @@ pub struct Popover {
 
 /// Builds the trigger; a sheet hands it the toggle it opens with.
 type TriggerBuilder = Box<dyn FnOnce(bool, Option<SheetToggle>, &Window, &App) -> AnyElement>;
-type SheetToggle = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+type SheetToggle = Rc<dyn Fn(&mut Window, &mut App)>;
 type ContentBuilder =
     Box<dyn FnOnce(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> AnyElement>;
 
@@ -104,11 +102,13 @@ impl Popover {
         self.trigger = Some(Box::new(move |open, toggle, _, _| {
             let is_open = trigger.is_open();
             let trigger = trigger.open(is_open || open);
-            // A sheet's trigger opens it itself, which gives it the press action assistive
-            // technology looks for.
+            // The sheet's press action is the trigger's own: GPUI's default one clicks the
+            // node's centre, which misses a trigger scrolled or clipped out of view.
             match toggle {
                 Some(toggle) => trigger
-                    .on_click(move |event, window, cx| toggle(event, window, cx))
+                    .on_a11y_action(gpui::accesskit::Action::Click, move |_, window, cx| {
+                        toggle(window, cx)
+                    })
                     .into_any_element(),
                 None => trigger.into_any_element(),
             }
@@ -239,18 +239,19 @@ impl Popover {
         let parent = window.current_view();
         let toggle: SheetToggle = Rc::new({
             let state = state.clone();
-            move |_, window, cx| {
-                crate::widgets::stop_click_propagation(window, cx);
+            move |window, cx| {
                 state.update(cx, |state, cx| state.toggle_open(window, cx));
                 cx.notify(parent);
             }
         });
         let mut root = div()
             .id(self.id)
-            // A trigger given with `trigger_with` leaves the click to this wrapper.
             .on_click({
                 let toggle = toggle.clone();
-                move |event, window, cx| toggle(event, window, cx)
+                move |_, window, cx| {
+                    crate::widgets::stop_click_propagation(window, cx);
+                    toggle(window, cx)
+                }
             })
             .when_some(self.trigger, |el, trigger| {
                 el.child(trigger(open, Some(toggle), window, cx))
