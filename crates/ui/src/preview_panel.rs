@@ -204,9 +204,7 @@ impl PreviewPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let url_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!("preview.url_placeholder"))
-        });
+        let url_input = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| {
                 // Native child views outlive GPUI layout nodes. Visibility
@@ -406,7 +404,9 @@ impl PreviewPanel {
             // Back / forward / reload drive a page. Without a backend they are
             // absent rather than present-but-dead.
             .children(self.history_controls(cx))
-            .child(div().flex_1().min_w_0().child(Input::new(&self.url_input)))
+            .child(div().flex_1().min_w_0().child(
+                Input::new(&self.url_input).placeholder(crate::tr!("preview.url_placeholder")),
+            ))
             // Compact: the address field is the row. Everything that acts *on*
             // the current URL goes into one overflow menu rather than squeezing
             // the field down to a word.
@@ -725,6 +725,38 @@ mod tests {
 
         host.shutdown_blocking().expect("stop host");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_address_placeholder(cx: &mut gpui::TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            PreviewPanel::new(store.clone(), window_state, window, cx)
+        });
+        crate::settings::assert_follows_language_switch(cx, "preview.url_placeholder", |cx| {
+            panel.read_with(cx, |panel, cx| {
+                let input = panel.url_input.read(cx);
+                input.presentation().placeholder().to_string()
+            })
+        });
     }
 
     #[test]

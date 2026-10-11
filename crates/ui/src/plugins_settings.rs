@@ -102,9 +102,7 @@ impl PluginsSettingsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!("providers.plugins.search"))
-        });
+        let search = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(
                 &store,
@@ -1027,7 +1025,11 @@ impl PluginsSettingsPanel {
             .w_full()
             .gap_2()
             .when(!none_available, |col| {
-                col.child(Input::new(&self.search).small())
+                col.child(
+                    Input::new(&self.search)
+                        .placeholder(crate::tr!("providers.plugins.search"))
+                        .small(),
+                )
             })
             .child(
                 material::group(cx)
@@ -1846,6 +1848,31 @@ mod tests {
         catalog: ProviderPluginCatalog,
         cx: &mut TestAppContext,
     ) -> (Host, &mut VisualTestContext) {
+        let host = plugins_host(settings, catalog, cx);
+        let window_state = cx.new(|_| {
+            let mut state = WindowState::new(false);
+            state.pending_settings_section = Some("plugins".into());
+            state
+        });
+        let page_store = host.store.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let page = cx.new(|cx| SettingsPage::new(page_store, window_state, window, cx));
+            gpui_base::Root::new(page, window, cx)
+        });
+        cx.simulate_resize(size(px(1000.), px(1400.)));
+        cx.run_until_parked();
+        host.store
+            .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        (host, cx)
+    }
+
+    /// A host whose replicated state holds `settings` and `catalog`.
+    fn plugins_host(
+        settings: Settings,
+        catalog: ProviderPluginCatalog,
+        cx: &mut TestAppContext,
+    ) -> Host {
         cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -1864,29 +1891,12 @@ mod tests {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| {
-            let mut state = WindowState::new(false);
-            state.pending_settings_section = Some("plugins".into());
-            state
-        });
-        let page_store = store.clone();
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let page = cx.new(|cx| SettingsPage::new(page_store, window_state, window, cx));
-            gpui_base::Root::new(page, window, cx)
-        });
-        cx.simulate_resize(size(px(1000.), px(1400.)));
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        draw(cx);
-        (
-            Host {
-                outgoing,
-                incoming,
-                store,
-                _pump: pump,
-            },
-            cx,
-        )
+        Host {
+            outgoing,
+            incoming,
+            store,
+            _pump: pump,
+        }
     }
 
     fn send_settings(incoming: &async_channel::Sender<String>, settings: Settings) {
@@ -1957,6 +1967,35 @@ mod tests {
             ],
             diagnostics: Vec::new(),
         }
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_search_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        let mut uninstalled = alpha();
+        uninstalled.installations.clear();
+        let host = plugins_host(claude_managed(), catalog(vec![uninstalled], Vec::new()), cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let store = host.store.clone();
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            PluginsSettingsPanel::new(store, window_state, ScrollHandle::new(), window, cx)
+        });
+        // The first frame shows the page, which lists the switched-on providers.
+        draw(cx);
+        cx.run_until_parked();
+        host.store
+            .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        panel.update(cx, |panel, cx| {
+            panel.view = View::Available;
+            cx.notify();
+        });
+        crate::settings::assert_follows_language_switch(cx, "providers.plugins.search", |cx| {
+            panel.read_with(cx, |panel, cx| {
+                let search = panel.search.read(cx);
+                search.presentation().placeholder().to_string()
+            })
+        });
     }
 
     /// The host decides which actions an entry offers in its context; the

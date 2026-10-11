@@ -10,6 +10,7 @@ use components::images::PendingImage;
 use components::voice::Voice;
 use model::*;
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -111,11 +112,11 @@ fn auto_grow_rows(compact: bool) -> (usize, usize) {
     if compact { (2, 5) } else { (1, 8) }
 }
 
-fn draft_placeholder(compact: bool) -> String {
+fn draft_placeholder(compact: bool) -> Cow<'static, str> {
     if compact {
-        crate::tr!("mobile.message").into_owned()
+        crate::tr!("mobile.message")
     } else {
-        crate::tr!("composer.placeholder").into_owned()
+        crate::tr!("composer.placeholder")
     }
 }
 
@@ -153,9 +154,6 @@ pub struct Composer {
     /// opens it; a non-blocking one arrives closed so it never takes the
     /// composer's place.
     ui_expanded: bool,
-    /// The placeholder text last applied to the input (so it is only re-set —
-    /// which notifies — when it actually changes).
-    applied_placeholder: String,
     /// Bumped by `/model` so the model-picker popover re-opens (a fresh popover
     /// instance, keyed by this token, starts open).
     model_picker_token: u64,
@@ -253,8 +251,6 @@ impl Composer {
         }
         self.compact = compact;
         let (min_rows, max_rows) = auto_grow_rows(compact);
-        // The placeholder has one owner in `render`; nudge it to re-apply there.
-        self.applied_placeholder.clear();
         self.input
             .update(cx, |input, cx| input.set_auto_grow(min_rows, max_rows, cx));
         cx.notify();
@@ -281,22 +277,11 @@ impl Composer {
                 // one: a wide tablet still types on glass, and a desktop window
                 // dragged narrow still has a hardware Enter key.
                 .submit_on_enter(!gpui_base::is_mobile())
-                .placeholder(draft_placeholder(compact))
         });
-        let model_search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!("composer.search_models"))
-        });
-        let user_input_custom = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .rows(1)
-                .submit_on_enter(true)
-                .placeholder(crate::tr!("userinput.custom_placeholder"))
-        });
-        let fallback_review_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(1, 6)
-                .placeholder(crate::tr!("fallback.review_placeholder"))
-        });
+        let model_search = cx.new(|cx| InputState::new(window, cx));
+        let user_input_custom =
+            cx.new(|cx| TextareaState::new(window, cx).rows(1).submit_on_enter(true));
+        let fallback_review_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6));
 
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
@@ -395,7 +380,6 @@ impl Composer {
             ui_selections: std::collections::HashMap::new(),
             ui_dismissed_request_id: None,
             ui_expanded: false,
-            applied_placeholder: crate::tr!("composer.placeholder").into_owned(),
             model_picker_token: 0,
             control_width: Rc::new(Cell::new(None)),
             prev_seen_width: None,
@@ -1136,18 +1120,12 @@ impl Render for Composer {
         });
 
         let desired_placeholder = if readonly {
-            crate::tr!("chat.subagent_readonly").into_owned()
+            crate::tr!("chat.subagent_readonly")
         } else if self.compact && !self.interactive(cx) {
-            crate::tr!("mobile.offline_message").into_owned()
+            crate::tr!("mobile.offline_message")
         } else {
             draft_placeholder(self.compact)
         };
-        if self.applied_placeholder != desired_placeholder {
-            self.applied_placeholder = desired_placeholder.clone();
-            self.input.update(cx, |state, cx| {
-                state.set_placeholder(desired_placeholder, window, cx)
-            });
-        }
 
         let user_input = self.pending_user_input(cx);
         let fallback_block = self
@@ -1335,6 +1313,7 @@ impl Render for Composer {
             // Match sent-message typography while composing.
             .child(
                 Textarea::new(&self.input)
+                    .placeholder(desired_placeholder)
                     .disabled(readonly)
                     .appearance(false)
                     .text_size(px(13.5))
@@ -1542,6 +1521,34 @@ mod replica_tests {
         click(cx, "permission-row-0");
         cx.run_until_parked();
         assert_eq!(sent(), [(id, Some(serde_json::Value::String(chosen)))]);
+    }
+
+    #[gpui::test]
+    fn switching_language_relocalizes_the_model_search_placeholder(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
+        let (store, incoming, _outgoing, status) = attach(cx);
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        cx.update(|window, cx| _ = window.draw(cx));
+        let picker = cx.debug_bounds("model-picker").expect("model picker");
+        cx.simulate_click(picker.center(), Modifiers::default());
+        crate::settings::assert_follows_language_switch(cx, "composer.search_models", |cx| {
+            composer.read_with(cx, |composer, cx| {
+                let search = composer.model_search.read(cx);
+                search.presentation().placeholder().to_string()
+            })
+        });
     }
 
     #[gpui::test]
