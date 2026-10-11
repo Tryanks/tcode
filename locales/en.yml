@@ -1354,7 +1354,7 @@ hosts:
   pair_again: "Pair again"
   local:
     unavailable: "Could not start: %{reason}"
-    default_settings: "Its settings could not be read, so the default language and theme are in use."
+    default_settings: "%{reason}. Its settings could not be read, so the default language and theme are in use."
     needs_migration: "Its data has to be upgraded first. Quit Tcode and open it again."
     retry: "Retry"
   invite:

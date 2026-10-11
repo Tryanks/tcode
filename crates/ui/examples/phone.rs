@@ -86,6 +86,7 @@ fn main() {
                         initial_pairing_error: None,
                         client_host: Some(host),
                         local: local_transport,
+                        local_failure: None,
                         seed_blocking: local,
                         restore_navigation: true,
                     },

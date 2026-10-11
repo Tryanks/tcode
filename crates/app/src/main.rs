@@ -313,8 +313,9 @@ enum LocalStart {
 /// and again on Retry. The error is what the window shows instead of that
 /// host.
 fn start_local_host() -> Result<LocalStart, String> {
-    let store = SessionStore::open_host(None)
-        .map_err(|error| format!("{error}. {}", tcode_ui::tr!("hosts.local.default_settings")))?;
+    let store = SessionStore::open_host(None).map_err(|error| {
+        tcode_ui::tr!("hosts.local.default_settings", reason = error.to_string()).into_owned()
+    })?;
     if store.needs_migration().map_err(|error| error.to_string())? {
         return Ok(LocalStart::Migrate(store));
     }
@@ -611,18 +612,11 @@ fn main() {
                     .map(|kernel| kernel.own(&data_dir, cx))
                     .unwrap_or_default();
                 let owned = Rc::new(RefCell::new(kernel.clone()));
-                // The launch's own failure is the first answer; asking again
-                // is a Retry.
-                let failure = std::cell::Cell::new(failure);
                 let local: tcode_ui::attachment::LocalTransport = Rc::new(move |cx| {
                     if let Some(kernel) = owned.borrow().as_ref() {
                         return Ok(kernel.transport());
                     }
-                    let started = match failure.take() {
-                        Some(reason) => Err(reason),
-                        None => start_local_host(),
-                    };
-                    match started? {
+                    match start_local_host()? {
                         LocalStart::Started(kernel) => {
                             kernel.own(&data_dir, cx);
                             let transport = kernel.transport();
@@ -648,6 +642,7 @@ fn main() {
                         setup: ShellSetup {
                             client_host: Some(native_client.clone()),
                             local: Some(local),
+                            local_failure: failure,
                             initial: Some(initial_target),
                             initial_pairing_error: None,
                             // Only here: bootstrap applies locale and theme from the
@@ -737,7 +732,10 @@ fn main() {
                         Ok(())
                     });
                 }
-                Err(reason) => launch(cx, Err(reason)),
+                Err(reason) => {
+                    log::error!("the local host did not start: {reason}");
+                    launch(cx, Err(reason))
+                }
             }
         });
 }

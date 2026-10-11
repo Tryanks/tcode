@@ -1019,18 +1019,15 @@ impl RemotePanel {
     fn on_disconnect(&mut self, _: &DisconnectHost, window: &mut Window, cx: &mut Context<Self>) {
         // Leaving a host is an explicit act; the saved record stays. A client
         // with a host of its own falls back to it rather than to nothing, and
-        // to nothing when that host does not start. Detaching updates this
-        // panel, so it runs once this listener has returned.
-        let local = cx
+        // to nothing when that host does not start.
+        crate::shell::detach_current(cx);
+        if cx
             .try_global::<ClientAttachment>()
-            .is_some_and(ClientAttachment::can_attach_local);
-        window.defer(cx, move |window, cx| {
-            crate::shell::detach_current(cx);
-            if local {
-                let switch = cx.global::<ClientAttachment>().switcher();
-                switch(AttachmentTarget::Local, window, cx);
-            }
-        });
+            .is_some_and(ClientAttachment::can_attach_local)
+        {
+            let switch = cx.global::<ClientAttachment>().switcher();
+            switch(AttachmentTarget::Local, window, cx);
+        }
         cx.notify();
     }
 

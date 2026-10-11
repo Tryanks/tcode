@@ -1347,7 +1347,7 @@ hosts:
   pair_again: "重新配对"
   local:
     unavailable: "无法启动：%{reason}"
-    default_settings: "无法读取本机设置，当前使用默认语言和主题。"
+    default_settings: "%{reason}。无法读取本机设置，当前使用默认语言和主题。"
     needs_migration: "需要先升级本机数据。请退出 Tcode 后重新打开。"
     retry: "重试"
   invite:
