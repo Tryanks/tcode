@@ -43,8 +43,12 @@ fn main() {
                     tcode_services::store::data_dir().expect("data directory"),
                 )
                 .expect("open local host");
-                let host = tcode_runtime::pipe::spawn_host(store, Default::default())
-                    .expect("start local host");
+                let mut services = tcode_runtime::pipe::HostServices::default();
+                if let Err(error) = services.start_mcp_servers(true) {
+                    eprintln!("phone: MCP servers unavailable: {error}");
+                }
+                let host =
+                    tcode_runtime::pipe::spawn_host(store, services).expect("start local host");
                 let mux = tcode_traverse::HostMux::new(host.to_host, host.from_host);
                 Rc::new(move || {
                     let connection = mux.attach(tcode_protocol::Principal::Full);

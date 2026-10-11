@@ -231,6 +231,10 @@ fn strip_one_trailing_newline(text: &str) -> &str {
 }
 
 fn join_reconstructed_lines(lines: &[String], template: &str) -> String {
+    // No lines is an empty text, not one blank line: a new file's old side.
+    if lines.is_empty() {
+        return String::new();
+    }
     let newline = if template.contains("\r\n") {
         "\r\n"
     } else {
@@ -976,6 +980,11 @@ mod tests {
                 Some("one\ntwo\nthree\nfour\nold value\nsix\nseven\neight\nnine\nten\n"),
             ),
             ("alpha\nbeta\n", "+alpha\n+beta", Some("")),
+            (
+                "pub struct Cart;\n\npub struct Item;\n",
+                "@@ -0,0 +1,3 @@\n+pub struct Cart;\n+\n+pub struct Item;\n",
+                Some(""),
+            ),
             (
                 "before\nnew one\nnew two\nafter\n",
                 "-old one\n-old two\n+new one\n+new two",

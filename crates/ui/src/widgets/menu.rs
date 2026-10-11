@@ -67,6 +67,7 @@ enum MenuItem {
     Label(SharedString),
     Item {
         label: Option<SharedString>,
+        icon: Option<IconName>,
         render: Option<ItemRenderer>,
         action: Box<dyn Action>,
         disabled: bool,
@@ -114,12 +115,34 @@ impl PopupMenu {
     ) -> Self {
         self.items.push(MenuItem::Item {
             label: Some(label.into()),
+            icon: None,
             render: None,
             action,
             disabled: !enable,
             checked: false,
         });
         self
+    }
+    pub fn menu_with_icon(
+        self,
+        label: impl Into<SharedString>,
+        icon: IconName,
+        action: Box<dyn Action>,
+    ) -> Self {
+        self.menu_with_icon_and_enable(label, icon, action, true)
+    }
+    pub fn menu_with_icon_and_enable(
+        self,
+        label: impl Into<SharedString>,
+        icon: IconName,
+        action: Box<dyn Action>,
+        enable: bool,
+    ) -> Self {
+        let mut menu = self.menu_with_enable(label, action, enable);
+        if let Some(MenuItem::Item { icon: slot, .. }) = menu.items.last_mut() {
+            *slot = Some(icon);
+        }
+        menu
     }
     pub fn menu_with_check(
         mut self,
@@ -129,6 +152,7 @@ impl PopupMenu {
     ) -> Self {
         self.items.push(MenuItem::Item {
             label: Some(label.into()),
+            icon: None,
             render: None,
             action,
             disabled: false,
@@ -143,6 +167,7 @@ impl PopupMenu {
     {
         self.items.push(MenuItem::Item {
             label: None,
+            icon: None,
             render: Some(Rc::new(move |window, cx| {
                 builder(window, cx).into_any_element()
             })),
@@ -341,6 +366,7 @@ impl Render for PopupMenu {
                 }
                 MenuItem::Item {
                     label,
+                    icon,
                     render,
                     action: _,
                     disabled,
@@ -354,6 +380,7 @@ impl Render for PopupMenu {
                             .id(("menu-item", index))
                             .debug_selector(move || format!("menu-item-{index}"))
                             .role(Role::MenuItem)
+                            .when_some(label.clone(), |el, label| el.aria_label(label))
                             .flex()
                             .items_center()
                             .gap_2()
@@ -370,8 +397,13 @@ impl Render for PopupMenu {
                                         this.choose(index, window, cx)
                                     }))
                             })
-                            .when(*checked, |el| el.child(Icon::new(IconName::Check).xsmall()))
-                            .when(!*checked, |el| el.child(div().w_4()))
+                            .child(div().flex_none().w_4().flex().justify_center().children(
+                                match (*checked, icon.clone()) {
+                                    (true, _) => Some(Icon::new(IconName::Check).xsmall()),
+                                    (false, Some(icon)) => Some(Icon::new(icon).small()),
+                                    (false, None) => None,
+                                },
+                            ))
                             .when_some(label.clone(), |el, label| el.child(label))
                             .when_some(content, |el, content| el.child(content)),
                     );
@@ -395,6 +427,7 @@ fn menu_popover<T>(
     trigger: T,
     button: MouseButton,
     builder: MenuBuilder,
+    touch: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement
@@ -420,7 +453,10 @@ where
             if let Some(menu) = menu_state.read(cx).menu.clone() {
                 return menu;
             }
-            let menu = PopupMenu::build(window, cx, |menu, window, cx| builder(menu, window, cx));
+            let menu = PopupMenu::build(window, cx, |mut menu, window, cx| {
+                menu.touch = touch;
+                builder(menu, window, cx)
+            });
             // A builder can decide there is nothing to offer (e.g. a
             // right-click on non-link Markdown text): close the popover
             // instead of presenting an empty strip.
@@ -645,6 +681,7 @@ pub trait DropdownMenu: InteractiveElement + gpui_base::Selectable + IntoElement
             id,
             trigger: self,
             builder: Rc::new(builder),
+            touch: false,
         }
     }
 }
@@ -655,6 +692,13 @@ pub struct DropdownMenuPopover<T: IntoElement + 'static> {
     id: ElementId,
     trigger: T,
     builder: MenuBuilder,
+    touch: bool,
+}
+impl<T: IntoElement + 'static> DropdownMenuPopover<T> {
+    pub fn touch(mut self, touch: bool) -> Self {
+        self.touch = touch;
+        self
+    }
 }
 impl<T: IntoElement + 'static> RenderOnce for DropdownMenuPopover<T> {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -663,6 +707,7 @@ impl<T: IntoElement + 'static> RenderOnce for DropdownMenuPopover<T> {
             self.trigger,
             MouseButton::Left,
             self.builder,
+            self.touch,
             window,
             cx,
         )
@@ -717,6 +762,36 @@ mod tests {
         let menu = right_click(cx, point(px(380.), px(50.)));
         assert!(menu.right() <= px(393. - 8.), "{menu:?}");
         assert_eq!(menu.top(), px(50.));
+    }
+
+    /// A phone row's "more" button: a dropdown opened by touch.
+    struct MoreMenu;
+    impl Render for MoreMenu {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().pt(px(200.)).child(
+                crate::widgets::Button::new("more")
+                    .label("More")
+                    .debug_selector(|| "more-trigger".into())
+                    .dropdown_menu(|menu, _, _| {
+                        menu.menu_with_icon("Copy link", IconName::Copy, Box::new(Cancel))
+                    })
+                    .touch(true),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_touch_dropdown_menu_has_touch_sized_rows(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| MoreMenu);
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("more-trigger").unwrap().center();
+        cx.simulate_click(trigger, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("menu-item-0").expect("menu opens");
+        assert!(row.size.height >= px(44.), "{row:?}");
     }
 
     /// A menu fed one row per project, like the sidebar's project filter.

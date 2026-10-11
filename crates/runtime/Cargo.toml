@@ -12,6 +12,7 @@ async-channel = "2"
 base64 = "0.23"
 computer-use-mcp = { path = "../computer-use-mcp" }
 log = "0.4"
+mcp-host = { path = "../mcp-host" }
 orchestrate-mcp = { path = "../orchestrate-mcp" }
 preview-mcp = { path = "../preview-mcp" }
 pull-request-mcp = { path = "../pull-request-mcp" }
@@ -29,6 +30,5 @@ uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 chrono = "0.4"
 filetime = "0.2"
-mcp-host = { path = "../mcp-host" }
 tcode-services = { path = "../services", features = ["test-support"] }
 tcode-traverse = { path = "../traverse", default-features = false }

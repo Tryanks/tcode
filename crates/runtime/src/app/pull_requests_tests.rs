@@ -932,33 +932,36 @@ fn registered_tools_prefix_each_turn_except_a_native_command() {
     }
 }
 
+/// A host started the way every composition root starts one discloses the tools to each client,
+/// for the providers that receive them.
 #[test]
 fn the_agent_tools_are_disclosed_before_the_first_turn() {
     let store = TestStore::new("tcode-pr-tools-disclosed");
-    let mut cx = TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    let mut host = mcp_host::Host::bind().unwrap();
-    let server = pull_request_mcp::start(&mut host);
-    state.update(&mut cx, |state, cx| {
-        state.pump_pull_request_requests(Some(server), cx)
-    });
+    let mut services = crate::pipe::HostServices::default();
+    services.start_mcp_servers(false).unwrap();
+    let host = crate::pipe::spawn_host((*store).clone(), services).unwrap();
     for (provider, disclosed) in [(ProviderKind::ClaudeCode, true), (ProviderKind::Pi, false)] {
-        let tools = state.update(&mut cx, |state, _| {
+        let tools = smol::block_on(host.update_state_for_test(move |state, _| {
             let meta = SessionMeta::new(provider, PathBuf::from("/tmp/synthetic-checkout"), None);
             let id = meta.id.clone();
             state.sessions.push(meta.clone());
-            state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+            state
+                .residents
+                .live
+                .insert(id.clone(), ActiveSession::new(meta, false, Vec::new()));
             state
                 .session_status_snapshot(&id)
                 .unwrap()
                 .pull_request_tools
-        });
+        }))
+        .unwrap();
         assert_eq!(
             tools.is_some(),
             disclosed,
             "{provider:?}: shown exactly when its provider would receive the tools"
         );
     }
+    host.shutdown_blocking().unwrap();
 }
 
 /// The tools a thread was registered with keep the hosts they named, so what the agent sees
