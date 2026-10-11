@@ -122,6 +122,8 @@ markdown:
 sidebar:
   failed: "失败"
   show_more_settled: "再显示 %{count} 个"
+  show_more: "显示更多"
+  show_less: "收起"
   active_empty: "没有进行中的对话。已收尾的对话在下方。"
   failed_tooltip: "上一轮运行失败"
   ctx_settle: "收尾对话"

@@ -121,6 +121,8 @@ markdown:
   mermaid_diagram: "Mermaid diagram"
 sidebar:
   show_more_settled: "Show %{count} more"
+  show_more: "Show more"
+  show_less: "Show less"
   active_empty: "Nothing active. Settled threads are below."
   failed: "Failed"
   failed_tooltip: "The last turn failed"
