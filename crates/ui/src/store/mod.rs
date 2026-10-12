@@ -1356,6 +1356,17 @@ impl WorkspaceStore {
                     return;
                 }
                 let thread = self.threads.entry(session_id.clone()).or_default();
+                let retain_timeline = records.is_empty()
+                    && thread.total_turns.is_some()
+                    && *from != 0
+                    && thread
+                        .history
+                        .as_ref()
+                        .is_some_and(|held| held.end == *from)
+                    && self
+                        .session_replica
+                        .as_ref()
+                        .is_some_and(|(id, _)| id == session_id);
                 thread.total_turns = None;
                 let held = &mut thread.history;
                 match held {
@@ -1388,8 +1399,14 @@ impl WorkspaceStore {
                     .get_mut(session_id)
                     .expect("snapshot thread")
                     .total_turns = Some(*total_turns as usize);
-                let mut timeline = self.fold_held_records(session_id);
                 self.baseline_topics.insert(envelope.topic.clone());
+                if retain_timeline {
+                    let timeline = &self.session_replica.as_ref().expect("retained timeline").1;
+                    self.session_turn_offset =
+                        (*total_turns as usize).saturating_sub(timeline.turns.len());
+                    return;
+                }
+                let mut timeline = self.fold_held_records(session_id);
                 self.session_turn_offset =
                     (*total_turns as usize).saturating_sub(timeline.turns.len());
                 self.settle_running_turn(&mut timeline);
