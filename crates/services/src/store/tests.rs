@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use agent::{ProviderCommand, ProviderCommandKind, TurnStatus};
+use tcode_core::project::SettledOverride;
 
 use std::sync::atomic::AtomicBool;
 
@@ -59,7 +60,7 @@ const ORPHAN_LOG: &[u8] =
 
 /// `sessions.json` in the current object schema, with one session that
 /// carries fields older builds wrote and this one dropped, and one that has
-/// no project yet.
+/// no project yet and was settled before settling recorded an override.
 fn legacy_index() -> serde_json::Value {
     serde_json::json!({
         "projects": [
@@ -74,7 +75,7 @@ fn legacy_index() -> serde_json::Value {
             },
             {
                 "id": "empty", "title": "Empty", "provider": "claude_code",
-                "cwd": "/work/beta", "created_at": 2, "updated_at": 20
+                "cwd": "/work/beta", "created_at": 2, "updated_at": 20, "settled_at": 15
             }
         ]
     })
@@ -130,6 +131,10 @@ fn assert_fixture_migrated(store: &SessionStore, root: &Path) {
     let mixed = &file.sessions[0];
     assert_eq!(mixed.title, "Mixed");
     assert_eq!(mixed.archived_at, None);
+    assert_eq!(mixed.settled_override, None);
+    let empty = &file.sessions[1];
+    assert_eq!(empty.settled_at, Some(15));
+    assert_eq!(empty.settled_override, Some(SettledOverride::Settled));
 
     assert_eq!(store.read_event_log("mixed").unwrap(), MIXED_LOG);
     assert_eq!(store.read_event_log("orphan").unwrap(), ORPHAN_LOG);
