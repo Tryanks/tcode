@@ -399,6 +399,27 @@ fn key() -> PullRequestKey {
     PullRequestKey::new("github.com", "sample/project", 1)
 }
 
+fn snapshot(state: PullRequestState) -> PullRequestSnapshot {
+    PullRequestSnapshot {
+        state,
+        title: "Change".into(),
+        head_branch: "change".into(),
+        base_branch: "main".into(),
+        is_draft: false,
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        synced_at: 1,
+        closed_at: None,
+        merged_at: None,
+        author: None,
+        additions: Some(0),
+        deletions: Some(0),
+        changed_files: Some(0),
+        review_decision: None,
+        checks_state: None,
+        mergeability: Default::default(),
+    }
+}
+
 #[test]
 fn rate_limited_passes_wake_nobody_and_end_nothing() {
     let mut harness = Harness::new("tcode-watch-rate-limit");
@@ -458,26 +479,60 @@ fn eight_failed_reads_end_the_watch_with_a_notice_delivered_before_it_ends() {
 }
 
 #[test]
-fn closed_ends_with_a_notice_and_merged_ends_silently() {
-    let mut harness = Harness::new("tcode-watch-terminal");
-    harness.host().state = "CLOSED";
+fn a_watch_whose_first_pass_finds_its_pull_request_closed_or_merged_wakes_once() {
+    for (state, text, notice) in [
+        (
+            "CLOSED",
+            "Pull request #1 (https://github.com/sample/project/pull/1) was closed, so Tcode stopped watching it. Call watch_pull_request if it reopens.",
+            WatchNotice::Closed,
+        ),
+        (
+            "MERGED",
+            "Pull request #1 (https://github.com/sample/project/pull/1) was merged, so Tcode stopped watching it.",
+            WatchNotice::Merged,
+        ),
+    ] {
+        let mut harness = Harness::new("tcode-watch-terminal");
+        harness.host().state = state;
+        harness.watch_thread("thread", START);
+        harness.pass();
+        let (delivery, delivered) = harness.delivered();
+        assert_eq!(delivered, text);
+        assert_eq!(harness.notices(), [notice]);
+        harness.accept(delivery);
+        assert_eq!(harness.watch("thread"), None);
+        harness.pass();
+        assert!(harness.commands.is_empty(), "{state} wakes the thread once");
+    }
+}
+
+#[test]
+fn a_merge_the_sync_records_wakes_the_watching_thread_once_and_ends_the_watch() {
+    let mut harness = Harness::new("tcode-watch-merged");
     harness.watch_thread("thread", START);
+    harness.pass();
+    assert!(harness.commands.is_empty());
+    harness.host().state = "MERGED";
+    harness.state.update(&mut harness.cx, |state, cx| {
+        let mut meta = state.find_meta("thread").unwrap();
+        meta.pull_requests[0].snapshot = Some(snapshot(PullRequestState::Merged));
+        state.save_pull_request_meta(meta, cx);
+    });
+    harness.notices();
     harness.pass();
     let (delivery, text) = harness.delivered();
     assert_eq!(
         text,
-        "Pull request #1 (https://github.com/sample/project/pull/1) was closed, so Tcode stopped watching it. Call watch_pull_request if it reopens."
+        "Pull request #1 (https://github.com/sample/project/pull/1) was merged, so Tcode stopped watching it."
     );
-    assert_eq!(harness.notices(), [WatchNotice::Closed]);
+    assert_eq!(harness.notices(), [WatchNotice::Merged]);
     harness.accept(delivery);
     assert_eq!(harness.watch("thread"), None);
-
-    harness.host().state = "MERGED";
-    harness.watch_thread("merged", START);
     harness.pass();
-    assert_eq!(harness.watch("merged"), None);
-    assert!(harness.notices().is_empty());
-    assert!(harness.commands.is_empty(), "a merge wakes nobody");
+    assert!(
+        harness.commands.is_empty(),
+        "the merge wakes the thread once"
+    );
 }
 
 #[test]
@@ -945,24 +1000,6 @@ fn agent_starts_are_refused_where_the_parent_owns_the_pull_request_or_it_merged(
                 cx,
             )
         })
-    };
-    let snapshot = |state| PullRequestSnapshot {
-        state,
-        title: "Change".into(),
-        head_branch: "change".into(),
-        base_branch: "main".into(),
-        is_draft: false,
-        updated_at: "2026-01-01T00:00:00Z".into(),
-        synced_at: 1,
-        closed_at: None,
-        merged_at: None,
-        author: None,
-        additions: Some(0),
-        deletions: Some(0),
-        changed_files: Some(0),
-        review_decision: None,
-        checks_state: None,
-        mergeability: Default::default(),
     };
     for (edit, refusal) in [
         (

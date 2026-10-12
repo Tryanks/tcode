@@ -134,7 +134,8 @@ pub use wire::{
 // Unreleased: thread metadata carries branch_pull_request, the pull request
 // discovery found on the thread's checkout branch, shown without a link; the
 // pull request source created becomes opened, and links stored as created,
-// which branch discovery made, are dropped as metadata is read.
+// which branch discovery made, are dropped as metadata is read. The
+// PullRequestWatch toast's notice gains merged.
 pub const PROTOCOL_VERSION: u32 = 11;
 
 #[cfg(test)]

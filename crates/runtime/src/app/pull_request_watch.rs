@@ -202,15 +202,32 @@ impl AppState {
                     undelivered.push((meta.id.clone(), link.key.clone(), wake.clone()));
                     continue;
                 }
-                // A merged pull request cannot reopen; settled threads and subagents hold no watch.
+                // Settled threads and subagents hold no watch. A merged pull request cannot
+                // reopen, so its watch ends with the merge as its last wake.
+                if meta.is_settled() || meta.parent_session_id.is_some() {
+                    ending.push((
+                        meta.id.clone(),
+                        link.key.clone(),
+                        watch.started_at.clone(),
+                        None,
+                    ));
+                    continue;
+                }
                 if link
                     .snapshot
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.state == PullRequestState::Merged)
-                    || meta.is_settled()
-                    || meta.parent_session_id.is_some()
                 {
-                    ending.push((meta.id.clone(), link.key.clone(), watch.started_at.clone()));
+                    let last = (
+                        watch::merged_message(link.key.number, &link.url),
+                        WatchNotice::Merged,
+                    );
+                    ending.push((
+                        meta.id.clone(),
+                        link.key.clone(),
+                        watch.started_at.clone(),
+                        Some(last),
+                    ));
                     continue;
                 }
                 let target = Target {
@@ -245,8 +262,8 @@ impl AppState {
         watches.last_reads.retain(|key, _| present.contains(key));
         watches.failures.retain(|key, _| present.contains(key));
         watches.tails.retain(|key, _| present.contains(key));
-        for (thread, key, started_at) in ending {
-            self.record_pull_request_watch(&thread, &key, &started_at, None, None, cx);
+        for (thread, key, started_at, last) in ending {
+            self.record_pull_request_watch(&thread, &key, &started_at, None, last, cx);
         }
         for (thread, key, wake) in undelivered {
             self.deliver_pull_request_wake(&thread, &key, &wake, cx);
@@ -428,19 +445,23 @@ impl AppState {
         if detail.state != PullRequestState::Open {
             self.pull_request_watches.last_reads.remove(&key);
             for target in &targets {
-                // Merged ends silently: the badge turning merged is the news.
-                let last = (detail.state == PullRequestState::Closed).then(|| {
+                let last = if detail.state == PullRequestState::Closed {
                     (
                         watch::closed_message(key.1.number, &target.url),
                         WatchNotice::Closed,
                     )
-                });
+                } else {
+                    (
+                        watch::merged_message(key.1.number, &target.url),
+                        WatchNotice::Merged,
+                    )
+                };
                 self.record_pull_request_watch(
                     &target.thread,
                     &key.1,
                     &target.started_at,
                     None,
-                    last,
+                    Some(last),
                     cx,
                 );
             }
