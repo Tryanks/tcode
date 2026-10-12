@@ -822,9 +822,17 @@ impl HostLink {
             }
         }
         drop(current);
-        if state.is_connected() && !previous.is_connected() {
-            // The store's acknowledged cursor is authoritative even when a transport
-            // has already replayed an older line during its own handshake.
+        let restores_subscriptions = match &state {
+            ConnectionState::Syncing { .. } => !matches!(previous, ConnectionState::Syncing { .. }),
+            ConnectionState::Connected { .. } => !matches!(
+                previous,
+                ConnectionState::Syncing { .. } | ConnectionState::Connected { .. }
+            ),
+            _ => false,
+        };
+        if restores_subscriptions {
+            // Replay the store's applied cursor once per recovery, before the
+            // first reply changes Syncing to Connected.
             for topic in self.inner.retired_topics.lock().unwrap().iter() {
                 let _ = self.send_payload(
                     self.next_id(),
@@ -835,13 +843,6 @@ impl HostLink {
                     }),
                 );
             }
-            for subscription in self.subscriptions() {
-                let _ = self.send_subscription(subscription);
-            }
-        }
-        if matches!(state, ConnectionState::Syncing { .. })
-            && !matches!(previous, ConnectionState::Syncing { .. })
-        {
             for subscription in self.subscriptions() {
                 let _ = self.send_subscription(subscription);
             }
