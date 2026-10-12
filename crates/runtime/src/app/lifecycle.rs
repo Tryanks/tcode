@@ -426,6 +426,7 @@ impl AppState {
 
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
+        self.turn_index_backfill = TurnIndexBackfill::Stopped;
         self.stop_diff_pass();
         self.stop_pull_request_workers();
         for id in self
