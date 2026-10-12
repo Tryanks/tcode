@@ -39,37 +39,39 @@ impl AppState {
         self.enqueue_store_write(StoreWrite::Flush(flushed), cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            // Each thread's activity is installed as its read completes, so a
-            // long sweep leaves only the threads not yet read without one.
-            if matches!(flush.recv().await, Ok(Ok(()))) {
-                for (id, has_parent, revision) in missing {
-                    let store = store.clone();
-                    let read_id = id.clone();
-                    let activity = host_cx
-                        .unblock(move || read_activity(&store, &read_id, has_parent))
-                        .await;
-                    host_cx.enqueue(move |state, cx| {
-                        if state.find_meta(&id).is_none() || state.thread_activity.contains_key(&id)
-                        {
-                            return;
-                        }
-                        // A record appended while the log was read is missing from it.
-                        if state.decision_revision(&id) != revision {
-                            state.settlement_sweep_pending = true;
-                            return;
-                        }
-                        match activity {
-                            Ok(activity) => {
-                                state.thread_activity.insert(id.clone(), activity);
-                                state.evaluate_thread_settlement(&id, cx);
-                            }
-                            Err(error) => log::warn!("settlement activity read for {id}: {error}"),
-                        }
-                    });
-                }
-            }
+            let activities = if matches!(flush.recv().await, Ok(Ok(()))) {
+                host_cx
+                    .unblock(move || {
+                        missing
+                            .into_iter()
+                            .map(|(id, has_parent, revision)| {
+                                let activity = read_activity(&store, &id, has_parent);
+                                (id, revision, activity)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+            } else {
+                Vec::new()
+            };
             let projected = started.elapsed();
             host_cx.enqueue(move |state, cx| {
+                for (id, revision, activity) in activities {
+                    if state.find_meta(&id).is_none() || state.thread_activity.contains_key(&id) {
+                        continue;
+                    }
+                    // A record appended while the log was read is missing from it.
+                    if state.decision_revision(&id) != revision {
+                        state.settlement_sweep_pending = true;
+                        continue;
+                    }
+                    match activity {
+                        Ok(activity) => {
+                            state.thread_activity.insert(id, activity);
+                        }
+                        Err(error) => log::warn!("settlement activity read for {id}: {error}"),
+                    }
+                }
                 let now = now_millis();
                 let due: Vec<_> = state
                     .sessions
