@@ -841,39 +841,56 @@ fn scoped_ping(
     principal: &tcode_protocol::Principal,
     id: u64,
 ) {
+    let key = format!("00000000-0000-4000-8000-{id:012x}");
+    let tcode_protocol::Principal::Space { device_id, .. } = principal else {
+        panic!("scoped ping requires a space member");
+    };
+    let scoped_key = format!("{device_id}:{key}");
     client
         .to_host
         .send_blocking(
             tcode_protocol::encode_line(&tcode_protocol::ClientMessage {
                 id,
-                key: None,
+                key: Some(key),
                 principal: Some(tcode_protocol::Principal::Full),
                 payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping),
             })
             .unwrap(),
         )
         .unwrap();
-    let line = tcode_traverse::block_on(async {
-        tokio::time::timeout(Duration::from_secs(10), host_rx.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    });
-    let request = tcode_protocol::decode_client_line(&line).unwrap();
-    assert_eq!(request.principal.as_ref(), Some(principal));
-    assert_eq!(
-        request.payload,
-        tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping)
-    );
-    host_tx
-        .send_blocking(
-            tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
-                id: request.id,
-                result: Ok(tcode_protocol::QueryResponse::Pong),
-            })
-            .unwrap(),
-        )
+    // Other connections can send idle heartbeats into this shared host queue.
+    // Mux request IDs are global, so identify the probe by its retained key.
+    tcode_traverse::block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let line = host_rx.recv().await.unwrap();
+                let request = tcode_protocol::decode_client_line(&line).unwrap();
+                assert_eq!(
+                    request.payload,
+                    tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Ping)
+                );
+                if let Some(key) = &request.key {
+                    assert_eq!(key, &scoped_key);
+                    assert_eq!(request.principal.as_ref(), Some(principal));
+                }
+                host_tx
+                    .send(
+                        tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                            id: request.id,
+                            result: Ok(tcode_protocol::QueryResponse::Pong),
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                if request.key.is_some() {
+                    break;
+                }
+            }
+        })
+        .await
         .unwrap();
+    });
     let reply = recv_type(client, "query_result", Some(id));
     assert_eq!(reply["content"]["result"]["Ok"]["type"], "pong");
 }

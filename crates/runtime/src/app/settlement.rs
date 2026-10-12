@@ -1,5 +1,5 @@
 use super::*;
-use tcode_core::settlement::{SettlementBlockers, ThreadActivity, automatic_settlement_at};
+use tcode_core::settlement::{SettlementBlockers, automatic_settlement_at};
 
 impl AppState {
     pub(crate) fn start_settlement_sweeps(&mut self, cx: &mut HostCx) {
@@ -42,13 +42,23 @@ impl AppState {
             let activities = if matches!(flush.recv().await, Ok(Ok(()))) {
                 host_cx
                     .unblock(move || {
-                        missing
-                            .into_iter()
-                            .map(|(id, has_parent, revision)| {
-                                let activity = read_activity(&store, &id, has_parent);
-                                (id, revision, activity)
-                            })
-                            .collect::<Vec<_>>()
+                        let threads: Vec<_> = missing
+                            .iter()
+                            .map(|(id, has_parent, _)| (id.clone(), *has_parent))
+                            .collect();
+                        match store.thread_activities(&threads) {
+                            Ok(activities) => missing
+                                .into_iter()
+                                .zip(activities)
+                                .map(|((id, _, revision), activity)| (id, revision, activity))
+                                .collect::<Vec<_>>(),
+                            Err(error) => missing
+                                .into_iter()
+                                .map(|(id, _, revision)| {
+                                    (id, revision, Err(std::io::Error::other(error.to_string())))
+                                })
+                                .collect(),
+                        }
                     })
                     .await
             } else {
@@ -172,30 +182,5 @@ impl AppState {
             .unwrap_or(self.settings.auto_settle_on_merge);
         automatic_settlement_at(meta, activity, blockers, now, days, on_merge)
             .map(|at| (meta.id.clone(), at))
-    }
-}
-
-/// The activity of a log, read backwards a page at a time until the fold is
-/// complete or the log's start shows a clock it needs has no record.
-fn read_activity(
-    store: &SessionStore,
-    id: &str,
-    has_parent: bool,
-) -> std::io::Result<ThreadActivity> {
-    let mut low = store.next_row(id)?;
-    let mut records = Vec::new();
-    loop {
-        let activity = ThreadActivity::fold_stored(&records, has_parent);
-        if low == 0 || activity.complete(has_parent) {
-            return Ok(activity);
-        }
-        let from = low.saturating_sub(history::TAIL_ROWS);
-        let page = store.read_rows(id, from..low)?.records;
-        records.splice(
-            0..0,
-            page.into_iter()
-                .filter(|record| ThreadActivity::moves_clock(&record.event)),
-        );
-        low = from;
     }
 }

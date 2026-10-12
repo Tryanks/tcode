@@ -12,7 +12,7 @@ use crate::session::{MessageOrigin, StoredEvent};
 /// The bound is absolute so clock skew either way cannot block a thread forever.
 const QUEUED_TURN_START_GRACE_MS: u64 = 2 * 60 * 1000;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadActivity {
     pub last_message_at: Option<u64>,
     pub last_human_message_at: Option<u64>,

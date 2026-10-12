@@ -20,6 +20,7 @@
 //! Replay accepts timestamped records and legacy bare [`AgentEvent`] lines,
 //! then folds [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
 
+mod activity;
 mod db;
 mod migrate;
 mod relocate;
@@ -1160,8 +1161,8 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
     db.write(|db, connection| {
         db.execute(connection, KEPT_WORKTREES, ())?;
         db.execute(connection, superseded::DIFF_PASS_TABLE, ())?;
-        db.execute(connection, turn_index::TURN_INDEX_TABLE, ())
-            .map(drop)
+        db.execute(connection, turn_index::TURN_INDEX_TABLE, ())?;
+        activity::create_cache(db, connection)
     })?;
     migrate::warn_about_stray_sources(root);
     migrate::remove_legacy(root);
