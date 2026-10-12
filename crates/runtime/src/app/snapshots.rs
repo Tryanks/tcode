@@ -209,8 +209,138 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
     }));
 }
 
+// Borrowing the host state confines cached results to one immutable snapshot.
+pub(super) struct ActivityProjection<'a> {
+    state: &'a AppState,
+    children: HashMap<&'a str, Vec<&'a SessionMeta>>,
+    holding: std::cell::RefCell<HashMap<String, bool>>,
+}
+
+impl<'a> ActivityProjection<'a> {
+    pub(super) fn new(state: &'a AppState) -> Self {
+        let mut children: HashMap<&str, Vec<&SessionMeta>> = HashMap::new();
+        for meta in &state.sessions {
+            if meta.archived_at.is_none()
+                && let Some(parent) = meta.parent_session_id.as_deref()
+            {
+                children.entry(parent).or_default().push(meta);
+            }
+        }
+        Self {
+            state,
+            children,
+            holding: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Whether a child of this thread holds it: one still runs, or a
+    /// dispatched one awaits its lead's settle.
+    pub(super) fn children_hold(&self, parent_id: &str) -> bool {
+        if let Some(holds) = self.holding.borrow().get(parent_id) {
+            return *holds;
+        }
+        let holds = self.children.get(parent_id).is_some_and(|children| {
+            children.iter().any(|child| match self.agent_status(child) {
+                Some(status) => status.delivery.holds_parent(),
+                None => {
+                    self.state.resident(&child.id).is_some_and(|session| {
+                        session.is_unfinished() || session.timeline.turn_running
+                    }) || self.children_hold(&child.id)
+                }
+            })
+        });
+        self.holding
+            .borrow_mut()
+            .insert(parent_id.to_string(), holds);
+        holds
+    }
+
+    /// A dispatched orchestrate child's execution and delivery; `None` for
+    /// every other thread.
+    pub(super) fn agent_status(&self, meta: &SessionMeta) -> Option<AgentStatus> {
+        if !meta.is_dispatched() {
+            return None;
+        }
+        let resident = self.state.resident(&meta.id);
+        let activity = self.state.thread_activity.get(&meta.id);
+        let asking = resident.is_some_and(|session| {
+            let (approvals, input) = self.state.open_requests(&meta.id, session);
+            !approvals.is_empty() || input.is_some()
+        });
+        let execution = if asking {
+            AgentExecution::Waiting
+        } else if resident.is_some_and(|session| {
+            session.turn_in_flight
+                || session.delivery_in_flight.is_some()
+                || !session.queue.is_empty()
+                || session.preparing_worktree
+                || matches!(session.runtime, Runtime::Starting { .. })
+        }) {
+            AgentExecution::Working
+        } else if resident.is_some_and(|session| session.background_task_count > 0)
+            || self.children_hold(&meta.id)
+        {
+            AgentExecution::Waiting
+        } else if meta.cancelled_at.is_some() {
+            AgentExecution::Cancelled
+        } else if activity.is_some_and(|activity| activity.failed) {
+            AgentExecution::Failed
+        } else if activity.is_some_and(|activity| activity.interrupted) {
+            AgentExecution::Interrupted
+        } else {
+            AgentExecution::Finished
+        };
+        Some(AgentStatus {
+            execution,
+            delivery: AgentDelivery::of(meta, execution),
+            run_started_at: activity.and_then(|activity| activity.last_run_started_at),
+            run_completed_at: activity.and_then(|activity| activity.last_run_completed_at),
+        })
+    }
+
+    pub(super) fn session_activity(
+        &self,
+        meta: &SessionMeta,
+        resident: Option<&ActiveSession>,
+    ) -> SessionActivity {
+        let (approvals, input) = resident.map_or((&[][..], None), |session| {
+            self.state.open_requests(&meta.id, session)
+        });
+        SessionActivity {
+            working: resident.is_some_and(|session| {
+                session.preparing_worktree
+                    || matches!(session.runtime, Runtime::Starting { .. })
+                    || session.turn_in_flight
+                    || session.delivery_in_flight.is_some()
+                    || (meta.native_subagent.is_some() && session.timeline.turn_running)
+                    || session
+                        .queue
+                        .iter()
+                        .any(|message| message.origin == MessageOrigin::Human)
+            }),
+            turn_running: resident.is_some_and(|session| session.turn_in_flight),
+            waiting: resident.is_some_and(|session| session.background_task_count > 0)
+                || self.children_hold(&meta.id)
+                || tcode_core::pull_request::watched(&meta.pull_requests)
+                    .next()
+                    .is_some(),
+            waiting_for_approval: !approvals.is_empty(),
+            waiting_for_input: input.is_some(),
+            failed: self
+                .state
+                .thread_activity
+                .get(&meta.id)
+                .is_some_and(|activity| activity.failed),
+            unread: self.state.session_unread(meta),
+            fork: AppState::session_fork_availability(meta, resident),
+            agent: self.agent_status(meta),
+        }
+    }
+}
+
 impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
+        let activity = ActivityProjection::new(self);
         let mut summary = IndexSummary {
             title_generating: self.title_generating.clone(),
             archived_revision: self.archived_revision,
@@ -224,7 +354,8 @@ impl AppState {
                 let resident = self.resident(&meta.id);
                 summary.activity.insert(
                     meta.id.clone(),
-                    self.session_activity(resident.map_or(meta, |session| &session.meta), resident),
+                    activity
+                        .session_activity(resident.map_or(meta, |session| &session.meta), resident),
                 );
                 if sharing.is_shared(meta) {
                     summary.worktree_shared.insert(meta.id.clone());
@@ -245,7 +376,7 @@ impl AppState {
             if session.meta.archived_at.is_none() && !summary.activity.contains_key(id) {
                 summary.activity.insert(
                     id.to_string(),
-                    self.session_activity(&session.meta, Some(session)),
+                    activity.session_activity(&session.meta, Some(session)),
                 );
                 if sharing.is_shared(&session.meta) {
                     summary.worktree_shared.insert(id.to_string());
@@ -268,6 +399,7 @@ impl AppState {
     }
 
     fn space_index_snapshot(&self, space_id: &str, ids: &BTreeSet<String>) -> IndexSnapshot {
+        let activity = ActivityProjection::new(self);
         let projects = self.space_projects(ids);
         let ids: HashSet<_> = projects.iter().map(|p| p.id.as_str()).collect();
         let in_scope = |meta: &&SessionMeta| {
@@ -308,7 +440,7 @@ impl AppState {
             let resident = self.resident(&meta.id);
             summary.activity.insert(
                 meta.id.clone(),
-                self.session_activity(resident.map_or(meta, |s| &s.meta), resident),
+                activity.session_activity(resident.map_or(meta, |s| &s.meta), resident),
             );
             if self.title_generating.contains(&meta.id) {
                 summary.title_generating.insert(meta.id.clone());
@@ -623,103 +755,8 @@ impl AppState {
         )
     }
 
-    /// Whether a child of this thread holds it: one still runs, or a
-    /// dispatched one awaits its lead's settle.
-    pub(super) fn children_hold(&self, parent_id: &str) -> bool {
-        self.sessions
-            .iter()
-            .filter(|meta| {
-                meta.parent_session_id.as_deref() == Some(parent_id) && meta.archived_at.is_none()
-            })
-            .any(|child| match self.agent_status(child) {
-                Some(status) => status.delivery.holds_parent(),
-                None => {
-                    self.resident(&child.id).is_some_and(|session| {
-                        session.is_unfinished() || session.timeline.turn_running
-                    }) || self.children_hold(&child.id)
-                }
-            })
-    }
-
-    /// A dispatched orchestrate child's execution and delivery; `None` for
-    /// every other thread.
     pub(super) fn agent_status(&self, meta: &SessionMeta) -> Option<AgentStatus> {
-        if !meta.is_dispatched() {
-            return None;
-        }
-        let resident = self.resident(&meta.id);
-        let activity = self.thread_activity.get(&meta.id);
-        let asking = resident.is_some_and(|session| {
-            let (approvals, input) = self.open_requests(&meta.id, session);
-            !approvals.is_empty() || input.is_some()
-        });
-        let execution = if asking {
-            AgentExecution::Waiting
-        } else if resident.is_some_and(|session| {
-            session.turn_in_flight
-                || session.delivery_in_flight.is_some()
-                || !session.queue.is_empty()
-                || session.preparing_worktree
-                || matches!(session.runtime, Runtime::Starting { .. })
-        }) {
-            AgentExecution::Working
-        } else if resident.is_some_and(|session| session.background_task_count > 0)
-            || self.children_hold(&meta.id)
-        {
-            AgentExecution::Waiting
-        } else if meta.cancelled_at.is_some() {
-            AgentExecution::Cancelled
-        } else if activity.is_some_and(|activity| activity.failed) {
-            AgentExecution::Failed
-        } else if activity.is_some_and(|activity| activity.interrupted) {
-            AgentExecution::Interrupted
-        } else {
-            AgentExecution::Finished
-        };
-        Some(AgentStatus {
-            execution,
-            delivery: AgentDelivery::of(meta, execution),
-            run_started_at: activity.and_then(|activity| activity.last_run_started_at),
-            run_completed_at: activity.and_then(|activity| activity.last_run_completed_at),
-        })
-    }
-
-    pub(super) fn session_activity(
-        &self,
-        meta: &SessionMeta,
-        resident: Option<&ActiveSession>,
-    ) -> SessionActivity {
-        let (approvals, input) = resident.map_or((&[][..], None), |session| {
-            self.open_requests(&meta.id, session)
-        });
-        SessionActivity {
-            working: resident.is_some_and(|session| {
-                session.preparing_worktree
-                    || matches!(session.runtime, Runtime::Starting { .. })
-                    || session.turn_in_flight
-                    || session.delivery_in_flight.is_some()
-                    || (meta.native_subagent.is_some() && session.timeline.turn_running)
-                    || session
-                        .queue
-                        .iter()
-                        .any(|message| message.origin == MessageOrigin::Human)
-            }),
-            turn_running: resident.is_some_and(|session| session.turn_in_flight),
-            waiting: resident.is_some_and(|session| session.background_task_count > 0)
-                || self.children_hold(&meta.id)
-                || tcode_core::pull_request::watched(&meta.pull_requests)
-                    .next()
-                    .is_some(),
-            waiting_for_approval: !approvals.is_empty(),
-            waiting_for_input: input.is_some(),
-            failed: self
-                .thread_activity
-                .get(&meta.id)
-                .is_some_and(|activity| activity.failed),
-            unread: self.session_unread(meta),
-            fork: Self::session_fork_availability(meta, resident),
-            agent: self.agent_status(meta),
-        }
+        ActivityProjection::new(self).agent_status(meta)
     }
 
     pub fn session_plan_snapshot(&self, session_id: &str) -> Option<SessionPlan> {
@@ -738,6 +775,14 @@ impl AppState {
     }
 
     pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
+        self.session_status_with_activity(session_id, &ActivityProjection::new(self))
+    }
+
+    fn session_status_with_activity(
+        &self,
+        session_id: &str,
+        activity: &ActivityProjection<'_>,
+    ) -> Option<SessionStatus> {
         let session = self.resident(session_id)?;
         let meta = &session.meta;
         let mut provider_option_descriptors = if matches!(
@@ -863,7 +908,7 @@ impl AppState {
                 .map(|preferences| preferences.height.clamp(120., 600.))
                 .unwrap_or(240.),
             delivery_in_flight: session.delivery_in_flight,
-            activity: self.session_activity(meta, Some(session)),
+            activity: activity.session_activity(meta, Some(session)),
             stopping: session.interrupt_requested,
             native_rewind_blocked: self.native_rewind_blocked(session),
             checkout_blocked: Self::checkout_blocked(session),
@@ -904,9 +949,10 @@ impl AppState {
     }
 
     fn resident_session_status_snapshots(&self) -> HashMap<String, SessionStatus> {
+        let activity = ActivityProjection::new(self);
         let mut statuses = HashMap::new();
         for id in self.residents.ids() {
-            if let Some(status) = self.session_status_snapshot(id) {
+            if let Some(status) = self.session_status_with_activity(id, &activity) {
                 statuses.insert(id.to_string(), status);
             }
         }
