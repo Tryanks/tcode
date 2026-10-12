@@ -247,6 +247,11 @@ impl WorkspaceStore {
             return;
         }
         let session_id = self.selected_session_id.clone().expect("selected history");
+        if !self.baseline_topics.contains(&Topic::SessionEvents {
+            session_id: session_id.clone(),
+        }) {
+            return;
+        }
         let before = self.selected_history().expect("selected history").from;
         let generation = self.selection_generation;
         let host = self.host.clone();

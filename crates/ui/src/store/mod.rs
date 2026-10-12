@@ -250,6 +250,8 @@ const KEPT_THREADS: usize = 4;
 struct ThreadReplica {
     /// Absent until the first window of the thread's log arrives.
     history: Option<history::HeldHistory>,
+    /// Total turns at the last complete window, absent during catch-up.
+    total_turns: Option<usize>,
     status: Option<SessionStatus>,
     plan: Option<SessionPlan>,
     git: Option<GitStatusStatus>,
@@ -1353,14 +1355,23 @@ impl WorkspaceStore {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
-                let held = &mut self.threads.entry(session_id.clone()).or_default().history;
+                let thread = self.threads.entry(session_id.clone()).or_default();
+                let retain_timeline = records.is_empty()
+                    && thread.total_turns.is_some()
+                    && *from != 0
+                    && thread
+                        .history
+                        .as_ref()
+                        .is_some_and(|held| held.end == *from)
+                    && self
+                        .session_replica
+                        .as_ref()
+                        .is_some_and(|(id, _)| id == session_id);
+                thread.total_turns = None;
+                let held = &mut thread.history;
                 match held {
                     // Continues the held cursor.
                     Some(held) if *from != 0 && held.end == *from => {
-                        if records.is_empty() && self.session_replica.is_some() {
-                            self.baseline_topics.insert(envelope.topic.clone());
-                            return;
-                        }
                         held.extend(records, *end);
                     }
                     // Neither a baseline nor what follows the held records:
@@ -1384,8 +1395,18 @@ impl WorkspaceStore {
                 if self.session_catching_up {
                     return;
                 }
-                let mut timeline = self.fold_held_records(session_id);
+                self.threads
+                    .get_mut(session_id)
+                    .expect("snapshot thread")
+                    .total_turns = Some(*total_turns as usize);
                 self.baseline_topics.insert(envelope.topic.clone());
+                if retain_timeline {
+                    let timeline = &self.session_replica.as_ref().expect("retained timeline").1;
+                    self.session_turn_offset =
+                        (*total_turns as usize).saturating_sub(timeline.turns.len());
+                    return;
+                }
+                let mut timeline = self.fold_held_records(session_id);
                 self.session_turn_offset =
                     (*total_turns as usize).saturating_sub(timeline.turns.len());
                 self.settle_running_turn(&mut timeline);
@@ -1398,7 +1419,10 @@ impl WorkspaceStore {
                 // Until its window arrives the thread may hold an earlier
                 // visit's records, which the window continues: a record sent
                 // before the window is part of it.
-                if self.session_catching_up || self.session_replica.is_none() {
+                if self.session_catching_up
+                    || !self.baseline_topics.contains(&envelope.topic)
+                    || self.session_replica.is_none()
+                {
                     return;
                 }
                 let Some(held) = self
@@ -1422,6 +1446,10 @@ impl WorkspaceStore {
                     if replica_id == *session_id {
                         timeline.apply_stored(record);
                         self.settle_running_turn(&mut timeline);
+                        self.threads
+                            .get_mut(session_id)
+                            .expect("live thread")
+                            .total_turns = Some(self.session_turn_offset + timeline.turns.len());
                     }
                     self.session_replica = Some((replica_id, timeline));
                 }
@@ -1522,6 +1550,13 @@ impl WorkspaceStore {
         else {
             return;
         };
+        if self.session_catching_up
+            || !self.baseline_topics.contains(&Topic::SessionEvents {
+                session_id: session_id.clone(),
+            })
+        {
+            return;
+        }
         let Some(through) = self
             .index_replica
             .0
