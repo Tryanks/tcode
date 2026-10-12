@@ -481,8 +481,14 @@ impl WorkspaceStore {
         let thread = self.threads.entry(session_id.clone()).or_default();
         self.session_status_replica = thread.status.clone();
         self.git_status_replica = thread.git.clone().unwrap_or_default();
-        self.session_replica = None;
         let after = thread.history.as_ref().map(|held| held.end);
+        let total_turns = thread.total_turns;
+        if let Some(total_turns) = total_turns.filter(|_| after.is_some()) {
+            let mut timeline = self.fold_held_records(&session_id);
+            self.session_turn_offset = total_turns.saturating_sub(timeline.turns.len());
+            self.settle_running_turn(&mut timeline);
+            self.session_replica = Some((session_id.clone(), timeline));
+        }
         if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope) {
             return;
         }
