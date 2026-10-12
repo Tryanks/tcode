@@ -18,7 +18,11 @@ pub(super) fn create_cache(db: &Db, connection: &Connection) -> io::Result<()> {
     // this data directory. A log replacement can keep exactly the same length.
     for (name, event, affected) in [
         ("insert", "INSERT", "session_id = NEW.session_id"),
-        ("update", "UPDATE", "session_id IN (OLD.session_id, NEW.session_id)"),
+        (
+            "update",
+            "UPDATE",
+            "session_id IN (OLD.session_id, NEW.session_id)",
+        ),
         ("delete", "DELETE", "session_id = OLD.session_id"),
     ] {
         db.execute(
