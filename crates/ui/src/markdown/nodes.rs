@@ -854,7 +854,7 @@ mod tests {
         let BlockNode::CodeBlock(code) = leaves[1] else {
             panic!("expected code block");
         };
-        let states = code.states_for_lines(&["first code line", "second code line"], 0..2);
+        let states = code.states_for_lines(code.prepared(), 0..2);
         select(&states[0], 6..10);
         select(&states[1], 0..6);
 
