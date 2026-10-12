@@ -206,6 +206,16 @@ fn project_group_threads(sessions: &[SessionMeta]) -> (Vec<&SessionMeta>, Vec<&S
     (active, settled)
 }
 
+/// The time a project-view row shows: its last update, or when it settled
+/// for a row on the Settled shelf, which sorts by that.
+fn project_view_timestamp(meta: &SessionMeta) -> u64 {
+    if meta.is_settled() {
+        tcode_core::thread_sort::shown_timestamp(meta)
+    } else {
+        meta.updated_at
+    }
+}
+
 fn animate_flat_thread_position(row: gpui::Div, session_id: &str, target_top: f32) -> gpui::Div {
     // `list` positions each item root explicitly during prepaint, which
     // overrides relative offsets applied to that root. Keep an unanimated
@@ -2837,7 +2847,7 @@ impl SessionsSidebar {
                 row.child(self.render_flat_thread_right_slot(
                     meta,
                     &row_key,
-                    meta.updated_at,
+                    project_view_timestamp(meta),
                     true,
                     cx,
                 ))
@@ -3321,7 +3331,7 @@ impl SessionsSidebar {
                     let timestamp = if recent {
                         tcode_core::thread_sort::shown_timestamp(meta)
                     } else {
-                        meta.updated_at
+                        project_view_timestamp(meta)
                     };
                     rows.push(CompactListRow::Thread(Rc::new(CompactThreadRow {
                         title: meta.title.clone().into(),
@@ -6574,6 +6584,29 @@ mod tests {
             verify(cx, expected(shown, false, false));
             click(cx, "settled-lead");
             verify(cx, expected(shown, true, false));
+            if compact {
+                // A shelf row shows when it settled, an active row its last update.
+                let shown_times = sidebar.update(cx, |sidebar, cx| {
+                    sidebar
+                        .compact_model(cx)
+                        .rows
+                        .iter()
+                        .filter_map(|row| match row {
+                            CompactListRow::Thread(row)
+                                if ["lead-settled-1", "mixed-a"]
+                                    .contains(&row.meta.id.as_str()) =>
+                            {
+                                Some((row.meta.id.clone(), row.timestamp))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                });
+                assert_eq!(
+                    shown_times,
+                    [("lead-settled-1".into(), 70), ("mixed-a".into(), 300)]
+                );
+            }
             click(cx, "settled-lead");
             verify(cx, expected(shown, false, false));
             store.update(cx, |store, cx| {
