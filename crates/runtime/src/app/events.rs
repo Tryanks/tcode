@@ -348,6 +348,37 @@ impl AppState {
                     }
                 }
             }
+            AgentEvent::SteerAccepted { request_id } => {
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident
+                        .pending_steers
+                        .retain(|steer| steer.request_id != *request_id);
+                }
+            }
+            AgentEvent::SteerRejected { request_id } => {
+                // The turn ended before the provider could fold the steer in,
+                // so the model never saw the text. Drop the pending bubble and
+                // send the same message as an ordinary turn: with no turn in
+                // flight that starts one, otherwise it waits in the queue.
+                self.record_event(session_id, &event, cx);
+                let steer = self.resident_mut(session_id).and_then(|resident| {
+                    let position = resident
+                        .pending_steers
+                        .iter()
+                        .position(|steer| steer.request_id == *request_id)?;
+                    Some(resident.pending_steers.remove(position))
+                });
+                let Some(steer) = steer else {
+                    log::warn!("provider rejected unknown steer {request_id} in {session_id}");
+                    return;
+                };
+                let previous = (cx.author.take(), cx.origin.take(), cx.delivery_key.take());
+                cx.author = steer.author;
+                cx.origin = steer.origin;
+                self.send_turn_assembled(session_id, steer.text, steer.attachments, cx);
+                (cx.author, cx.origin, cx.delivery_key) = previous;
+                return;
+            }
             AgentEvent::Warning { message } => {
                 log::warn!("provider warning in {session_id}: {message}");
                 // Provider warnings (config problems, deprecations, failed
@@ -471,7 +502,6 @@ impl AppState {
             | AgentEvent::ItemUpdated(_)
             | AgentEvent::ItemCompleted(_)
             | AgentEvent::SteerRequested { .. }
-            | AgentEvent::SteerAccepted { .. }
             | AgentEvent::Delta { .. }
             | AgentEvent::ApprovalRequested(_)
             | AgentEvent::ApprovalResolved { .. }

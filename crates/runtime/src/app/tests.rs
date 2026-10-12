@@ -4253,6 +4253,80 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
     });
 }
 
+/// The runtime routes a steer by its own turn flag, but the provider's
+/// `turn/completed` can already be on the wire. The provider then rejects the
+/// steer by id, and the text goes out as the next ordinary turn instead of
+/// vanishing behind a notice.
+#[test]
+fn steer_rejected_after_turn_end_is_resent_as_a_new_turn() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-steer-rejected-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(TestClientState::new(store));
+    let (commands, receiver) = smol::channel::unbounded();
+
+    state.update(cx, |state, cx| {
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.meta.id = "active".into();
+        active.turn_in_flight = true;
+        state.install_selected(active);
+
+        cx.origin = Some(MessageOrigin::Agent);
+        state.steer("active", "redirect".into(), Vec::new(), cx);
+        cx.origin = None;
+        let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
+            panic!("steer command missing")
+        };
+
+        state.on_event(
+            "active",
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        assert!(receiver.try_recv().is_err(), "nothing queued yet");
+
+        state.on_event(
+            "active",
+            AgentEvent::SteerRejected {
+                request_id: request_id.clone(),
+            },
+            cx,
+        );
+        match receiver.try_recv().unwrap() {
+            SessionCommand::SendTurn { text, .. } => assert_eq!(text, "redirect"),
+            other => panic!("expected the rejected steer to be sent as a turn, got {other:?}"),
+        }
+        let active = state.selected_session().unwrap();
+        assert!(active.pending_steers.is_empty());
+        assert!(
+            !active
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == request_id),
+            "the pending steer bubble is gone; the send records its own message"
+        );
+        assert_eq!(active.queue.len(), 1);
+        assert_eq!(active.queue[0].origin, MessageOrigin::Agent);
+
+        state.on_event(
+            "active",
+            AgentEvent::SteerRejected {
+                request_id: request_id.clone(),
+            },
+            cx,
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "a rejection for an already resolved steer sends nothing"
+        );
+    });
+}
+
 #[test]
 fn callbacks_racing_provider_start_share_one_wakeup_turn() {
     let cx = &mut TestAppContext::default();
