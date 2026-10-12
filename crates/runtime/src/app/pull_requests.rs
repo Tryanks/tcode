@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::orchestrate::PullRequestRegistration;
 use tcode_core::pull_request::{
-    self, PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestStackState,
-    PullRequestState, PullRequestSyncError,
+    self, BranchPullRequest, PullRequestKey, PullRequestSnapshot, PullRequestSource,
+    PullRequestStackState, PullRequestState, PullRequestSyncError,
 };
 use tcode_protocol::{
     CommandResponse, ProtocolError, PullRequestAction, PullRequestActionResult, PullRequestRead,
@@ -427,7 +427,13 @@ impl AppState {
         key: &PullRequestKey,
     ) -> Result<(), ProtocolError> {
         self.find_meta(session_id)
-            .filter(|meta| pull_request::shown(&meta.pull_requests, key))
+            .filter(|meta| {
+                pull_request::shown(
+                    &meta.pull_requests,
+                    meta.branch_pull_request.as_deref(),
+                    key,
+                )
+            })
             .map(|_| ())
             .ok_or_else(|| ProtocolError {
                 code: "pull_request_not_linked".into(),
@@ -659,7 +665,7 @@ impl AppState {
                                 &id,
                                 opened,
                                 url,
-                                PullRequestSource::Created,
+                                PullRequestSource::Opened,
                                 true,
                                 cx,
                             )
@@ -875,6 +881,9 @@ impl AppState {
         if let Some(resident) = self.meta_mut(&meta.id) {
             resident.pull_requests.clone_from(&meta.pull_requests);
             resident
+                .branch_pull_request
+                .clone_from(&meta.branch_pull_request);
+            resident
                 .pull_request_reviews
                 .clone_from(&meta.pull_request_reviews);
             resident
@@ -910,6 +919,34 @@ impl AppState {
             self.request_pull_request_sync(key, cx);
         }
         Ok(())
+    }
+    /// What discovery found on the thread's checkout branch: shown, read and settled on, never
+    /// linked.
+    fn apply_branch_pull_request(
+        &mut self,
+        id: &str,
+        key: PullRequestKey,
+        url: String,
+        cx: &mut HostCx,
+    ) {
+        let Some(mut meta) = self.find_meta(id) else {
+            return;
+        };
+        if meta.native_subagent.is_some()
+            || meta
+                .branch_pull_request
+                .as_ref()
+                .is_some_and(|branch| branch.key == key)
+        {
+            return;
+        }
+        meta.branch_pull_request = Some(Box::new(BranchPullRequest {
+            key: key.clone(),
+            url,
+            snapshot: None,
+        }));
+        self.save_pull_request_meta(meta, cx);
+        self.request_pull_request_sync(key, cx);
     }
     pub fn unlink_pull_request(&mut self, id: &str, key: &PullRequestKey, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id) else {
@@ -1006,13 +1043,24 @@ impl AppState {
             .filter(|meta| meta.archived_at.is_none())
             .collect();
         for meta in metas {
-            for link in meta.pull_requests.iter().filter(|link| link.visible()) {
-                let group = groups.entry(link.key.clone()).or_insert_with(|| SyncGroup {
-                    key: link.key.clone(),
+            let links = meta
+                .pull_requests
+                .iter()
+                .filter(|link| link.visible())
+                .map(|link| (&link.key, &link.snapshot, link.stack.clone()));
+            // The branch's pull request is read for its own snapshot, never for a stack to link.
+            let branch = meta
+                .branch_pull_request
+                .iter()
+                .filter(|branch| !pull_request::shown(&meta.pull_requests, None, &branch.key))
+                .map(|branch| (&branch.key, &branch.snapshot, PullRequestStackState::None));
+            for (key, snapshot, stack) in links.chain(branch) {
+                let group = groups.entry(key.clone()).or_insert_with(|| SyncGroup {
+                    key: key.clone(),
                     projects: Vec::new(),
                     threads: Vec::new(),
                     observations: Vec::new(),
-                    request: self.pull_requests.requested.get(&link.key).copied(),
+                    request: self.pull_requests.requested.get(key).copied(),
                 });
                 group.threads.push(meta.id.clone());
                 if !group.projects.contains(&meta.project_id) {
@@ -1020,9 +1068,7 @@ impl AppState {
                 }
                 // Settled threads share updates without independently scheduling reads.
                 if !meta.is_settled() {
-                    group
-                        .observations
-                        .push((link.snapshot.clone(), link.stack.clone()));
+                    group.observations.push((snapshot.clone(), stack));
                 }
             }
         }
@@ -1221,6 +1267,19 @@ impl AppState {
                 .iter()
                 .find(|link| link.key == key && link.visible())
             else {
+                if let Some(branch) = meta
+                    .branch_pull_request
+                    .as_mut()
+                    .filter(|branch| branch.key == key)
+                    && branch
+                        .snapshot
+                        .as_ref()
+                        .is_none_or(|s| !s.same_observation(&summary.snapshot))
+                {
+                    branch.snapshot = Some(summary.snapshot.clone());
+                    self.save_pull_request_meta(meta, cx);
+                    self.evaluate_thread_settlement(&id, cx);
+                }
                 continue;
             };
             let stack = stack.clone().unwrap_or_else(|| link.stack.clone());
@@ -1381,13 +1440,8 @@ impl AppState {
                                 {
                                     return;
                                 }
-                                let _ = state.apply_pull_request_link(
-                                    &meta.id,
-                                    result.key,
-                                    result.url,
-                                    PullRequestSource::Created,
-                                    false,
-                                    cx,
+                                state.apply_branch_pull_request(
+                                    &meta.id, result.key, result.url, cx,
                                 );
                             })
                             .await;

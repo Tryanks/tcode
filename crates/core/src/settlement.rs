@@ -5,7 +5,7 @@ use agent::{AgentEvent, ItemContent, ThreadItem, TurnStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::project::SessionMeta;
-use crate::pull_request::PullRequestState;
+use crate::pull_request::{PullRequestSnapshot, PullRequestState, branch_fallback};
 use crate::session::{MessageOrigin, StoredEvent};
 
 /// How long a user-role message waits for its run before it stops blocking.
@@ -192,18 +192,25 @@ pub fn automatic_settlement_at(
     days: Option<f64>,
     on_merge: bool,
 ) -> Option<u64> {
-    let mut latest: Option<(PullRequestState, Option<u64>)> = None;
-    for link in meta.pull_requests.iter().filter(|link| link.visible()) {
-        let snapshot = link.snapshot.as_ref()?;
-        let terminal_at = match snapshot.state {
+    let terminal = |snapshot: &PullRequestSnapshot| {
+        let at = match snapshot.state {
             PullRequestState::Open => return None,
             PullRequestState::Merged => snapshot.merged_at.as_deref(),
             PullRequestState::Closed => snapshot.closed_at.as_deref(),
         }
         .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
         .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
+        Some((snapshot.state, at))
+    };
+    // The branch's pull request is only evidence that the work ended: open or unread, it holds
+    // nothing, so inactivity still settles the thread.
+    let mut latest = branch_fallback(&meta.pull_requests, meta.branch_pull_request.as_deref())
+        .and_then(|branch| branch.snapshot.as_ref())
+        .and_then(terminal);
+    for link in meta.pull_requests.iter().filter(|link| link.visible()) {
+        let (state, terminal_at) = terminal(link.snapshot.as_ref()?)?;
         if latest.is_none_or(|(_, at)| terminal_at > at) {
-            latest = Some((snapshot.state, terminal_at));
+            latest = Some((state, terminal_at));
         }
     }
     if meta.archived_at.is_some()
@@ -481,7 +488,7 @@ mod tests {
         assert_eq!(
             settle_at(&dismissed, &records, NOW, true),
             worked_at,
-            "a dismissed tombstone is not a link"
+            "an unlinked pull request is not a link"
         );
         let latest_merged = thread(&[
             Some((Closed, Some(NOW - 4 * HOUR + 1))),
@@ -492,6 +499,47 @@ mod tests {
             settle_at(&latest_merged, &records, NOW, false),
             None,
             "an older closed link does not stand in for the latest merged one"
+        );
+    }
+
+    /// [`thread`] with its one pull request found on the checkout branch instead of linked.
+    fn on_branch(pull_request: Option<(PullRequestState, Option<u64>)>) -> SessionMeta {
+        let mut meta = thread(&[pull_request]);
+        let link = meta.pull_requests.remove(0);
+        meta.branch_pull_request = Some(Box::new(crate::pull_request::BranchPullRequest {
+            key: link.key,
+            url: link.url,
+            snapshot: link.snapshot,
+        }));
+        meta
+    }
+
+    #[test]
+    fn the_branch_pull_request_settles_once_it_ends_and_never_holds_inactivity() {
+        use PullRequestState::{Merged, Open};
+        let records = worked();
+        let aged = NOW + 3 * 86_400_000;
+        let worked_at = Some(NOW - 4 * HOUR);
+        for (meta, label) in [
+            (on_branch(Some((Open, None))), "open"),
+            (on_branch(None), "unread"),
+        ] {
+            assert_eq!(settle_at(&meta, &records, NOW, true), None, "{label}");
+            assert_eq!(
+                settle_at(&meta, &records, aged, true),
+                worked_at,
+                "an {label} branch pull request does not hold inactivity"
+            );
+        }
+        let merged = on_branch(Some((Merged, Some(NOW - 3 * HOUR))));
+        assert_eq!(settle_at(&merged, &records, NOW, true), worked_at);
+        assert_eq!(settle_at(&merged, &records, NOW, false), None);
+        let mut linked = merged.clone();
+        linked.pull_requests = thread(&[Some((Open, None))]).pull_requests;
+        assert_eq!(
+            settle_at(&linked, &records, aged, true),
+            None,
+            "an open link still blocks, and the branch's pull request does not stand in for it"
         );
     }
 

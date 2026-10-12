@@ -750,7 +750,13 @@ fn map_content(
         let number = row.layer.number;
         let layer_key = PullRequestKey::new(&offer.key.host, &offer.key.repository, number);
         let linked = row.condition == StackLayerCondition::Linked;
-        let (glyph, color, _) = appearance(row_state(row.link, Some(row.layer.state)), cx);
+        let (glyph, color, _) = appearance(
+            row_state(
+                row.link.and_then(|link| link.snapshot.as_ref()),
+                Some(row.layer.state),
+            ),
+            cx,
+        );
         let title = row
             .link
             .and_then(|link| link.snapshot.as_ref())
