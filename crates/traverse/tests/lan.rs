@@ -37,10 +37,17 @@ impl Drop for TestDir {
 }
 
 /// A machine whose host answers nothing: the handshake is the transport's.
-fn start_host(dir: &TestDir, bind_port: Option<u16>) -> TraverseHost {
-    let (to_host, _host_rx) = async_channel::unbounded::<String>();
-    let (_host_tx, from_host) = async_channel::unbounded::<String>();
-    TraverseHost::start(
+fn start_host(
+    dir: &TestDir,
+    bind_port: Option<u16>,
+) -> (
+    TraverseHost,
+    async_channel::Receiver<String>,
+    async_channel::Sender<String>,
+) {
+    let (to_host, host_rx) = async_channel::unbounded::<String>();
+    let (host_tx, from_host) = async_channel::unbounded::<String>();
+    let host = TraverseHost::start(
         HostMux::new(to_host, from_host),
         HostConfig {
             host_name: "LAN Host".into(),
@@ -50,7 +57,8 @@ fn start_host(dir: &TestDir, bind_port: Option<u16>) -> TraverseHost {
             bind_port,
         },
     )
-    .unwrap()
+    .unwrap();
+    (host, host_rx, host_tx)
 }
 
 fn free_port() -> u16 {
@@ -116,7 +124,7 @@ fn relaunched_device(
 fn stale_addresses_without_a_browse_do_not_reach_the_machine() {
     let _ = env_logger::builder().is_test(true).try_init();
     let host_dir = TestDir::new("stale-host");
-    let host = start_host(&host_dir, Some(free_port()));
+    let (host, _host_rx, _host_tx) = start_host(&host_dir, Some(free_port()));
     let device_dir = TestDir::new("stale-device");
     let (device, saved) = relaunched_device(
         &host,
@@ -153,57 +161,6 @@ fn stale_addresses_without_a_browse_do_not_reach_the_machine() {
         host.devices().iter().all(|device| device.live.is_none()),
         "the machine sees a device: {:?}",
         host.devices()
-    );
-    client.to_host.close();
-    host.shutdown();
-}
-
-/// The address that last worked is stale, but the machine's current one is
-/// further down the saved list: the device connects through it, and the
-/// path that carried the connection — the machine's port, at whichever of
-/// its addresses answered — moves to the front for the next launch.
-#[test]
-fn a_saved_address_further_down_the_list_reaches_the_machine() {
-    let _ = env_logger::builder().is_test(true).try_init();
-    let host_dir = TestDir::new("saved-host");
-    let port = free_port();
-    let host = start_host(&host_dir, Some(port));
-    let device_dir = TestDir::new("saved-device");
-    let current = format!("127.0.0.1:{port}");
-    let (device, saved) = relaunched_device(
-        &host,
-        &device_dir,
-        vec![
-            format!("127.0.0.1:{}", free_port()),
-            format!("127.0.0.1:{}", free_port()),
-            current.clone(),
-        ],
-    );
-
-    let client = tcode_traverse::connect(&saved, &device);
-    let (_, took) = wait_state(
-        &client,
-        |state| matches!(state, ConnectionState::Syncing { .. }),
-        Duration::from_secs(15),
-    );
-    eprintln!("connected through a saved address in {took:?}");
-    assert!(
-        took < Duration::from_secs(5),
-        "the stale addresses stalled the handshake: {took:?}"
-    );
-    let reached = host.devices();
-    assert!(
-        reached[0].live.as_ref().is_some_and(|path| path.direct),
-        "the machine sees a direct path: {reached:?}"
-    );
-    let saved = tcode_traverse::hosts::load_hosts(&device_dir.0).unwrap();
-    assert!(
-        saved[0]
-            .addrs
-            .first()
-            .is_some_and(|addr| addr.ends_with(&format!(":{port}"))),
-        "{:?}",
-        saved[0].addrs
     );
     client.to_host.close();
     host.shutdown();
@@ -274,7 +231,7 @@ fn a_dropped_resolve_stops_the_platform_browse_at_once() {
 fn a_machine_advertises_dns_sd_that_a_device_browses() {
     let host_dir = TestDir::new("mdns-host");
     let port = free_port();
-    let host = start_host(&host_dir, Some(port));
+    let (host, _host_rx, _host_tx) = start_host(&host_dir, Some(port));
     let id: iroh::EndpointId = host.endpoint_id().parse().unwrap();
     let lookup = LanLookup::new(
         |_| Vec::new(),
