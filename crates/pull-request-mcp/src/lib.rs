@@ -140,7 +140,7 @@ impl PullRequestTools {
         self.invoke(Operation::Link(target)).await
     }
     #[tool(
-        description = "Unlink a PR from this thread. It stays unlinked, even when discovered again or found in a stack, until explicitly linked again. Pass a URL or repository plus number."
+        description = "Unlink a PR from this thread. A layer of a stack stays unlinked, even when found in the stack again, until explicitly linked again. Pass a URL or repository plus number."
     )]
     async fn unlink_pull_request(&self, Parameters(target): Parameters<Target>) -> CallToolResult {
         self.invoke(Operation::Unlink(target)).await

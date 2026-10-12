@@ -111,32 +111,41 @@ impl Forge for GitHub {
         repository::Repository::from_key(key).map(|repository| repository.url(key.number))
     }
 
-    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered> {
+    fn discover(
+        &self,
+        cwd: &Path,
+        root: &Path,
+        refresh: bool,
+    ) -> Result<Option<Discovered>, ForgeError> {
         let cwd = if cwd.exists() { cwd } else { root };
-        let head = repository::branch_head(cwd)?;
-        let project_repository = repository::resolve(root)?;
-        if head.repository != project_repository {
-            return None;
-        }
-        let result = match self.pull_requests.branch(&head, refresh) {
-            Ok(Some(result)) => result,
-            _ => return None,
+        let (Some(head), Some(project_repository)) =
+            (repository::branch_head(cwd), repository::resolve(root))
+        else {
+            return Ok(None);
         };
+        if head.repository != project_repository {
+            return Ok(None);
+        }
+        let Some(result) = self.pull_requests.branch(&head, refresh)? else {
+            return Ok(None);
+        };
+        // An answer for another repository, or for a checkout that moved while it was read,
+        // says nothing about this branch.
         if result.key.host != project_repository.host
             || result.key.repository != project_repository.key(result.key.number).repository
-        {
-            return None;
-        }
-        if repository::branch_head(cwd).as_ref() != Some(&head)
+            || repository::branch_head(cwd).as_ref() != Some(&head)
             || repository::resolve(root).as_ref() != Some(&project_repository)
         {
-            return None;
+            return Err(ForgeError {
+                kind: ForgeErrorKind::Uncertain,
+                description: "The branch's pull request no longer matches its checkout.".into(),
+            });
         }
-        Some(Discovered {
+        Ok(Some(Discovered {
             branch: head.branch,
             key: result.key,
             url: result.url,
-        })
+        }))
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {

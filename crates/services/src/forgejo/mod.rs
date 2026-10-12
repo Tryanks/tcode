@@ -806,11 +806,20 @@ impl Forge for Forgejo {
 
     /// One page of the repository's open pull requests, newest activity first: a branch whose
     /// pull request is older than fifty others is not found, rather than every page read.
-    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered> {
+    fn discover(
+        &self,
+        cwd: &Path,
+        root: &Path,
+        refresh: bool,
+    ) -> Result<Option<Discovered>, ForgeError> {
         let known = self.known();
         let cwd = if cwd.exists() { cwd } else { root };
-        let repository = repository::resolve(&known, root)?;
-        let branch = repository::branch(&known, cwd)?;
+        let Some(repository) = repository::resolve(&known, root) else {
+            return Ok(None);
+        };
+        let Some(branch) = repository::branch(&known, cwd) else {
+            return Ok(None);
+        };
         let slot = (
             format!("{}/{}", repository.host, repository.locator),
             format!("{}:{}", branch.head_owner, branch.head_branch),
@@ -819,16 +828,14 @@ impl Forge for Forgejo {
             && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
             && at.elapsed() < READ_TTL
         {
-            return found.clone();
+            return Ok(found.clone());
         }
         let probe = repository.key(1);
         let pull = self.pull(&probe);
-        let rows = pull
-            .get(
-                "pulls?state=open&sort=recentupdate&limit=50",
-                "PullRequestsByHead",
-            )
-            .ok()?;
+        let rows = pull.get(
+            "pulls?state=open&sort=recentupdate&limit=50",
+            "PullRequestsByHead",
+        )?;
         let found = rows.as_array().into_iter().flatten().find_map(|row| {
             let head = &row["head"];
             let owner = head["repo"]["owner"]["login"].as_str()?;
@@ -847,7 +854,7 @@ impl Forge for Forgejo {
             .lock()
             .unwrap()
             .insert(slot, (Instant::now(), found.clone()));
-        found
+        Ok(found)
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {
