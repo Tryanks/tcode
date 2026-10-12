@@ -776,6 +776,76 @@ fn a_wake_reaches_a_non_resident_thread_and_a_restart_before_acceptance_redelive
 }
 
 #[test]
+fn a_wake_steers_into_a_running_turn_and_is_not_repeated() {
+    let mut harness = Harness::new("tcode-watch-steer");
+    harness.host().checks = vec![check("build", "FAILURE")];
+    harness.watch_thread("thread", START);
+    harness.state.update(&mut harness.cx, |state, cx| {
+        state.select_session("thread", cx);
+    });
+    harness.state.dispatch_command(
+        &mut harness.cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "Open a pull request and watch it.".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    let (delivery_id, _) = harness.delivered();
+    harness
+        .events
+        .try_send(AgentEvent::TurnAccepted { delivery_id })
+        .unwrap();
+    harness.cx.run_until_parked();
+
+    harness.pass();
+    let commands = harness.commands.clone();
+    harness.cx.run_until(|_| !commands.is_empty());
+    let (request_id, text) = match commands.try_recv() {
+        Ok(SessionCommand::Steer {
+            request_id, text, ..
+        }) => (request_id, text),
+        other => panic!("a wake during a turn steers into it, got {other:?}"),
+    };
+    assert!(text.starts_with(
+        "Update on pull request #1 (https://github.com/sample/project/pull/1), which Tcode is watching for you:\n- Checks failed on 1111111:"
+    ));
+    assert_eq!(
+        harness.watch("thread").unwrap().pending_wake,
+        None,
+        "a steered wake is delivered"
+    );
+    assert!(
+        harness
+            .state
+            .read(|state| state.resident("thread").unwrap().queue.is_empty()),
+        "a steered wake does not also wait in the queue"
+    );
+    let recorded = harness
+        .store
+        .read_events("thread")
+        .unwrap()
+        .into_iter()
+        .find(|record| {
+            matches!(&record.event, AgentEvent::SteerRequested { request_id: id, .. } if id == &request_id)
+        })
+        .expect("the steer is recorded before delivery");
+    assert_eq!(
+        recorded.origin,
+        Some(MessageOrigin::Server),
+        "a wake is never a human message"
+    );
+
+    harness.requests();
+    harness.pass();
+    assert!(
+        harness.commands.is_empty(),
+        "a delivered wake is not repeated"
+    );
+}
+
+#[test]
 fn stop_discards_a_read_in_flight_and_refuses_a_late_agent_start() {
     let mut harness = Harness::new("tcode-watch-stop");
     harness.host().checks = vec![check("build", "FAILURE")];
