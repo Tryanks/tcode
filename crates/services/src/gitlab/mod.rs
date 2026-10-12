@@ -9,7 +9,7 @@ mod repository;
 use crate::{
     forge::{
         Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, Verdicts, ViewedMarks,
+        Tails, ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -24,7 +24,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::{
-        GITLAB, HostKind, HostTerms, Mergeability, PullRequestKey, PullRequestMergeMethod,
+        GITLAB, HostKind, HostTerms, PullRequestKey, PullRequestMergeMethod,
         PullRequestReviewDraftComment, PullRequestStackState,
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
@@ -59,7 +59,6 @@ pub struct GitLab {
     known: RwLock<Vec<String>>,
     reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
     branches: Mutex<Branches>,
-    verdicts: Verdicts,
 }
 
 impl GitLab {
@@ -74,7 +73,6 @@ impl GitLab {
             known: RwLock::default(),
             reads: Mutex::default(),
             branches: Mutex::default(),
-            verdicts: Verdicts::default(),
         })
     }
 
@@ -119,16 +117,6 @@ impl GitLab {
 
     fn account_of(&self, viewer: Option<&str>, key: &PullRequestKey) -> String {
         format!("{}:{}", key.host, viewer.unwrap_or(ANONYMOUS))
-    }
-
-    /// `has_conflicts` as a watch may act on it: a conflict once it holds at one head.
-    fn mergeability(&self, key: &PullRequestKey, mr: &Value) -> Mergeability {
-        self.verdicts.read(
-            key,
-            mr["sha"].as_str(),
-            reads::mergeability(mr),
-            Instant::now(),
-        )
     }
 
     /// The diffs from `page` on: one page past the first, else as many as [`MAX_PAGES`]
@@ -405,7 +393,7 @@ impl GitLab {
         };
         Ok(PullRequestActionState {
             head: text(&read, "sha").unwrap_or_default(),
-            merge_state: reads::merge_state(&read, self.mergeability(key, &read), &checks),
+            merge_state: reads::merge_state(&read, reads::mergeability(&read), &checks),
             behind_by: read["diverged_commits_count"].as_u64(),
             merge_queue: false,
             auto_merge_allowed: true,
@@ -687,7 +675,7 @@ impl Forge for GitLab {
             None
         });
         Ok(Summary {
-            snapshot: reads::snapshot(&read, stats, self.mergeability(key, &read), Self::now())
+            snapshot: reads::snapshot(&read, stats, reads::mergeability(&read), Self::now())
                 .ok_or_else(|| {
                     error(ForgeErrorKind::Uncertain, "GitLab merge request unreadable")
                 })?,
@@ -866,7 +854,7 @@ impl Forge for GitLab {
             head_sha: text(&read, "sha"),
             base_branch: text(&read, "target_branch").unwrap_or_default(),
             checks: reads::checks(&read),
-            mergeability: self.mergeability(key, &read),
+            mergeability: reads::mergeability(&read),
             viewer: mr.viewer()?,
             author: text(&read["author"], "username"),
         })

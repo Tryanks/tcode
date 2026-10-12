@@ -256,6 +256,8 @@ pub fn detail(api: &GitHubApi, key: &PullRequestKey) -> Result<PullRequestWatchR
         mergeability: match pr["mergeable"].as_str() {
             Some("MERGEABLE") => Mergeability::Clean,
             Some("CONFLICTING") => Mergeability::Conflicting,
+            // GitHub's word for a computation it has not finished.
+            Some("UNKNOWN") => Mergeability::Pending,
             _ => Mergeability::Unknown,
         },
         viewer: login(&data["viewer"]),

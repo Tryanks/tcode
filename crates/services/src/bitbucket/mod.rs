@@ -9,7 +9,7 @@ mod repository;
 use crate::{
     forge::{
         Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, Verdicts, ViewedMarks,
+        Tails, ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -67,7 +67,6 @@ pub struct Bitbucket {
     branches: Mutex<Branches>,
     /// Each pull request's last summary, kept for [`Bitbucket::sync_ttl`].
     summaries: Mutex<HashMap<PullRequestKey, (Instant, Summary)>>,
-    verdicts: Verdicts,
 }
 
 impl Bitbucket {
@@ -83,7 +82,6 @@ impl Bitbucket {
             diffs: Mutex::default(),
             branches: Mutex::default(),
             summaries: Mutex::default(),
-            verdicts: Verdicts::default(),
         })
     }
 
@@ -149,7 +147,7 @@ impl Bitbucket {
         })
     }
 
-    /// `/conflicts` as a watch may act on it: a conflict once it holds at one head.
+    /// `/conflicts` while open; Bitbucket has no other word on mergeability.
     fn mergeability(&self, key: &PullRequestKey, pr: &Value) -> Result<Mergeability, ForgeError> {
         if reads::state(pr) != Some(tcode_core::pull_request::PullRequestState::Open) {
             return Ok(Mergeability::Unknown);
@@ -157,20 +155,17 @@ impl Bitbucket {
         // `/conflicts` is not in Bitbucket's published API (it is what its own page reads), so
         // an answer it stops giving leaves mergeability unknown rather than failing the read; a
         // rate limit, a refused credential or a host turned off still say so.
-        let read = match self.pr(key).conflicts() {
-            Ok(read) => read,
+        match self.pr(key).conflicts() {
+            Ok(read) => Ok(read),
             Err(ForgeError {
                 kind:
                     ForgeErrorKind::NotFound
                     | ForgeErrorKind::Refused { .. }
                     | ForgeErrorKind::Uncertain,
                 ..
-            }) => Mergeability::Unknown,
-            Err(failure) => return Err(failure),
-        };
-        Ok(self
-            .verdicts
-            .read(key, reads::head(pr).as_deref(), read, Instant::now()))
+            }) => Ok(Mergeability::Unknown),
+            Err(failure) => Err(failure),
+        }
     }
 
     /// The whole diff at the pull request's head, `None` past the read limit.

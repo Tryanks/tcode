@@ -212,11 +212,13 @@ pub(super) fn branch(reference: &str) -> String {
 }
 
 /// Azure's trial merge of the source into the target. A policy that rejects the pull request
-/// and a merge that failed for another reason are no conflict; one still queued is not read.
+/// and a merge that failed for another reason are no conflict; one queued or not yet set is
+/// still to run.
 pub(super) fn mergeability(pr: &Value) -> Mergeability {
     match pr["mergeStatus"].as_str() {
         Some("succeeded") => Mergeability::Clean,
         Some("conflicts") => Mergeability::Conflicting,
+        Some("queued" | "notSet") => Mergeability::Pending,
         _ => Mergeability::Unknown,
     }
 }
@@ -350,7 +352,7 @@ pub(super) fn merge_state(
     }
     match mergeability {
         Mergeability::Conflicting => PullRequestMergeState::Dirty,
-        Mergeability::Unknown => PullRequestMergeState::Unknown,
+        Mergeability::Pending | Mergeability::Unknown => PullRequestMergeState::Unknown,
         Mergeability::Clean
             if checks.iter().any(|check| {
                 check.required == Some(true)
@@ -776,17 +778,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Azure's trial merge reads as mergeability only where it names one: a conflict is one, and
-    /// a rejection by policy or a failed merge is not; auto-complete is armed once someone set
-    /// it, with the strategy it was set with. Votes come to a decision: one against holds it
-    /// back, a required reviewer yet to approve is required, then any approval.
+    /// Azure's trial merge reads as mergeability only where it names one: a conflict is one, a
+    /// rejection by policy or a failed merge is not, and a merge still to run is pending;
+    /// auto-complete is armed once someone set it, with the strategy it was set with. Votes come
+    /// to a decision: one against holds it back, a required reviewer yet to approve is required,
+    /// then any approval.
     #[test]
     fn merge_status_auto_complete_and_votes_read_as_tcode_has_them() {
         let status = |status: &str| mergeability(&json!({"mergeStatus": status}));
         assert_eq!(status("succeeded"), Mergeability::Clean);
         assert_eq!(status("conflicts"), Mergeability::Conflicting);
-        for unread in ["rejectedByPolicy", "failure", "queued", "notSet"] {
+        for unread in ["rejectedByPolicy", "failure"] {
             assert_eq!(status(unread), Mergeability::Unknown, "{unread}");
+        }
+        for running in ["queued", "notSet"] {
+            assert_eq!(status(running), Mergeability::Pending, "{running}");
         }
         assert_eq!(
             auto_complete(&json!({"completionOptions": {"mergeStrategy": "squash"}})),

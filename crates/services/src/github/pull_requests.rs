@@ -459,6 +459,8 @@ fn decode_summary(raw: &Value, key: &PullRequestKey) -> Option<Summary> {
             mergeability: match raw["mergeable"].as_str() {
                 Some("MERGEABLE") => Mergeability::Clean,
                 Some("CONFLICTING") => Mergeability::Conflicting,
+                // GitHub's word for a computation it has not finished.
+                Some("UNKNOWN") => Mergeability::Pending,
                 _ => Mergeability::Unknown,
             },
         },

@@ -131,7 +131,8 @@ pub use wire::{
 // (optional email) and RefreshHostCredentials replacing SetGitHubToken and
 // RefreshGitHubCredentials.
 //
-// Unreleased: (none)
+// Unreleased: pull request mergeability adds pending, a host still working it
+// out, beside unknown.
 pub const PROTOCOL_VERSION: u32 = 11;
 
 #[cfg(test)]

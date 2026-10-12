@@ -603,6 +603,9 @@ pub enum ReviewDecision {
 pub enum Mergeability {
     Clean,
     Conflicting,
+    /// The host says it is still working mergeability out, so an answer is coming.
+    Pending,
+    /// The host gives no answer it will settle, such as a draft's or one its API cannot state.
     #[default]
     Unknown,
 }
