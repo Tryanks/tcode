@@ -3059,6 +3059,14 @@ impl Render for AppShell {
         crate::wheel_easing::root(
             div()
                 .size_full()
+                // gpui-base transfers focus between controls, but leaves it
+                // intact on empty backgrounds. Mobile users need that tap to
+                // dismiss the software keyboard too.
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    if crate::window_seam::is_mobile(cx) && !window.default_prevented() {
+                        window.blur(cx);
+                    }
+                })
                 // Both layouts must select UI text explicitly: GPUI's default
                 // fallback stack prefers Lilex once the terminal font is loaded.
                 .font_family(cx.theme().font_family.clone())
@@ -4244,6 +4252,17 @@ mod tests {
         cx.simulate_click(card.center(), gpui::Modifiers::default());
         draw(cx);
         cx.update(|window, _| assert!(focus.is_focused(window)));
+        // The empty timeline above the composer must let a phone user put
+        // away the keyboard without finding another focusable control.
+        cx.simulate_click(
+            gpui::point(card.center().x, card.top() - px(40.)),
+            gpui::Modifiers::default(),
+        );
+        draw(cx);
+        cx.update(|window, _| assert!(!focus.is_focused(window), "tap blank timeline"));
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
+        draw(cx);
+        cx.update(|window, _| assert!(focus.is_focused(window), "tap composer again"));
         crate::window_seam::occlude_for_test(cx, keyboard);
         draw(cx);
         cx.update(|window, _| assert!(focus.is_focused(window), "typing under the keyboard"));

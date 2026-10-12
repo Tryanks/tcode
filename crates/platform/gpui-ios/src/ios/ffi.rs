@@ -519,11 +519,6 @@ pub extern "C" fn gpui_ios_set_marked_text(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn gpui_ios_unmark_text() {
-    with_window(IosWindow::unmark_text);
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_delete_backward() {
     with_window(IosWindow::delete_backward);
 }

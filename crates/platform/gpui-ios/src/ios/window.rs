@@ -442,12 +442,6 @@ impl IosWindow {
         self.request_frame(true);
     }
 
-    pub(crate) fn unmark_text(&self) {
-        if let Some(handler) = self.input_handler.borrow_mut().as_mut() {
-            handler.unmark_text();
-        }
-    }
-
     pub(crate) fn delete_backward(&self) {
         let keystroke = Keystroke {
             modifiers: self.modifiers.get(),
