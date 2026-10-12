@@ -181,7 +181,11 @@ impl SpaceHost {
         assert!(matches!(
             self.request(
                 principal,
-                ClientPayload::Subscribe(Subscription { topic, after: None })
+                ClientPayload::Subscribe(Subscription {
+                    known_index: None,
+                    topic,
+                    after: None
+                })
             ),
             HostMessage::Ack { result: Ok(_), .. }
         ));
@@ -313,6 +317,7 @@ fn space_index_and_scope_project_only_the_members_projects() {
     host.request(
         stale,
         ClientPayload::Unsubscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionStatus {
                 session_id: "b".into(),
             },
@@ -406,6 +411,7 @@ fn space_index_and_scope_project_only_the_members_projects() {
     host.request(
         host.member("one"),
         ClientPayload::Unsubscribe(Subscription {
+            known_index: None,
             topic: topic.clone(),
             after: None,
         }),
@@ -464,7 +470,11 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
     ] {
         denied(host.request(
             member.clone(),
-            ClientPayload::Subscribe(Subscription { topic, after: None }),
+            ClientPayload::Subscribe(Subscription {
+                known_index: None,
+                topic,
+                after: None,
+            }),
         ));
     }
     denied(host.request(
@@ -595,6 +605,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
     denied(host.request(
         member.clone(),
         ClientPayload::Subscribe(Subscription {
+            known_index: None,
             topic: Topic::Terminal { terminal_id },
             after: None,
         }),

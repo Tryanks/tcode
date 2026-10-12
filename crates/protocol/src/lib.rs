@@ -6,6 +6,8 @@
 
 mod command;
 mod event;
+mod index;
+pub use index::index_fingerprint;
 mod preview;
 mod pull_request;
 mod query;
@@ -145,7 +147,8 @@ pub use wire::{
 //
 // Unreleased: the agent event stream gains steer_rejected, a provider's
 // report that the correlated steer reached it after its turn had ended; the
-// host then sends the text as an ordinary turn.
+// host then sends the text as an ordinary turn. Index subscriptions may carry
+// known_index; matching content receives IndexUnchanged instead of a snapshot.
 pub const PROTOCOL_VERSION: u32 = 12;
 
 #[cfg(test)]

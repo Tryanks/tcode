@@ -437,6 +437,7 @@ impl WorkspaceStore {
         let mut store = store;
 
         let _ = host.subscribe(Subscription {
+            known_index: None,
             topic: Topic::Scope,
             after: None,
         });
@@ -713,7 +714,13 @@ impl WorkspaceStore {
                     Topic::Providers,
                     Topic::RuntimeEvents,
                 ] {
-                    let _ = self.host.subscribe(Subscription { topic, after: None });
+                    let _ = self.host.subscribe(Subscription {
+                        known_index: (topic == Topic::Index)
+                            .then(|| self.cached_index_fingerprint())
+                            .flatten(),
+                        topic,
+                        after: None,
+                    });
                 }
                 // A client with no preview backend must not become a competing
                 // owner of the preview: it would win requests it can only
@@ -721,6 +728,7 @@ impl WorkspaceStore {
                 // reaches it through an already-open subscription.
                 if crate::preview_panel::PREVIEW_BACKEND {
                     let _ = self.host.subscribe(Subscription {
+                        known_index: None,
                         topic: Topic::Preview,
                         after: None,
                     });
@@ -759,6 +767,7 @@ impl WorkspaceStore {
                         .extend(choice.models.clone());
                 }
                 let _ = self.host.subscribe(Subscription {
+                    known_index: self.cached_index_fingerprint(),
                     topic: self.index_topic(),
                     after: None,
                 });
@@ -823,7 +832,6 @@ impl WorkspaceStore {
             }
             self.baseline_topics.clear();
             self.archived_task = None;
-            self.index_summary.archived_revision = 0;
         }
         self.connection_state = state;
         if restarts
@@ -837,6 +845,7 @@ impl WorkspaceStore {
             // cannot satisfy readiness for the new one. HostLink correlates the
             // replies against these new request IDs and retains applied cursors.
             let _ = self.host.subscribe(Subscription {
+                known_index: None,
                 topic: Topic::Scope,
                 after: None,
             });
@@ -1251,31 +1260,29 @@ impl WorkspaceStore {
                     self.selected_session_id.as_ref() == Some(session_id)
                         || snapshot.sessions.iter().any(|meta| meta.id == *session_id)
                 });
-                if let Some(id) = self.selected_session_id.clone() {
-                    let visible = snapshot.sessions.iter().any(|meta| meta.id == id)
-                        || self.session_status_replica.as_ref().is_some_and(|status| {
-                            status.draft
-                                && status.project_id.as_ref().is_some_and(|project| {
-                                    snapshot.projects.iter().any(|p| &p.id == project)
-                                })
-                        });
-                    if visible
-                        && !self
-                            .host
-                            .subscribed_topics()
-                            .contains(&Topic::SessionStatus {
-                                session_id: id.clone(),
-                            })
-                    {
-                        self.selected_session_id = None;
-                        self.select_session(id);
-                    } else if !visible && !self.scope.is_full() {
-                        self.leave_session();
-                    }
-                }
+                self.restore_index_selection();
                 self.apply_index_summary(&snapshot.summary, cx);
                 if self.archived_holds > 0 {
                     self.load_archived_sessions(cx);
+                }
+            }
+            (Topic::Index, ServerEvent::IndexUnchanged { fingerprint }) => {
+                if self.cached_index_fingerprint().as_ref() == Some(fingerprint) {
+                    if self.baseline_topics.insert(index_topic.clone()) {
+                        for project in &self.index_replica.1 {
+                            images::invalidate_project_icon(project, cx);
+                        }
+                    }
+                    self.restore_index_selection();
+                    if self.archived_holds > 0 {
+                        self.load_archived_sessions(cx);
+                    }
+                } else {
+                    let _ = self.host.subscribe(Subscription {
+                        topic: index_topic.clone(),
+                        after: None,
+                        known_index: None,
+                    });
                 }
             }
             (Topic::Index, ServerEvent::IndexSummaryReplaced(summary)) => {
@@ -1382,6 +1389,7 @@ impl WorkspaceStore {
                         self.baseline_topics.remove(&envelope.topic);
                         self.session_catching_up = false;
                         let _ = self.host.subscribe(Subscription {
+                            known_index: None,
                             topic: envelope.topic.clone(),
                             after: None,
                         });
@@ -2203,6 +2211,44 @@ impl WorkspaceStore {
         self.index_summary.title_generating.contains(session_id)
     }
 
+    fn cached_index_fingerprint(&self) -> Option<String> {
+        self.index_hydrated
+            .then(|| {
+                tcode_protocol::index_fingerprint(
+                    &self.index_summary,
+                    &self.index_replica.0,
+                    &self.index_replica.1,
+                )
+                .ok()
+            })
+            .flatten()
+    }
+
+    fn restore_index_selection(&mut self) {
+        if let Some(id) = self.selected_session_id.clone() {
+            let visible = self.index_replica.0.iter().any(|meta| meta.id == id)
+                || self.session_status_replica.as_ref().is_some_and(|status| {
+                    status.draft
+                        && status.project_id.as_ref().is_some_and(|project| {
+                            self.index_replica.1.iter().any(|p| &p.id == project)
+                        })
+                });
+            if visible
+                && !self
+                    .host
+                    .subscribed_topics()
+                    .contains(&Topic::SessionStatus {
+                        session_id: id.clone(),
+                    })
+            {
+                self.selected_session_id = None;
+                self.select_session(id);
+            } else if !visible && !self.scope.is_full() {
+                self.leave_session();
+            }
+        }
+    }
+
     fn apply_index_summary(&mut self, summary: &IndexSummary, cx: &mut Context<Self>) {
         self.index_summary = summary.clone();
         if self.archived_holds > 0
@@ -2868,6 +2914,7 @@ impl WorkspaceStore {
             return;
         }
         if let Err(error) = self.host.subscribe(Subscription {
+            known_index: None,
             after: None,
             topic: Topic::ExternalImport {
                 project_id: project_id.to_string(),
@@ -2879,6 +2926,7 @@ impl WorkspaceStore {
 
     pub fn unwatch_external_import(&mut self, project_id: &str) {
         let _ = self.host.unsubscribe(Subscription {
+            known_index: None,
             after: None,
             topic: Topic::ExternalImport {
                 project_id: project_id.to_string(),
@@ -7144,6 +7192,7 @@ pub(crate) mod tests {
         // navigation owns only its selected session; mux isolation is tested separately.
         host.link()
             .subscribe(tcode_protocol::Subscription {
+                known_index: None,
                 topic: Topic::SessionStatus {
                     session_id: second.id.clone(),
                 },
