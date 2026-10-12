@@ -6968,23 +6968,28 @@ pub(crate) mod tests {
 
         // Credential discovery can update settings after the command reply.
         // Let the UI consume those events before comparing the live replicas.
-        wait_until(cx, &workspace, "index and settings equal to live state", |cx| {
-            let (live_index, live_settings) = update_host!(&host, |state, _| {
-                let index = state.index_snapshot();
-                (
+        wait_until(
+            cx,
+            &workspace,
+            "index and settings equal to live state",
+            |cx| {
+                let (live_index, live_settings) = update_host!(&host, |state, _| {
+                    let index = state.index_snapshot();
                     (
-                        serde_json::to_value(&index.sessions).unwrap(),
-                        serde_json::to_value(&index.projects).unwrap(),
-                    ),
-                    serde_json::to_value(&state.settings).unwrap(),
-                )
-            });
-            workspace.read_with(cx, |store, _| {
-                serde_json::to_value(&store.index_replica.0).unwrap() == live_index.0
-                    && serde_json::to_value(&store.index_replica.1).unwrap() == live_index.1
-                    && serde_json::to_value(&store.settings_replica).unwrap() == live_settings
-            })
-        });
+                        (
+                            serde_json::to_value(&index.sessions).unwrap(),
+                            serde_json::to_value(&index.projects).unwrap(),
+                        ),
+                        serde_json::to_value(&state.settings).unwrap(),
+                    )
+                });
+                workspace.read_with(cx, |store, _| {
+                    serde_json::to_value(&store.index_replica.0).unwrap() == live_index.0
+                        && serde_json::to_value(&store.index_replica.1).unwrap() == live_index.1
+                        && serde_json::to_value(&store.settings_replica).unwrap() == live_settings
+                })
+            },
+        );
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
