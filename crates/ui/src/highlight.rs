@@ -334,6 +334,61 @@ fn push_merged(
 static POISONED_SYNTAXES: LazyLock<Mutex<HashSet<&'static str>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+#[derive(Debug)]
+pub(crate) struct HighlightedSource {
+    pub(crate) runs: Vec<(Range<usize>, HighlightStyle)>,
+    source: gpui::SharedString,
+    language: gpui::SharedString,
+    theme: HighlightTheme,
+    checkpoint: Option<HighlightCheckpoint>,
+}
+
+#[derive(Debug, Clone)]
+struct HighlightCheckpoint {
+    offset: usize,
+    parse: ParseState,
+    scopes: ScopeStack,
+    runs_len: usize,
+    last_run_end: usize,
+}
+
+impl HighlightedSource {
+    pub(crate) fn new(
+        source: gpui::SharedString,
+        language: gpui::SharedString,
+        theme: &HighlightTheme,
+        previous: Option<&Self>,
+    ) -> Self {
+        let previous = previous.filter(|old| {
+            old.language == language
+                && old.theme == *theme
+                && old
+                    .checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| source.starts_with(&old.source[..checkpoint.offset]))
+        });
+        let parsed = highlight_safely(&language, |syntax| {
+            highlight_from(&source, syntax, theme, previous)
+        });
+        let (runs, checkpoint) = parsed.unwrap_or_else(|| (plain_runs(&source), None));
+        Self {
+            runs,
+            source,
+            language,
+            theme: theme.clone(),
+            checkpoint,
+        }
+    }
+}
+
+fn plain_runs(src: &str) -> Vec<(Range<usize>, HighlightStyle)> {
+    if src.is_empty() {
+        Vec::new()
+    } else {
+        vec![(0..src.len(), HighlightStyle::default())]
+    }
+}
+
 /// Highlight a complete source string, returning original UTF-8 byte ranges.
 pub(crate) fn highlight_source(
     src: &str,
@@ -343,31 +398,30 @@ pub(crate) fn highlight_source(
     if src.is_empty() {
         return Vec::new();
     }
-    let Some(syntax) = syntax_for_name_or_extension(lang) else {
-        return vec![(0..src.len(), HighlightStyle::default())];
-    };
+    highlight_safely(lang, |syntax| highlight_with_syntect(src, syntax, theme))
+        .unwrap_or_else(|| plain_runs(src))
+}
+
+fn highlight_safely<T>(lang: &str, compute: impl FnOnce(&SyntaxReference) -> T) -> Option<T> {
+    let syntax = syntax_for_name_or_extension(lang)?;
     let name = syntax.name.as_str();
-    // `into_inner` keeps this failing closed: a poisoned set must disable
-    // highlighting for the recorded syntaxes, never re-run a panicking parse.
+    // A poisoned set must never re-run a syntax whose parser already panicked.
     if POISONED_SYNTAXES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .contains(name)
     {
-        return vec![(0..src.len(), HighlightStyle::default())];
+        return None;
     }
-
-    match panic::catch_unwind(AssertUnwindSafe(|| {
-        highlight_with_syntect(src, syntax, theme)
-    })) {
-        Ok(runs) => runs,
+    match panic::catch_unwind(AssertUnwindSafe(|| compute(syntax))) {
+        Ok(value) => Some(value),
         Err(_) => {
             log::error!("syntect panicked highlighting {name:?}; disabling it for this session");
             POISONED_SYNTAXES
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(name);
-            vec![(0..src.len(), HighlightStyle::default())]
+            None
         }
     }
 }
@@ -377,14 +431,49 @@ fn highlight_with_syntect(
     syntax: &SyntaxReference,
     theme: &HighlightTheme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut parse_state = ParseState::new(syntax);
-    let mut scope_stack = ScopeStack::new();
-    let mut runs = Vec::new();
-    let mut line_start = 0;
+    highlight_from(src, syntax, theme, None).0
+}
 
-    for line in LinesWithEndings::from(src) {
+fn highlight_from(
+    src: &str,
+    syntax: &SyntaxReference,
+    theme: &HighlightTheme,
+    previous: Option<&HighlightedSource>,
+) -> (
+    Vec<(Range<usize>, HighlightStyle)>,
+    Option<HighlightCheckpoint>,
+) {
+    let saved = previous.and_then(|old| old.checkpoint.as_ref());
+    let mut parse_state =
+        saved.map_or_else(|| ParseState::new(syntax), |saved| saved.parse.clone());
+    let mut scope_stack = saved.map_or_else(ScopeStack::new, |saved| saved.scopes.clone());
+    let mut runs = match (previous, saved) {
+        (Some(old), Some(saved)) => {
+            let mut runs = old.runs[..saved.runs_len].to_vec();
+            if let Some((range, _)) = runs.last_mut() {
+                range.end = saved.last_run_end;
+            }
+            runs
+        }
+        _ => Vec::new(),
+    };
+    let mut line_start = saved.map_or(0, |saved| saved.offset);
+    let mut checkpoint = saved.cloned();
+
+    for line in LinesWithEndings::from(&src[line_start..]) {
         let parse_checkpoint = parse_state.clone();
         let stack_checkpoint = scope_stack.clone();
+        // Reparse the final line on growth: its tokens and newline-dependent
+        // grammar transitions may change when the next chunk arrives.
+        if line_start + line.len() == src.len() {
+            checkpoint = Some(HighlightCheckpoint {
+                offset: line_start,
+                parse: parse_checkpoint.clone(),
+                scopes: stack_checkpoint.clone(),
+                runs_len: runs.len(),
+                last_run_end: runs.last().map_or(0, |(range, _)| range.end),
+            });
+        }
         let Ok(ops) = parse_state.parse_line(line, &SYNTAX_SET) else {
             parse_state = parse_checkpoint;
             push_merged(
@@ -432,7 +521,7 @@ fn highlight_with_syntect(
         line_start += line.len();
     }
 
-    runs
+    (runs, checkpoint)
 }
 
 #[cfg(test)]
