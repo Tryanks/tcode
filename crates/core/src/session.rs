@@ -857,6 +857,7 @@ impl Timeline {
                 attachments,
             } => self.request_steer(ts, request_id, text, attachments),
             AgentEvent::SteerAccepted { request_id } => self.accept_steer(request_id),
+            AgentEvent::SteerRejected { request_id } => self.reject_steer(request_id),
             AgentEvent::Delta {
                 item_id,
                 kind,
@@ -1307,6 +1308,21 @@ impl Timeline {
             Arc::make_mut(&mut entry).turn = turn;
         }
         self.entries.push(entry);
+    }
+
+    /// The provider never consumed the steer; the runtime re-sends its text as
+    /// an ordinary message, which records its own user entry.
+    fn reject_steer(&mut self, request_id: &str) {
+        self.entries.retain(|entry| {
+            entry.id != request_id
+                || !matches!(
+                    entry.content,
+                    EntryContent::Steer {
+                        status: SteeringStatus::Pending,
+                        ..
+                    }
+                )
+        });
     }
 
     fn apply_delta(&mut self, ts: Option<u64>, item_id: &str, kind: DeltaKind, text: &str) {
@@ -2125,6 +2141,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rejected_steer_leaves_the_timeline_live_and_on_replay() {
+        let events = [
+            user_msg("user-a", "start"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-a".into(),
+            },
+            AgentEvent::SteerRequested {
+                request_id: "steer-a".into(),
+                text: "late".into(),
+                attachments: Vec::new(),
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-a".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            AgentEvent::SteerRejected {
+                request_id: "steer-a".into(),
+            },
+        ];
+        let mut live = Timeline::fold_events(events[..4].iter().cloned());
+        assert!(live.entries.iter().any(|entry| entry.id == "steer-a"));
+        live.apply_at(None, &events[4]);
+        assert!(!live.entries.iter().any(|entry| entry.id == "steer-a"));
+
+        let replayed = Timeline::fold_events(events);
+        assert!(!replayed.entries.iter().any(|entry| entry.id == "steer-a"));
     }
 
     #[test]
