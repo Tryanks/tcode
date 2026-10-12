@@ -623,10 +623,19 @@ impl Forge for Bitbucket {
 
     /// One page of the repository's open pull requests from the branch: a source branch with
     /// more than one page of them is not searched further.
-    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered> {
+    fn discover(
+        &self,
+        cwd: &Path,
+        root: &Path,
+        refresh: bool,
+    ) -> Result<Option<Discovered>, ForgeError> {
         let cwd = if cwd.exists() { cwd } else { root };
-        let target = repository::resolve(root)?;
-        let branch = repository::branch(cwd)?;
+        let Some(target) = repository::resolve(root) else {
+            return Ok(None);
+        };
+        let Some(branch) = repository::branch(cwd) else {
+            return Ok(None);
+        };
         let slot = (
             target.locator.clone(),
             format!("{}:{}", branch.source.locator, branch.source_branch),
@@ -635,7 +644,7 @@ impl Forge for Bitbucket {
             && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
             && at.elapsed() < self.sync_ttl()
         {
-            return found.clone();
+            return Ok(found.clone());
         }
         let quoted = branch
             .source_branch
@@ -653,7 +662,7 @@ impl Forge for Bitbucket {
                 )),
                 "PullRequestsByBranch",
             )
-            .ok()?;
+            ?;
         let found = rows["values"]
             .as_array()
             .into_iter()
@@ -676,7 +685,7 @@ impl Forge for Bitbucket {
             .lock()
             .unwrap()
             .insert(slot, (Instant::now(), found.clone()));
-        found
+        Ok(found)
     }
 
     /// The pull request and its head's build statuses.

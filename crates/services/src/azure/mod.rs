@@ -767,10 +767,19 @@ impl Forge for Azure {
 
     /// The repository's active pull requests from the branch, one page of them; a fork's come
     /// from the fork's repository.
-    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered> {
+    fn discover(
+        &self,
+        cwd: &Path,
+        root: &Path,
+        refresh: bool,
+    ) -> Result<Option<Discovered>, ForgeError> {
         let cwd = if cwd.exists() { cwd } else { root };
-        let target = repository::resolve(root)?;
-        let branch = repository::branch(cwd)?;
+        let Some(target) = repository::resolve(root) else {
+            return Ok(None);
+        };
+        let Some(branch) = repository::branch(cwd) else {
+            return Ok(None);
+        };
         let slot = (
             format!("{}/{}", target.host, target.locator),
             format!(
@@ -782,7 +791,7 @@ impl Forge for Azure {
             && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
             && at.elapsed() < READ_TTL
         {
-            return found.clone();
+            return Ok(found.clone());
         }
         let probe = target.key(1);
         let pr = self.pr(&probe);
@@ -797,7 +806,7 @@ impl Forge for Azure {
                 )),
                 "PullRequestsByBranch",
             )
-            .ok()?;
+            ?;
         let from_fork = branch.source != target;
         let found = rows["value"]
             .as_array()
@@ -833,7 +842,7 @@ impl Forge for Azure {
             .lock()
             .unwrap()
             .insert(slot, (Instant::now(), found.clone()));
-        found
+        Ok(found)
     }
 
     /// The pull request with its statuses and policy evaluations.

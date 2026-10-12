@@ -2005,6 +2005,18 @@ impl WorkspaceStore {
             .map_or(&[], |meta| meta.pull_requests.as_slice())
     }
 
+    /// The pull request found on the thread's checkout branch, which it shows only while it has
+    /// no visible link.
+    pub fn branch_pull_request(
+        &self,
+        session_id: &str,
+    ) -> Option<&tcode_core::pull_request::BranchPullRequest> {
+        tcode_core::pull_request::branch_fallback(
+            self.pull_requests(session_id),
+            self.thread_meta(session_id)?.branch_pull_request.as_deref(),
+        )
+    }
+
     /// The pull request the thread has open, read inside its Pull requests tab or page.
     pub fn open_pull_request(
         &self,
@@ -2020,7 +2032,11 @@ impl WorkspaceStore {
         self.open_pull_requests = open
             .into_iter()
             .filter(|(session_id, key)| {
-                tcode_core::pull_request::shown(self.pull_requests(session_id), key)
+                tcode_core::pull_request::shown(
+                    self.pull_requests(session_id),
+                    self.branch_pull_request(session_id),
+                    key,
+                )
             })
             .collect();
     }

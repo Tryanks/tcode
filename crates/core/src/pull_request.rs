@@ -569,10 +569,13 @@ pub enum PullRequestState {
 #[serde(rename_all = "snake_case")]
 pub enum PullRequestSource {
     Manual,
-    Created,
+    /// Opened by an action in this thread. Links stored as `created` came from branch
+    /// discovery, which no longer links; [`drop_discovered_links`] drops them as they are read.
+    Opened,
     Agent,
     Stack,
-    /// A key-only tombstone left by every unlink, so sync and discovery never relink it.
+    /// A key-only tombstone left by unlinking a native stack layer, so the stack's sync never
+    /// relinks it.
     Dismissed,
 }
 
@@ -703,22 +706,73 @@ fn is_unknown(stack: &PullRequestStackState) -> bool {
     *stack == PullRequestStackState::Unknown
 }
 
+/// Reads a thread's links without those stored with source `created`: branch discovery made
+/// them, and a link a user or agent adopted afterwards cannot be told apart from one it never
+/// touched.
+pub(crate) fn drop_discovered_links<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Vec<ThreadPullRequestLink>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Discovered {
+        Created,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Link(Box<ThreadPullRequestLink>),
+        Discovered { source: Discovered },
+    }
+    Ok(Vec::<Stored>::deserialize(decoder)?
+        .into_iter()
+        .filter_map(|stored| match stored {
+            Stored::Link(link) => Some(*link),
+            Stored::Discovered {
+                source: Discovered::Created,
+            } => None,
+        })
+        .collect())
+}
+
+/// The pull request discovery found for the thread's checkout branch. It is shown only while
+/// the thread has no visible link, is never one, and holds the thread out of no settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchPullRequest {
+    pub key: PullRequestKey,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<PullRequestSnapshot>,
+}
+
+/// The branch's pull request, which the thread shows only while it has no visible link.
+pub fn branch_fallback<'a>(
+    links: &[ThreadPullRequestLink],
+    branch: Option<&'a BranchPullRequest>,
+) -> Option<&'a BranchPullRequest> {
+    branch.filter(|_| !links.iter().any(ThreadPullRequestLink::visible))
+}
+
 impl ThreadPullRequestLink {
     pub fn visible(&self) -> bool {
         self.source != PullRequestSource::Dismissed
     }
 }
 
-/// Whether the thread shows the pull request: a visible link, or a layer of the native stack
-/// a visible link carries.
-pub fn shown(links: &[ThreadPullRequestLink], key: &PullRequestKey) -> bool {
-    links.iter().filter(|link| link.visible()).any(|link| {
-        link.key == *key
-            || matches!(&link.stack, PullRequestStackState::Native(stack)
+/// Whether the thread shows the pull request: a visible link, a layer of the native stack
+/// a visible link carries, or its branch's pull request while it has no visible link.
+pub fn shown(
+    links: &[ThreadPullRequestLink],
+    branch: Option<&BranchPullRequest>,
+    key: &PullRequestKey,
+) -> bool {
+    branch_fallback(links, branch).is_some_and(|branch| branch.key == *key)
+        || links.iter().filter(|link| link.visible()).any(|link| {
+            link.key == *key
+                || matches!(&link.stack, PullRequestStackState::Native(stack)
                 if link.key.host == key.host
                     && link.key.repository == key.repository
                     && stack.layers.iter().any(|layer| layer.number == key.number))
-    })
+        })
 }
 
 /// GitHub's merge methods, in the order its merge button lists them.
@@ -1116,15 +1170,28 @@ pub fn link_pull_request(
     true
 }
 
-/// Leaves a key-only tombstone, which only an explicit link restores.
-pub fn unlink_pull_request(links: &mut [ThreadPullRequestLink], key: &PullRequestKey) -> bool {
-    let Some(link) = links
-        .iter_mut()
-        .find(|link| &link.key == key && link.visible())
+/// Removes the link; a native stack layer leaves a key-only tombstone instead, which only an
+/// explicit link restores.
+pub fn unlink_pull_request(links: &mut Vec<ThreadPullRequestLink>, key: &PullRequestKey) -> bool {
+    let Some(index) = links
+        .iter()
+        .position(|link| &link.key == key && link.visible())
     else {
         return false;
     };
-    *link = ThreadPullRequestLink {
+    let in_stack = links[index].source == PullRequestSource::Stack
+        || matches!(links[index].stack, PullRequestStackState::Native(_))
+        || links.iter().any(|link| {
+            matches!(&link.stack, PullRequestStackState::Native(stack)
+                if link.key.host == key.host
+                    && link.key.repository == key.repository
+                    && stack.layers.iter().any(|layer| layer.number == key.number))
+        });
+    if !in_stack {
+        links.remove(index);
+        return true;
+    }
+    links[index] = ThreadPullRequestLink {
         key: key.clone(),
         source: PullRequestSource::Dismissed,
         url: String::new(),
@@ -1146,10 +1213,30 @@ pub enum PullRequestBadgeState {
     Closed,
 }
 
-pub fn badge(links: &[ThreadPullRequestLink]) -> Option<(PullRequestBadgeState, usize, bool)> {
+impl PullRequestBadgeState {
+    pub fn of(snapshot: Option<&PullRequestSnapshot>) -> Self {
+        match snapshot.map(|snapshot| (snapshot.state, snapshot.is_draft)) {
+            Some((PullRequestState::Open, true)) => Self::Draft,
+            Some((PullRequestState::Open, false)) => Self::Open,
+            Some((PullRequestState::Merged, _)) => Self::Merged,
+            Some((PullRequestState::Closed, _)) => Self::Closed,
+            None => Self::Unknown,
+        }
+    }
+}
+
+pub fn badge(
+    links: &[ThreadPullRequestLink],
+    branch: Option<&BranchPullRequest>,
+) -> Option<(PullRequestBadgeState, usize, bool)> {
     let visible: Vec<_> = links.iter().filter(|link| link.visible()).collect();
     if visible.is_empty() {
-        return None;
+        let branch = branch?;
+        return Some((
+            PullRequestBadgeState::of(branch.snapshot.as_ref()),
+            1,
+            false,
+        ));
     }
     let open: Vec<_> = visible
         .iter()
@@ -1806,6 +1893,61 @@ mod tests {
         );
     }
     #[test]
+    fn unlinking_removes_a_link_and_tombstones_only_a_stack_layer() {
+        let stack = PullRequestStack {
+            id: "stack".into(),
+            number: 1,
+            url: "https://github.com/sample/project/stacks/1".into(),
+            base: "main".into(),
+            layers: [2, 3]
+                .map(|number| PullRequestStackLayer {
+                    url: format!("https://github.com/sample/project/pull/{number}"),
+                    number,
+                    head_branch: format!("layer-{number}"),
+                    state: PullRequestState::Open,
+                })
+                .to_vec(),
+        };
+        let mut carrier = link(2, None, false);
+        carrier.stack = PullRequestStackState::Native(stack);
+        let mut layer = link(3, None, false);
+        layer.source = PullRequestSource::Stack;
+        let mut links = vec![link(1, None, false), carrier, layer];
+        let key = |number| PullRequestKey::new("github.com", "sample/project", number);
+        for number in [1, 2, 3] {
+            assert!(unlink_pull_request(&mut links, &key(number)));
+        }
+        assert!(!unlink_pull_request(&mut links, &key(1)), "already gone");
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| (link.key.number, link.source))
+                .collect::<Vec<_>>(),
+            [
+                (2, PullRequestSource::Dismissed),
+                (3, PullRequestSource::Dismissed)
+            ],
+            "the stack's layers stay dismissed so its sync does not relink them"
+        );
+        assert!(link_pull_request(
+            &mut links,
+            key(1),
+            "https://github.com/sample/project/pull/1".into(),
+            PullRequestSource::Manual,
+            2,
+            false,
+        ));
+        assert!(!link_pull_request(
+            &mut links,
+            key(3),
+            "https://github.com/sample/project/pull/3".into(),
+            PullRequestSource::Stack,
+            2,
+            false,
+        ));
+    }
+
+    #[test]
     fn badge_distinguishes_unknown_drafts_terminal_and_related_links() {
         use PullRequestBadgeState as Badge;
         use PullRequestState as State;
@@ -1846,7 +1988,7 @@ mod tests {
             ),
         ];
         for (links, expected) in cases {
-            assert_eq!(badge(&links), expected);
+            assert_eq!(badge(&links, None), expected);
         }
         let mut links = vec![
             link(1, Some(State::Open), false),
@@ -1855,7 +1997,7 @@ mod tests {
         ];
         links[1].snapshot.as_mut().unwrap().base_branch = "layer-1".into();
         links[2].snapshot.as_mut().unwrap().base_branch = "layer-2".into();
-        assert_eq!(badge(&links), Some((Badge::Open, 3, true)));
+        assert_eq!(badge(&links, None), Some((Badge::Open, 3, true)));
         assert_eq!(
             groups(&links)[0]
                 .links
@@ -1865,7 +2007,25 @@ mod tests {
             vec![1, 2, 3]
         );
         links[1].source = PullRequestSource::Dismissed;
-        assert_eq!(badge(&links), Some((Badge::Open, 2, false)));
+        assert_eq!(badge(&links, None), Some((Badge::Open, 2, false)));
+        let found = link(9, Some(State::Open), true);
+        let branch = BranchPullRequest {
+            key: found.key.clone(),
+            url: found.url.clone(),
+            snapshot: found.snapshot.clone(),
+        };
+        assert_eq!(badge(&[], Some(&branch)), Some((Badge::Draft, 1, false)));
+        let mut dismissed = link(1, Some(State::Merged), false);
+        dismissed.source = PullRequestSource::Dismissed;
+        assert_eq!(
+            badge(&[dismissed], Some(&branch)),
+            Some((Badge::Draft, 1, false))
+        );
+        assert_eq!(
+            badge(&[link(1, Some(State::Merged), false)], Some(&branch)),
+            Some((Badge::Merged, 1, false)),
+            "a link hides the branch's pull request"
+        );
         assert!(is_pull_request_url(
             "https://github.com/sample/project/pull/123/files"
         ));

@@ -24,7 +24,8 @@ pub(crate) fn parse_document(source: &str) -> ParsedDocument {
     let parser = rushdown::parser::Parser::with_extensions(
         rushdown::parser::Options::default(),
         rushdown::parser::gfm(rushdown::parser::GfmOptions::default())
-            .and(super::math_parse::MathParser),
+            .and(super::math_parse::MathParser)
+            .and(super::math_parse::MathBlockParser),
     );
     let mut reader = rushdown::text::BasicReader::new(source);
     let (arena, doc_ref) = parser.parse(&mut reader);
@@ -60,6 +61,15 @@ fn block_node(
             children: block_children(arena, node_ref, source, None),
         },
         KindData::Paragraph(_) => {
+            let paragraph = inline_paragraph(arena, node_ref, source);
+            if paragraph.children.is_empty() {
+                return None;
+            }
+            split_math_blocks(paragraph)
+        }
+        KindData::Extension(extension)
+            if extension.as_any().is::<super::math_parse::MathBlock>() =>
+        {
             let paragraph = inline_paragraph(arena, node_ref, source);
             if paragraph.children.is_empty() {
                 return None;
@@ -556,6 +566,47 @@ x&-y\\
             document.text()
         );
         assert!(document.text().contains("Next paragraph."));
+    }
+
+    #[test]
+    fn display_math_lines_are_not_paragraph_structure() {
+        let source = "Differentiating gives\n\\[\n\\frac{d}{dt}K(t)\n=\n-C t^q\n\\tag{30}\n\\]\nafter reducing.\n\n$$\nx = y\n---\n$$\n";
+        let blocks = root_children(source);
+        let latex: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                BlockNode::Root { children } => Some(children),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                BlockNode::CodeBlock(code) if code.lang.as_deref() == Some("latex") => {
+                    Some(code.code.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            latex,
+            [
+                "\n\\frac{d}{dt}K(t)\n=\n-C t^q\n\\tag{30}\n",
+                "\nx = y\n---\n"
+            ],
+            "{blocks:?}"
+        );
+        assert!(
+            !blocks.iter().any(|block| matches!(
+                block,
+                BlockNode::Heading { .. } | BlockNode::HorizontalRule
+            )),
+            "{blocks:?}"
+        );
+        let text = parse(source).text();
+        assert!(text.contains("Differentiating gives"), "{text}");
+        assert!(text.contains("after reducing."), "{text}");
+
+        let text = parse("\\[ x \\] after $$ y $$ end").text();
+        assert!(text.contains("after") && text.contains("end"), "{text}");
     }
 
     #[test]
