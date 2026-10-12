@@ -249,7 +249,9 @@ impl<'a> ActivityProjection<'a> {
                 }
             })
         });
-        self.holding.borrow_mut().insert(parent_id.to_string(), holds);
+        self.holding
+            .borrow_mut()
+            .insert(parent_id.to_string(), holds);
         holds
     }
 
@@ -352,10 +354,8 @@ impl AppState {
                 let resident = self.resident(&meta.id);
                 summary.activity.insert(
                     meta.id.clone(),
-                    activity.session_activity(
-                        resident.map_or(meta, |session| &session.meta),
-                        resident,
-                    ),
+                    activity
+                        .session_activity(resident.map_or(meta, |session| &session.meta), resident),
                 );
                 if sharing.is_shared(meta) {
                     summary.worktree_shared.insert(meta.id.clone());
