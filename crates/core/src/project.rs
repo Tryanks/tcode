@@ -82,8 +82,13 @@ pub enum SettledOverride {
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::pull_request::drop_discovered_links"
+    )]
     pub pull_requests: Vec<crate::pull_request::ThreadPullRequestLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_pull_request: Option<Box<crate::pull_request::BranchPullRequest>>,
     /// Reviews being written in this thread, one per pull request it shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pull_request_reviews: Vec<crate::pull_request::PullRequestReviewDraft>,
@@ -282,6 +287,7 @@ impl SessionMeta {
             id: uuid::Uuid::new_v4().to_string(),
             title: format!("New {} session", provider.display_name()),
             pull_requests: Vec::new(),
+            branch_pull_request: None,
             pull_request_reviews: Vec::new(),
             pull_request_operations: Vec::new(),
             provider,
@@ -553,6 +559,58 @@ mod tests {
         assert_eq!(by_name[0].project.name, "Empty");
         assert_eq!(by_name[1].project.name, "New");
         assert_eq!(by_name[2].project.name, "Old");
+    }
+
+    #[test]
+    fn links_branch_discovery_stored_are_dropped_as_the_thread_is_read() {
+        let link = |number: u64, source: &str| {
+            serde_json::json!({
+                "key": {"host": "github.com", "repository": "sample/project", "number": number},
+                "source": source,
+                "url": format!("https://github.com/sample/project/pull/{number}"),
+                "linked_at": 1
+            })
+        };
+        let stored = serde_json::json!({
+            "id": "legacy", "title": "Legacy", "provider": "codex",
+            "cwd": "/work", "created_at": 1, "updated_at": 2,
+            "pull_requests": [
+                link(1, "manual"),
+                link(2, "created"),
+                link(3, "agent"),
+                link(4, "stack"),
+                {"key": {"host": "github.com", "repository": "sample/project", "number": 5},
+                 "source": "dismissed"},
+                link(6, "opened")
+            ]
+        });
+        let meta: SessionMeta = serde_json::from_value(stored).unwrap();
+        let kept: Vec<_> = meta
+            .pull_requests
+            .iter()
+            .map(|link| (link.key.number, link.source))
+            .collect();
+        use crate::pull_request::PullRequestSource::*;
+        assert_eq!(
+            kept,
+            [
+                (1, Manual),
+                (3, Agent),
+                (4, Stack),
+                (5, Dismissed),
+                (6, Opened)
+            ]
+        );
+        assert_eq!(meta.branch_pull_request, None);
+        let malformed = serde_json::json!({
+            "id": "legacy", "title": "Legacy", "provider": "codex",
+            "cwd": "/work", "created_at": 1, "updated_at": 2,
+            "pull_requests": [{"source": "manual"}]
+        });
+        assert!(
+            serde_json::from_value::<SessionMeta>(malformed).is_err(),
+            "only discovery's links are dropped; an unreadable link still fails the thread"
+        );
     }
 
     #[test]

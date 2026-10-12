@@ -80,8 +80,14 @@ pub trait Forge: Send + Sync {
     /// The web URL of a pull request.
     fn url(&self, key: &PullRequestKey) -> Option<String>;
     /// The pull request of the branch checked out at `cwd`, when `root`'s repository has one:
-    /// read again with `refresh`, otherwise possibly from what was read recently.
-    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered>;
+    /// read again with `refresh`, otherwise possibly from what was read recently. `Ok(None)`
+    /// is an answer that there is none; an error is no answer.
+    fn discover(
+        &self,
+        cwd: &Path,
+        root: &Path,
+        refresh: bool,
+    ) -> Result<Option<Discovered>, ForgeError>;
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError>;
     fn stack(&self, key: &PullRequestKey) -> Result<PullRequestStackState, ForgeError>;
@@ -521,8 +527,15 @@ impl Forge for Hosts {
         self.host(&key.host).url(key)
     }
 
-    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered> {
-        let repository = self.checkout_repository(root)?;
+    fn discover(
+        &self,
+        cwd: &Path,
+        root: &Path,
+        refresh: bool,
+    ) -> Result<Option<Discovered>, ForgeError> {
+        let Some(repository) = self.checkout_repository(root) else {
+            return Ok(None);
+        };
         self.host(&repository.host).discover(cwd, root, refresh)
     }
 

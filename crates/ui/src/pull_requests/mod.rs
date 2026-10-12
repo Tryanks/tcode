@@ -22,9 +22,9 @@ use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::{
     pull_request::{
-        self, ChecksState, HostTerms, Mergeability, PullRequestBadgeState, PullRequestKey,
-        PullRequestSource, PullRequestState, PullRequestSyncError, ReviewDecision,
-        ThreadPullRequestLink,
+        self, BranchPullRequest, ChecksState, HostTerms, Mergeability, PullRequestBadgeState,
+        PullRequestKey, PullRequestSnapshot, PullRequestSource, PullRequestState,
+        PullRequestSyncError, ReviewDecision, ThreadPullRequestLink,
     },
     pull_request_watch::{WatchChangeKind, WatchNotice},
     ui::RightTab,
@@ -78,32 +78,35 @@ fn appearance(state: PullRequestBadgeState, cx: &App) -> (IconName, Hsla, &'stat
     }
 }
 fn row_state(
-    link: Option<&ThreadPullRequestLink>,
+    snapshot: Option<&PullRequestSnapshot>,
     state: Option<PullRequestState>,
 ) -> PullRequestBadgeState {
-    match link
-        .and_then(|link| link.snapshot.as_ref())
-        .map(|s| (s.state, s.is_draft))
-        .or_else(|| state.map(|state| (state, false)))
-    {
-        Some((PullRequestState::Open, true)) => PullRequestBadgeState::Draft,
-        Some((PullRequestState::Open, false)) => PullRequestBadgeState::Open,
-        Some((PullRequestState::Merged, _)) => PullRequestBadgeState::Merged,
-        Some((PullRequestState::Closed, _)) => PullRequestBadgeState::Closed,
-        None => PullRequestBadgeState::Unknown,
+    match (snapshot, state) {
+        (None, Some(PullRequestState::Open)) => PullRequestBadgeState::Open,
+        (None, Some(PullRequestState::Merged)) => PullRequestBadgeState::Merged,
+        (None, Some(PullRequestState::Closed)) => PullRequestBadgeState::Closed,
+        (snapshot, _) => PullRequestBadgeState::of(snapshot),
     }
 }
-/// A single-link badge names that link.
-fn single_number(links: &[ThreadPullRequestLink]) -> Option<u64> {
+/// A single-link badge names that link, or the branch's pull request standing in for none.
+fn single_number(
+    links: &[ThreadPullRequestLink],
+    branch: Option<&BranchPullRequest>,
+) -> Option<u64> {
     links
         .iter()
         .find(|link| link.visible())
         .map(|link| link.key.number)
+        .or_else(|| branch.map(|branch| branch.key.number))
 }
-pub fn badge_label(links: &[ThreadPullRequestLink], cx: &App) -> Option<String> {
-    let (state, count, stacked) = pull_request::badge(links)?;
+pub fn badge_label(
+    links: &[ThreadPullRequestLink],
+    branch: Option<&BranchPullRequest>,
+    cx: &App,
+) -> Option<String> {
+    let (state, count, stacked) = pull_request::badge(links, branch)?;
     let (_, _, label) = appearance(state, cx);
-    let number = single_number(links)?;
+    let number = single_number(links, branch)?;
     let label = format!("{label}_lower");
     let label = if stacked {
         crate::tr!(
@@ -129,11 +132,16 @@ pub fn badge_label(links: &[ThreadPullRequestLink], cx: &App) -> Option<String> 
     };
     Some(label)
 }
-pub fn badge(links: &[ThreadPullRequestLink], size: f32, cx: &App) -> Option<AnyElement> {
-    let (state, count, stacked) = pull_request::badge(links)?;
+pub fn badge(
+    links: &[ThreadPullRequestLink],
+    branch: Option<&BranchPullRequest>,
+    size: f32,
+    cx: &App,
+) -> Option<AnyElement> {
+    let (state, count, stacked) = pull_request::badge(links, branch)?;
     let (glyph, color, _) = appearance(state, cx);
-    let label = badge_label(links, cx)?;
-    let number = single_number(links)?;
+    let label = badge_label(links, branch, cx)?;
+    let number = single_number(links, branch)?;
     let text = if stacked {
         count.to_string()
     } else if count > 1 {
@@ -161,20 +169,23 @@ pub fn badge(links: &[ThreadPullRequestLink], size: f32, cx: &App) -> Option<Any
 }
 pub fn sidebar_badge(
     links: &[ThreadPullRequestLink],
+    branch: Option<&BranchPullRequest>,
     id: &str,
     store: Entity<WorkspaceStore>,
     cx: &App,
 ) -> Option<AnyElement> {
-    let badge = badge(links, 12., cx)?;
+    let branch = pull_request::branch_fallback(links, branch);
+    let badge = badge(links, branch, 12., cx)?;
     let id = id.to_owned();
     let hover_links = links.to_vec();
+    let hover_branch = branch.cloned();
     let hover_store = store.clone();
     let hover_id = id.clone();
     let trigger = crate::material::accessible_clickable(
         div(),
         SharedString::from(format!("pr-badge-{id}")),
         gpui::Role::Button,
-        badge_label(links, cx).unwrap_or_default(),
+        badge_label(links, branch, cx).unwrap_or_default(),
         cx,
     )
     .cursor_pointer()
@@ -209,7 +220,7 @@ pub fn sidebar_badge(
                             .text_color(cx.theme().muted_foreground)
                             .child(crate::tr!("pull_requests.title")),
                     );
-                let ordered: Vec<_> = pull_request::groups(&hover_links)
+                let mut ordered: Vec<_> = pull_request::groups(&hover_links)
                     .into_iter()
                     .flat_map(|group| {
                         let caption = match group.kind {
@@ -229,7 +240,8 @@ pub fn sidebar_badge(
                             .map(move |(depth, link)| {
                                 (
                                     depth,
-                                    link,
+                                    &link.key,
+                                    link.snapshot.as_ref(),
                                     if depth == 0 {
                                         caption.map(|caption| {
                                             crate::tr!(caption, count = count.to_string())
@@ -242,10 +254,14 @@ pub fn sidebar_badge(
                             })
                     })
                     .collect();
-                for (index, (depth, link, caption)) in ordered.iter().take(8).enumerate() {
-                    let (glyph, color, _) = appearance(row_state(Some(link), None), cx);
-                    let (store, id, key) =
-                        (hover_store.clone(), hover_id.clone(), link.key.clone());
+                ordered.extend(
+                    hover_branch
+                        .as_ref()
+                        .map(|branch| (0, &branch.key, branch.snapshot.as_ref(), None)),
+                );
+                for (index, (depth, key, snapshot, caption)) in ordered.iter().take(8).enumerate() {
+                    let (glyph, color, _) = appearance(row_state(*snapshot, None), cx);
+                    let (store, id, open) = (hover_store.clone(), hover_id.clone(), (*key).clone());
                     rows = rows.child(
                         h_flex()
                             .id(index)
@@ -259,23 +275,19 @@ pub fn sidebar_badge(
                                 store.update(cx, |store, cx| {
                                     store.select_session(id.clone());
                                     store.open_tab_for(&id, RightTab::PullRequests, cx);
-                                    store.set_open_pull_request(&id, Some(key.clone()), cx);
+                                    store.set_open_pull_request(&id, Some(open.clone()), cx);
                                 });
                             })
                             .child(Icon::new(glyph).xsmall().text_color(color))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .child(format!("#{}", link.key.number)),
-                            )
+                            .child(div().text_size(px(11.)).child(format!("#{}", key.number)))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_size(px(12.))
-                                    .child(link.snapshot.as_ref().map_or_else(
-                                        || link.key.repository.clone(),
+                                    .child(snapshot.map_or_else(
+                                        || key.repository.clone(),
                                         |s| s.title.clone(),
                                     )),
                             )
@@ -372,14 +384,17 @@ pub fn watch_notice_toast(number: u64, notice: &WatchNotice) -> (NotificationTyp
     }
 }
 
-fn source(link: Option<&ThreadPullRequestLink>) -> &'static str {
+/// What made the thread show the row's pull request; a row without a link is a layer of a
+/// stack when it has a position, and otherwise the branch's pull request.
+fn source(link: Option<&ThreadPullRequestLink>, in_stack: bool) -> &'static str {
     match link.map(|link| link.source) {
         Some(PullRequestSource::Manual) => "pull_requests.source_manual",
         Some(PullRequestSource::Agent) => "pull_requests.source_agent",
-        Some(PullRequestSource::Created) => "pull_requests.source_created",
+        Some(PullRequestSource::Opened) => "pull_requests.source_opened",
         Some(PullRequestSource::Stack) => "pull_requests.source_stack",
         Some(PullRequestSource::Dismissed) => "pull_requests.source_dismissed",
-        None => "pull_requests.source_not_linked",
+        None if in_stack => "pull_requests.source_not_linked",
+        None => "pull_requests.source_branch",
     }
 }
 /// When a rate limit lifts, as the notices say it: ahead, or soon once its time has passed.
@@ -624,6 +639,8 @@ struct PullRequestRow<'a> {
     link: Option<&'a ThreadPullRequestLink>,
     branch: Option<&'a str>,
     state: Option<PullRequestState>,
+    /// What a row without a visible link still knows of the pull request.
+    snapshot: Option<&'a PullRequestSnapshot>,
     position: Option<(usize, usize)>,
     depth: usize,
     /// The thread may start a watch: not settled, archived or a subagent.
@@ -744,6 +761,7 @@ impl PullRequestsPanel {
             link,
             branch,
             state,
+            snapshot: unlinked,
             position,
             depth,
             watchable,
@@ -752,14 +770,21 @@ impl PullRequestsPanel {
         let watched = link.is_some_and(|link| link.visible() && link.watch.is_some());
         let snapshot = link
             .filter(|link| link.visible())
-            .and_then(|link| link.snapshot.as_ref());
-        let (glyph, color, state_label) = appearance(row_state(link, state), cx);
+            .and_then(|link| link.snapshot.as_ref())
+            .or(unlinked);
+        let (glyph, color, state_label) = appearance(
+            row_state(
+                link.and_then(|link| link.snapshot.as_ref()).or(unlinked),
+                state,
+            ),
+            cx,
+        );
         let color = if visible {
             color
         } else {
             cx.theme().muted_foreground
         };
-        let source = crate::tr!(source(link)).into_owned();
+        let source = crate::tr!(source(link, position.is_some())).into_owned();
         let title = snapshot.map(|s| s.title.clone()).unwrap_or_else(|| {
             branch
                 .map(str::to_owned)
@@ -1344,6 +1369,10 @@ impl Render for PullRequestsPanel {
             .as_deref()
             .map(|id| store.pull_requests(id).to_vec())
             .unwrap_or_default();
+        let found = session
+            .as_deref()
+            .and_then(|id| store.branch_pull_request(id))
+            .cloned();
         let operations = session
             .as_deref()
             .and_then(|id| store.thread_meta(id))
@@ -1437,6 +1466,7 @@ impl Render for PullRequestsPanel {
                             link,
                             branch: Some(&layer.head_branch),
                             state: Some(layer.state),
+                            snapshot: None,
                             position: Some((index + 1, stack.layers.len())),
                             depth: index,
                             watchable,
@@ -1454,6 +1484,7 @@ impl Render for PullRequestsPanel {
                             link: Some(link),
                             branch: None,
                             state: None,
+                            snapshot: None,
                             position: None,
                             depth: index,
                             watchable,
@@ -1463,6 +1494,23 @@ impl Render for PullRequestsPanel {
                     ));
                 }
             }
+        }
+        if let Some(found) = &found {
+            rows = rows.child(self.row(
+                PullRequestRow {
+                    key: found.key.clone(),
+                    url: found.url.clone(),
+                    link: None,
+                    branch: None,
+                    state: None,
+                    snapshot: found.snapshot.as_ref(),
+                    position: None,
+                    depth: 0,
+                    watchable,
+                },
+                compact,
+                cx,
+            ));
         }
         let agent_tools = agent_tools.map(|tools| self.agent_tools(&tools, cx));
         let count = links.iter().filter(|link| link.visible()).count();
