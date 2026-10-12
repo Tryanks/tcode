@@ -48,7 +48,8 @@ struct AgentRow {
     provider: Option<ProviderKind>,
     /// "provider · model".
     detail: String,
-    /// Absent for an archived agent, whose host reports no activity.
+    /// Absent for a settled or archived agent the host reports no activity
+    /// for.
     execution: Option<AgentExecution>,
     /// Absent for a provider-native subagent.
     delivery: Option<AgentDelivery>,
@@ -169,8 +170,13 @@ impl Agents {
             let status = (!archived).then(|| store.agent_status(&meta.id)).flatten();
             let (execution, delivery) = match status {
                 Some(status) => (Some(status.execution), status.delivery),
-                None if archived => (None, AgentDelivery::of(meta, AgentExecution::Finished)),
-                None => (Some(AgentExecution::Working), AgentDelivery::Running),
+                // Nor does a settled one; an unsettled agent is running
+                // until the host reports it.
+                None => {
+                    let delivery = AgentDelivery::of(meta, AgentExecution::Working);
+                    let running = matches!(delivery, AgentDelivery::Running);
+                    (running.then_some(AgentExecution::Working), delivery)
+                }
             };
             let row = AgentRow {
                 key: meta.id.clone(),
@@ -959,5 +965,74 @@ impl Render for AgentsPanel {
                 .track_scroll(&self.vscroll)
                 .child(column),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent::ProviderKind;
+    use gpui::{AppContext as _, TestAppContext};
+    use tcode_core::project::SessionMeta;
+    use tcode_protocol::{EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic};
+
+    use super::Agents;
+    use crate::store::{WorkspaceAttachment, WorkspaceStore};
+
+    /// A settled child is not resident, so the host reports no activity for
+    /// it: it is done and the badge leaves it out, while an unsettled child
+    /// the host has not reported yet is running.
+    #[gpui::test]
+    fn a_settled_child_without_reported_activity_is_done(cx: &mut TestAppContext) {
+        let (to_host, _requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let thread = |id: &str, parent: Option<&str>| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
+            meta.id = id.into();
+            meta.parent_session_id = parent.map(str::to_string);
+            meta
+        };
+        let mut settled = thread("settled", Some("lead"));
+        settled.settled_at = Some(1);
+        let index = tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
+            request_id: None,
+            topic: Topic::Index,
+            event: ServerEvent::IndexSnapshot(IndexSnapshot {
+                projects: Vec::new(),
+                sessions: vec![
+                    thread("lead", None),
+                    settled,
+                    thread("unsettled", Some("lead")),
+                ],
+                summary: Default::default(),
+            }),
+        }))
+        .unwrap();
+        crate::store::tests::seed_full_scope(&store, &incoming, vec![index], cx);
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+
+        store.read_with(cx, |store, _| {
+            let agents = Agents::of(store, "lead");
+            let keys = |rows: &[super::AgentRow]| {
+                rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>()
+            };
+            assert_eq!(keys(&agents.done), ["settled"]);
+            assert_eq!(keys(&agents.running), ["unsettled"]);
+            assert_eq!(agents.outstanding(), 1);
+        });
+        link.close();
     }
 }
