@@ -522,7 +522,7 @@ impl ActiveSession {
         id
     }
 
-    /// Queue a host-authored turn behind any running turn; it is never steered.
+    /// Queue a host-authored turn behind any running turn.
     pub(super) fn push_server_message(&mut self, text: String, kind: QueuedMessageKind) -> u64 {
         self.idle_since = None;
         let id = self.next_queue_id;

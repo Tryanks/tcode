@@ -570,8 +570,7 @@ impl AppState {
     /// Apply what a pass saw to one thread's watch, only while the same generation is on, so a
     /// stop or restart that landed during the read wins. `next` is the watch to keep, `None` to
     /// end it; a wake without `next` is the last message the agent reads before it ends. A wake
-    /// is written in the same metadata write as the watermark it reports, then queued behind any
-    /// running turn.
+    /// is written in the same metadata write as the watermark it reports, then delivered.
     fn record_pull_request_watch(
         &mut self,
         thread: &str,
@@ -641,7 +640,9 @@ impl AppState {
         true
     }
 
-    /// Queue a persisted wake unless it already waits in the thread's queue.
+    /// Deliver a persisted wake: into the running turn when the provider can steer, so news
+    /// about the pull request reaches the agent while it still works on it, otherwise queued
+    /// behind that turn. A wake already waiting in the queue is not delivered twice.
     fn deliver_pull_request_wake(
         &mut self,
         thread: &str,
@@ -659,6 +660,26 @@ impl AppState {
         {
             return;
         }
+        let can_steer = self
+            .resident(thread)
+            .is_some_and(|session| session.turn_in_flight && session.can_steer());
+        if can_steer {
+            let mut steer_cx = cx.clone();
+            steer_cx.origin = Some(MessageOrigin::Server);
+            steer_cx.author = None;
+            steer_cx.delivery_key = Some(wake.id.clone());
+            let request_id = self.record_steer_request(thread, &wake.text, &[], &mut steer_cx);
+            let sent = self.resident_mut(thread).is_some_and(|session| {
+                session
+                    .steer_now(request_id, wake.text.clone(), Vec::new())
+                    .is_ok()
+            });
+            if sent {
+                self.acknowledge_pull_request_wake(thread, key, &wake.id, cx);
+                return;
+            }
+            // Provider channel gone: the wake survives in the queue for the next turn.
+        }
         let text = wake.text.clone();
         self.queue_automatic_turn(
             thread,
@@ -669,7 +690,8 @@ impl AppState {
         );
     }
 
-    /// The provider accepted a wake: it is delivered, and an ending watch ends here.
+    /// The provider took a wake, steered or as a turn: it is delivered, and an ending watch
+    /// ends here.
     pub(super) fn acknowledge_pull_request_wake(
         &mut self,
         thread: &str,
