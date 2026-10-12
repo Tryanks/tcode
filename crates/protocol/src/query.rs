@@ -48,6 +48,10 @@ pub enum Query {
     ReadFileBytes {
         path: PathBuf,
     },
+    /// Complete file contents for a preview, rejected above 512 KiB.
+    ReadFilePreview {
+        path: PathBuf,
+    },
     SaveAttachment {
         dir: PathBuf,
         #[serde(with = "crate::wire::base64_bytes")]
