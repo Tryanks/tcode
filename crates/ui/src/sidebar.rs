@@ -196,6 +196,16 @@ fn project_threads<'a>(
     )
 }
 
+/// A project's threads in the project view: the active ones (pinned
+/// included) in the order the store gives them, and its Settled shelf newest
+/// settled first.
+fn project_group_threads(sessions: &[SessionMeta]) -> (Vec<&SessionMeta>, Vec<&SessionMeta>) {
+    let (mut settled, active): (Vec<_>, Vec<_>) =
+        sessions.iter().partition(|meta| meta.is_settled());
+    settled.sort_by(|a, b| tcode_core::thread_sort::compare_threads(a, b));
+    (active, settled)
+}
+
 fn animate_flat_thread_position(row: gpui::Div, session_id: &str, target_top: f32) -> gpui::Div {
     // `list` positions each item root explicitly during prepaint, which
     // overrides relative offsets applied to that root. Keep an unanimated
@@ -457,6 +467,14 @@ enum GroupedListRow {
         expanded: bool,
         label: SharedString,
     },
+    Settled {
+        group: usize,
+        count: usize,
+    },
+    SettledMore {
+        group: usize,
+        count: usize,
+    },
 }
 
 impl GroupedListRow {
@@ -466,6 +484,8 @@ impl GroupedListRow {
             Self::Project { group, .. } => ("project", project(group)),
             Self::Thread(meta) => ("thread", &meta.id),
             Self::ToggleThreads { group, .. } => ("toggle", project(group)),
+            Self::Settled { group, .. } => ("settled", project(group)),
+            Self::SettledMore { group, .. } => ("settled-more", project(group)),
         }
     }
 }
@@ -575,8 +595,9 @@ impl SessionsSidebar {
         }
     }
 
-    /// The project view lists every project's threads in the order the store
-    /// gives them; Pinned, Active and Settled belong to the threads view.
+    /// The project view lists each project's active threads in the order the
+    /// store gives them, then its Settled shelf; Pinned belongs to the threads
+    /// view.
     fn grouped_rows(&self, groups: &[ProjectGroup], store: &WorkspaceStore) -> Vec<GroupedListRow> {
         let mut rows = Vec::new();
         for (group, project) in groups.iter().enumerate() {
@@ -586,25 +607,39 @@ impl SessionsSidebar {
             if collapsed {
                 continue;
             }
+            let (active, mut settled) = project_group_threads(&project.sessions);
             let expanded = self.expanded_groups.contains(project_id);
             let shown = if expanded {
-                project.sessions.len()
+                active.len()
             } else {
                 THREADS_COLLAPSED_LIMIT
             };
             rows.extend(
-                project
-                    .sessions
+                active
                     .iter()
                     .take(shown)
-                    .map(|meta| GroupedListRow::Thread(Box::new(meta.clone()))),
+                    .map(|meta| GroupedListRow::Thread(Box::new((*meta).clone()))),
             );
-            if let Some(label) = thread_list_toggle_label(project.sessions.len(), expanded) {
+            if let Some(label) = thread_list_toggle_label(active.len(), expanded) {
                 rows.push(GroupedListRow::ToggleThreads {
                     group,
                     expanded,
                     label: label.into(),
                 });
+            }
+            if !settled.is_empty() {
+                let count = settled.len();
+                rows.push(GroupedListRow::Settled { group, count });
+                self.limit_settled_rows(project_id, &mut settled);
+                let hidden = count - settled.len();
+                rows.extend(
+                    settled
+                        .into_iter()
+                        .map(|meta| GroupedListRow::Thread(Box::new(meta.clone()))),
+                );
+                if let Some(count) = self.settled_more_count(project_id, hidden) {
+                    rows.push(GroupedListRow::SettledMore { group, count });
+                }
             }
         }
         rows
@@ -1216,11 +1251,15 @@ impl SessionsSidebar {
         };
         if meta.is_settled()
             && let Some(project_id) = &meta.project_id
-            && self.store.read(cx).is_project_collapsed(project_id)
         {
-            self.store.update(cx, |store, cx| {
-                store.toggle_project_collapsed(project_id.clone(), cx)
-            });
+            // The project view's shelf opens; the threads view shows the
+            // viewed row under its closed shelf instead.
+            self.expanded_settled.insert(project_id.clone());
+            if self.store.read(cx).is_project_collapsed(project_id) {
+                self.store.update(cx, |store, cx| {
+                    store.toggle_project_collapsed(project_id.clone(), cx)
+                });
+            }
         }
         self.compact_model_dirty = true;
     }
@@ -2234,6 +2273,12 @@ impl SessionsSidebar {
                 )
                 .into_any_element()
             }
+            GroupedListRow::Settled { group, count } => item
+                .child(self.render_settled_header(&groups[*group].project.id, *count, None, cx))
+                .into_any_element(),
+            GroupedListRow::SettledMore { group, count } => item
+                .child(self.render_settled_more(&groups[*group].project.id, *count, cx))
+                .into_any_element(),
         }
     }
 
@@ -3342,12 +3387,29 @@ impl SessionsSidebar {
                 }
             } else {
                 for group in &groups {
+                    let key = group.project.id.as_str();
                     let count = group.sessions.len();
-                    let collapsed =
-                        groups.len() > 1 && collapsed_projects.contains(&group.project.id);
+                    let collapsed = groups.len() > 1 && collapsed_projects.contains(key);
                     let start = rows.len();
                     if !collapsed {
-                        rows.extend(thread_rows(group.sessions.iter().collect(), false));
+                        let (active, mut settled) = project_group_threads(&group.sessions);
+                        rows.extend(thread_rows(active, false));
+                        if !settled.is_empty() {
+                            let count = settled.len();
+                            rows.push(CompactListRow::Settled {
+                                key: key.into(),
+                                count,
+                            });
+                            self.limit_settled_rows(key, &mut settled);
+                            let hidden = count - settled.len();
+                            rows.extend(thread_rows(settled, false));
+                            if let Some(count) = self.settled_more_count(key, hidden) {
+                                rows.push(CompactListRow::More {
+                                    key: format!("{key}-more"),
+                                    count,
+                                });
+                            }
+                        }
                     }
                     if groups.len() > 1 {
                         rows.insert(
@@ -6292,12 +6354,14 @@ mod tests {
         );
     }
 
-    /// The project view lists a project whose roots are pinned, active and
-    /// settled as one plain list by last update, with no Settled shelf, and
-    /// orders projects by the activity of every thread in them, agents
-    /// included. A project shows six rows until "Show more".
+    /// The project view lists a project's pinned and active roots as one list
+    /// by last update and ends it in a closed "Settled N" shelf, newest
+    /// settled first, that opens per project and opens for a selected settled
+    /// thread. Projects order by the activity of every thread in them, agents
+    /// included. A project shows six active rows until "Show more", whatever
+    /// its shelf holds.
     #[gpui::test]
-    fn the_project_view_lists_threads_by_update_whatever_their_section(cx: &mut TestAppContext) {
+    fn the_project_view_keeps_a_settled_shelf_per_project(cx: &mut TestAppContext) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
         };
@@ -6331,9 +6395,9 @@ mod tests {
             meta.updated_at = updated;
             meta
         };
-        let settled = |id: &str, project: &str, updated: u64| {
+        let settled = |id: &str, project: &str, updated: u64, settled_at: u64| {
             let mut meta = thread(id, project, updated);
-            meta.settled_at = Some(updated);
+            meta.settled_at = Some(settled_at);
             meta
         };
         let mut pinned = thread("lead-pinned", "lead", 50);
@@ -6344,16 +6408,20 @@ mod tests {
         let mut arranged = thread("mixed-b", "mixed", 100);
         arranged.active_order = Some("b".into());
         let mut sessions = vec![
-            settled("lead-settled-0", "lead", 60),
+            settled("lead-settled-0", "lead", 60, 60),
             pinned,
-            settled("lead-settled-1", "lead", 30),
-            settled("lead-settled-2", "lead", 20),
+            settled("lead-settled-1", "lead", 30, 70),
+            settled("lead-settled-2", "lead", 20, 20),
             agent,
             thread("mixed-a", "mixed", 300),
-            settled("mixed-old", "mixed", 200),
+            settled("mixed-old", "mixed", 200, 200),
             arranged,
         ];
         sessions.extend((0..8).map(|index| thread(&format!("many-{index}"), "many", 10 + index)));
+        // Newer than every active row in their project, so a limit that
+        // counted them would take active rows' places.
+        sessions.push(settled("many-settled-0", "many", 41, 41));
+        sessions.push(settled("many-settled-1", "many", 40, 40));
         send(
             Topic::Settings,
             ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
@@ -6396,28 +6464,78 @@ mod tests {
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         cx.simulate_resize(size(px(393.), px(2000.)));
-        let lead = [
-            "lead-settled-0",
-            "lead-pinned",
-            "lead-settled-1",
-            "lead-settled-2",
-        ];
-        let mixed = ["mixed-a", "mixed-old", "mixed-b"];
-        let many = |shown: u64| (0..shown).map(|index| format!("many-{}", 7 - index));
-        let expected = |shown: u64| {
-            lead.iter()
-                .chain(&mixed)
-                .map(|id| id.to_string())
-                .chain(many(shown))
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let lead = |open: bool| {
+            let mut rows = ids(&["lead-pinned"]);
+            if open {
+                rows.extend(ids(&["lead-settled-1", "lead-settled-0", "lead-settled-2"]));
+            }
+            rows
+        };
+        let mixed = ids(&["mixed-a", "mixed-b"]);
+        let many = |shown: u64, open: bool| {
+            let mut rows = (0..shown)
+                .map(|index| format!("many-{}", 7 - index))
+                .collect::<Vec<_>>();
+            if open {
+                rows.extend(ids(&["many-settled-0", "many-settled-1"]));
+            }
+            rows
+        };
+        let expected = |shown: u64, lead_open: bool, many_open: bool| {
+            lead(lead_open)
+                .into_iter()
+                .chain(mixed.clone())
+                .chain(many(shown, many_open))
                 .collect::<Vec<_>>()
         };
+        let click = |cx: &mut VisualTestContext, selector: &'static str| {
+            let bounds = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            draw(cx);
+        };
         for compact in [false, true] {
+            store.update(cx, |store, _| store.select_session("mixed-a".into()));
             window_state.update(cx, |state, cx| {
                 state.compact = compact;
                 cx.notify();
             });
-            sidebar.update(cx, |sidebar, _| sidebar.compact_model_dirty = true);
+            sidebar.update(cx, |sidebar, _| {
+                sidebar.expanded_settled.clear();
+                sidebar.compact_model_dirty = true;
+            });
             draw(cx);
+            let shelves = sidebar.update(cx, |sidebar, cx| {
+                if compact {
+                    sidebar
+                        .compact_model(cx)
+                        .rows
+                        .iter()
+                        .filter_map(|row| match row {
+                            CompactListRow::Settled { key, count } => Some((key.clone(), *count)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    let store = sidebar.store.read(cx);
+                    let groups = store.grouped_sessions();
+                    sidebar
+                        .grouped_rows(&groups, store)
+                        .into_iter()
+                        .filter_map(|row| match row {
+                            GroupedListRow::Settled { group, count } => {
+                                Some((groups[group].project.id.clone(), count))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                }
+            });
+            assert_eq!(
+                shelves,
+                [("lead".into(), 3), ("mixed".into(), 1), ("many".into(), 2)],
+                "compact={compact}"
+            );
             let verify = |cx: &mut VisualTestContext, ids: Vec<String>| {
                 assert_eq!(
                     sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
@@ -6435,24 +6553,35 @@ mod tests {
                     assert!(previous.is_none_or(|previous| top > previous), "{id}");
                     previous = Some(top);
                 }
-                for project in ["lead", "mixed", "many"] {
-                    assert!(
-                        cx.debug_bounds(format!("settled-{project}").leak())
-                            .is_none(),
-                        "no Settled shelf in {project}; compact={compact}"
-                    );
-                }
             };
-            if compact {
-                // The phone lists every row of a project, as it always did.
-                verify(cx, expected(8));
+            // The shelf sits under its project's active rows.
+            let shelf = cx.debug_bounds("settled-lead").unwrap().top();
+            let pinned = if compact {
+                "compact-row-lead-pinned"
             } else {
-                verify(cx, expected(6));
-                let more = cx.debug_bounds("show-more-many").unwrap();
-                cx.simulate_click(more.center(), gpui::Modifiers::default());
-                draw(cx);
-                verify(cx, expected(8));
-            }
+                "sidebar-thread-lead-pinned"
+            };
+            assert!(cx.debug_bounds(pinned).unwrap().top() < shelf);
+            assert!(cx.debug_bounds("settled-mixed").is_some());
+            let shown = if compact {
+                // The phone lists every active row of a project.
+                8
+            } else {
+                verify(cx, expected(6, false, false));
+                click(cx, "show-more-many");
+                8
+            };
+            verify(cx, expected(shown, false, false));
+            click(cx, "settled-lead");
+            verify(cx, expected(shown, true, false));
+            click(cx, "settled-lead");
+            verify(cx, expected(shown, false, false));
+            store.update(cx, |store, cx| {
+                store.select_session("many-settled-1".into());
+                cx.notify();
+            });
+            draw(cx);
+            verify(cx, expected(shown, false, true));
 
             send(
                 Topic::Settings,
@@ -6467,9 +6596,9 @@ mod tests {
             draw(cx);
             assert_eq!(
                 sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
-                lead.iter()
-                    .map(|id| id.to_string())
-                    .chain(many(8))
+                lead(false)
+                    .into_iter()
+                    .chain(many(8, true))
                     .collect::<Vec<_>>(),
                 "a collapsed project lists nothing; compact={compact}"
             );
