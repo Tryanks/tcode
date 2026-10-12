@@ -28,7 +28,6 @@ tar = "0.4"
 turso = { version = "=0.8.1", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
-[dev-dependencies]
-uuid = { version = "1", features = ["v4"] }
