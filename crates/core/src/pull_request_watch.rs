@@ -292,9 +292,10 @@ pub fn evaluate(
     if read.mergeability == Mergeability::Conflicting && !watch.conflicting {
         changes.push(WatchChange::Conflicting);
     }
-    // Unknown is GitHub still computing after a push; only a clean answer clears a conflict.
+    // A host still computing after a push, or one with no answer, says nothing of the conflict;
+    // only a clean answer clears it.
     let conflicting = match read.mergeability {
-        Mergeability::Unknown => watch.conflicting,
+        Mergeability::Pending | Mergeability::Unknown => watch.conflicting,
         Mergeability::Conflicting => true,
         Mergeability::Clean => false,
     };

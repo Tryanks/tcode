@@ -89,14 +89,9 @@ impl Pr<'_> {
         )?;
         Ok(checks(&page))
     }
-    /// Whether the source merges into the destination: Bitbucket lists each conflicting path.
+    /// Whether the source merges into the destination.
     pub(super) fn conflicts(&self) -> Result<Mergeability, ForgeError> {
-        let page = self.get(self.path("/conflicts"), "Conflicts")?;
-        Ok(match page["values"].as_array() {
-            Some(paths) if paths.is_empty() => Mergeability::Clean,
-            Some(_) => Mergeability::Conflicting,
-            None => Mergeability::Unknown,
-        })
+        Ok(conflicts(&self.get(self.path("/conflicts"), "Conflicts")?))
     }
     /// Every comment, page by page up to [`MAX_PAGES`]; `false` when more remained.
     pub(super) fn comments(&self) -> Result<(Vec<Value>, bool), ForgeError> {
@@ -180,6 +175,15 @@ pub(super) fn checks_state(checks: &[PullRequestCheck]) -> Option<ChecksState> {
     }
 }
 
+/// A `/conflicts` page lists each conflicting path, so an empty one is clean.
+pub(super) fn conflicts(page: &Value) -> Mergeability {
+    match page["values"].as_array() {
+        Some(paths) if paths.is_empty() => Mergeability::Clean,
+        Some(_) => Mergeability::Conflicting,
+        None => Mergeability::Unknown,
+    }
+}
+
 /// What merging now would meet. Bitbucket's merge checks (approvals, tasks) have no read, so a
 /// pull request they hold back reads clean, and the merge answers with the check it failed.
 pub(super) fn merge_state(
@@ -194,7 +198,7 @@ pub(super) fn merge_state(
     } else {
         match mergeability {
             Mergeability::Conflicting => PullRequestMergeState::Dirty,
-            Mergeability::Unknown => PullRequestMergeState::Unknown,
+            Mergeability::Pending | Mergeability::Unknown => PullRequestMergeState::Unknown,
             Mergeability::Clean
                 if checks
                     .iter()
@@ -600,6 +604,18 @@ mod tests {
             checks(&json!({"values": [{"key": "a", "name": "Build", "state": "STOPPED"}]}));
         assert_eq!(checks_state(&stopped), Some(ChecksState::Failing));
         assert_eq!(checks_state(&checks(&json!({"values": []}))), None);
+    }
+
+    /// A listed conflicting path is a conflict, an empty list is clean, and a page without a
+    /// list says nothing.
+    #[test]
+    fn a_conflicts_page_reads_as_mergeability() {
+        assert_eq!(
+            conflicts(&json!({"values": [{"path": "src/lib.rs"}]})),
+            Mergeability::Conflicting
+        );
+        assert_eq!(conflicts(&json!({"values": []})), Mergeability::Clean);
+        assert_eq!(conflicts(&json!({})), Mergeability::Unknown);
     }
 
     /// Replies join the thread their first line comment opened, however deep, and a reply to

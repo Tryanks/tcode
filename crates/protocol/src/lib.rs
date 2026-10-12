@@ -135,6 +135,8 @@ pub use wire::{
 // discovery found on the thread's checkout branch, shown without a link; the
 // pull request source created becomes opened, and links stored as created,
 // which branch discovery made, are dropped as metadata is read.
+// Unreleased: pull request mergeability adds pending, a host still working it
+// out, beside unknown.
 pub const PROTOCOL_VERSION: u32 = 11;
 
 #[cfg(test)]

@@ -550,6 +550,88 @@ fn reads_follow_the_fingerprint_and_its_half_hour_backstop() {
     );
 }
 
+/// GitHub still computing mergeability keeps the pull request read every pass for ten minutes
+/// at one head, and a push starts the ten minutes over.
+#[test]
+fn pending_mergeability_is_read_every_pass_for_ten_minutes_at_one_head() {
+    let mut harness = Harness::new("tcode-watch-pending");
+    harness.host().mergeable = "UNKNOWN";
+    harness.watch_thread("thread", START);
+    harness.pass();
+    harness.requests();
+    harness.pass();
+    assert_eq!(harness.requests(), [FINGERPRINTS, DETAIL]);
+    let age = |harness: &mut Harness| {
+        harness.state.update(&mut harness.cx, |state, _| {
+            for read in state.pull_request_watches.last_reads.values_mut() {
+                if let Some((_, since)) = &mut read.pending {
+                    *since -= PENDING_MERGEABILITY;
+                }
+            }
+        })
+    };
+    age(&mut harness);
+    harness.pass();
+    assert_eq!(
+        harness.requests(),
+        [FINGERPRINTS],
+        "ten minutes on, a quiet pass makes only the fingerprint request"
+    );
+    harness.host().head = "2222222bbbb";
+    harness.pass();
+    harness.requests();
+    harness.pass();
+    assert_eq!(harness.requests(), [FINGERPRINTS, DETAIL], "a new head");
+}
+
+/// Mergeability a host cannot work out, such as a Forgejo draft's or Bitbucket's without
+/// `/conflicts`, stays unknown however often it is read, so it keeps nothing in flight; one the
+/// host is still working out does.
+#[test]
+fn unknown_mergeability_keeps_the_usual_cadence() {
+    let mut harness = Harness::new("tcode-watch-unknown");
+    let group = || Group {
+        key: (Some("sample".into()), key()),
+        targets: Vec::new(),
+        snapshot: String::new(),
+    };
+    let fingerprint = Fingerprint {
+        status: "open".into(),
+        remarks: "none".into(),
+    };
+    for (mergeability, read_again) in [
+        (pull_request::Mergeability::Pending, true),
+        (pull_request::Mergeability::Unknown, false),
+    ] {
+        let detail = PullRequestWatchRead {
+            state: PullRequestState::Open,
+            head_sha: Some("1111111aaaa".into()),
+            base_branch: "main".into(),
+            checks: Vec::new(),
+            mergeability,
+            viewer: None,
+            author: None,
+        };
+        let full = Plan {
+            detail: true,
+            activity: true,
+            reread_tails: false,
+        };
+        let next = harness.state.update(&mut harness.cx, |state, cx| {
+            state.finish_pull_request_watch_read(
+                group(),
+                Some(fingerprint.clone()),
+                full,
+                Ok((detail, Some(Some(Vec::new())))),
+                cx,
+            );
+            let last = state.pull_request_watches.last_reads.get(&group().key);
+            plan(&group(), last, Some(&fingerprint), Instant::now())
+        });
+        assert_eq!(next.detail, read_again, "{mergeability:?}");
+    }
+}
+
 #[test]
 fn without_a_fingerprint_the_snapshot_gates_reads_with_a_ten_minute_backstop() {
     let mut harness = Harness::new("tcode-watch-snapshot");
