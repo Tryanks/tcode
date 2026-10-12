@@ -23,8 +23,6 @@ pub(super) const HOST: &str = "bitbucket.org";
 const API: &str = "https://api.bitbucket.org/2.0";
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
-/// How long Bitbucket is left alone after a rate limit that names no time.
-const PAUSE: Duration = Duration::from_secs(5 * 60);
 /// Bitbucket's rate-limit window.
 const WINDOW: Duration = Duration::from_secs(3600);
 /// Same-origin redirects followed for one read, as `/diff` and `/diffstat` answer with one.
@@ -157,7 +155,7 @@ pub(super) struct Api {
     pub(super) agent: ureq::Agent,
     /// Until when, and for which credential's fingerprint: Bitbucket limits each credential, and
     /// anonymous reads by address, apart.
-    paused: Mutex<Option<(SystemTime, String)>>,
+    rate_limits: Mutex<crate::forge::RateLimits>,
     /// The account each credential reads as, by fingerprint, for a few minutes: every read
     /// that names the viewer would otherwise spend one of Bitbucket's hourly requests on it.
     viewers: Mutex<HashMap<String, (Instant, Option<Value>)>>,
@@ -178,7 +176,7 @@ impl Api {
                 .redirects(0)
                 .max_idle_connections(0)
                 .build(),
-            paused: Mutex::default(),
+            rate_limits: Mutex::default(),
             viewers: Mutex::default(),
         })
     }
@@ -301,15 +299,17 @@ impl Api {
         let fingerprint = credential
             .as_ref()
             .map_or_else(|| "anonymous".to_owned(), Credential::fingerprint);
-        if let Some((until, paused)) = self.paused.lock().unwrap().clone()
-            && until > SystemTime::now()
-            && paused == fingerprint
-        {
-            return Err(error(
-                ForgeErrorKind::Paused { retry_at: until },
-                "Bitbucket request paused",
-            ));
-        }
+        let lease = self
+            .rate_limits
+            .lock()
+            .unwrap()
+            .admit(HOST, &fingerprint, false)
+            .map_err(|retry_at| {
+                error(
+                    ForgeErrorKind::Paused { retry_at },
+                    "Bitbucket request paused",
+                )
+            })?;
         if request.write && credential.is_none() {
             return Err(error(
                 ForgeErrorKind::NoCredential,
@@ -393,20 +393,26 @@ impl Api {
         let truncated = body.len() > limit;
         body.truncate(limit);
         if status == 429 {
-            let retry_at = retry_after
+            let named = retry_after
                 .as_deref()
                 .and_then(retry_at)
-                .filter(|at| *at > SystemTime::now())
-                .unwrap_or_else(|| SystemTime::now() + PAUSE)
                 // No answer outlasts Bitbucket's hourly window.
-                .min(SystemTime::now() + WINDOW);
-            *self.paused.lock().unwrap() = Some((retry_at, fingerprint));
+                .map(|at| at.min(SystemTime::now() + WINDOW));
+            let retry_at =
+                self.rate_limits
+                    .lock()
+                    .unwrap()
+                    .refused(HOST, &fingerprint, lease, named);
             return Err(error(
                 ForgeErrorKind::RateLimited { retry_at },
                 "Bitbucket request failed (rate limited)",
             ));
         }
         if (200..300).contains(&status) {
+            self.rate_limits
+                .lock()
+                .unwrap()
+                .succeeded(HOST, &fingerprint, lease);
             if let Some(credential) = credential
                 .as_ref()
                 .filter(|credential| credential.source == CredentialSource::SavedBearer)

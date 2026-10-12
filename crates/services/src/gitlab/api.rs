@@ -20,8 +20,6 @@ use tcode_core::{
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
-/// How long a rate-limited server is left alone when it names no time.
-const PAUSE: Duration = Duration::from_secs(60);
 /// The environment token glab itself reads, for the server its host variables name, else
 /// gitlab.com.
 pub(super) const ENV_TOKEN: &str = "GITLAB_TOKEN";
@@ -119,7 +117,7 @@ pub(super) struct Api {
     hosts: RwLock<BTreeMap<String, HostSettings>>,
     pub(super) agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
-    paused: Mutex<HashMap<String, SystemTime>>,
+    rate_limits: Mutex<crate::forge::RateLimits>,
 }
 
 impl Api {
@@ -137,7 +135,7 @@ impl Api {
                 .max_idle_connections(0)
                 .build(),
             tokens: Mutex::default(),
-            paused: Mutex::default(),
+            rate_limits: Mutex::default(),
         })
     }
 
@@ -370,15 +368,18 @@ impl Api {
         path: &str,
         request: Request<'_>,
     ) -> Result<Response, ForgeError> {
-        if let Some(until) = self.paused.lock().unwrap().get(authority).copied()
-            && until > SystemTime::now()
-        {
-            return Err(error(
-                ForgeErrorKind::Paused { retry_at: until },
-                "GitLab request paused",
-            ));
-        }
         let credential = self.credential(authority)?;
+        let fingerprint = credential
+            .as_ref()
+            .map_or("anonymous", |credential| &credential.verification);
+        let lease = self
+            .rate_limits
+            .lock()
+            .unwrap()
+            .admit(authority, fingerprint, false)
+            .map_err(|retry_at| {
+                error(ForgeErrorKind::Paused { retry_at }, "GitLab request paused")
+            })?;
         if request.write && credential.is_none() {
             return Err(error(
                 ForgeErrorKind::NoCredential,
@@ -435,26 +436,29 @@ impl Api {
         let truncated = body.len() > limit;
         body.truncate(limit);
         if status == 429 {
-            let retry_at = retry_after
+            let named = retry_after
                 .and_then(|value| value.trim().parse().ok())
                 .map(|seconds| SystemTime::now() + Duration::from_secs(seconds))
                 .or_else(|| {
                     reset
                         .and_then(|value| value.trim().parse().ok())
                         .map(|at| UNIX_EPOCH + Duration::from_secs(at))
-                })
-                .filter(|at| *at > SystemTime::now())
-                .unwrap_or_else(|| SystemTime::now() + PAUSE);
-            self.paused
-                .lock()
-                .unwrap()
-                .insert(authority.to_owned(), retry_at);
+                });
+            let retry_at =
+                self.rate_limits
+                    .lock()
+                    .unwrap()
+                    .refused(authority, fingerprint, lease, named);
             return Err(error(
                 ForgeErrorKind::RateLimited { retry_at },
                 "GitLab request failed (rate limited)",
             ));
         }
         if (200..300).contains(&status) {
+            self.rate_limits
+                .lock()
+                .unwrap()
+                .succeeded(authority, fingerprint, lease);
             if let Some(credential) = credential
                 .as_ref()
                 .filter(|credential| credential.source == CredentialSource::Saved)

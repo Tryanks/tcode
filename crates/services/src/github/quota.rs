@@ -11,15 +11,9 @@ struct Snapshot {
     reset: SystemTime,
 }
 #[derive(Default)]
-struct Pause {
-    attempt: u32,
-    generation: u64,
-    retry_at: Option<SystemTime>,
-}
-#[derive(Default)]
 pub(super) struct Ledger {
     quotas: HashMap<(String, String, String), Snapshot>,
-    pauses: HashMap<(String, String), Pause>,
+    pauses: crate::forge::RateLimits,
 }
 
 impl Ledger {
@@ -31,14 +25,10 @@ impl Ledger {
         interactive: bool,
     ) -> Result<u64, GitHubError> {
         let now = SystemTime::now();
-        let pause = self.pauses.get(&(host.to_owned(), scope.to_owned()));
-        if !interactive
-            && let Some(retry_at) = pause
-                .and_then(|pause| pause.retry_at)
-                .filter(|retry_at| *retry_at > now)
-        {
-            return Err(GitHubError::Paused { retry_at });
-        }
+        let lease = self
+            .pauses
+            .admit(host, scope, interactive)
+            .map_err(|retry_at| GitHubError::Paused { retry_at })?;
         if let Some(snapshot) =
             self.quotas
                 .get(&(host.to_owned(), resource.to_owned(), scope.to_owned()))
@@ -50,7 +40,7 @@ impl Ledger {
                 retry_at: snapshot.reset,
             });
         }
-        Ok(pause.map_or(0, |pause| pause.generation))
+        Ok(lease)
     }
 
     pub fn observe(&mut self, host: &str, scope: &str, headers: &Headers) {
@@ -110,43 +100,11 @@ impl Ledger {
                 }
             })
             .or_else(|| reset_time(headers).filter(|time| *time > now));
-        let pause = self
-            .pauses
-            .entry((host.to_owned(), scope.to_owned()))
-            .or_default();
-        if pause.generation > lease {
-            if let Some(explicit) = explicit
-                && pause.retry_at.is_none_or(|old| explicit > old)
-            {
-                pause.retry_at = Some(explicit);
-            }
-            return pause.retry_at.unwrap_or(now);
-        }
-        pause.attempt = pause.attempt.saturating_add(1);
-        let cooldown = 30_u64
-            .saturating_mul(2_u64.saturating_pow(pause.attempt - 1))
-            .min(900);
-        let proposed = explicit
-            .filter(|time| *time > now)
-            .unwrap_or(now + Duration::from_secs(cooldown));
-        pause.retry_at = Some(
-            pause
-                .retry_at
-                .filter(|time| *time > now)
-                .map_or(proposed, |old| old.max(proposed)),
-        );
-        pause.generation = pause.generation.max(lease) + 1;
-        pause.retry_at.unwrap()
+        self.pauses.refused(host, scope, lease, explicit)
     }
 
     pub fn succeeded(&mut self, host: &str, scope: &str, lease: u64) {
-        if let Some(pause) = self.pauses.get_mut(&(host.to_owned(), scope.to_owned()))
-            && pause.generation == lease
-            && pause.retry_at.is_none_or(|time| time <= SystemTime::now())
-        {
-            pause.attempt = 0;
-            pause.retry_at = None;
-        }
+        self.pauses.succeeded(host, scope, lease);
     }
 }
 

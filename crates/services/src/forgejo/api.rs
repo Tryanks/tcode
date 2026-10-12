@@ -19,8 +19,6 @@ use tcode_core::{
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
-/// How long a rate-limited server is left alone when it names no time.
-const PAUSE: Duration = Duration::from_secs(60);
 /// The environment token tea itself reads, for the server its companion variable names.
 pub(super) const ENV_TOKEN: &str = "GITEA_TOKEN";
 const ENV_URL: &str = "GITEA_INSTANCE_URL";
@@ -143,7 +141,7 @@ pub(super) struct Api {
     agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     servers: Mutex<HashMap<String, Cached<Server>>>,
-    paused: Mutex<HashMap<String, SystemTime>>,
+    rate_limits: Mutex<crate::forge::RateLimits>,
 }
 
 impl Api {
@@ -162,7 +160,7 @@ impl Api {
                 .build(),
             tokens: Mutex::default(),
             servers: Mutex::default(),
-            paused: Mutex::default(),
+            rate_limits: Mutex::default(),
         })
     }
 
@@ -344,15 +342,22 @@ impl Api {
         authority: &str,
         request: Request<'_>,
     ) -> Result<Response, ForgeError> {
-        if let Some(until) = self.paused.lock().unwrap().get(authority).copied()
-            && until > SystemTime::now()
-        {
-            return Err(error(
-                ForgeErrorKind::Paused { retry_at: until },
-                "Forgejo request paused",
-            ));
-        }
         let credential = self.credential(authority)?;
+        let fingerprint = credential.as_ref().map_or_else(
+            || "anonymous".to_owned(),
+            |credential| crate::settings::credential_fingerprint(&credential.token, None),
+        );
+        let lease = self
+            .rate_limits
+            .lock()
+            .unwrap()
+            .admit(authority, &fingerprint, false)
+            .map_err(|retry_at| {
+                error(
+                    ForgeErrorKind::Paused { retry_at },
+                    "Forgejo request paused",
+                )
+            })?;
         if request.write && credential.is_none() {
             return Err(error(
                 ForgeErrorKind::NoCredential,
@@ -416,21 +421,25 @@ impl Api {
         let truncated = body.len() > limit;
         body.truncate(limit);
         if status == 429 {
-            let retry_at = SystemTime::now()
-                + headers
-                    .get("retry-after")
-                    .and_then(|value| value.trim().parse().ok())
-                    .map_or(PAUSE, Duration::from_secs);
-            self.paused
-                .lock()
-                .unwrap()
-                .insert(authority.to_owned(), retry_at);
+            let named = headers
+                .get("retry-after")
+                .and_then(|value| value.trim().parse().ok())
+                .map(|seconds| SystemTime::now() + Duration::from_secs(seconds));
+            let retry_at =
+                self.rate_limits
+                    .lock()
+                    .unwrap()
+                    .refused(authority, &fingerprint, lease, named);
             return Err(error(
                 ForgeErrorKind::RateLimited { retry_at },
                 "Forgejo request failed (rate limited)",
             ));
         }
         if (200..300).contains(&status) {
+            self.rate_limits
+                .lock()
+                .unwrap()
+                .succeeded(authority, &fingerprint, lease);
             return Ok(Response { body, truncated });
         }
         let message = serde_json::from_slice::<serde_json::Value>(&body)
