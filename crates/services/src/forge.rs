@@ -6,12 +6,14 @@
 pub(crate) mod anchors;
 pub(crate) mod checkout;
 mod http;
+mod rate_limit;
 #[cfg(test)]
 pub(crate) mod verification_tests;
 mod viewed;
 
 use crate::settings::SettingsStore;
 pub(crate) use http::{Step, answered, in_order, media, run_cli, same_origin};
+pub(crate) use rate_limit::RateLimits;
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,

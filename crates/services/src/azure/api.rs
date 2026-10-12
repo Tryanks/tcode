@@ -26,8 +26,6 @@ pub(super) const VERSION: &str = "7.1";
 pub(super) const PREVIEW: &str = "7.1-preview.1";
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(60);
-/// How long an organization is left alone after a rate limit that names no time.
-const PAUSE: Duration = Duration::from_secs(60);
 /// The personal access token az's devops extension reads, which Tcode sends only to the
 /// organization `ENV_ORGANIZATION` names; az itself sends it to any.
 pub(super) const ENV_TOKEN: &str = "AZURE_DEVOPS_EXT_PAT";
@@ -160,7 +158,7 @@ pub(super) struct Api {
     pub(super) agent: ureq::Agent,
     /// az's token, which is its signed-in account's for every organization.
     az: Mutex<Option<Cached<Option<String>>>>,
-    paused: Mutex<HashMap<String, SystemTime>>,
+    rate_limits: Mutex<crate::forge::RateLimits>,
     /// The account each credential reads as, by fingerprint, for a few minutes.
     viewers: Mutex<HashMap<String, Cached<Value>>>,
 }
@@ -182,7 +180,7 @@ impl Api {
                 .max_idle_connections(0)
                 .build(),
             az: Mutex::default(),
-            paused: Mutex::default(),
+            rate_limits: Mutex::default(),
             viewers: Mutex::default(),
         })
     }
@@ -354,15 +352,21 @@ impl Api {
         authority: &str,
         request: Request<'_>,
     ) -> Result<Response, ForgeError> {
-        if let Some(until) = self.paused.lock().unwrap().get(authority).copied()
-            && until > SystemTime::now()
-        {
-            return Err(error(
-                ForgeErrorKind::Paused { retry_at: until },
-                "Azure DevOps request paused",
-            ));
-        }
         let credential = self.credential(authority)?;
+        let fingerprint = credential
+            .as_ref()
+            .map_or("anonymous", |credential| &credential.verification);
+        let lease = self
+            .rate_limits
+            .lock()
+            .unwrap()
+            .admit(authority, fingerprint, false)
+            .map_err(|retry_at| {
+                error(
+                    ForgeErrorKind::Paused { retry_at },
+                    "Azure DevOps request paused",
+                )
+            })?;
         if request.write && credential.is_none() {
             return Err(error(
                 ForgeErrorKind::NoCredential,
@@ -433,20 +437,19 @@ impl Api {
         let truncated = body.len() > limit;
         body.truncate(limit);
         if status == 429 {
-            let retry_at = retry_after
+            let named = retry_after
                 .and_then(|value| value.trim().parse().ok())
                 .map(|seconds| SystemTime::now() + Duration::from_secs(seconds))
                 .or_else(|| {
                     reset
                         .and_then(|value| value.trim().parse().ok())
                         .map(|at| UNIX_EPOCH + Duration::from_secs(at))
-                })
-                .filter(|at| *at > SystemTime::now())
-                .unwrap_or_else(|| SystemTime::now() + PAUSE);
-            self.paused
-                .lock()
-                .unwrap()
-                .insert(authority.to_owned(), retry_at);
+                });
+            let retry_at =
+                self.rate_limits
+                    .lock()
+                    .unwrap()
+                    .refused(authority, fingerprint, lease, named);
             return Err(error(
                 ForgeErrorKind::RateLimited { retry_at },
                 "Azure DevOps request failed (rate limited)",
@@ -454,6 +457,10 @@ impl Api {
         }
         // A 203 is Azure's sign-in page served in place of the answer.
         if (200..300).contains(&status) && status != 203 {
+            self.rate_limits
+                .lock()
+                .unwrap()
+                .succeeded(authority, fingerprint, lease);
             if let Some(credential) = credential
                 .as_ref()
                 .filter(|credential| credential.source == CredentialSource::Saved)
