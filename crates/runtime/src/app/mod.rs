@@ -247,7 +247,7 @@ mod diff_pass;
 mod events;
 mod git;
 mod history;
-use history::{Hydration, Joined, SessionLog};
+use history::{Hydration, Joined, SessionLog, TurnIndexBackfill};
 mod lifecycle;
 mod options;
 mod orchestrate;
@@ -348,6 +348,7 @@ pub struct AppState {
     pub sessions: Vec<SessionMeta>,
     archived_revision: u64,
     settlement_sweep_running: bool,
+    turn_index_backfill: TurnIndexBackfill,
     settlement_sweep_pending: bool,
     settlement_timer_generation: u64,
     decision_revisions: HashMap<String, u64>,
@@ -544,6 +545,7 @@ impl AppState {
             projects,
             archived_revision: 0,
             settlement_sweep_running: false,
+            turn_index_backfill: TurnIndexBackfill::Pending,
             settlement_sweep_pending: false,
             settlement_timer_generation: 0,
             decision_revisions: HashMap::new(),
