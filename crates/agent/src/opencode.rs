@@ -158,6 +158,7 @@ async fn run_actor(
             == Some("auto"),
         pending_permissions: HashSet::new(),
         pending_questions: HashMap::new(),
+        instructions: opts.instructions.clone(),
     };
     actor
         .events
@@ -202,6 +203,8 @@ struct OpenCodeActor {
     auto_approve: bool,
     pending_permissions: HashSet<String>,
     pending_questions: HashMap<String, Vec<String>>,
+    /// [`SessionOptions::instructions`], the `system` field of every prompt.
+    instructions: Option<String>,
 }
 
 impl SessionActor for OpenCodeActor {
@@ -239,6 +242,9 @@ impl SessionActor for OpenCodeActor {
                     .or_else(|| self.variant.clone());
                 if let Some(variant) = variant {
                     body["variant"] = json!(variant);
+                }
+                if let Some(instructions) = &self.instructions {
+                    body["system"] = json!(instructions);
                 }
                 let (status, _) = self
                     .server
@@ -1803,15 +1809,21 @@ fn opencode_config_content(
 mod tests {
     use super::*;
 
+    /// Answers `count` requests with `response` and returns each request line and JSON body.
     #[cfg(unix)]
-    #[test]
-    fn native_auto_approve_replies_once_and_toggle_restores_requests() {
+    fn recording_server(
+        count: usize,
+        response: &'static [u8],
+    ) -> (
+        std::net::SocketAddr,
+        std::thread::JoinHandle<Vec<(String, Value)>>,
+    ) {
         use std::io::Write as _;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let mut requests = Vec::new();
-            for _ in 0..2 {
+            for _ in 0..count {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut request_line = String::new();
@@ -1830,7 +1842,7 @@ mod tests {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
-                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+                stream.write_all(response).unwrap();
                 requests.push((
                     request_line,
                     serde_json::from_slice::<Value>(&body).unwrap(),
@@ -1838,24 +1850,84 @@ mod tests {
             }
             requests
         });
+        (address, server)
+    }
+
+    #[cfg(unix)]
+    fn test_actor(
+        address: std::net::SocketAddr,
+        events: Sender<AgentEvent>,
+        instructions: Option<String>,
+    ) -> OpenCodeActor {
+        let (_, sse) = smol::channel::unbounded();
+        OpenCodeActor {
+            server: OpenCodeServer {
+                child: crate::process::command("/usr/bin/true").spawn().unwrap(),
+                http: HttpClient::new(format!("http://{address}"), "test".into()),
+                stderr_tail: crate::process::StderrTail::default(),
+            },
+            sse,
+            events,
+            mapper: OpenCodeMapper::new("ses_target".into()),
+            model: None,
+            variant: None,
+            auto_approve: false,
+            pending_permissions: HashSet::new(),
+            pending_questions: HashMap::new(),
+            instructions,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instructions_ride_the_system_field_of_every_prompt() {
+        let (address, server) = recording_server(
+            2,
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
         smol::block_on(async {
             let (events, receiver) = smol::channel::unbounded();
-            let (_, sse) = smol::channel::unbounded();
-            let mut actor = OpenCodeActor {
-                server: OpenCodeServer {
-                    child: crate::process::command("/usr/bin/true").spawn().unwrap(),
-                    http: HttpClient::new(format!("http://{address}"), "test".into()),
-                    stderr_tail: crate::process::StderrTail::default(),
-                },
-                sse,
-                events,
-                mapper: OpenCodeMapper::new("ses_target".into()),
-                model: None,
-                variant: None,
-                auto_approve: false,
-                pending_permissions: HashSet::new(),
-                pending_questions: HashMap::new(),
-            };
+            let instructions =
+                "<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n";
+            let mut actor = test_actor(address, events, Some(instructions.into()));
+            for (delivery_id, text) in [(1, "hello"), (2, "/review")] {
+                actor
+                    .handle_command(SessionCommand::SendTurn {
+                        delivery_id,
+                        text: text.into(),
+                        options: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    receiver.try_recv().unwrap(),
+                    AgentEvent::TurnAccepted { delivery_id: accepted } if accepted == delivery_id
+                ));
+            }
+            let requests = server.join().unwrap();
+            for ((request, body), text) in requests.iter().zip(["hello", "/review"]) {
+                assert_eq!(
+                    request,
+                    "POST /session/ses_target/prompt_async HTTP/1.1\r\n"
+                );
+                assert_eq!(body["system"], instructions);
+                assert_eq!(body["parts"], json!([{"type": "text", "text": text}]));
+            }
+            actor.server.stop();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_auto_approve_replies_once_and_toggle_restores_requests() {
+        let (address, server) = recording_server(
+            2,
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        );
+        smol::block_on(async {
+            let (events, receiver) = smol::channel::unbounded();
+            let mut actor = test_actor(address, events, None);
             actor
                 .handle_command(SessionCommand::SetOption {
                     id: "permission_mode".into(),

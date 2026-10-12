@@ -80,6 +80,24 @@ pub struct Caps {
     pub home_path: bool,
     pub trust_project_extensions: bool,
     pub plugin_management: PluginManagement,
+    /// Where [`SessionOptions::instructions`] reach the model.
+    pub instruction_channel: InstructionChannel,
+}
+
+/// The provider's own channel for instructions a host gives the model alongside the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionChannel {
+    /// Appended to the system prompt once per process, on creation and resume alike.
+    SessionAppend,
+    /// Developer context Codex re-sends when it changes; restored after a compaction.
+    DeveloperContext,
+    /// The system field of every prompt.
+    PerPromptSystem,
+    /// A content block of its own after the user's text on every prompt that is not a native
+    /// `/command`, while the session attached Tcode's MCP servers.
+    PerPromptUserBlock,
+    None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +164,7 @@ impl ProviderKind {
                     ],
                     marketplaces: true,
                 },
+                instruction_channel: InstructionChannel::SessionAppend,
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
@@ -170,6 +189,7 @@ impl ProviderKind {
                     ],
                     marketplaces: true,
                 },
+                instruction_channel: InstructionChannel::DeveloperContext,
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
@@ -187,6 +207,7 @@ impl ProviderKind {
                 home_path: true,
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
+                instruction_channel: InstructionChannel::PerPromptUserBlock,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
@@ -202,6 +223,7 @@ impl ProviderKind {
                 home_path: true,
                 trust_project_extensions: true,
                 plugin_management: PluginManagement::NONE,
+                instruction_channel: InstructionChannel::None,
             },
             ProviderKind::OpenCode => Caps {
                 supports_steering: false,
@@ -217,6 +239,7 @@ impl ProviderKind {
                 home_path: false,
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
+                instruction_channel: InstructionChannel::PerPromptSystem,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -232,6 +255,7 @@ impl ProviderKind {
                 home_path: true,
                 trust_project_extensions: false,
                 plugin_management: PluginManagement::NONE,
+                instruction_channel: InstructionChannel::PerPromptUserBlock,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
@@ -254,6 +278,7 @@ impl ProviderKind {
                     ],
                     marketplaces: true,
                 },
+                instruction_channel: InstructionChannel::PerPromptUserBlock,
             },
         }
     }
@@ -742,6 +767,9 @@ pub struct SessionOptions {
     /// Which ACP agent to launch. Required when `provider == ProviderKind::Acp`,
     /// ignored (and `None`) for native providers.
     pub acp: Option<AcpAgent>,
+    /// Tcode's instructions for the model, delivered through the provider's
+    /// [`Caps::instruction_channel`]; never part of a user turn's text.
+    pub instructions: Option<String>,
 }
 
 /// The per-provider environment configured in Settings → Providers, applied to
@@ -804,6 +832,7 @@ impl McpRegistration {
     /// The child-thread half of orchestration: a single `report_result` tool.
     pub const SERVER_NAME_ORCHESTRATE_REPORT: &'static str = "tcode_report";
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
+    pub const SERVER_NAME_PULL_REQUESTS: &'static str = "tcode_pull_requests";
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
@@ -1698,6 +1727,10 @@ pub enum AgentEvent {
     TurnAccepted {
         delivery_id: u64,
     },
+    /// The agent took none of [`SessionOptions::mcp_servers`] (an ACP agent without HTTP MCP),
+    /// so neither the tools nor [`SessionOptions::instructions`] reach the model. Transient, like
+    /// [`Self::TurnAccepted`].
+    McpServersNotAttached,
     /// Claude-owned background work which must keep its provider process alive
     /// after the model turn itself has completed. Other adapters currently do
     /// not emit this transient liveness signal.

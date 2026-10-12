@@ -132,6 +132,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     for arg in mcp_args(&opts.mcp_servers) {
         cmd.arg(arg);
     }
+    // Passed on every launch: the CLI records the rendered system prompt with the conversation
+    // and renders it again from the current launch after a compaction.
+    if let Some(instructions) = &opts.instructions {
+        cmd.arg("--append-system-prompt").arg(instructions);
+    }
     // Settings → Providers "Launch arguments", appended last so the user can
     // override anything we set above.
     for arg in &opts.extra_args {
@@ -3544,17 +3549,83 @@ mod tests {
         }
     }
 
+    /// A stand-in CLI that records its arguments, one per line, in `directory/argv`.
+    #[cfg(unix)]
+    fn recording_claude(directory: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::create_dir_all(directory).unwrap();
+        let binary = directory.join("claude");
+        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        binary
+    }
+
+    #[cfg(unix)]
+    async fn shut_down(handle: SessionHandle) {
+        handle
+            .commands
+            .send(SessionCommand::Shutdown)
+            .await
+            .unwrap();
+        while let Ok(event) = handle.events.recv().await {
+            if matches!(event, AgentEvent::SessionClosed { .. }) {
+                break;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instructions_append_to_the_system_prompt_on_creation_and_resume() {
+        smol::block_on(async {
+            let directory = std::env::temp_dir().join(format!(
+                "agent-claude-instructions-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let binary = recording_claude(&directory);
+            let instructions =
+                "<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n";
+            for resume in [None, Some(ResumeCursor(json!({"session_id": "native"})))] {
+                let handle = start(SessionOptions {
+                    cwd: directory.clone(),
+                    model: None,
+                    resume: resume.clone(),
+                    fork: false,
+                    binary_path: Some(binary.clone()),
+                    option_selections: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    launch_env: LaunchEnv::default(),
+                    extra_args: Vec::new(),
+                    acp: None,
+                    instructions: Some(instructions.into()),
+                })
+                .await
+                .unwrap();
+                while !matches!(
+                    handle.events.recv().await.unwrap(),
+                    AgentEvent::ProviderOptions { .. }
+                ) {}
+                let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
+                assert_eq!(resume.is_some(), argv.contains("--resume\nnative\n"));
+                assert_eq!(
+                    argv.matches(&format!("--append-system-prompt\n{instructions}"))
+                        .count(),
+                    1,
+                    "{argv}"
+                );
+                shut_down(handle).await;
+            }
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn launch_uses_native_permission_selection_and_enables_live_bypass() {
-        use std::os::unix::fs::PermissionsExt as _;
         smol::block_on(async {
             let directory = std::env::temp_dir()
                 .join(format!("agent-claude-permission-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&directory).unwrap();
-            let binary = directory.join("claude");
-            std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let binary = recording_claude(&directory);
             let handle = start(SessionOptions {
                 cwd: directory.clone(),
                 model: None,
@@ -3569,6 +3640,7 @@ mod tests {
                 launch_env: LaunchEnv::default(),
                 extra_args: Vec::new(),
                 acp: None,
+                instructions: None,
             })
             .await
             .unwrap();
@@ -3591,16 +3663,7 @@ mod tests {
                     .any(|pair| pair == ["--permission-mode", "auto"])
             );
             assert!(args.contains(&"--allow-dangerously-skip-permissions"));
-            handle
-                .commands
-                .send(SessionCommand::Shutdown)
-                .await
-                .unwrap();
-            while let Ok(event) = handle.events.recv().await {
-                if matches!(event, AgentEvent::SessionClosed { .. }) {
-                    break;
-                }
-            }
+            shut_down(handle).await;
             std::fs::remove_dir_all(directory).unwrap();
         });
     }

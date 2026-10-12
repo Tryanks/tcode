@@ -430,15 +430,20 @@ async fn run_op(broker: &Broker, op: OrchestrateOp) -> CallToolResult {
     }
 }
 
+/// The orchestrating thread's server `instructions`, read at initialization.
+pub const INSTRUCTIONS: &str = "Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted. dispatch, send, cancel and settle take a list, so act on every child that is ready in one call.";
+
+/// A dispatched child's server `instructions`, read at initialization.
+pub const REPORT_INSTRUCTIONS: &str =
+    "Report this thread's final result to the orchestrator that dispatched it.";
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ChildReportTools {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                "Report this thread's final result to the orchestrator that dispatched it.",
-            )
+            .with_instructions(REPORT_INSTRUCTIONS)
     }
 }
 
@@ -458,7 +463,7 @@ impl ServerHandler for OrchestrateTools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Prefer Tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, send to continue either thread, and settle each child whose result you have accepted. dispatch, send, cancel and settle take a list, so act on every child that is ready in one call.")
+            .with_instructions(INSTRUCTIONS)
     }
 }
 

@@ -190,15 +190,16 @@ pub fn tool_descriptions(hosts: &str) -> Vec<(String, String)> {
         })
         .collect()
 }
+/// The server's `instructions`, which the client reads at initialization.
+pub const INSTRUCTIONS: &str = "Link every PR and every stack layer you create or work on immediately. \
+                 List and link missing PRs before finishing. Do not link background mentions. \
+                 Report linking failures.";
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PullRequestTools {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                "Link every PR and every stack layer you create or work on immediately. \
-                 List and link missing PRs before finishing. Do not link background mentions. \
-                 Report linking failures.",
-            )
+            .with_instructions(INSTRUCTIONS)
     }
 }

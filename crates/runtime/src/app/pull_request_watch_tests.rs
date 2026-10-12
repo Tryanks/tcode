@@ -791,7 +791,7 @@ fn stop_discards_a_read_in_flight_and_refuses_a_late_agent_start() {
                     bearer_token: "token".into(),
                 },
                 hosts: "GitHub".into(),
-                instructed: false,
+                instructions: String::new(),
             },
         );
     });
@@ -886,7 +886,7 @@ fn stop_ends_the_watches_of_an_idle_thread_without_interrupting_its_provider() {
                     bearer_token: "token".into(),
                 },
                 hosts: "GitHub".into(),
-                instructed: false,
+                instructions: String::new(),
             },
         );
     });

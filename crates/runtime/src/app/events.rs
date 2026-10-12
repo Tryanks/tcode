@@ -33,6 +33,12 @@ impl AppState {
                 self.on_turn_accepted(session_id, *delivery_id, cx);
                 return;
             }
+            AgentEvent::McpServersNotAttached => {
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident.mcp_servers_attached = false;
+                }
+                return;
+            }
             AgentEvent::BackgroundTasksChanged { count } => {
                 let is_active = self.residents.live.contains_key(session_id);
                 let should_mark_idle = self.resident_mut(session_id).is_some_and(|resident| {

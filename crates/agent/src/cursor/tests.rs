@@ -67,6 +67,8 @@ struct Agent {
     /// Every method the client sent.
     methods: Vec<String>,
     request_seq: u64,
+    /// The `initialize` result this agent answers with.
+    initialize: Value,
 }
 
 impl Agent {
@@ -79,6 +81,7 @@ impl Agent {
             pending: VecDeque::new(),
             methods: Vec::new(),
             request_seq: 0,
+            initialize: recorded_initialize(),
         }
     }
 
@@ -103,6 +106,7 @@ impl Agent {
             launch_env: self.launch_env(),
             extra_args: Vec::new(),
             acp: None,
+            instructions: None,
         }
     }
 
@@ -126,7 +130,7 @@ impl Agent {
             initialize["params"]["clientCapabilities"]["_meta"],
             json!({ "parameterizedModelPicker": true, "subagents": true })
         );
-        self.reply(&initialize, recorded_initialize()).await;
+        self.reply(&initialize, self.initialize.clone()).await;
     }
 
     async fn read(&mut self) -> Value {
@@ -317,6 +321,58 @@ fn turn_status(events: &[AgentEvent]) -> TurnStatus {
             _ => None,
         })
         .unwrap()
+}
+
+#[test]
+fn instructions_follow_each_prompt_as_a_block_of_their_own_only_with_the_mcp_servers() {
+    smol::block_on(bounded(async {
+        let instructions = "<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n";
+        for http in [true, false] {
+            let mut agent = Agent::new().await;
+            agent.initialize["agentCapabilities"]["mcpCapabilities"]["http"] = json!(http);
+            let mut opts = agent.options();
+            opts.mcp_servers = vec![crate::McpRegistration {
+                name: "tcode_pull_requests".into(),
+                url: "http://127.0.0.1:1/mcp".into(),
+                bearer_token: "token".into(),
+            }];
+            opts.instructions = Some(instructions.into());
+            let mut starting = smol::spawn(super::start(opts));
+            agent.connect(&mut starting).await;
+            let new = agent.new_session().await;
+            let handle = starting.await.unwrap();
+            assert_eq!(
+                new["params"]["mcpServers"].as_array().map(Vec::len),
+                Some(usize::from(http))
+            );
+
+            let mut sent = Vec::new();
+            let mut events = Vec::new();
+            for text in ["Fix the build", "/review"] {
+                send_turn(&handle, text).await;
+                let prompt = agent.expect("session/prompt").await;
+                sent.push(prompt["params"]["prompt"].clone());
+                agent
+                    .reply(&prompt, json!({ "stopReason": "end_turn" }))
+                    .await;
+                events.extend(events_until(&handle, turn_completed).await);
+            }
+            let text = |text: &str| json!({ "type": "text", "text": text });
+            let first = if http {
+                json!([text("Fix the build"), text(instructions)])
+            } else {
+                json!([text("Fix the build")])
+            };
+            assert_eq!(sent, [first, json!([text("/review")])]);
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::McpServersNotAttached)),
+                !http
+            );
+            agent.finish(Some(handle)).await;
+        }
+    }));
 }
 
 #[test]

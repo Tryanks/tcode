@@ -356,19 +356,20 @@ impl PreviewTools {
     }
 }
 
+/// The server's `instructions`, which the client reads at initialization.
+pub const INSTRUCTIONS: &str = "Drive the Tcode embedded preview browser: open/navigate URLs, inspect and \
+                 automate the page, resize its canvas, press keys, scroll, wait for page \
+                 conditions, and capture screenshots. For browser work, call preview_status first \
+                 and preview_open when no automation-capable preview is attached; use another \
+                 browser only if preview_open explicitly reports unsupported or unavailable.";
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for PreviewTools {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                "Drive the Tcode embedded preview browser: open/navigate URLs, inspect and \
-                 automate the page, resize its canvas, press keys, scroll, wait for page \
-                 conditions, and capture screenshots. For browser work, call preview_status first \
-                 and preview_open when no automation-capable preview is attached; use another \
-                 browser only if preview_open explicitly reports unsupported or unavailable.",
-            )
+            .with_instructions(INSTRUCTIONS)
     }
 }
 

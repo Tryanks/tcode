@@ -210,16 +210,17 @@ impl AppState {
             .map(|names| names.get())
             .unwrap_or_default();
         let registration = agent::McpRegistration {
-            name: "tcode_pull_requests".into(),
+            name: agent::McpRegistration::SERVER_NAME_PULL_REQUESTS.into(),
             url,
             bearer_token,
         };
+        let instructions = pull_request::linking_instructions(&self.pull_request_hosts());
         self.mcp.pull_request_registrations.insert(
             meta.id.clone(),
             PullRequestRegistration {
                 registration: registration.clone(),
                 hosts: names,
-                instructed: false,
+                instructions,
             },
         );
         Some(registration)
@@ -228,22 +229,83 @@ impl AppState {
     pub(super) fn pull_request_tools_offered(&self, provider: ProviderKind) -> bool {
         provider.caps().mcp_servers && self.mcp.pull_request_url.is_some()
     }
-    /// The first turn after the tools are registered carries the linking block, the same gate as
-    /// launch; later turns do not, since the model has already read it.
-    pub(super) fn pull_request_instructions(&self, session_id: &str) -> Option<String> {
+    /// The linking instructions the thread's provider is given: its registration's, else the
+    /// ones a registration made now would have.
+    pub(super) fn pull_request_instructions(&self, session_id: &str) -> String {
         self.mcp
             .pull_request_registrations
             .get(session_id)
-            .is_some_and(|existing| !existing.instructed)
-            .then(|| pull_request::linking_instructions(&self.pull_request_hosts()))
+            .map(|existing| existing.instructions.clone())
+            .unwrap_or_else(|| pull_request::linking_instructions(&self.pull_request_hosts()))
     }
-    /// A turn leading with the linking block reached the provider.
-    pub(super) fn note_pull_request_instructed(&mut self, session_id: &str, text: &str) {
-        if pull_request::strip_linking_instructions(text).is_some()
-            && let Some(existing) = self.mcp.pull_request_registrations.get_mut(session_id)
-        {
-            existing.instructed = true;
+    /// The pull request tools offered to the thread's provider, and every text Tcode gives its
+    /// model outside the conversation, as delivered.
+    pub(super) fn injected_pull_request_tools(
+        &self,
+        session: &ActiveSession,
+    ) -> Option<tcode_protocol::InjectedPullRequestTools> {
+        use tcode_protocol::{InjectedChannel, InjectedInstructions};
+        let provider = session.meta.provider;
+        if !self.pull_request_tools_offered(provider) {
+            return None;
         }
+        let id = session.meta.id.as_str();
+        let attached = session.mcp_servers_attached;
+        let mut instructions = Vec::new();
+        let channel = provider.caps().instruction_channel;
+        if attached && channel != agent::InstructionChannel::None {
+            instructions.push(InjectedInstructions {
+                channel: InjectedChannel::Linking(channel),
+                text: self.pull_request_instructions(id),
+            });
+        }
+        if provider == ProviderKind::Codex {
+            instructions.push(InjectedInstructions {
+                channel: InjectedChannel::DeveloperInstructions,
+                text: agent::codex::PREVIEW_BROWSER_INSTRUCTIONS.to_owned(),
+            });
+        }
+        let servers = [
+            (
+                agent::McpRegistration::SERVER_NAME_PULL_REQUESTS,
+                pull_request_mcp::INSTRUCTIONS,
+                self.mcp.pull_request_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_PREVIEW,
+                preview_mcp::INSTRUCTIONS,
+                self.mcp.preview_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE,
+                orchestrate_mcp::INSTRUCTIONS,
+                self.mcp.orchestrate_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT,
+                orchestrate_mcp::REPORT_INSTRUCTIONS,
+                self.mcp.orchestrate_child_registrations.contains_key(id),
+            ),
+            (
+                agent::McpRegistration::SERVER_NAME_COMPUTER_USE,
+                computer_use_mcp::tools::INSTRUCTIONS,
+                self.mcp.computer_use_registrations.contains_key(id),
+            ),
+        ];
+        instructions.extend(
+            servers
+                .into_iter()
+                .filter(|(_, _, registered)| attached && *registered)
+                .map(|(name, text, _)| InjectedInstructions {
+                    channel: InjectedChannel::McpServer(name.to_owned()),
+                    text: text.to_owned(),
+                }),
+        );
+        Some(tcode_protocol::InjectedPullRequestTools {
+            tools: pull_request_mcp::tool_descriptions(&self.pull_request_tool_hosts(id)),
+            attached,
+            instructions,
+        })
     }
     /// The host names the thread's pull request tools are described with: its registration's,
     /// else the ones a registration made now would have.

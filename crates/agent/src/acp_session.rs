@@ -242,11 +242,17 @@ impl Setup<'_> {
 
     /// The `mcpServers` for `session/new`, `load` or `resume`. tcode's MCP
     /// servers are loopback streamable-HTTP endpoints, so they are only
-    /// offered to agents that speak MCP over HTTP.
+    /// offered to agents that speak MCP over HTTP; the instructions go with them.
     pub(crate) async fn mcp_servers(&self) -> Vec<acp::McpServer> {
         let registrations: Vec<_> = self.opts.mcp_servers.iter().collect();
         let servers = mcp_servers(&registrations, &self.init.agent_capabilities);
+        self.state.lock_recover().instructions = if servers.is_empty() {
+            None
+        } else {
+            self.opts.instructions.clone()
+        };
         if !registrations.is_empty() && servers.is_empty() {
+            let _ = self.events.send(AgentEvent::McpServersNotAttached).await;
             log::info!(
                 "acp[{}]: no mcpCapabilities.http; Tcode MCP servers are not registered",
                 self.name
@@ -1038,8 +1044,11 @@ async fn handle_command<D: Dialect>(
             let id = format!("turn-{turn_seq}");
             state.lock_recover().turn = Some(id.clone());
 
-            let request =
-                acp::PromptRequest::new(session_id.clone(), prompt_blocks(&text, &attachments));
+            let instructions = state.lock_recover().instructions.clone();
+            let request = acp::PromptRequest::new(
+                session_id.clone(),
+                prompt_blocks(&text, &attachments, instructions.as_deref()),
+            );
             // The observed stdio writer consumes this id when the complete
             // `session/prompt` JSON-RPC line reaches the child.
             pending_deliveries.lock_recover().push_back(delivery_id);
@@ -1461,8 +1470,14 @@ pub(crate) fn stop_reason_status(reason: acp::StopReason) -> (TurnStatus, Option
     }
 }
 
-fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Vec<acp::ContentBlock> {
-    let mut blocks = Vec::with_capacity(1 + attachments.len());
+/// The user's text and images, then the instructions as a text block of their own. A native
+/// `/command` goes alone: the agent reads the prompt as the command's arguments.
+fn prompt_blocks(
+    text: &str,
+    attachments: &[Attachment],
+    instructions: Option<&str>,
+) -> Vec<acp::ContentBlock> {
+    let mut blocks = Vec::with_capacity(2 + attachments.len());
     blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
         text.to_string(),
     )));
@@ -1470,6 +1485,11 @@ fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Vec<acp::ContentBloc
         blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
             attachment.data_base64.clone(),
             attachment.media_type.clone(),
+        )));
+    }
+    if let Some(instructions) = instructions.filter(|_| !text.starts_with('/')) {
+        blocks.push(acp::ContentBlock::Text(acp::TextContent::new(
+            instructions.to_owned(),
         )));
     }
     blocks
@@ -1710,6 +1730,8 @@ pub(crate) struct State {
     /// A turn the agent started while another was still open.
     next_turn: Option<String>,
     modes: Option<acp::SessionModeState>,
+    /// [`SessionOptions::instructions`] while the session attached Tcode's MCP servers.
+    instructions: Option<String>,
 }
 
 impl State {
@@ -1733,6 +1755,7 @@ impl State {
             owned_options: &[],
             next_turn: None,
             modes: None,
+            instructions: None,
         }
     }
 
@@ -3484,6 +3507,7 @@ mod tests {
                 data_base64: "AAAA".into(),
                 source_path: None,
             }],
+            None,
         );
         let value = serde_json::to_value(&blocks).unwrap();
         assert_eq!(value[0]["type"], "text");
