@@ -664,7 +664,133 @@ pub(super) struct Hydration {
 
 type LogQuery = Box<dyn FnOnce(Result<&SessionLog, &str>) + Send>;
 
+pub(super) enum TurnIndexBackfill {
+    Pending,
+    Started { _task: HostTask<()> },
+    Stopped,
+}
+
 impl AppState {
+    /// Build missing indexes after activity recovery, one log at a time and
+    /// outside the writer. The same fold as hydration owns turn boundaries;
+    /// a revision check rejects work overtaken by appends or metadata changes.
+    pub(super) fn start_turn_index_backfill(&mut self, cx: &mut HostCx) {
+        if !matches!(self.turn_index_backfill, TurnIndexBackfill::Pending) || self.store_failed {
+            return;
+        }
+        let ids: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.archived_at.is_none())
+            .map(|meta| meta.id.clone())
+            .collect();
+        let store = self.store.clone();
+        let host_cx = cx.clone();
+        self.turn_index_backfill = TurnIndexBackfill::Started {
+            _task: cx.spawn_background(async move {
+                let started = Instant::now();
+                let mut indexed = 0;
+                for id in ids {
+                    let read_store = store.clone();
+                    let read_id = id.clone();
+                    let missing = host_cx
+                        .unblock(move || -> std::io::Result<bool> {
+                            Ok(read_store.turn_index(&read_id)?.is_none()
+                                && read_store.next_row(&read_id)? > BASELINE_RECORDS)
+                        })
+                        .await;
+                    match missing {
+                        Ok(false) => continue,
+                        Err(error) => {
+                            log::warn!("could not inspect turn index of {id}: {error}");
+                            break;
+                        }
+                        Ok(true) => {}
+                    }
+                    let read_id = id.clone();
+                    let Ok(Some((revision, taken))) = host_cx
+                        .enqueue_and_wait(move |state, cx| {
+                            if state.store_failed
+                                || !matches!(
+                                    state.turn_index_backfill,
+                                    TurnIndexBackfill::Started { .. }
+                                )
+                                || state.resident(&read_id).is_some()
+                                || state.log_hydrations.contains_key(&read_id)
+                                || !state
+                                    .find_meta(&read_id)
+                                    .is_some_and(|meta| meta.archived_at.is_none())
+                            {
+                                return None;
+                            }
+                            let revision = state.decision_revision(&read_id);
+                            let (snapshot, taken) = smol::channel::bounded(1);
+                            state.enqueue_store_write(
+                                StoreWrite::SnapshotLog {
+                                    id: read_id,
+                                    end: snapshot,
+                                },
+                                cx,
+                            );
+                            Some((revision, taken))
+                        })
+                        .await
+                    else {
+                        continue;
+                    };
+                    let Ok(Ok(end)) = taken.recv().await else {
+                        break;
+                    };
+                    let read_store = store.clone();
+                    let read_id = id.clone();
+                    let index = host_cx
+                        .unblock(move || {
+                            read_store
+                                .read_log_until(&read_id, end)
+                                .map(|log| SessionLog::new(log).turn_index())
+                        })
+                        .await;
+                    let index = match index {
+                        Ok(index) => index,
+                        Err(error) => {
+                            log::warn!("could not build turn index of {id}: {error}");
+                            break;
+                        }
+                    };
+                    let Ok(Some(flushed)) = host_cx
+                        .enqueue_and_wait(move |state, cx| {
+                            if state.store_failed
+                                || !matches!(
+                                    state.turn_index_backfill,
+                                    TurnIndexBackfill::Started { .. }
+                                )
+                                || state.decision_revision(&id) != revision
+                                || state.find_meta(&id).is_none()
+                            {
+                                return None;
+                            }
+                            state.enqueue_store_write(StoreWrite::SetTurnIndex { id, index }, cx);
+                            let (completion, flushed) = smol::channel::bounded(1);
+                            state.enqueue_store_write(StoreWrite::Flush(completion), cx);
+                            Some(flushed)
+                        })
+                        .await
+                    else {
+                        continue;
+                    };
+                    if !matches!(flushed.recv().await, Ok(Ok(()))) {
+                        break;
+                    }
+                    indexed += 1;
+                }
+                log::info!(
+                    "backfilled {indexed} turn indexes in {:?}",
+                    started.elapsed()
+                );
+            }),
+        };
+    }
+
     /// The session's hydration, begun unless its log is being read already.
     /// Callers check first that the log is not resident.
     pub(super) fn hydrate_log(
