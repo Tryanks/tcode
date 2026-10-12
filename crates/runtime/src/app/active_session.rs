@@ -182,6 +182,7 @@ pub struct ActiveSession {
     /// Id of the submitted queue entry awaiting adapter delivery confirmation.
     /// The entry remains in `queue` until acceptance; scheduled rows may precede it.
     pub(super) delivery_in_flight: Option<u64>,
+    pub(super) pending_steers: Vec<PendingSteer>,
     pub(super) turn_in_flight: bool,
     /// Set once an interrupt reached the provider; cleared when the turn ends.
     pub(super) interrupt_requested: bool,
@@ -201,6 +202,18 @@ pub struct ActiveSession {
     /// Lazily-spawned per-session PTYs and provider-bound terminal context.
     pub terminal_workspace: TerminalWorkspace,
     pub(super) _pump: Option<HostTask<()>>,
+}
+
+/// A steer handed to the provider whose consumption it has not yet reported.
+/// Kept so a rejected steer can be re-sent as an ordinary turn with the text
+/// and admission the user gave it.
+#[derive(Debug, Clone)]
+pub(super) struct PendingSteer {
+    pub(super) request_id: String,
+    pub(super) text: String,
+    pub(super) attachments: Vec<Attachment>,
+    pub(super) author: Option<Author>,
+    pub(super) origin: Option<MessageOrigin>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +250,7 @@ impl ActiveSession {
             queue: Vec::new(),
             next_queue_id: 0,
             delivery_in_flight: None,
+            pending_steers: Vec::new(),
             turn_in_flight: false,
             interrupt_requested: false,
             background_task_count: 0,

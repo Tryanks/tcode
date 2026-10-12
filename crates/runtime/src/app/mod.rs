@@ -272,7 +272,7 @@ mod tests;
 
 pub use active_session::{ActiveSession, QueuedMessage};
 use active_session::{
-    PendingRelay, Runtime, SendRouting, attachment_paths, conversation_destination,
+    PendingRelay, PendingSteer, Runtime, SendRouting, attachment_paths, conversation_destination,
     wire_text_with_placeholder,
 };
 use orchestrate::McpWiring;

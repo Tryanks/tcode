@@ -955,9 +955,7 @@ impl SessionActor for Actor {
                 // silently start a second turn.
                 let Some(turn_id) = self.active_turn.clone() else {
                     self.events
-                        .emit(AgentEvent::Warning {
-                            message: "cannot steer: no active Codex turn".into(),
-                        })
+                        .emit(AgentEvent::SteerRejected { request_id })
                         .await;
                     return Ok(());
                 };
@@ -1672,7 +1670,17 @@ impl Actor {
                 }
                 return;
             }
-            if let Some(error) = value.get("error") {
+            if let Some(PendingRequest::Steer { request_id, .. }) = &pending
+                && (value.get("error").is_some() || value.get("result").is_none())
+            {
+                // `expectedTurnId` no longer matches: the turn ended before the
+                // steer reached the server, so the input was never enqueued.
+                self.events
+                    .emit(AgentEvent::SteerRejected {
+                        request_id: request_id.clone(),
+                    })
+                    .await;
+            } else if let Some(error) = value.get("error") {
                 self.events
                     .emit(AgentEvent::Error {
                         message: format!(
@@ -4674,7 +4682,7 @@ mod tests {
                 .await;
             assert!(matches!(
                 events.recv().await.unwrap(),
-                AgentEvent::Error { .. }
+                AgentEvent::SteerRejected { ref request_id } if request_id == "steer-error"
             ));
             actor
                 .handle_line(&json!({"method":"item/completed","params":{"threadId":"thread-1","item":{
@@ -4684,6 +4692,44 @@ mod tests {
             assert!(
                 events.try_recv().is_err(),
                 "RPC errors must not accept a steer, even if matching text is echoed"
+            );
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// The runtime routes a steer while its own turn flag is still set, but
+    /// `turn/completed` can already be on the wire. The actor then has no turn
+    /// to steer into and must say which request it dropped, so the runtime can
+    /// send the text as a new turn instead of losing it.
+    #[test]
+    fn steer_after_turn_completed_is_rejected_by_request_id() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.active_turn = Some("turn-1".into());
+            actor
+                .handle_line(&json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}).to_string())
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCompleted { .. }
+            ));
+            actor
+                .handle_command(SessionCommand::Steer {
+                    request_id: "steer-late".into(),
+                    text: "late".into(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::SteerRejected { ref request_id } if request_id == "steer-late"
+            ));
+            assert!(
+                actor.lines.try_recv().is_err(),
+                "no turn/steer request is written without an active turn"
             );
 
             let _ = actor.child.kill();

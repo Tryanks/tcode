@@ -1797,6 +1797,13 @@ pub enum AgentEvent {
     SteerAccepted {
         request_id: String,
     },
+    /// The provider could not fold the correlated steer into a running turn:
+    /// the turn had already ended by the time the request reached it. The
+    /// text was never seen by the model, so the runtime re-sends it as an
+    /// ordinary turn.
+    SteerRejected {
+        request_id: String,
+    },
     /// Streaming text growth for an in-progress item. The item may not have
     /// been announced via `ItemStarted` yet (providers differ); the UI creates
     /// the item lazily on first delta.

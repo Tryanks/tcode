@@ -684,6 +684,13 @@ impl AppState {
                 // renders as a plain bubble. Drop any staged split rather than let
                 // it attach to a later queued message.
                 active.pending_context_len = None;
+                active.pending_steers.push(PendingSteer {
+                    request_id: request_id.clone(),
+                    text,
+                    attachments: attachments.clone(),
+                    author: cx.author.clone(),
+                    origin: cx.origin,
+                });
                 if active
                     .steer_now(request_id, wire_text, attachments)
                     .is_err()

@@ -142,6 +142,10 @@ pub use wire::{
 // that carries it (the linking instructions through the provider's
 // instruction channel, an MCP server's instructions, Codex's developer
 // instructions).
+//
+// Unreleased: the agent event stream gains steer_rejected, a provider's
+// report that the correlated steer reached it after its turn had ended; the
+// host then sends the text as an ordinary turn.
 pub const PROTOCOL_VERSION: u32 = 12;
 
 #[cfg(test)]
