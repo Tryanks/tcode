@@ -73,10 +73,11 @@ impl AppState {
                     }
                 }
                 let now = now_millis();
+                let projection = super::snapshots::ActivityProjection::new(state);
                 let due: Vec<_> = state
                     .sessions
                     .iter()
-                    .filter_map(|meta| state.settlement_due(meta, now))
+                    .filter_map(|meta| state.settlement_due(meta, now, &projection))
                     .collect();
                 for (id, at) in due {
                     state.settle_session_at(&id, at / 1000, cx);
@@ -109,17 +110,23 @@ impl AppState {
 
     /// Settle one thread now if it is due; for changes that concern only it.
     pub(super) fn evaluate_thread_settlement(&mut self, id: &str, cx: &mut HostCx) {
+        let projection = super::snapshots::ActivityProjection::new(self);
         let due = self
             .sessions
             .iter()
             .find(|meta| meta.id == id)
-            .and_then(|meta| self.settlement_due(meta, now_millis()));
+            .and_then(|meta| self.settlement_due(meta, now_millis(), &projection));
         if let Some((id, at)) = due {
             self.settle_session_at(&id, at / 1000, cx);
         }
     }
 
-    fn settlement_due(&self, meta: &SessionMeta, now: u64) -> Option<(String, u64)> {
+    fn settlement_due(
+        &self,
+        meta: &SessionMeta,
+        now: u64,
+        projection: &super::snapshots::ActivityProjection<'_>,
+    ) -> Option<(String, u64)> {
         let activity = self.thread_activity.get(&meta.id)?;
         let resident = self.resident(&meta.id);
         let blockers = SettlementBlockers {
@@ -136,7 +143,7 @@ impl AppState {
             }),
             completion_holding_work: resident
                 .is_some_and(|session| session.background_task_count > 0)
-                || self.children_hold(&meta.id)
+                || projection.children_hold(&meta.id)
                 || tcode_core::pull_request::watched(&meta.pull_requests)
                     .next()
                     .is_some(),
