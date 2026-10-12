@@ -4,6 +4,8 @@ use std::time::Duration;
 
 mod tools;
 
+pub use tools::{INSTRUCTIONS, REPORT_INSTRUCTIONS};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadPurpose {
     Execution,

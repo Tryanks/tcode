@@ -31,11 +31,11 @@ pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, Th
 pub use event::{
     AcpMarketplaceItem, AgentStatus, ArchivedSessions, EventEnvelope, ExternalImportState,
     ExternalImportStatus, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    IndexSummary, InjectedPullRequestTools, MergeWorktreeFailure, NoticeSeverity,
-    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
-    PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
-    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
+    IndexSummary, InjectedChannel, InjectedInstructions, InjectedPullRequestTools,
+    MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
+    PluginOperationTarget, PluginStaleReason, ProviderPluginCatalog, ProviderUpdateAvailable,
+    ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect,
+    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
     ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
     SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
     Topic,
@@ -139,6 +139,10 @@ pub use wire::{
 // out, beside unknown.
 // which branch discovery made, are dropped as metadata is read. The
 // PullRequestWatch toast's notice gains merged.
+// Unreleased: SessionStatus.pull_request_tools carries attached and replaces the
+// instructions string with a list of verbatim texts, each with the channel that
+// carries it (the linking instructions through the provider's instruction
+// channel, an MCP server's instructions, Codex's developer instructions).
 pub const PROTOCOL_VERSION: u32 = 11;
 
 #[cfg(test)]

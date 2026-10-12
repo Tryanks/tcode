@@ -899,16 +899,7 @@ impl AppState {
             native_rewind_prefill_available: false,
             model_pending_restart: session.model_changed_while_live(),
             options_pending_restart: session.options_changed_while_live(),
-            pull_request_tools: self
-                .pull_request_tools_offered(session.meta.provider)
-                .then(|| tcode_protocol::InjectedPullRequestTools {
-                    tools: pull_request_mcp::tool_descriptions(
-                        &self.pull_request_tool_hosts(session_id),
-                    ),
-                    instructions: tcode_core::pull_request::linking_instructions(
-                        &self.pull_request_hosts(),
-                    ),
-                }),
+            pull_request_tools: self.injected_pull_request_tools(session),
         })
     }
 

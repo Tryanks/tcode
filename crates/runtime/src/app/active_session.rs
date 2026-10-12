@@ -188,6 +188,8 @@ pub struct ActiveSession {
     /// Provider-owned background tasks which outlive a completed model turn.
     /// Claude currently supplies this transient liveness signal.
     pub(super) background_task_count: usize,
+    /// Cleared when the live provider took none of Tcode's MCP servers.
+    pub(super) mcp_servers_attached: bool,
     /// When this parked, fully idle provider became eligible for grace-period
     /// retention and LRU eviction. Active or working sessions keep this clear.
     pub(super) idle_since: Option<Instant>,
@@ -238,6 +240,7 @@ impl ActiveSession {
             turn_in_flight: false,
             interrupt_requested: false,
             background_task_count: 0,
+            mcp_servers_attached: true,
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
@@ -558,10 +561,7 @@ impl ActiveSession {
     /// queued message is by definition one that waits for the running turn to
     /// finish. (Steering — the other way to send mid-turn — never goes through
     /// here; see [`AppState::steer`].)
-    pub(super) fn dispatch_next_pending(
-        &mut self,
-        pull_request_instructions: Option<String>,
-    ) -> Result<bool, ()> {
+    pub(super) fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
         if self.turn_in_flight
             || self.delivery_in_flight.is_some()
             || self.settings_restart_deferred()
@@ -572,7 +572,7 @@ impl ActiveSession {
             return Ok(false);
         };
         let now = SystemTime::now();
-        let Some(mut send) = self
+        let Some(send) = self
             .queue
             .iter()
             .find(|message| message.not_before.is_none_or(|time| time <= now))
@@ -580,21 +580,7 @@ impl ActiveSession {
         else {
             return Ok(false);
         };
-        // A retried delivery already carries the block it was first dispatched with.
-        if let Some(len) = send.context_len
-            && let Some(own) = tcode_core::pull_request::strip_linking_instructions(&send.text)
-            && len >= send.text.len() - own.len()
-        {
-            let block = send.text.len() - own.len();
-            send.text = own.to_owned();
-            send.context_len = Some(len - block).filter(|len| *len > 0);
-        }
-        let mut text = send.wire_text(&self.provider_commands);
-        // A native `/command` must stay at byte zero, and the block must not become its arguments.
-        let instructions = pull_request_instructions.filter(|_| !text.starts_with('/'));
-        if let Some(instructions) = &instructions {
-            text.insert_str(0, instructions);
-        }
+        let text = send.wire_text(&self.provider_commands);
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,
@@ -603,15 +589,6 @@ impl ActiveSession {
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
-        if let Some(queued) = self.queue.iter_mut().find(|queued| queued.id == send.id) {
-            if let Some(instructions) = instructions {
-                queued.text = format!("{instructions}{}", send.text);
-                queued.context_len = Some(instructions.len() + send.context_len.unwrap_or(0));
-            } else {
-                queued.text = send.text;
-                queued.context_len = send.context_len;
-            }
-        }
         self.idle_since = None;
         self.delivery_in_flight = Some(send.id);
         Ok(true)

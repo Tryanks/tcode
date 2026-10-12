@@ -376,6 +376,7 @@ mod tests {
                     },
                     extra_args: vec![],
                     acp: None,
+                    instructions: None,
                 })
                 .await
                 .unwrap();

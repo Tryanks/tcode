@@ -481,8 +481,8 @@ pub struct SessionStatus {
     pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
-    /// The pull request tools and the instructions this thread's provider is given with them,
-    /// while they are registered for it.
+    /// The pull request tools offered to this thread's provider, with every text Tcode gives
+    /// its model outside the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_tools: Option<InjectedPullRequestTools>,
 }
@@ -491,7 +491,28 @@ pub struct SessionStatus {
 pub struct InjectedPullRequestTools {
     /// Each tool's name and the description the model reads.
     pub tools: Vec<(String, String)>,
-    pub instructions: String,
+    /// False once the provider took none of Tcode's MCP servers: its model has neither these
+    /// tools nor the linking instructions.
+    pub attached: bool,
+    /// Verbatim, as delivered.
+    pub instructions: Vec<InjectedInstructions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedInstructions {
+    pub channel: InjectedChannel,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectedChannel {
+    /// The pull request linking instructions, through the provider's own channel.
+    Linking(agent::InstructionChannel),
+    /// An MCP server's `instructions`, by server name.
+    McpServer(String),
+    /// Codex's thread `developerInstructions`.
+    DeveloperInstructions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
