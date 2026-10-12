@@ -164,27 +164,42 @@ impl Lookups {
     /// the machine meanwhile. `pin` marks a pairing in flight, released
     /// with [`Self::unpin`].
     async fn ensure(self: &Arc<Self>, source: &ManifestSource, pin: bool) {
-        let loader = {
-            let mut sources = self.sources.lock().unwrap();
-            if let Some(known) = sources.get_mut(source) {
-                known.pinned += usize::from(pin);
-                // Installed, or claimed by a fetch already under way.
-                return;
-            }
-            // Claim the source before awaiting, so a concurrent dial to
-            // the same instance does not fetch twice.
-            let loader = ManifestLoader::new(source.clone(), &self.data_dir);
-            sources.insert(
-                source.clone(),
-                Source {
-                    loader: loader.clone(),
-                    manifest: None,
-                    pinned: usize::from(pin),
-                    refresher: None,
-                },
-            );
-            loader
-        };
+        let claimed = self.claim(&mut self.sources.lock().unwrap(), source, pin);
+        if let Some(loader) = claimed {
+            self.load(source, loader).await;
+        }
+    }
+
+    /// Count `pin` against a known source, or claim an unknown one before
+    /// any await so a concurrent dial to the same instance does not fetch
+    /// twice. Returns the loader the claimant must [`Self::load`].
+    fn claim(
+        &self,
+        sources: &mut HashMap<ManifestSource, Source>,
+        source: &ManifestSource,
+        pin: bool,
+    ) -> Option<ManifestLoader> {
+        if let Some(known) = sources.get_mut(source) {
+            known.pinned += usize::from(pin);
+            // Installed, or claimed by a fetch already under way.
+            return None;
+        }
+        let loader = ManifestLoader::new(source.clone(), &self.data_dir);
+        sources.insert(
+            source.clone(),
+            Source {
+                loader: loader.clone(),
+                manifest: None,
+                pinned: usize::from(pin),
+                refresher: None,
+            },
+        );
+        Some(loader)
+    }
+
+    /// Fetch the manifest of a source claimed with `loader`; a source
+    /// dropped meanwhile is not brought back.
+    async fn load(self: &Arc<Self>, source: &ManifestSource, loader: ManifestLoader) {
         match loader.startup().await {
             Ok(manifest) => self.adopt(source, Some(manifest)).await,
             Err(error) => {
@@ -253,17 +268,33 @@ impl Lookups {
     /// The saved machines changed: drop the instances none of them and no
     /// pairing in flight names, and load the ones that are new.
     async fn reconcile(self: &Arc<Self>) {
-        let wanted = saved_sources(&self.data_dir);
-        let dropped = {
+        // hosts.json is read, and its new instances claimed, in the same
+        // hold that drops the rest: a reconciliation that read the file
+        // earlier must not claim an instance after a later one dropped it.
+        let (dropped, claimed) = {
             let mut sources = self.sources.lock().unwrap();
+            let wanted = saved_sources(&self.data_dir);
             let before = sources.len();
             sources.retain(|source, known| known.pinned > 0 || wanted.contains(source));
-            sources.len() != before
+            let dropped = sources.len() != before;
+            let claimed: Vec<_> = wanted
+                .into_iter()
+                .filter_map(|source| {
+                    let loader = self.claim(&mut sources, &source, false)?;
+                    Some((source, loader))
+                })
+                .collect();
+            (dropped, claimed)
         };
         if dropped {
             self.apply().await;
         }
-        self.ensure_all(&wanted, false).await;
+        let mut fetches = tokio::task::JoinSet::new();
+        for (source, loader) in claimed {
+            let lookups = self.clone();
+            fetches.spawn(async move { lookups.load(&source, loader).await });
+        }
+        fetches.join_all().await;
     }
 }
 
@@ -324,9 +355,16 @@ impl DeviceIdentity {
                     );
                     lookups.adopt(&source, Some(manifest)).await;
                 }
+                // Claimed before the endpoint is shared, so a reconciliation
+                // that runs while they are fetched can still drop them.
                 for source in to_fetch {
+                    let claimed =
+                        lookups.claim(&mut lookups.sources.lock().unwrap(), &source, false);
+                    let Some(loader) = claimed else {
+                        continue;
+                    };
                     let lookups = lookups.clone();
-                    runtime().spawn(async move { lookups.ensure(&source, false).await });
+                    runtime().spawn(async move { lookups.load(&source, loader).await });
                 }
                 Ok(ClientEndpoint {
                     endpoint,
