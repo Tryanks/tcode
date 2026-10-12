@@ -37,7 +37,6 @@ use super::{
     utils::list_item_prefix,
 };
 
-const CODE_CACHE_CAPACITY: usize = 64;
 const BLOCK_OVERDRAW: Pixels = px(300.);
 const CODE_LINES_PER_ITEM: usize = 32;
 const LIST_ITEMS_PER_ITEM: usize = 8;
@@ -54,9 +53,14 @@ type MarkRuns = (LinkRuns, HighlightRuns, FontOverrides);
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct CodeCacheKey {
-    code: String,
-    lang: String,
+    code: SharedString,
+    lang: SharedString,
     theme: HighlightTheme,
+}
+
+thread_local! {
+    static CODE_HIGHLIGHTS: RefCell<RecentCache<CodeCacheKey, SharedHighlightRuns>> =
+        RefCell::new(RecentCache::new(64));
 }
 
 /// The most recent results of a render step keyed by its inputs, so a repaint
@@ -91,11 +95,6 @@ impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
         self.entries.insert(key, value.clone());
         value
     }
-}
-
-thread_local! {
-    static CODE_HIGHLIGHTS: RefCell<RecentCache<CodeCacheKey, SharedHighlightRuns>> =
-        RefCell::new(RecentCache::new(CODE_CACHE_CAPACITY));
 }
 
 #[derive(Clone)]
@@ -161,7 +160,7 @@ pub(super) fn push_root_items(blocks: &[BlockNode], first_block: usize, items: &
             {
                 (0, 1)
             }
-            BlockNode::CodeBlock(code) => (code_lines(&code.code).len(), CODE_LINES_PER_ITEM),
+            BlockNode::CodeBlock(code) => (code.prepared().lines.len(), CODE_LINES_PER_ITEM),
             BlockNode::List { children, .. } => (children.len(), LIST_ITEMS_PER_ITEM),
             _ => (0, 1),
         };
@@ -199,10 +198,14 @@ pub(super) fn item_renders_alike(
     };
     match (old, new) {
         (BlockNode::CodeBlock(old), BlockNode::CodeBlock(new)) => {
-            let (old_lines, new_lines) = (code_lines(&old.code), code_lines(&new.code));
+            let (old_code, new_code) = (old.prepared(), new.prepared());
             old.lang == new.lang
-                && same_end(old_lines.len(), new_lines.len())
-                && old_lines.get(span.clone()) == new_lines.get(span)
+                && same_end(old_code.lines.len(), new_code.lines.len())
+                && span.end <= old_code.lines.len()
+                && span.end <= new_code.lines.len()
+                && span
+                    .clone()
+                    .all(|ix| old_code.line(ix) == new_code.line(ix))
         }
         (
             BlockNode::List {
@@ -246,6 +249,7 @@ pub(super) fn block_span(block: &BlockNode, start: Option<usize>, end: Option<us
                 lang: code.lang.clone(),
                 line_states: Arc::new(Mutex::new(states)),
                 formula: Default::default(),
+                prepared: Default::default(),
             })
         }
         BlockNode::List {
@@ -1065,17 +1069,37 @@ fn render_list_item(
     item.into_any_element()
 }
 
-fn cached_highlights(code: &str, lang: &str, theme: &HighlightTheme) -> SharedHighlightRuns {
-    let key = CodeCacheKey {
-        code: code.to_string(),
-        lang: lang.to_string(),
-        theme: theme.clone(),
-    };
-    CODE_HIGHLIGHTS.with(|cache| {
-        cache.borrow_mut().get_or_insert_with(key, || {
-            Arc::new(highlight::highlight_source(code, lang, theme))
+fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighlightRuns {
+    let prepared = code.prepared();
+    let compute = || {
+        let key = CodeCacheKey {
+            code: prepared.text.clone(),
+            lang: code.lang.clone().unwrap_or_else(|| "text".into()),
+            theme: theme.clone(),
+        };
+        CODE_HIGHLIGHTS.with(|cache| {
+            cache.borrow_mut().get_or_insert_with(key, || {
+                Arc::new(highlight::highlight_source(
+                    &prepared.text,
+                    code.lang.as_deref().unwrap_or("text"),
+                    theme,
+                ))
+            })
         })
-    })
+    };
+    let Ok(mut cache) = prepared.highlights.lock() else {
+        return compute();
+    };
+    if let Some((cached_theme, runs)) = cache.as_ref()
+        && cached_theme == theme
+        && let Some(runs) = runs.upgrade()
+    {
+        return runs;
+    }
+    let runs = compute();
+    // The global cache bounds retention; the block's shortcut must not keep evicted runs alive.
+    *cache = Some((theme.clone(), Arc::downgrade(&runs)));
+    runs
 }
 
 /// Split code content into display lines. The fence's single terminating
@@ -1097,44 +1121,30 @@ fn render_code_block(
     window: &Window,
     cx: &mut App,
 ) -> AnyElement {
-    let lang = code.lang.as_deref().unwrap_or("text");
-    // Normalize CRLF so no stray `\r` is measured or painted, and drop the
-    // fence's terminating newline (split would otherwise yield a phantom
-    // blank last line). Highlight runs, line offsets, and selection states
-    // are all derived from this same normalized text.
-    let normalized;
-    let code_text: &str = if code.code.contains('\r') {
-        normalized = code.code.replace("\r\n", "\n");
-        &normalized
-    } else {
-        &code.code
-    };
+    let prepared = code.prepared();
+    let code_text = prepared.text.as_ref();
     if mermaid::is_mermaid(code.lang.as_deref())
         && let Some(image) = mermaid::diagram(code_text, cx.theme().mode.is_dark())
     {
         return render_diagram(image, code_text, options, view, cx);
     }
-    let all_runs = cached_highlights(code_text, lang, &cx.theme().highlight_theme);
-    let lines = code_lines(code_text);
-    let span = span.unwrap_or(0..lines.len());
-    let (first, last) = (span.start == 0, span.end == lines.len());
-    let states = code.states_for_lines(&lines, span.clone());
-    let mut offset = lines[..span.start]
-        .iter()
-        .map(|line| line.len() + 1)
-        .sum::<usize>();
-    let span_end = offset
-        + lines[span.clone()]
-            .iter()
-            .map(|line| line.len() + 1)
-            .sum::<usize>();
+    let all_runs = cached_highlights(code, &cx.theme().highlight_theme);
+    let span = span.unwrap_or(0..prepared.lines.len());
+    let (first, last) = (span.start == 0, span.end == prepared.lines.len());
+    let states = code.states_for_lines(prepared, span.clone());
+    let mut offset = prepared.lines.get(span.start).map_or(0, |line| line.start);
+    let span_end = span
+        .end
+        .checked_sub(1)
+        .and_then(|ix| prepared.lines.get(ix))
+        .map_or(offset, |line| line.end + 1);
     // Highlight runs are ordered and disjoint; only those in the span matter.
     let span_runs = &all_runs[all_runs.partition_point(|(range, _)| range.end <= offset)
         ..all_runs.partition_point(|(range, _)| range.start < span_end)];
     let mut rendered_lines = Vec::with_capacity(span.len());
     let mono_font_family = cx.theme().mono_font_family.clone();
-    for ((line, line_state), ix) in lines[span.clone()].iter().zip(states).zip(span.clone()) {
-        let end = offset + line.len();
+    for (line_state, ix) in states.into_iter().zip(span.clone()) {
+        let end = prepared.lines[ix].end;
         let runs = sub_runs(span_runs, offset, end);
         let line = div()
             .id(("code-line", ix))
@@ -1158,10 +1168,7 @@ fn render_code_block(
     let radius = cx.theme().tokens.radius.md;
     // The whole fence, not the painted span: a long block is split across
     // list items and the menu copies the code a reader sees as one block.
-    let whole_code = code_text
-        .strip_suffix('\n')
-        .unwrap_or(code_text)
-        .to_string();
+    let whole_code = prepared.text.clone();
     let context_view = view.clone();
     let is_math = super::math::is_math(code.lang.as_deref());
     // One button per fence, on the item that paints its first line.
@@ -1176,7 +1183,11 @@ fn render_code_block(
             move |_, window, cx| {
                 crate::widgets::stop_click_propagation(window, cx);
                 view.update(cx, |state, cx| {
-                    state.copy_code(path.clone(), code.clone(), cx)
+                    state.copy_code(
+                        path.clone(),
+                        code.strip_suffix('\n').unwrap_or(&code).to_string(),
+                        cx,
+                    )
                 });
             },
             cx,
@@ -1204,7 +1215,12 @@ fn render_code_block(
             block.on_mouse_down(MouseButton::Right, move |_, _, cx| {
                 context_view.update(cx, |state, cx| {
                     state.set_pending_context(
-                        Some(PendingContextTarget::CodeBlock(whole_code.clone())),
+                        Some(PendingContextTarget::CodeBlock(
+                            whole_code
+                                .strip_suffix('\n')
+                                .unwrap_or(&whole_code)
+                                .to_string(),
+                        )),
                         cx,
                     )
                 });
@@ -1275,7 +1291,12 @@ fn render_diagram(
         .on_mouse_down(MouseButton::Right, move |_, _, cx| {
             context_view.update(cx, |state, cx| {
                 state.set_pending_context(
-                    Some(PendingContextTarget::CodeBlock(whole_code.clone())),
+                    Some(PendingContextTarget::CodeBlock(
+                        whole_code
+                            .strip_suffix('\n')
+                            .unwrap_or(&whole_code)
+                            .to_string(),
+                    )),
                     cx,
                 )
             });
