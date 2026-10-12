@@ -556,102 +556,111 @@ where
     // The token scopes retained-command keys across socket lifetimes, as the
     // device id does on Traverse, so no two devices can share a dedup cache.
     let scope = auth::hex_hash(token.as_bytes());
-    let mut unanswered_pings = 0_u8;
-    loop {
-        enum Input {
-            WebSocket(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
-            Host(Result<String, async_channel::RecvError>),
-            Ping,
-            Shutdown,
-        }
-        let input = tokio::select! {
-            message = websocket.next() => Input::WebSocket(message),
-            line = connection.from_host.recv() => Input::Host(line),
-            _ = tokio::time::sleep(PING_INTERVAL) => Input::Ping,
-            _ = shared.shutdown.recv() => Input::Shutdown,
-        };
-        // Active streams may never reach the idle keepalive tick. Recheck
-        // before forwarding in either direction, including hosting polls.
-        if !shared.auth.lock().unwrap().token_is_valid(&token) {
-            let _ = websocket.close(None).await;
-            break;
-        }
-        match input {
-            Input::WebSocket(Some(Ok(Message::Text(line)))) => {
-                let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    let _ = websocket.close(None).await;
-                    break;
-                };
-                if let Ok(tcode_protocol::ClientMessage {
-                    principal: _,
-                    id,
-                    key: _,
-                    payload:
-                        tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting { action }),
-                }) = serde_json::from_value(value.clone())
-                {
-                    let reply = tcode_protocol::HostMessage::QueryResult {
-                        id,
-                        result: shared
-                            .hosting(action)
-                            .map(tcode_protocol::QueryResponse::Hosting),
-                    };
-                    websocket
-                        .send(Message::Text(
-                            serde_json::to_string(&reply)
-                                .map_err(io::Error::other)?
-                                .into(),
-                        ))
-                        .await
-                        .map_err(io::Error::other)?;
-                    continue;
-                }
-                if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
-                    if !crate::host::valid_key(key) {
-                        let _ = websocket.close(None).await;
-                        break;
-                    }
-                    value["key"] = format!("{scope}:{key}").into();
-                }
-                let mut line = value.to_string();
-                line.push('\n');
-                if connection.to_host.send(line).await.is_err() {
-                    break;
-                }
+    let relay = async {
+        let mut unanswered_pings = 0_u8;
+        loop {
+            enum Input {
+                WebSocket(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
+                Host(Result<String, async_channel::RecvError>),
+                Ping,
+                Shutdown,
             }
-            Input::WebSocket(Some(Ok(Message::Ping(payload)))) => {
-                websocket
-                    .send(Message::Pong(payload))
-                    .await
-                    .map_err(io::Error::other)?;
-            }
-            Input::WebSocket(Some(Ok(Message::Pong(_)))) => unanswered_pings = 0,
-            Input::WebSocket(Some(Ok(Message::Close(_))) | Some(Err(_)) | None) => break,
-            Input::WebSocket(Some(Ok(_))) => {}
-            Input::Host(Ok(line)) => websocket
-                .send(Message::Text(line.trim_end().to_owned().into()))
-                .await
-                .map_err(io::Error::other)?,
-            Input::Host(Err(_)) => break,
-            Input::Ping => {
-                if unanswered_pings >= 2 {
-                    let _ = websocket.close(None).await;
-                    break;
-                }
-                unanswered_pings += 1;
-                websocket
-                    .send(Message::Ping(Vec::new().into()))
-                    .await
-                    .map_err(io::Error::other)?;
-            }
-            Input::Shutdown => {
+            let input = tokio::select! {
+                message = websocket.next() => Input::WebSocket(message),
+                line = connection.from_host.recv() => Input::Host(line),
+                _ = tokio::time::sleep(PING_INTERVAL) => Input::Ping,
+                _ = shared.shutdown.recv() => Input::Shutdown,
+            };
+            // Active streams may never reach the idle keepalive tick. Recheck
+            // before forwarding in either direction, including hosting polls.
+            if !shared.auth.lock().unwrap().token_is_valid(&token) {
                 let _ = websocket.close(None).await;
                 break;
             }
+            match input {
+                Input::WebSocket(Some(Ok(Message::Text(line)))) => {
+                    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        let _ = websocket.close(None).await;
+                        break;
+                    };
+                    if let Ok(tcode_protocol::ClientMessage {
+                        principal: _,
+                        id,
+                        key: _,
+                        payload:
+                            tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
+                                action,
+                            }),
+                    }) = serde_json::from_value(value.clone())
+                    {
+                        let reply = tcode_protocol::HostMessage::QueryResult {
+                            id,
+                            result: shared
+                                .hosting(action)
+                                .map(tcode_protocol::QueryResponse::Hosting),
+                        };
+                        websocket
+                            .send(Message::Text(
+                                serde_json::to_string(&reply)
+                                    .map_err(io::Error::other)?
+                                    .into(),
+                            ))
+                            .await
+                            .map_err(io::Error::other)?;
+                        continue;
+                    }
+                    if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
+                        if !crate::host::valid_key(key) {
+                            let _ = websocket.close(None).await;
+                            break;
+                        }
+                        value["key"] = format!("{scope}:{key}").into();
+                    }
+                    let mut line = value.to_string();
+                    line.push('\n');
+                    if connection.to_host.send(line).await.is_err() {
+                        break;
+                    }
+                }
+                Input::WebSocket(Some(Ok(Message::Ping(payload)))) => {
+                    websocket
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(io::Error::other)?;
+                }
+                Input::WebSocket(Some(Ok(Message::Pong(_)))) => unanswered_pings = 0,
+                Input::WebSocket(Some(Ok(Message::Close(_))) | Some(Err(_)) | None) => break,
+                Input::WebSocket(Some(Ok(_))) => {}
+                Input::Host(Ok(line)) => websocket
+                    .send(Message::Text(line.trim_end().to_owned().into()))
+                    .await
+                    .map_err(io::Error::other)?,
+                Input::Host(Err(_)) => break,
+                Input::Ping => {
+                    if unanswered_pings >= 2 {
+                        let _ = websocket.close(None).await;
+                        break;
+                    }
+                    unanswered_pings += 1;
+                    websocket
+                        .send(Message::Ping(Vec::new().into()))
+                        .await
+                        .map_err(io::Error::other)?;
+                }
+                Input::Shutdown => {
+                    let _ = websocket.close(None).await;
+                    break;
+                }
+            }
         }
-    }
+        Ok(())
+    };
+    let result = tokio::select! {
+        result = relay => result,
+        _ = connection.to_host.closed() => Ok(()),
+    };
     connection.to_host.close();
-    Ok(())
+    result
 }
 
 async fn receive_hello<S>(websocket: &mut WebSocketStream<S>) -> Option<serde_json::Value>
