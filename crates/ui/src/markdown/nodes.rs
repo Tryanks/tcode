@@ -5,7 +5,7 @@
 
 use std::{
     ops::Range,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use gpui::{SharedString, SharedUri};
@@ -53,6 +53,36 @@ pub(crate) enum BlockNode {
 }
 
 impl BlockNode {
+    pub(super) fn reuse_highlights(&self, previous: &Self) {
+        match (self, previous) {
+            (Self::CodeBlock(new), Self::CodeBlock(old)) => {
+                let Some(prepared) = old.prepared.get() else {
+                    return;
+                };
+                let cached = prepared
+                    .highlights
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.as_ref().map(|(_, runs)| runs.clone()))
+                    .or_else(|| prepared.previous_highlights.get().cloned());
+                if let Some(cached) = cached {
+                    // Multiple chunks can arrive before painting. Carry the last
+                    // available checkpoint without retaining evicted cache entries.
+                    let _ = new.prepared().previous_highlights.set(cached);
+                }
+            }
+            (Self::Root { children: new }, Self::Root { children: old })
+            | (Self::Blockquote { children: new }, Self::Blockquote { children: old })
+            | (Self::List { children: new, .. }, Self::List { children: old, .. })
+            | (Self::ListItem { children: new, .. }, Self::ListItem { children: old, .. }) => {
+                for (new, old) in new.iter().zip(old) {
+                    new.reuse_highlights(old);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn text(&self) -> String {
         match self {
             Self::Root { children, .. }
@@ -223,6 +253,7 @@ impl BlockNode {
                     .map(Into::into)
                     .unwrap_or_else(|| code.code.clone()),
                 formula: Default::default(),
+                prepared: Default::default(),
                 lang: code.lang.clone(),
                 line_states: Arc::new(Mutex::new(
                     code.formula
@@ -582,6 +613,24 @@ pub(crate) struct CodeBlock {
     pub(crate) code: SharedString,
     pub(crate) lang: Option<SharedString>,
     pub(super) line_states: Arc<Mutex<Vec<Arc<Mutex<InlineState>>>>>,
+    pub(super) prepared: Arc<OnceLock<PreparedCode>>,
+}
+
+pub(super) type CodeHighlightRuns = crate::highlight::HighlightedSource;
+
+#[derive(Debug)]
+pub(super) struct PreparedCode {
+    pub(super) text: SharedString,
+    pub(super) lines: Vec<Range<usize>>,
+    pub(super) previous_highlights: OnceLock<Weak<CodeHighlightRuns>>,
+    pub(super) highlights:
+        Mutex<Option<(crate::highlight::HighlightTheme, Weak<CodeHighlightRuns>)>>,
+}
+
+impl PreparedCode {
+    pub(super) fn line(&self, index: usize) -> &str {
+        &self.text[self.lines[index].clone()]
+    }
 }
 
 impl PartialEq for CodeBlock {
@@ -591,27 +640,51 @@ impl PartialEq for CodeBlock {
 }
 
 impl CodeBlock {
-    /// The selection states of `lines[span]`, the lines one list item paints.
+    pub(super) fn prepared(&self) -> &PreparedCode {
+        self.prepared.get_or_init(|| {
+            let text: SharedString = if self.code.contains("\r\n") {
+                self.code.replace("\r\n", "\n").into()
+            } else {
+                self.code.clone()
+            };
+            let mut lines = Vec::new();
+            let mut start = 0;
+            for (index, byte) in text.bytes().enumerate() {
+                if byte == b'\n' {
+                    lines.push(start..index);
+                    start = index + 1;
+                }
+            }
+            if start < text.len() {
+                lines.push(start..text.len());
+            }
+            PreparedCode {
+                text,
+                lines,
+                highlights: Mutex::new(None),
+                previous_highlights: OnceLock::new(),
+            }
+        })
+    }
+
     pub(super) fn states_for_lines(
         &self,
-        lines: &[&str],
+        code: &PreparedCode,
         span: Range<usize>,
     ) -> Vec<Arc<Mutex<InlineState>>> {
         let Ok(mut states) = self.line_states.lock() else {
-            return lines[span]
-                .iter()
-                .map(|line| InlineState::shared((*line).into()))
+            return span
+                .map(|ix| InlineState::shared(code.line(ix).to_string().into()))
                 .collect();
         };
-        if states.len() != lines.len() {
-            *states = lines
-                .iter()
-                .map(|line| InlineState::shared((*line).into()))
+        if states.len() != code.lines.len() {
+            *states = (0..code.lines.len())
+                .map(|ix| InlineState::shared(code.line(ix).to_string().into()))
                 .collect();
         } else {
-            for (state, line) in states[span.clone()].iter().zip(&lines[span.clone()]) {
+            for (state, ix) in states[span.clone()].iter().zip(span.clone()) {
                 if let Ok(mut state) = state.lock() {
-                    state.set_text((*line).into());
+                    state.set_text(code.line(ix).to_string().into());
                 }
             }
         }
@@ -781,7 +854,7 @@ mod tests {
         let BlockNode::CodeBlock(code) = leaves[1] else {
             panic!("expected code block");
         };
-        let states = code.states_for_lines(&["first code line", "second code line"], 0..2);
+        let states = code.states_for_lines(code.prepared(), 0..2);
         select(&states[0], 6..10);
         select(&states[1], 0..6);
 
