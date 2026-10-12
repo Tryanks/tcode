@@ -1,6 +1,7 @@
-//! Pinning and arranging threads. Desktop rows drag within and between the
-//! Pinned, Active and Settled sections; the phone's Arrange threads page drags
-//! by handle; Move up / Move down write the same keys without a drag.
+//! Pinning and arranging threads. Rows of the desktop threads view drag within
+//! and between the Pinned, Active and Settled sections; the phone's Arrange
+//! threads page drags by handle; Move up / Move down write the same keys
+//! without a drag. Rows of the project view do none of this.
 //!
 //! gpui-base has no sortable-list primitive (its dock drag is specific to tab
 //! groups), so the drag composes GPUI's `on_drag`, `on_drag_move` and
@@ -209,13 +210,18 @@ impl Render for ThreadDragView {
 }
 
 impl SessionsSidebar {
-    /// The project a list shows a thread under: its group in Grouped, the
-    /// filter in the desktop's flat list, every project otherwise.
-    pub(super) fn list_scope(&self, meta: &SessionMeta, cx: &App) -> Option<String> {
+    /// Whether rows are listed by project, where they are neither dragged
+    /// nor moved: the project view orders them by activity alone.
+    fn in_project_view(&self, cx: &App) -> bool {
+        self.store.read(cx).sidebar_layout() == SidebarLayout::Grouped
+            && self.window_state.read(cx).destination() != Destination::ArrangeThreads
+    }
+
+    /// The project a list shows a thread under: the filter in the desktop's
+    /// flat list, every project otherwise.
+    pub(super) fn list_scope(&self, cx: &App) -> Option<String> {
         if self.window_state.read(cx).destination() == Destination::ArrangeThreads {
             self.arrange_scope.clone()
-        } else if self.store.read(cx).sidebar_layout() == SidebarLayout::Grouped {
-            meta.project_id.clone()
         } else if self.compact(cx) {
             None
         } else {
@@ -256,10 +262,12 @@ impl SessionsSidebar {
         cx: &App,
     ) -> Option<DraggedThread> {
         let store = self.store.read(cx);
-        (store.scope().is_full() && state.renaming.is_none()).then(|| DraggedThread {
+        let draggable =
+            store.scope().is_full() && state.renaming.is_none() && !self.in_project_view(cx);
+        draggable.then(|| DraggedThread {
             session_id: meta.id.clone(),
             from: thread_section(meta),
-            scope: self.list_scope(meta, cx),
+            scope: self.list_scope(cx),
             title: meta.title.clone().into(),
             can_settle: !store.turn_running_for(&meta.id)
                 && !store.pending_approval_for(&meta.id)
@@ -456,16 +464,15 @@ impl SessionsSidebar {
         });
     }
 
+    /// The list a drag in progress scrolls: the Arrange threads page's, or
+    /// else the threads view's.
     fn drag_list(&self, cx: &App) -> Option<ListState> {
         self.drag.as_ref()?;
         Some(
             if self.window_state.read(cx).destination() == Destination::ArrangeThreads {
                 self.arrange_list_state.clone()
             } else {
-                match self.store.read(cx).sidebar_layout() {
-                    SidebarLayout::Flat => self.flat_list_state.clone(),
-                    SidebarLayout::Grouped => self.grouped_list_state.clone(),
-                }
+                self.flat_list_state.clone()
             },
         )
     }
@@ -612,14 +619,14 @@ impl SessionsSidebar {
     }
 
     /// Whether a thread can move up and down within its section, or `None`
-    /// for a settled thread.
+    /// for a settled thread and in the project view.
     pub(super) fn move_bounds(&self, id: &str, cx: &App) -> Option<(bool, bool)> {
         let meta = self.store.read(cx).thread_meta(id).cloned()?;
         let section = thread_section(&meta);
-        if section == ThreadSection::Settled {
+        if section == ThreadSection::Settled || self.in_project_view(cx) {
             return None;
         }
-        let scope = self.list_scope(&meta, cx);
+        let scope = self.list_scope(cx);
         let sections = self.scoped_sections(scope.as_deref(), cx);
         let rows: Vec<_> = sections
             .section(section)
@@ -643,7 +650,7 @@ impl SessionsSidebar {
         if section == ThreadSection::Settled {
             return;
         }
-        let scope = self.list_scope(&meta, cx);
+        let scope = self.list_scope(cx);
         let sections = self.scoped_sections(scope.as_deref(), cx);
         let Some(index) = sections
             .section(section)
@@ -678,6 +685,9 @@ impl SessionsSidebar {
             .filter(|meta| thread_section(meta) == ThreadSection::Pinned)
             .filter_map(|meta| meta.pin_order)
             .min();
+        if self.store.read(cx).sidebar_layout() == SidebarLayout::Flat {
+            self.reveal_pinned = Some(action.0.clone());
+        }
         self.perform_lifecycle(
             vec![Command::PinSession {
                 session_id: action.0.clone(),

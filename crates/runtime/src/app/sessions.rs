@@ -234,30 +234,44 @@ impl AppState {
         cx: &mut HostCx,
     ) -> HostTask<Result<(), ProtocolError>> {
         let outcome = self.prepare_project_root_change(project_id, &root, move_files, cx);
+        let discovery_left = match &outcome {
+            Ok((old_root, _)) if move_files => {
+                Some(self.pull_requests.begin_root_move(old_root.clone()))
+            }
+            _ => None,
+        };
         let host = cx.clone();
         let project_id = project_id.to_string();
         cx.spawn_background(async move {
             let (old_root, worktrees) = outcome?;
+            if let Some(discovery_left) = &discovery_left {
+                let _ = discovery_left.recv().await;
+            }
+            let moving = old_root.clone();
             let destination = root.clone();
-            host.unblock(move || {
-                if move_files {
-                    tcode_services::fs_tree::move_tree(&old_root, &destination)?;
-                } else if !destination.is_dir() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("{} is not a directory on this host", destination.display()),
-                    ));
-                }
-                if let Err(error) = tcode_services::worktree::repair(&destination, &worktrees) {
-                    log::warn!(
-                        "could not repair the worktrees of {}: {error}",
-                        destination.display()
-                    );
-                }
-                Ok(())
-            })
-            .await
-            .map_err(project_root_error)?;
+            let changed = host
+                .unblock(move || {
+                    if move_files {
+                        tcode_services::fs_tree::move_tree(&old_root, &destination)?;
+                    } else if !destination.is_dir() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("{} is not a directory on this host", destination.display()),
+                        ));
+                    }
+                    if let Err(error) = tcode_services::worktree::repair(&destination, &worktrees) {
+                        log::warn!(
+                            "could not repair the worktrees of {}: {error}",
+                            destination.display()
+                        );
+                    }
+                    Ok(())
+                })
+                .await;
+            if discovery_left.is_some() {
+                host.enqueue(move |app, _| app.pull_requests.end_root_move(&moving));
+            }
+            changed.map_err(project_root_error)?;
             host.enqueue_and_wait(move |app, cx| app.apply_project_root(&project_id, root, cx))
                 .await
                 .map_err(|_| ProtocolError {
@@ -1026,7 +1040,6 @@ impl AppState {
         };
         if !meta.is_settled() {
             meta.settled_at = Some(timestamp);
-            meta.updated_at = now_secs();
         }
         if let Some(input) = self
             .resident(id)
@@ -1071,7 +1084,6 @@ impl AppState {
         meta.settled_override = Some(SettledOverride::Active);
         meta.settled_at = None;
         meta.unsettled_at = Some(now_secs());
-        meta.updated_at = now_secs();
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
@@ -1153,7 +1165,6 @@ impl AppState {
             return;
         }
         meta.auto_settle_disabled_at = (!enabled).then(now_secs);
-        meta.updated_at = now_secs();
         if let Some(session) = self.resident_mut(id) {
             session.meta = meta.clone();
         }
