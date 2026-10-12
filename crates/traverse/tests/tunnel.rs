@@ -43,14 +43,18 @@ impl Drop for TestDir {
 /// A machine whose host answers nothing: tunnels do not touch the mux.
 struct Machine {
     host: Option<TraverseHost>,
+    _backend: (
+        async_channel::Receiver<String>,
+        async_channel::Sender<String>,
+    ),
     _dir: TestDir,
 }
 
 impl Machine {
     fn start() -> Self {
         let dir = TestDir::new("host");
-        let (to_host, _host_rx) = async_channel::unbounded::<String>();
-        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (to_host, host_rx) = async_channel::unbounded::<String>();
+        let (host_tx, from_host) = async_channel::unbounded::<String>();
         let host = TraverseHost::start(
             HostMux::new(to_host, from_host),
             HostConfig {
@@ -64,6 +68,7 @@ impl Machine {
         .unwrap();
         Self {
             host: Some(host),
+            _backend: (host_rx, host_tx),
             _dir: dir,
         }
     }
