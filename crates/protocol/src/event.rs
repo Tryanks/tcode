@@ -78,6 +78,7 @@ pub enum ServerEvent {
     IndexSummaryReplaced(IndexSummary),
     IndexUnchanged {
         fingerprint: String,
+        archived_revision: u64,
     },
     IndexRemoveSession {
         session_id: String,

@@ -742,6 +742,7 @@ impl AppState {
             {
                 ServerEvent::IndexUnchanged {
                     fingerprint: known.clone(),
+                    archived_revision: snapshot.summary.archived_revision,
                 }
             }
             (_, event) => event,

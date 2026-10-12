@@ -1266,8 +1266,15 @@ impl WorkspaceStore {
                     self.load_archived_sessions(cx);
                 }
             }
-            (Topic::Index, ServerEvent::IndexUnchanged { fingerprint }) => {
+            (
+                Topic::Index,
+                ServerEvent::IndexUnchanged {
+                    fingerprint,
+                    archived_revision,
+                },
+            ) => {
                 if self.cached_index_fingerprint().as_ref() == Some(fingerprint) {
+                    self.index_summary.archived_revision = *archived_revision;
                     if self.baseline_topics.insert(index_topic.clone()) {
                         for project in &self.index_replica.1 {
                             images::invalidate_project_icon(project, cx);
