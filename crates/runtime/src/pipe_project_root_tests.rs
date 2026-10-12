@@ -48,6 +48,7 @@ fn fixture() -> Fixture {
     let link = host.link();
     let events = link.events();
     link.subscribe(Subscription {
+        known_index: None,
         topic: Topic::Index,
         after: None,
     })

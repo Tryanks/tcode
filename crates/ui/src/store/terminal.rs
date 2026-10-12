@@ -229,6 +229,7 @@ impl WorkspaceStore {
     pub(super) fn clear_terminal_topics(&mut self) {
         for id in self.terminals.keys() {
             let _ = self.host.unsubscribe(Subscription {
+                known_index: None,
                 topic: Topic::Terminal { terminal_id: *id },
                 after: None,
             });
@@ -247,6 +248,7 @@ impl WorkspaceStore {
                 return true;
             }
             let _ = self.host.unsubscribe(Subscription {
+                known_index: None,
                 topic: Topic::Terminal { terminal_id: *id },
                 after: None,
             });
@@ -263,6 +265,7 @@ impl WorkspaceStore {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.terminals.entry(id) {
                 entry.insert(Rc::new(ClientTerminal::new(id, self.host.clone())));
                 let _ = self.host.subscribe(Subscription {
+                    known_index: None,
                     topic: Topic::Terminal { terminal_id: id },
                     after: None,
                 });

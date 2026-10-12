@@ -241,6 +241,7 @@ fn omitted_optional_subscription_index_and_queue_fields_default() {
     assert_eq!(
         subscription,
         Subscription {
+            known_index: None,
             topic: Topic::Index,
             after: None
         }
@@ -1502,7 +1503,11 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
             id: 1,
             key: None,
             principal: Some(Principal::Full),
-            payload: ClientPayload::Subscribe(Subscription { topic, after: None }),
+            payload: ClientPayload::Subscribe(Subscription {
+                known_index: None,
+                topic,
+                after: None,
+            }),
         };
         assert_eq!(serde_json::to_value(&request).unwrap(), wire);
         assert_eq!(decode_client_line(&wire.to_string()).unwrap(), request);

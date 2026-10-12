@@ -2733,6 +2733,7 @@ fn only_a_loaded_conversation_marks_a_thread_read() {
     });
 
     let subscription = Subscription {
+        known_index: None,
         topic: Topic::SessionEvents {
             session_id: id.clone(),
         },
@@ -5615,6 +5616,7 @@ fn subscribing_readopts_an_uncommitted_draft_before_its_idle_reaper() {
     state.update(cx, |state, cx| {
         let id = AppState::start_draft(state, "project".into(), PathBuf::from("/tmp"), cx);
         let subscription = tcode_protocol::Subscription {
+            known_index: None,
             topic: Topic::SessionStatus {
                 session_id: id.clone(),
             },
@@ -7458,6 +7460,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
             panic!("draft id missing")
         };
         link.subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: id.clone(),
             },
@@ -7534,6 +7537,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         }
         assert_eq!(records, 3);
         link.subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: id.clone(),
             },
@@ -7552,6 +7556,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         );
         assert!(events.try_recv().is_err());
         link.subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: id.clone(),
             },
@@ -7678,6 +7683,7 @@ fn usage_projection_survives_a_partial_history_window() {
         let snapshot = events_reply(
             state,
             &Subscription {
+                known_index: None,
                 topic: Topic::SessionEvents {
                     session_id: id.into(),
                 },
@@ -7720,6 +7726,7 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             .event_records
             .insert("large".into(), session_log(records.clone()));
         let subscription = tcode_protocol::Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
             },
@@ -7859,6 +7866,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         let snapshot = events_reply(
             state,
             &tcode_protocol::Subscription {
+                known_index: None,
                 topic: Topic::SessionEvents {
                     session_id: "streamed".into(),
                 },
@@ -8108,6 +8116,7 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
             .event_records
             .insert("large".into(), session_log(records.clone()));
         let subscription = tcode_protocol::Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
             },
@@ -8366,6 +8375,7 @@ fn history_paging_bench() {
         let snapshot = events_reply(
             state,
             &tcode_protocol::Subscription {
+                known_index: None,
                 topic: Topic::SessionEvents {
                     session_id: "bench".into(),
                 },
@@ -8635,6 +8645,7 @@ fn history_sends_output_previews_and_reads_whole_outputs_on_request() {
         let snapshot = events_reply(
             state,
             &tcode_protocol::Subscription {
+                known_index: None,
                 topic: Topic::SessionEvents {
                     session_id: "outputs".into(),
                 },
@@ -8851,6 +8862,7 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
             let ServerEvent::SessionSnapshot { records, .. } = events_reply(
                 state,
                 &tcode_protocol::Subscription {
+                    known_index: None,
                     topic: Topic::SessionEvents {
                         session_id: "thread".into(),
                     },
@@ -8970,6 +8982,7 @@ fn history_windows_are_byte_budgeted() {
         let mut snapshot = events_reply(
             state,
             &tcode_protocol::Subscription {
+                known_index: None,
                 topic: Topic::SessionEvents {
                     session_id: "wide".into(),
                 },
@@ -9451,6 +9464,7 @@ fn through_pipe(
 
 fn subscribe_events(session_id: &str, after: Option<u64>) -> tcode_protocol::ClientPayload {
     tcode_protocol::ClientPayload::Subscribe(Subscription {
+        known_index: None,
         topic: Topic::SessionEvents {
             session_id: session_id.into(),
         },
@@ -9460,6 +9474,7 @@ fn subscribe_events(session_id: &str, after: Option<u64>) -> tcode_protocol::Cli
 
 fn unsubscribe_events(session_id: &str) -> tcode_protocol::ClientPayload {
     tcode_protocol::ClientPayload::Unsubscribe(Subscription {
+        known_index: None,
         topic: Topic::SessionEvents {
             session_id: session_id.into(),
         },
@@ -9891,6 +9906,7 @@ fn clients_opening_a_cold_thread_through_the_mux_get_each_record_once() {
     host_held.recv_blocking().unwrap();
     for link in &clients {
         link.subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: "cold".into(),
             },
@@ -9989,6 +10005,7 @@ fn a_long_thread_opens_from_its_tail_with_the_whole_logs_window() {
         };
         cx.run_until(|state| state.event_records.contains_key("long"));
         let whole = SessionLog::new(store.read_log("long").unwrap()).events_window(&Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: "long".into(),
             },
@@ -10211,6 +10228,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     let host = spawn_host((*store).clone(), HostServices::default()).unwrap();
     let link = host.link();
     link.subscribe(Subscription {
+        known_index: None,
         topic: Topic::Index,
         after: None,
     })
@@ -10261,6 +10279,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     .unwrap();
     let link = restarted.link();
     link.subscribe(Subscription {
+        known_index: None,
         topic: Topic::Index,
         after: None,
     })
@@ -10613,6 +10632,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
         cx,
         21,
         tcode_protocol::ClientPayload::Subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: "parent".into(),
             },
@@ -10646,6 +10666,7 @@ fn manual_settlement_is_thread_local_cancels_automatic_queue_and_blocks_human_ad
         cx,
         24,
         tcode_protocol::ClientPayload::Subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionStatus {
                 session_id: "parent".into(),
             },
@@ -10739,6 +10760,7 @@ fn settling_closes_only_idle_real_shells_and_spares_new_terminal_input() {
             cx,
             request,
             tcode_protocol::ClientPayload::Subscribe(Subscription {
+                known_index: None,
                 topic: Topic::SessionStatus {
                     session_id: id.into(),
                 },

@@ -76,6 +76,10 @@ pub enum ServerEvent {
     IndexUpsertSession(SessionMeta),
     IndexUpsertProject(Project),
     IndexSummaryReplaced(IndexSummary),
+    IndexUnchanged {
+        fingerprint: String,
+        archived_revision: u64,
+    },
     IndexRemoveSession {
         session_id: String,
     },

@@ -729,6 +729,24 @@ impl AppState {
                 frame: Box::new(self.terminal_frame(*terminal_id)?),
             },
         };
+        let event = match (subscription.known_index.as_ref(), event) {
+            (Some(known), ServerEvent::IndexSnapshot(snapshot))
+                if tcode_protocol::index_fingerprint(
+                    &snapshot.summary,
+                    &snapshot.sessions,
+                    &snapshot.projects,
+                )
+                .ok()
+                .as_ref()
+                    == Some(known) =>
+            {
+                ServerEvent::IndexUnchanged {
+                    fingerprint: known.clone(),
+                    archived_revision: snapshot.summary.archived_revision,
+                }
+            }
+            (_, event) => event,
+        };
         Some(EventEnvelope {
             request_id: None,
             topic: topic.clone(),

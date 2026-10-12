@@ -1415,6 +1415,7 @@ mod tests {
         // The host only renders what it has folded; a client reads a thread by
         // subscribing to it, which is what makes the timeline resident.
         link.subscribe(tcode_protocol::Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: meta.id.clone(),
             },
@@ -1556,6 +1557,7 @@ mod tests {
             ),
         ] {
             link.subscribe(Subscription {
+                known_index: None,
                 topic: topic.clone(),
                 after: None,
             })
@@ -1600,6 +1602,7 @@ mod tests {
         let host = spawn_host(store.clone(), HostServices::default()).unwrap();
         let link = host.link();
         link.subscribe(Subscription {
+            known_index: None,
             after: None,
             topic: Topic::Index,
         })
@@ -1859,6 +1862,7 @@ mod tests {
             session_id: "legacy-thread".into(),
         };
         link.subscribe(Subscription {
+            known_index: None,
             after: None,
             topic: topic.clone(),
         })
@@ -1928,6 +1932,7 @@ mod tests {
         let events = link.events();
 
         link.subscribe(Subscription {
+            known_index: None,
             after: None,
             topic: Topic::Index,
         })

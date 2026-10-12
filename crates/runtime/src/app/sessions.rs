@@ -1390,6 +1390,7 @@ impl AppState {
                     state.reply_to_subscription(
                         None,
                         tcode_protocol::Subscription {
+                            known_index: None,
                             topic: Topic::SessionEvents {
                                 session_id: fork.id.clone(),
                             },

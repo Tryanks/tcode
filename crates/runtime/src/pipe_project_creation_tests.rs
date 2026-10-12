@@ -24,6 +24,7 @@ fn create_new_project_creates_and_registers_a_host_directory() {
     let link = host.link();
     let events = link.events();
     link.subscribe(Subscription {
+        known_index: None,
         topic: Topic::Index,
         after: None,
     })
@@ -67,6 +68,7 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
         let link = host.link();
         let events = link.events();
         link.subscribe(Subscription {
+            known_index: None,
             topic: Topic::Index,
             after: None,
         })
@@ -90,6 +92,7 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
         };
         assert_eq!(project.root, project_root);
         link.subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionStatus {
                 session_id: id.clone(),
             },

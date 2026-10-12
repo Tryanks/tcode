@@ -83,6 +83,9 @@ pub enum HostMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
+    /// Fingerprint of the applied index; only index topics use this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_index: Option<String>,
     pub topic: Topic,
     #[serde(default)]
     pub after: Option<u64>,

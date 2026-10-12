@@ -829,6 +829,7 @@ impl HostLink {
                 let _ = self.send_payload(
                     self.next_id(),
                     ClientPayload::Unsubscribe(Subscription {
+                        known_index: None,
                         topic: topic.clone(),
                         after: None,
                     }),
@@ -1434,6 +1435,7 @@ mod tests {
         let (_incoming, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let subscription = Subscription {
+            known_index: None,
             topic: Topic::SessionEvents {
                 session_id: "one".into(),
             },
@@ -1519,6 +1521,7 @@ mod tests {
             session_id: "one".into(),
         };
         link.subscribe(Subscription {
+            known_index: None,
             topic: topic.clone(),
             after: None,
         })
@@ -1550,8 +1553,12 @@ mod tests {
             },
         };
         assert!(link.subscription_reply_is_current(&queued_reply));
-        link.unsubscribe(Subscription { topic, after: None })
-            .unwrap();
+        link.unsubscribe(Subscription {
+            known_index: None,
+            topic,
+            after: None,
+        })
+        .unwrap();
         assert!(!link.subscription_reply_is_current(&queued_reply));
         assert!(link.inner.subscription_requests.lock().unwrap().is_empty());
         outgoing.try_recv().unwrap();
@@ -1622,11 +1629,13 @@ mod tests {
         });
 
         link.subscribe(Subscription {
+            known_index: None,
             after: None,
             topic: Topic::Index,
         })
         .unwrap();
         link.subscribe(Subscription {
+            known_index: None,
             after: None,
             topic: Topic::Index,
         })

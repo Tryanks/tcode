@@ -409,6 +409,7 @@ impl LocalKernel {
     fn settings(&self) -> settings::Settings {
         let topic = tcode_protocol::Topic::Settings;
         if let Err(error) = self.control_link.subscribe(tcode_protocol::Subscription {
+            known_index: None,
             topic: topic.clone(),
             after: None,
         }) {
@@ -432,9 +433,11 @@ impl LocalKernel {
                 Err(_) => break settings::Settings::default(),
             }
         };
-        let _ = self
-            .control_link
-            .unsubscribe(tcode_protocol::Subscription { topic, after: None });
+        let _ = self.control_link.unsubscribe(tcode_protocol::Subscription {
+            known_index: None,
+            topic,
+            after: None,
+        });
         result
     }
 }

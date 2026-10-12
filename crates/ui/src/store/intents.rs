@@ -425,9 +425,11 @@ impl WorkspaceStore {
                 },
                 tcode_protocol::Topic::GitStatus { session_id },
             ] {
-                let _ = self
-                    .host
-                    .unsubscribe(tcode_protocol::Subscription { topic, after: None });
+                let _ = self.host.unsubscribe(tcode_protocol::Subscription {
+                    known_index: None,
+                    topic,
+                    after: None,
+                });
             }
         }
         self.session_status_replica = None;
@@ -505,6 +507,7 @@ impl WorkspaceStore {
             tcode_protocol::Topic::SessionEvents { session_id },
         ] {
             let _ = self.host.subscribe(tcode_protocol::Subscription {
+                known_index: None,
                 after: if matches!(topic, tcode_protocol::Topic::SessionEvents { .. }) {
                     after
                 } else {
