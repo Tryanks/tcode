@@ -137,6 +137,8 @@ pub use wire::{
 // which branch discovery made, are dropped as metadata is read.
 // Unreleased: pull request mergeability adds pending, a host still working it
 // out, beside unknown.
+// which branch discovery made, are dropped as metadata is read. The
+// PullRequestWatch toast's notice gains merged.
 // Unreleased: SessionStatus.pull_request_tools carries attached and replaces the
 // instructions string with a list of verbatim texts, each with the channel that
 // carries it (the linking instructions through the provider's instruction

@@ -1141,8 +1141,9 @@ impl AppState {
                 if !group.projects.contains(&meta.project_id) {
                     group.projects.push(meta.project_id.clone());
                 }
-                // Settled threads share updates without independently scheduling reads.
-                if !meta.is_settled() {
+                // Settled threads share updates without independently scheduling reads, except
+                // for a link never read, which nothing else would read after a restart.
+                if !meta.is_settled() || snapshot.is_none() {
                     group.observations.push((snapshot.clone(), stack));
                 }
             }

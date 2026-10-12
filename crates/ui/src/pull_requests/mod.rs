@@ -330,6 +330,7 @@ pub fn watch_notice_kinds(notice: &WatchNotice) -> String {
             .chain(stopped.then_some("pull_requests.kind_stopped"))
             .collect(),
         WatchNotice::Closed => vec!["pull_requests.kind_closed"],
+        WatchNotice::Merged => vec!["pull_requests.kind_merged"],
         WatchNotice::Unreadable => vec!["pull_requests.kind_unreadable"],
     };
     parts
@@ -376,6 +377,10 @@ pub fn watch_notice_toast(number: u64, notice: &WatchNotice) -> (NotificationTyp
         WatchNotice::Closed => (
             NotificationType::Info,
             crate::tr!("pull_requests.watch_closed", number = number).into_owned(),
+        ),
+        WatchNotice::Merged => (
+            NotificationType::Success,
+            crate::tr!("pull_requests.watch_merged", number = number).into_owned(),
         ),
         WatchNotice::Unreadable => (
             NotificationType::Error,
