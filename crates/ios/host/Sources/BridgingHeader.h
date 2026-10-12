@@ -61,7 +61,6 @@ void gpui_ios_insert_text(const uint8_t *bytes, size_t length);
 void gpui_ios_set_marked_text(const uint8_t *bytes, size_t length,
                               size_t selection_start,
                               size_t selection_length);
-void gpui_ios_unmark_text(void);
 void gpui_ios_delete_backward(void);
 void gpui_ios_key_event(const uint8_t *key_bytes, size_t key_length,
                         const uint8_t *character_bytes,

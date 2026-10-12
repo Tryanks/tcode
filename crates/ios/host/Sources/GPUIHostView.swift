@@ -367,12 +367,12 @@ final class GPUIHostView: UIView, UITextViewDelegate {
         }
 
         let committed = textView.text ?? ""
-        if !committed.isEmpty {
+        if !committed.isEmpty || hasForwardedMarkedText {
+            // Cancelling composition must replace the marked range with empty
+            // text; unmarking alone preserves the preedit as committed text.
             withUTF8(committed) { bytes, length in
                 gpui_ios_insert_text(bytes, length)
             }
-        } else if hasForwardedMarkedText {
-            gpui_ios_unmark_text()
         }
         hasForwardedMarkedText = false
         resettingKeyboardProxy = true
