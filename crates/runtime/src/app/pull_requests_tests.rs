@@ -189,10 +189,12 @@ fn shared_sync_changes_only_observations_and_honors_terminal_cadence() {
         }
     });
     sweep(&state, &mut cx);
+    let mut first_reads = read_numbers();
+    first_reads.sort_unstable();
     assert_eq!(
-        read_numbers(),
-        vec![1],
-        "a PR shared by two threads needs one read"
+        first_reads,
+        vec![1, 2],
+        "a PR shared by two threads needs one read, and a settled thread's unsynced link is read"
     );
     let first = store.load_index().unwrap();
     for id in ["active", "settled"] {
@@ -246,14 +248,16 @@ fn shared_sync_changes_only_observations_and_honors_terminal_cadence() {
     fifteen_minutes_pass(&state, &mut cx);
     sweep(&state, &mut cx);
     assert_eq!(read_numbers().len(), closed_reads + 1, "merged stops reads");
-    assert!(
-        !read_numbers().contains(&2),
-        "a settled thread's open or unsynced link nobody shares is not independently due"
+    assert_eq!(
+        read_numbers().iter().filter(|number| **number == 2).count(),
+        1,
+        "a settled thread's open link nobody shares is not independently due"
     );
     assert!(state.read(|state| {
         state.find_meta("settled-alone").unwrap().pull_requests[0]
             .snapshot
-            .is_none()
+            .as_ref()
+            .is_some_and(|s| s.state == PullRequestState::Open)
     }));
 }
 
