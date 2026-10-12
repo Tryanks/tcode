@@ -29,6 +29,7 @@ impl Replica {
         terminal_id: u64,
     ) -> Self {
         link.subscribe(Subscription {
+            known_index: None,
             topic: Topic::Terminal { terminal_id },
             after: None,
         })
@@ -424,6 +425,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
     // advancing, so neither is disturbed.
     second_link
         .unsubscribe(Subscription {
+            known_index: None,
             topic: Topic::Terminal {
                 terminal_id: session.terminal_id,
             },
@@ -451,6 +453,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
     let watcher_events = watcher.events();
     watcher
         .subscribe(Subscription {
+            known_index: None,
             topic: Topic::SessionStatus {
                 session_id: session.session_id.clone(),
             },

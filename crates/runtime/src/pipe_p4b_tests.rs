@@ -44,6 +44,7 @@ pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
         panic!("no session");
     };
     link.subscribe(Subscription {
+        known_index: None,
         topic: Topic::SessionStatus {
             session_id: session_id.clone(),
         },
@@ -67,6 +68,7 @@ fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscribe
     for client in [&link, &second] {
         client
             .subscribe(Subscription {
+                known_index: None,
                 topic: Topic::Preview,
                 after: None,
             })
@@ -162,6 +164,7 @@ fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscribe
     for client in [&link, &second] {
         client
             .unsubscribe(Subscription {
+                known_index: None,
                 topic: Topic::Preview,
                 after: None,
             })
@@ -324,6 +327,7 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
     let (host, mux, link, _root, project_id) = project_fixture();
     let events = link.events();
     link.subscribe(Subscription {
+        known_index: None,
         after: None,
         topic: Topic::ExternalImport {
             project_id: project_id.clone(),
@@ -398,6 +402,7 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
     let late = linked(&mux);
     let late_events = late.events();
     late.subscribe(Subscription {
+        known_index: None,
         after: None,
         topic: Topic::ExternalImport {
             project_id: project_id.clone(),
@@ -479,7 +484,11 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
         },
     ] {
         watcher
-            .subscribe(Subscription { after: None, topic })
+            .subscribe(Subscription {
+                known_index: None,
+                after: None,
+                topic,
+            })
             .unwrap();
     }
     next(&events, |event| {
@@ -573,6 +582,7 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
         "please review zqxsentinel handling",
     )];
     link.subscribe(Subscription {
+        known_index: None,
         after: None,
         topic: Topic::ExternalImport {
             project_id: project_id.clone(),

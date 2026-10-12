@@ -10945,6 +10945,7 @@ dependencies = [
  "bitflags 2.13.2",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tcode-core",
 ]
 

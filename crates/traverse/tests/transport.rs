@@ -205,6 +205,7 @@ fn subscribe(id: u64) -> String {
         key: None,
         principal: None,
         payload: tcode_protocol::ClientPayload::Subscribe(tcode_protocol::Subscription {
+            known_index: None,
             topic: tcode_protocol::Topic::Index,
             after: None,
         }),

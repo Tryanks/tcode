@@ -487,6 +487,7 @@ mod tests {
                         key: None,
                         principal: None,
                         payload: ClientPayload::Subscribe(Subscription {
+                            known_index: None,
                             topic: topic.clone(),
                             after: None,
                         }),
