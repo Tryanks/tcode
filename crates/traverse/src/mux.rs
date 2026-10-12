@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_channel::{Receiver, Sender};
 use tcode_protocol::{Principal, encode_line};
 
+mod outbox;
+use outbox::Outbox;
+
 /// One logical client endpoint attached to a [`HostMux`].
 pub struct Connection {
     pub to_host: Sender<String>,
@@ -25,7 +28,7 @@ struct Inner {
 }
 
 enum Ingress {
-    Add(u64, Sender<String>, Principal),
+    Add(u64, Outbox, Principal),
     Line(u64, String),
     Closed(u64),
 }
@@ -48,20 +51,28 @@ impl HostMux {
     pub fn attach(&self, principal: Principal) -> Connection {
         let connection_id = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
         let (client_tx, client_rx) = async_channel::unbounded();
-        let (output_tx, output_rx) = async_channel::unbounded();
+        let (output_tx, forward, output_rx) = Outbox::new(client_rx.clone());
         let ingress = self.inner.ingress.clone();
         let _ = ingress.try_send(Ingress::Add(connection_id, output_tx, principal));
         std::thread::Builder::new()
             .name(format!("tcode-mux-{connection_id}"))
             .spawn(move || {
-                while let Ok(line) = client_rx.recv_blocking() {
-                    if ingress
-                        .send_blocking(Ingress::Line(connection_id, line))
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
+                futures_lite::future::block_on(futures_lite::future::race(
+                    async {
+                        while let Ok(line) = client_rx.recv().await {
+                            if client_rx.is_closed()
+                                || ingress
+                                    .send(Ingress::Line(connection_id, line))
+                                    .await
+                                    .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    },
+                    forward,
+                ));
+                client_rx.close();
                 let _ = ingress.send_blocking(Ingress::Closed(connection_id));
             })
             .expect("failed to spawn mux connection thread");
@@ -73,7 +84,7 @@ impl HostMux {
 }
 
 async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Receiver<Ingress>) {
-    let mut clients = HashMap::<u64, Sender<String>>::new();
+    let mut clients = HashMap::<u64, Outbox>::new();
     let mut subscriptions = HashMap::<u64, HashSet<String>>::new();
     let mut routes = HashMap::<u64, (u64, u64)>::new();
     let mut pending_subscriptions = HashMap::<u64, String>::new();
@@ -99,7 +110,9 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
             }
             Input::Client(Ok(Ingress::Closed(id))) => {
                 clients.remove(&id);
-                let principal = principals.remove(&id).unwrap();
+                let Some(principal) = principals.remove(&id) else {
+                    continue;
+                };
                 let mut topics = subscriptions.remove(&id).unwrap_or_default();
                 pending_subscriptions.retain(|global_id, topic| {
                     if routes.get(global_id).is_some_and(|route| route.0 == id) {
@@ -127,6 +140,9 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                 routes.retain(|_, route| route.0 != id);
             }
             Input::Client(Ok(Ingress::Line(connection_id, line))) => {
+                if !principals.contains_key(&connection_id) {
+                    continue;
+                }
                 let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
@@ -161,7 +177,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                 result: Ok(tcode_protocol::CommandResponse::Unit),
                             };
                             if let Some(sender) = clients.get(&connection_id) {
-                                let _ = sender.try_send(encode_line(&ack).unwrap());
+                                let _ = sender.try_send(encode_line(&ack).unwrap(), None);
                             }
                             continue;
                         }
@@ -215,16 +231,30 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                     && let Some(sender) = clients.get(&connection_id)
                                 {
                                     value["content"]["request_id"] = local_id.into();
-                                    let _ = sender.try_send(encode_line(&value).unwrap());
+                                    let _ = sender.try_send(encode_line(&value).unwrap(), None);
                                 }
                             }
                         } else {
+                            let replace = content
+                                .get("event")
+                                .and_then(|event| event.get("type"))
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|kind| {
+                                    matches!(
+                                        *kind,
+                                        "session_plan_replaced"
+                                            | "git_status_replaced"
+                                            | "providers_replaced"
+                                            | "index_summary_replaced"
+                                    )
+                                })
+                                .map(|kind| format!("{kind}:{topic}"));
                             for (id, sender) in &clients {
                                 if subscriptions
                                     .get(id)
                                     .is_some_and(|topics| topics.contains(&topic))
                                 {
-                                    let _ = sender.try_send(line.clone());
+                                    let _ = sender.try_send(line.clone(), replace.clone());
                                 }
                             }
                         }
@@ -265,7 +295,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                         }
                         value["content"]["id"] = local_id.into();
                         if clients.get(&connection_id).is_some_and(|sender| {
-                            sender.try_send(encode_line(&value).unwrap()).is_err()
+                            sender.try_send(encode_line(&value).unwrap(), None).is_err()
                         }) {
                             clients.remove(&connection_id);
                         }

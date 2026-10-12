@@ -1601,86 +1601,82 @@ impl StreamTask {
         let full = matches!(principal, Principal::Full);
         let attachment = self.shared.mux.attach(principal);
         let scope = self.connection.remote_id().to_string();
-        let (outbound, outbound_rx) = async_channel::unbounded::<String>();
-        let from_host = attachment.from_host.clone();
-        let forward = outbound.clone();
-        let forwarder = tokio::spawn(async move {
-            while let Ok(line) = from_host.recv().await {
-                if forward.send(line).await.is_err() {
-                    break;
-                }
+        let (outbound, outbound_rx) = async_channel::bounded::<String>(1);
+        let writer = async {
+            loop {
+                let line = tokio::select! {
+                    line = attachment.from_host.recv() => line,
+                    line = outbound_rx.recv() => line,
+                };
+                let line = line.map_err(|_| {
+                    io::Error::new(io::ErrorKind::ConnectionAborted, "host attachment closed")
+                })?;
+                send.write_line(&line).await?;
             }
-        });
-        let writer = tokio::spawn(async move {
-            while let Ok(line) = outbound_rx.recv().await {
-                if send.write_line(&line).await.is_err() {
-                    break;
+        };
+        let reader = async {
+            while let Some(line) = reader.read_line(wire::MAX_LINE).await? {
+                if line.trim().is_empty() {
+                    continue;
                 }
-            }
-            send.finish();
-        });
-        let result =
-            async {
-                while let Some(line) = reader.read_line(wire::MAX_LINE).await? {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "client line is not JSON",
+                    ));
+                };
+                if let Ok(tcode_protocol::ClientMessage {
+                    principal: _,
+                    id,
+                    payload:
+                        tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting { action }),
+                    ..
+                }) = serde_json::from_value(value.clone())
+                {
+                    let reply = tcode_protocol::HostMessage::QueryResult {
+                        id,
+                        result: if full {
+                            self.shared
+                                .hosting(action)
+                                .map(tcode_protocol::QueryResponse::Hosting)
+                        } else {
+                            Err(ProtocolError::out_of_scope(
+                                "hosting is available only to full devices",
+                            ))
+                        },
+                    };
+                    let reply = tcode_protocol::encode_line(&reply)
+                        .map_err(|error| io::Error::other(error.message))?;
+                    let _ = outbound.send(reply).await;
+                    continue;
+                }
+                if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
+                    if !valid_key(key) {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            "client line is not JSON",
+                            "client line carries an invalid key",
                         ));
-                    };
-                    if let Ok(tcode_protocol::ClientMessage {
-                        principal: _,
-                        id,
-                        payload:
-                            tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
-                                action,
-                            }),
-                        ..
-                    }) = serde_json::from_value(value.clone())
-                    {
-                        let reply = tcode_protocol::HostMessage::QueryResult {
-                            id,
-                            result: if full {
-                                self.shared
-                                    .hosting(action)
-                                    .map(tcode_protocol::QueryResponse::Hosting)
-                            } else {
-                                Err(ProtocolError::out_of_scope(
-                                    "hosting is available only to full devices",
-                                ))
-                            },
-                        };
-                        let reply = tcode_protocol::encode_line(&reply)
-                            .map_err(|error| io::Error::other(error.message))?;
-                        let _ = outbound.send(reply).await;
-                        continue;
                     }
-                    if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
-                        if !valid_key(key) {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "client line carries an invalid key",
-                            ));
-                        }
-                        value["key"] = format!("{scope}:{key}").into();
-                    }
-                    let mut line = value.to_string();
-                    line.push('\n');
-                    if attachment.to_host.send(line).await.is_err() {
-                        break;
-                    }
+                    value["key"] = format!("{scope}:{key}").into();
                 }
-                Ok(())
+                let mut line = value.to_string();
+                line.push('\n');
+                attachment.to_host.send(line).await.map_err(|_| {
+                    io::Error::new(io::ErrorKind::ConnectionAborted, "host attachment closed")
+                })?;
             }
-            .await;
+            Ok(())
+        };
+        let result = tokio::select! {
+            result = futures_lite::future::race(reader, writer) => result,
+            _ = attachment.to_host.closed() => Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted, "host attachment closed",
+            )),
+        };
+        let attachment_closed = attachment.to_host.is_closed();
         attachment.to_host.close();
-        outbound.close();
-        forwarder.abort();
-        let _ = writer.await;
-        if result.is_err() {
+        send.finish();
+        if result.is_err() || attachment_closed {
             self.connection.close(2_u32.into(), b"protocol");
         }
         result
