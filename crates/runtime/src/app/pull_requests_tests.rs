@@ -798,6 +798,121 @@ fn discovery_shows_the_branch_pull_request_without_linking_it_and_its_merge_sett
     assert_eq!(merged.settled_at, Some(worked_at / 1000));
 }
 
+#[test]
+fn a_branch_without_a_pull_request_clears_the_branch_one_and_a_failed_read_keeps_it() {
+    let store = TestStore::new("tcode-pr-branch-clear");
+    let root = checkout(&store);
+    let publish = |branch: &str| {
+        git(&root, &["switch", "-c", branch]);
+        git(
+            &root,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                "HEAD",
+            ],
+        );
+    };
+    publish("topic");
+    let fixture = fixture::Fixture::new();
+    let api = client(&store, &fixture);
+    // The host's pull request #1 by state, `None` when the branch has none, or a failing host.
+    let host = Arc::new(Mutex::new(Ok::<_, ()>(Some("OPEN"))));
+    let replying = host.clone();
+    let _server = fixture.serve(move |exchange| {
+        let sent: Value = serde_json::from_slice(&exchange.body).unwrap();
+        let Ok(state) = *replying.lock().unwrap() else {
+            exchange.reply(500, "", b"{}");
+            return;
+        };
+        let body = if sent["query"]
+            .as_str()
+            .unwrap()
+            .contains("PullRequestsByHead")
+        {
+            let nodes: Vec<_> = state
+                .map(|state| {
+                    json!({
+                        "number": 1,
+                        "url": "https://github.com/sample/project/pull/1",
+                        "state": state,
+                        "headRepositoryOwner": {"login": "sample"},
+                    })
+                })
+                .into_iter()
+                .collect();
+            json!({"data": {"repository": {"h0": {"nodes": nodes}}}})
+        } else {
+            let mut data = serde_json::Map::new();
+            for (name, number) in sent["variables"].as_object().unwrap() {
+                if let Some(alias) = name.strip_suffix("_number") {
+                    data.insert(
+                        alias.into(),
+                        json!({"pullRequest": pr(number.as_u64().unwrap(), state.unwrap(), false)}),
+                    );
+                }
+            }
+            json!({"data": data})
+        };
+        exchange.reply(200, "", &serde_json::to_vec(&body).unwrap());
+    });
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(&mut cx, |state, _| {
+        state.pull_requests = PullRequestRuntime::new(api);
+        let mut meta = linked_meta("active", false);
+        meta.pull_requests.clear();
+        meta.cwd = root.clone();
+        // Pinned, so a merged pull request does not settle it out of discovery.
+        meta.pinned_at = Some(1);
+        let project = Project::from_root(root.clone());
+        meta.project_id = Some(project.id.clone());
+        state.projects.push(project);
+        store.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+    });
+    let discover = |state: &TestEntity, cx: &mut TestAppContext| {
+        state.update(cx, |state, cx| {
+            state.discover_pull_requests_for("active", true, cx)
+        });
+        cx.run_until(|state| {
+            !state.pull_requests.discovering
+                && !state.pull_requests.syncing
+                && !state.pull_requests.sync_scheduled
+                && state.pull_requests.requested.is_empty()
+        });
+        state.read(|state| {
+            state
+                .find_meta("active")
+                .unwrap()
+                .branch_pull_request
+                .map(|branch| (branch.key.number, branch.snapshot.map(|s| s.state)))
+        })
+    };
+    let open = Some((1, Some(PullRequestState::Open)));
+    assert_eq!(discover(&state, &mut cx), open);
+    *host.lock().unwrap() = Err(());
+    assert_eq!(discover(&state, &mut cx), open, "a failed read keeps it");
+    publish("unrelated");
+    *host.lock().unwrap() = Ok(None);
+    assert_eq!(
+        discover(&state, &mut cx),
+        None,
+        "a branch without a pull request clears it"
+    );
+    publish("finished");
+    *host.lock().unwrap() = Ok(Some("MERGED"));
+    let merged = Some((1, Some(PullRequestState::Merged)));
+    assert_eq!(discover(&state, &mut cx), merged);
+    publish("next");
+    *host.lock().unwrap() = Ok(None);
+    assert_eq!(
+        discover(&state, &mut cx),
+        merged,
+        "a thread in the project root keeps the pull request it ended"
+    );
+}
+
 fn rpc(url: &str, token: &str, session: Option<&str>, body: Value) -> (Value, Option<String>) {
     let mut request = ureq::post(url)
         .set("Authorization", &format!("Bearer {token}"))
@@ -2277,7 +2392,7 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
         fn url(&self, _: &PullRequestKey) -> Option<String> {
             unreachable!()
         }
-        fn discover(&self, _: &Path, _: &Path, _: bool) -> Option<Discovered> {
+        fn discover(&self, _: &Path, _: &Path, _: bool) -> Result<Option<Discovered>, ForgeError> {
             unreachable!()
         }
         fn summary(&self, _: &PullRequestKey) -> Result<Summary, ForgeError> {

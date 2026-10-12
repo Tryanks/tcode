@@ -620,11 +620,20 @@ impl Forge for GitLab {
 
     /// One page of the project's open merge requests from the branch: a source branch with
     /// more than one page of them is not searched further.
-    fn discover(&self, cwd: &Path, root: &Path, refresh: bool) -> Option<Discovered> {
+    fn discover(
+        &self,
+        cwd: &Path,
+        root: &Path,
+        refresh: bool,
+    ) -> Result<Option<Discovered>, ForgeError> {
         let known = self.known();
         let cwd = if cwd.exists() { cwd } else { root };
-        let target = repository::resolve(&known, root)?;
-        let branch = repository::branch(&known, cwd)?;
+        let Some(target) = repository::resolve(&known, root) else {
+            return Ok(None);
+        };
+        let Some(branch) = repository::branch(&known, cwd) else {
+            return Ok(None);
+        };
         let slot = (
             format!("{}/{}", target.host, target.locator),
             format!("{}:{}", branch.source.locator, branch.source_branch),
@@ -633,26 +642,28 @@ impl Forge for GitLab {
             && let Some((at, found)) = self.branches.lock().unwrap().get(&slot)
             && at.elapsed() < READ_TTL
         {
-            return found.clone();
+            return Ok(found.clone());
         }
         let probe = target.key(1);
         let mr = self.mr(&probe);
-        let rows = mr
-            .get(
-                mr.project_path(&format!(
-                    "/merge_requests?state=opened&source_branch={}&per_page=20",
-                    crate::github::pull_request_reads::percent_encode(&branch.source_branch)
-                )),
-                "MergeRequestsByBranch",
-            )
-            .ok()?;
+        let rows = mr.get(
+            mr.project_path(&format!(
+                "/merge_requests?state=opened&source_branch={}&per_page=20",
+                crate::github::pull_request_reads::percent_encode(&branch.source_branch)
+            )),
+            "MergeRequestsByBranch",
+        )?;
         // A fork's merge request comes from another project, which only its id names here.
         let source_id = if branch.source == target {
             None
         } else {
             let fork = branch.source.key(1);
             let fork = self.mr(&fork);
-            Some(fork.get(fork.project_path(""), "SourceProject").ok()?["id"].as_u64()?)
+            Some(
+                fork.get(fork.project_path(""), "SourceProject")?["id"]
+                    .as_u64()
+                    .ok_or_else(|| error(ForgeErrorKind::Uncertain, "GitLab project unreadable"))?,
+            )
         };
         let found = rows.as_array().into_iter().flatten().find_map(|row| {
             let from = row["source_project_id"].as_u64();
@@ -675,7 +686,7 @@ impl Forge for GitLab {
             .lock()
             .unwrap()
             .insert(slot, (Instant::now(), found.clone()));
-        found
+        Ok(found)
     }
 
     fn summary(&self, key: &PullRequestKey) -> Result<Summary, ForgeError> {

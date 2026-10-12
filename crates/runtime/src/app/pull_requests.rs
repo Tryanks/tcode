@@ -920,33 +920,46 @@ impl AppState {
         }
         Ok(())
     }
-    /// What discovery found on the thread's checkout branch: shown, read and settled on, never
-    /// linked.
+    /// What discovery found on the thread's checkout branch, `None` when it has no pull
+    /// request: shown, read and settled on, never linked.
     fn apply_branch_pull_request(
         &mut self,
         id: &str,
-        key: PullRequestKey,
-        url: String,
+        found: Option<(PullRequestKey, String)>,
         cx: &mut HostCx,
     ) {
         let Some(mut meta) = self.find_meta(id) else {
             return;
         };
-        if meta.native_subagent.is_some()
-            || meta
-                .branch_pull_request
-                .as_ref()
-                .is_some_and(|branch| branch.key == key)
-        {
+        if meta.native_subagent.is_some() {
             return;
         }
-        meta.branch_pull_request = Some(Box::new(BranchPullRequest {
-            key: key.clone(),
-            url,
-            snapshot: None,
-        }));
+        let previous = meta.branch_pull_request.as_deref();
+        let branch = match found {
+            Some((key, _)) if previous.is_some_and(|branch| branch.key == key) => return,
+            Some((key, url)) => Some(Box::new(BranchPullRequest {
+                key,
+                url,
+                snapshot: None,
+            })),
+            None if previous.is_none() => return,
+            // A thread in the project root keeps the pull request it ended once the checkout
+            // leaves its branch, so the merge or close still settles it.
+            None if meta.worktree.is_none()
+                && previous
+                    .and_then(|branch| branch.snapshot.as_ref())
+                    .is_some_and(|snapshot| snapshot.state != PullRequestState::Open) =>
+            {
+                return;
+            }
+            None => None,
+        };
+        let read = branch.as_ref().map(|branch| branch.key.clone());
+        meta.branch_pull_request = branch;
         self.save_pull_request_meta(meta, cx);
-        self.request_pull_request_sync(key, cx);
+        if let Some(key) = read {
+            self.request_pull_request_sync(key, cx);
+        }
     }
     pub fn unlink_pull_request(&mut self, id: &str, key: &PullRequestKey, cx: &mut HostCx) {
         let Some(mut meta) = self.find_meta(id) else {
@@ -1413,7 +1426,8 @@ impl AppState {
                     host.enqueue(move |state, _| {
                         state.pull_requests.end_discovery_read(&cwd, &read_root)
                     });
-                    let Some(result) = result else {
+                    // A read that failed says nothing of the branch, so it changes nothing.
+                    let Ok(result) = result else {
                         continue;
                     };
                     for meta in metas {
@@ -1433,15 +1447,18 @@ impl AppState {
                                 {
                                     return;
                                 }
-                                if state
-                                    .resident(&meta.id)
-                                    .and_then(|r| r.git_branch.as_ref())
-                                    .is_some_and(|branch| branch != &result.branch)
+                                if let Some(result) = &result
+                                    && state
+                                        .resident(&meta.id)
+                                        .and_then(|r| r.git_branch.as_ref())
+                                        .is_some_and(|branch| branch != &result.branch)
                                 {
                                     return;
                                 }
                                 state.apply_branch_pull_request(
-                                    &meta.id, result.key, result.url, cx,
+                                    &meta.id,
+                                    result.map(|result| (result.key, result.url)),
+                                    cx,
                                 );
                             })
                             .await;
