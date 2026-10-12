@@ -53,6 +53,36 @@ pub(crate) enum BlockNode {
 }
 
 impl BlockNode {
+    pub(super) fn reuse_highlights(&self, previous: &Self) {
+        match (self, previous) {
+            (Self::CodeBlock(new), Self::CodeBlock(old)) => {
+                let Some(prepared) = old.prepared.get() else {
+                    return;
+                };
+                let cached = prepared
+                    .highlights
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.as_ref().map(|(_, runs)| runs.clone()))
+                    .or_else(|| prepared.previous_highlights.get().cloned());
+                if let Some(cached) = cached {
+                    // Multiple chunks can arrive before painting. Carry the last
+                    // available checkpoint without retaining evicted cache entries.
+                    let _ = new.prepared().previous_highlights.set(cached);
+                }
+            }
+            (Self::Root { children: new }, Self::Root { children: old })
+            | (Self::Blockquote { children: new }, Self::Blockquote { children: old })
+            | (Self::List { children: new, .. }, Self::List { children: old, .. })
+            | (Self::ListItem { children: new, .. }, Self::ListItem { children: old, .. }) => {
+                for (new, old) in new.iter().zip(old) {
+                    new.reuse_highlights(old);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn text(&self) -> String {
         match self {
             Self::Root { children, .. }
@@ -586,12 +616,13 @@ pub(crate) struct CodeBlock {
     pub(super) prepared: Arc<OnceLock<PreparedCode>>,
 }
 
-pub(super) type CodeHighlightRuns = Vec<(Range<usize>, gpui::HighlightStyle)>;
+pub(super) type CodeHighlightRuns = crate::highlight::HighlightedSource;
 
 #[derive(Debug)]
 pub(super) struct PreparedCode {
     pub(super) text: SharedString,
     pub(super) lines: Vec<Range<usize>>,
+    pub(super) previous_highlights: OnceLock<Weak<CodeHighlightRuns>>,
     pub(super) highlights:
         Mutex<Option<(crate::highlight::HighlightTheme, Weak<CodeHighlightRuns>)>>,
 }
@@ -631,6 +662,7 @@ impl CodeBlock {
                 text,
                 lines,
                 highlights: Mutex::new(None),
+                previous_highlights: OnceLock::new(),
             }
         })
     }

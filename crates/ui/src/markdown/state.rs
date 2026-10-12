@@ -360,6 +360,10 @@ impl MarkdownState {
             (blocks, old_prefix_count, old_suffix)
         };
 
+        for (old, new) in old_suffix.iter().zip(&blocks[unchanged..]) {
+            new.reuse_highlights(old);
+        }
+
         // An append can only affect the old trailing block and blocks added
         // after it. Keep the measured items before it, and those of its items
         // that paint as they did.

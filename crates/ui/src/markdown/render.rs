@@ -45,7 +45,7 @@ const HEADING_BASE_FONT_SIZE: Pixels = px(15.);
 const INLINE_CODE_FONT_SIZE: Pixels = px(13.);
 const INLINE_CODE_RADIUS: Pixels = px(4.);
 type HighlightRuns = Vec<(Range<usize>, HighlightStyle)>;
-type SharedHighlightRuns = Arc<HighlightRuns>;
+type SharedHighlightRuns = Arc<highlight::HighlightedSource>;
 type LinkRuns = Vec<(Range<usize>, super::nodes::LinkMark)>;
 type FontOverrides = Vec<(Range<usize>, SharedString)>;
 type ParagraphTextStyle = (String, LinkRuns, HighlightRuns, FontOverrides);
@@ -1079,10 +1079,15 @@ fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighligh
         };
         CODE_HIGHLIGHTS.with(|cache| {
             cache.borrow_mut().get_or_insert_with(key, || {
-                Arc::new(highlight::highlight_source(
-                    &prepared.text,
-                    code.lang.as_deref().unwrap_or("text"),
+                let previous = prepared
+                    .previous_highlights
+                    .get()
+                    .and_then(std::sync::Weak::upgrade);
+                Arc::new(highlight::HighlightedSource::new(
+                    prepared.text.clone(),
+                    code.lang.clone().unwrap_or_else(|| "text".into()),
                     theme,
+                    previous.as_deref(),
                 ))
             })
         })
@@ -1128,7 +1133,8 @@ fn render_code_block(
     {
         return render_diagram(image, code_text, options, view, cx);
     }
-    let all_runs = cached_highlights(code, &cx.theme().highlight_theme);
+    let highlighted = cached_highlights(code, &cx.theme().highlight_theme);
+    let all_runs = &highlighted.runs;
     let span = span.unwrap_or(0..prepared.lines.len());
     let (first, last) = (span.start == 0, span.end == prepared.lines.len());
     let states = code.states_for_lines(prepared, span.clone());
