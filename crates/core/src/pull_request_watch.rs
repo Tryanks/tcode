@@ -331,6 +331,7 @@ const EXHAUSTED_PREFIX: &str = "Tcode stopped watching after ";
 const UNREADABLE_PREFIX: &str = "Tcode stopped watching pull request #";
 const CLOSED_SUFFIX: &str =
     "was closed, so Tcode stopped watching it. Call watch_pull_request if it reopens.";
+const MERGED_SUFFIX: &str = "was merged, so Tcode stopped watching it.";
 
 fn snippet(body: &str) -> String {
     let mut text = String::new();
@@ -452,6 +453,10 @@ pub fn closed_message(number: u64, url: &str) -> String {
     format!("Pull request #{number} ({url}) {CLOSED_SUFFIX}")
 }
 
+pub fn merged_message(number: u64, url: &str) -> String {
+    format!("Pull request #{number} ({url}) {MERGED_SUFFIX}")
+}
+
 pub fn unreadable_message(number: u64, url: &str) -> String {
     format!(
         "{UNREADABLE_PREFIX}{number} ({url}) because it failed to read it from the host {READ_FAILURE_LIMIT} times in a row. Check it yourself, and call watch_pull_request to watch it again."
@@ -468,6 +473,7 @@ pub enum WatchNotice {
         stopped: bool,
     },
     Closed,
+    Merged,
     Unreadable,
 }
 
@@ -508,10 +514,14 @@ pub fn parse_message(text: &str) -> Option<(u64, WatchNotice)> {
         return Some((number(rest)?, WatchNotice::Unreadable));
     }
     let rest = text.strip_prefix("Pull request #")?;
-    text.ends_with(CLOSED_SUFFIX)
-        .then(|| number(rest))
-        .flatten()
-        .map(|number| (number, WatchNotice::Closed))
+    let notice = if text.ends_with(CLOSED_SUFFIX) {
+        WatchNotice::Closed
+    } else if text.ends_with(MERGED_SUFFIX) {
+        WatchNotice::Merged
+    } else {
+        return None;
+    };
+    Some((number(rest)?, notice))
 }
 
 #[cfg(test)]
@@ -852,6 +862,10 @@ mod tests {
         assert_eq!(
             parse_message(&closed_message(5, url)),
             Some((5, WatchNotice::Closed))
+        );
+        assert_eq!(
+            parse_message(&merged_message(5, url)),
+            Some((5, WatchNotice::Merged))
         );
         assert_eq!(
             parse_message(&unreadable_message(5, url)),
