@@ -1061,117 +1061,124 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
     }));
 }
 
-/// The model reads the linking block once: the first turn after the tools are registered carries
-/// it, a native `/command` never does, and once a turn carrying it is accepted no later one does.
+/// The linking instructions reach the provider at launch, for its own instruction channel; no
+/// turn carries them, so the stored user turn is the user's text alone, and what the agent sees
+/// holds the delivered text verbatim under that channel. A provider that took none of Tcode's MCP
+/// servers is shown the tools as offered, with no instructions.
 #[test]
-fn registered_tools_prefix_the_first_turn_except_a_native_command() {
+fn instructions_reach_the_provider_at_launch_and_no_turn_carries_them() {
+    use tcode_protocol::{InjectedChannel, InjectedInstructions};
     let store = TestStore::new("tcode-pr-instructions");
-    let mut cx = TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
     let mut host = mcp_host::Host::bind().unwrap();
     let server = pull_request_mcp::start(&mut host);
-    state.update(&mut cx, |state, cx| {
-        state.pump_pull_request_requests(Some(server), cx)
+    let scripted = scripted_provider(ProviderKind::ClaudeCode);
+    let (launched_tx, launched) = smol::channel::unbounded();
+    let scripted_launcher = scripted.launcher.clone();
+    let launcher = ProviderLauncher(Arc::new(move |kind, options: agent::SessionOptions| {
+        launched_tx.try_send(options.clone()).unwrap();
+        scripted_launcher.launch(kind, options)
+    }));
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.set_provider_launcher_for_test(launcher);
+        state
     });
-    let review = |kind| ProviderCommand {
-        name: "review".into(),
-        description: None,
-        kind,
+    state.update(&mut cx, |state, cx| {
+        state.pump_pull_request_requests(Some(server), cx);
+        let mut meta = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/tmp/synthetic-checkout"),
+            None,
+        );
+        meta.id = "thread".into();
+        store.upsert_meta(&meta).unwrap();
+        state.sessions.push(meta);
+        state.select_session("thread", cx);
+    });
+    state.dispatch_command(
+        &mut cx,
+        1,
+        Command::SendTurn {
+            session_id: "thread".into(),
+            text: "fix the build".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    let commands = scripted.commands.clone();
+    cx.run_until(|_| !commands.is_empty());
+    let Ok(SessionCommand::SendTurn {
+        text, delivery_id, ..
+    }) = commands.try_recv()
+    else {
+        panic!("expected a provider delivery")
     };
-    for (id, typed, instructed) in [
-        ("plain", "fix the build", true),
-        ("slash", "/compact keep the plan", false),
-        ("skill", "$review the diff", false),
-    ] {
-        let (commands, delivered) = smol::channel::unbounded();
-        state.update(&mut cx, |state, cx| {
-            let mut meta = SessionMeta::new(
-                ProviderKind::ClaudeCode,
-                PathBuf::from("/tmp/synthetic-checkout"),
-                None,
-            );
-            meta.id = id.into();
-            let registration = state.pull_request_registration_for(&meta);
-            assert!(registration.is_some());
-            let mut active = ActiveSession::new(meta.clone(), false, Vec::new());
-            active.runtime = Runtime::Live(commands);
-            active.provider_commands = vec![
-                review(ProviderCommandKind::Command),
-                review(ProviderCommandKind::Skill),
-            ];
-            active.push_queued(typed.into(), Vec::new());
-            state.sessions.push(meta);
-            state.install_selected(active);
-            assert_eq!(state.dispatch_next_queued(id, cx), Ok(true));
+    assert_eq!(text, "fix the build");
+    let options = launched.try_recv().unwrap();
+    let linking = pull_request::linking_instructions(&pull_request::hosts_in([]));
+    assert_eq!(options.instructions.as_deref(), Some(linking.as_str()));
+    assert!(
+        options
+            .mcp_servers
+            .iter()
+            .any(|server| server.name == "tcode_pull_requests")
+    );
+
+    scripted
+        .events
+        .try_send(AgentEvent::TurnAccepted { delivery_id })
+        .unwrap();
+    cx.run_until_parked();
+    let stored = store
+        .read_events("thread")
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event.event {
+            AgentEvent::ItemCompleted(ThreadItem {
+                content:
+                    ItemContent::UserMessage {
+                        text, context_len, ..
+                    },
+                ..
+            }) => Some((text, context_len)),
+            _ => None,
         });
-        let Ok(SessionCommand::SendTurn {
-            text, delivery_id, ..
-        }) = delivered.try_recv()
-        else {
-            panic!("expected a provider delivery")
-        };
-        let typed_wire = typed.replacen('$', "/", 1);
-        if instructed {
-            assert_eq!(
-                text,
-                format!(
-                    "{}{typed}",
-                    pull_request::linking_instructions(&pull_request::hosts_in([]))
-                )
-            );
-        } else {
-            assert_eq!(text, typed_wire, "a native command stays at byte zero");
-        }
-        state.update(&mut cx, |state, cx| {
-            state.on_event(id, AgentEvent::TurnAccepted { delivery_id }, cx)
-        });
-        cx.run_until_parked();
-        let (recorded, context_len) = store
-            .read_events(id)
-            .unwrap()
-            .into_iter()
-            .find_map(|event| match event.event {
-                AgentEvent::ItemCompleted(ThreadItem {
-                    content:
-                        ItemContent::UserMessage {
-                            text, context_len, ..
-                        },
-                    ..
-                }) => Some((text, context_len)),
-                _ => None,
-            })
-            .unwrap();
-        let disclosed = context_len.map(|len| &recorded[..len]);
-        assert_eq!(&recorded[context_len.unwrap_or(0)..], typed);
-        assert_eq!(
-            disclosed.and_then(pull_request::strip_linking_instructions),
-            instructed.then_some(""),
-            "the disclosure holds exactly the pull request instructions"
-        );
-        state.update(&mut cx, |state, cx| {
-            state.on_event(id, turn_completed(), cx);
+    assert_eq!(stored, Some(("fix the build".to_owned(), None)));
+
+    let disclosed = |state: &TestEntity| {
+        state.read(|state| {
             state
-                .resident_mut(id)
+                .session_status_snapshot("thread")
                 .unwrap()
-                .push_queued("and the tests".into(), Vec::new());
-            assert_eq!(state.dispatch_next_queued(id, cx), Ok(true));
-        });
-        let Ok(SessionCommand::SendTurn { text, .. }) = delivered.try_recv() else {
-            panic!("expected a second provider delivery")
-        };
-        assert_eq!(
-            text,
-            if instructed {
-                "and the tests".to_owned()
-            } else {
-                format!(
-                    "{}and the tests",
-                    pull_request::linking_instructions(&pull_request::hosts_in([]))
-                )
+                .pull_request_tools
+                .unwrap()
+        })
+    };
+    let tools = disclosed(&state);
+    assert!(tools.attached);
+    assert_eq!(
+        tools.instructions,
+        [
+            InjectedInstructions {
+                channel: InjectedChannel::Linking(agent::InstructionChannel::SessionAppend),
+                text: linking,
             },
-            "the block is read once, on the first turn that can carry it"
-        );
-    }
+            InjectedInstructions {
+                channel: InjectedChannel::McpServer("tcode_pull_requests".into()),
+                text: pull_request_mcp::INSTRUCTIONS.into(),
+            },
+        ]
+    );
+
+    scripted
+        .events
+        .try_send(AgentEvent::McpServersNotAttached)
+        .unwrap();
+    cx.run_until_parked();
+    let tools = disclosed(&state);
+    assert!(!tools.attached);
+    assert!(tools.instructions.is_empty());
+    assert!(!tools.tools.is_empty());
 }
 
 /// A host started the way every composition root starts one discloses the tools to each client,

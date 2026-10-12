@@ -14,9 +14,8 @@ pub(super) struct PullRequestRegistration {
     pub(super) registration: agent::McpRegistration,
     /// The host names the tools were described with.
     pub(super) hosts: String,
-    /// Whether a turn carrying the linking instructions has been accepted; the model reads them
-    /// once per registration, not on every turn.
-    pub(super) instructed: bool,
+    /// The linking instructions the provider is given with the tools.
+    pub(super) instructions: String,
 }
 
 #[derive(Default)]

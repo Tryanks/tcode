@@ -87,6 +87,7 @@ impl AppState {
         let generation = self.next_start_generation;
         let active = self.resident_mut(session_id).unwrap();
         active.runtime = Runtime::Starting { generation };
+        active.mcp_servers_attached = true;
         active.idle_since = None;
         active.live_model = active.meta.model.clone();
         active.live_option_selections = active.meta.option_selections.clone();
@@ -105,6 +106,9 @@ impl AppState {
         } else {
             None
         };
+        let instructions = pull_request_registration
+            .is_some()
+            .then(|| self.pull_request_instructions(&meta.id));
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
@@ -141,6 +145,7 @@ impl AppState {
                 computer_use_registration,
             );
             opts.mcp_servers.extend(pull_request_registration);
+            opts.instructions = instructions;
             let result = provider_launcher.launch(meta.provider, opts).await;
             host_cx.enqueue(move |state, cx| {
                 let matches_active = state.residents.live.get(&session_id).is_some_and(|active| {

@@ -1346,12 +1346,52 @@ impl PullRequestsPanel {
                     )
                     .child(div().text_color(muted).child(description.clone()))
             }))
-            .child(caption("pull_requests.agent_instructions"))
-            .child(crate::chat::components::disclosure::disclosure_body(
-                "pr-agent-instructions",
-                &tools.instructions,
-                cx,
-            ));
+            .when(!tools.attached, |body| {
+                body.child(caption("pull_requests.agent_not_attached"))
+            })
+            .when(!tools.instructions.is_empty(), |body| {
+                body.child(caption("pull_requests.agent_instructions"))
+            })
+            .children(
+                tools
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, injected)| {
+                        use agent::InstructionChannel;
+                        use tcode_protocol::InjectedChannel;
+                        let channel = match &injected.channel {
+                            InjectedChannel::Linking(InstructionChannel::SessionAppend) => {
+                                crate::tr!("pull_requests.channel_system").into_owned()
+                            }
+                            InjectedChannel::Linking(InstructionChannel::PerPromptSystem) => {
+                                crate::tr!("pull_requests.channel_system_per_prompt").into_owned()
+                            }
+                            InjectedChannel::Linking(InstructionChannel::DeveloperContext) => {
+                                crate::tr!("pull_requests.channel_developer_context").into_owned()
+                            }
+                            InjectedChannel::Linking(
+                                InstructionChannel::PerPromptUserBlock | InstructionChannel::None,
+                            ) => crate::tr!("pull_requests.channel_per_turn_block").into_owned(),
+                            InjectedChannel::McpServer(name) => {
+                                crate::tr!("pull_requests.channel_mcp_server", name = name)
+                                    .into_owned()
+                            }
+                            InjectedChannel::DeveloperInstructions => {
+                                crate::tr!("pull_requests.channel_developer_instructions")
+                                    .into_owned()
+                            }
+                        };
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().text_size(px(11.)).text_color(muted).child(channel))
+                            .child(crate::chat::components::disclosure::disclosure_body(
+                                &format!("pr-agent-instructions-{index}"),
+                                &injected.text,
+                                cx,
+                            ))
+                    }),
+            );
         v_flex()
             .flex_none()
             .px_3()

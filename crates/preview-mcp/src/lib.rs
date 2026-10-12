@@ -13,6 +13,8 @@ pub mod js;
 pub mod ports;
 mod tools;
 
+pub use tools::INSTRUCTIONS;
+
 /// Fixed preview canvas presets as `(id, portrait_width, portrait_height)` in
 /// CSS pixels.
 pub const PREVIEW_PRESETS: &[(&str, u32, u32)] = &[

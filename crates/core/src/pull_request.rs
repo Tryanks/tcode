@@ -477,7 +477,7 @@ pub fn host_names(hosts: &[&HostTerms]) -> String {
     names.join(" or ")
 }
 
-/// Prepended to the first turn after the pull request tools are registered; the transcript shows it.
+/// Given to the model with the pull request tools, through the provider's instruction channel.
 pub fn linking_instructions(hosts: &[&HostTerms]) -> String {
     let mut clis: Vec<_> = Vec::new();
     for terms in hosts {
@@ -498,8 +498,9 @@ pub fn linking_instructions(hosts: &[&HostTerms]) -> String {
     text
 }
 
-/// The rest of a turn's injected context when it leads with the linking instructions, whichever
-/// host's they were.
+/// The rest of a stored turn's injected context when it leads with the linking instructions,
+/// whichever host's they were: turns recorded before the instructions moved to the provider's
+/// instruction channel carry them.
 pub fn strip_linking_instructions(context: &str) -> Option<&str> {
     let block = context.strip_prefix(LINKING_OPEN)?;
     let end = block.find(LINKING_CLOSE)?;

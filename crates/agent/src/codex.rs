@@ -25,7 +25,10 @@ use crate::{
 
 mod developer_instructions;
 pub(crate) mod plugins;
-use developer_instructions::PREVIEW_BROWSER_INSTRUCTIONS;
+pub use developer_instructions::PREVIEW_BROWSER_INSTRUCTIONS;
+
+/// The `additionalContext` key [`SessionOptions::instructions`] ride under.
+const INSTRUCTIONS_CONTEXT_KEY: &str = "tcode";
 
 /// Fallback model slug for `collaborationMode.settings.model` when the session
 /// has no resolved model yet.
@@ -537,6 +540,7 @@ enum PendingRequest {
         request_id: String,
         decision: ApprovalDecision,
     },
+    InjectItems,
 }
 
 struct PendingApproval {
@@ -617,6 +621,8 @@ struct Actor {
     /// loop drains it before its next model request and echoes it back as a
     /// `userMessage` item, which is the real acceptance signal.
     pending_steers: Vec<(String, String)>,
+    /// [`SessionOptions::instructions`], sent as `turn/start.additionalContext`.
+    instructions: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -694,6 +700,7 @@ async fn run_actor(
         usage_by_turn: HashMap::new(),
         active_turn: None,
         pending_steers: Vec::new(),
+        instructions: opts.instructions.clone(),
     };
 
     let started = AgentEvent::SessionStarted {
@@ -1547,6 +1554,29 @@ impl Actor {
             })
             .await;
     }
+    /// Compaction drops the developer message carrying the instructions, and Codex sends
+    /// `additionalContext` again only when it changes; put it back as Codex rendered it, mid-turn
+    /// included.
+    fn restore_instructions(&mut self) {
+        let Some(instructions) = &self.instructions else {
+            return;
+        };
+        let params = json!({
+            "threadId": self.thread_id,
+            "items": [{
+                "type": "message",
+                "role": "developer",
+                "content": [{
+                    "type": "input_text",
+                    "text": format!("<{INSTRUCTIONS_CONTEXT_KEY}>{instructions}</{INSTRUCTIONS_CONTEXT_KEY}>"),
+                }],
+            }],
+        });
+        if let Err(err) = self.request("thread/inject_items", params, PendingRequest::InjectItems) {
+            log::warn!("codex: could not restore instructions after compaction: {err}");
+        }
+    }
+
     fn request(&mut self, method: &str, params: Value, kind: PendingRequest) -> Result<(), String> {
         let id = self.next_id;
         self.next_id += 1;
@@ -1584,6 +1614,13 @@ impl Actor {
         }
         if let Some(tier) = &self.service_tier {
             params["serviceTier"] = json!(tier);
+        }
+        // Codex sends an entry to the model when its value changes, as a `<key>value</key>`
+        // developer message beside the thread's developer instructions.
+        if let Some(instructions) = &self.instructions {
+            params["additionalContext"] = json!({
+                INSTRUCTIONS_CONTEXT_KEY: {"kind": "application", "value": instructions},
+            });
         }
 
         let model = self
@@ -2104,6 +2141,7 @@ impl Actor {
                     }
                     Some("contextCompaction") => {
                         if method == "item/completed" {
+                            self.restore_instructions();
                             self.events
                                 .emit(AgentEvent::ContextCompacted(Default::default()))
                                 .await;
@@ -2848,6 +2886,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
         Some(PendingRequest::Steer { .. }) => "turn/steer",
         Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
         Some(PendingRequest::GuardianApproval { .. }) => "thread/approveGuardianDeniedAction",
+        Some(PendingRequest::InjectItems) => "thread/inject_items",
         None => "unknown",
     }
 }
@@ -4151,6 +4190,7 @@ mod tests {
                 pending_steers: Vec::new(),
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
+                instructions: None,
             },
             event_rx,
         )
@@ -4306,6 +4346,61 @@ mod tests {
             }
             assert!(actor.usage_by_turn.is_empty());
             assert!(actor.items.is_empty());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn instructions_ride_additional_context_and_return_after_a_mid_turn_compaction() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.instructions =
+                Some("<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n".into());
+            for delivery_id in [1, 2] {
+                actor
+                    .handle_command(SessionCommand::SendTurn {
+                        delivery_id,
+                        text: "hello".into(),
+                        options: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .unwrap();
+                let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
+                    panic!("native request")
+                };
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "turn/start");
+                assert_eq!(
+                    request["params"]["additionalContext"],
+                    json!({"tcode": {"kind": "application", "value": "<pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n"}})
+                );
+                assert_eq!(request["params"]["input"][0]["text"], "hello");
+            }
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2"}}}"#)
+                .await;
+            actor
+                .handle_line(r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"contextCompaction","id":"compaction"}}}"#)
+                .await;
+            let ChildOutput::Line(line) = actor.lines.recv().await.unwrap() else {
+                panic!("native request")
+            };
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "thread/inject_items");
+            assert_eq!(
+                request["params"],
+                json!({"threadId": "thread-1", "items": [{
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "<tcode><pull_request_linking>\nLink every PR.\n</pull_request_linking>\n\n</tcode>"}],
+                }]})
+            );
+            assert!(
+                std::iter::from_fn(|| events.try_recv().ok())
+                    .any(|event| matches!(event, AgentEvent::ContextCompacted(_)))
+            );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });

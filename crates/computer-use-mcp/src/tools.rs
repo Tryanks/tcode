@@ -641,19 +641,20 @@ impl ComputerUseTools {
     }
 }
 
+/// The server's `instructions`, which the client reads at initialization.
+pub const INSTRUCTIONS: &str = "Use find_roots → observe_ui, query the immutable cached state with \
+                 search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again. \
+                 Every @e ref belongs to the state_id that produced it, so use each returned \
+                 successor state instead of an older state. This server handles desktop windows \
+                 only; use the tcode_preview tools for web pages.";
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ComputerUseTools {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                "Use find_roots → observe_ui, query the immutable cached state with \
-                 search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again. \
-                 Every @e ref belongs to the state_id that produced it, so use each returned \
-                 successor state instead of an older state. This server handles desktop windows \
-                 only; use the tcode_preview tools for web pages.",
-            )
+            .with_instructions(INSTRUCTIONS)
     }
 }
 

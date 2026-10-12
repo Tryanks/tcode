@@ -1098,6 +1098,7 @@ pub(super) fn session_options(
             name: agent.name.clone(),
             launch: agent.launch.clone(),
         }),
+        instructions: None,
     }
 }
 
