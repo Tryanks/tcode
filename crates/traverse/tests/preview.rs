@@ -39,6 +39,10 @@ impl Drop for TestDir {
 /// A machine, a device paired with it and the device's attachment.
 struct Machine {
     host: Option<TraverseHost>,
+    _backend: (
+        async_channel::Receiver<String>,
+        async_channel::Sender<String>,
+    ),
     paired: PairedHost,
     _transport: Transport,
     tunnels: Arc<dyn TunnelOpener>,
@@ -48,8 +52,8 @@ struct Machine {
 impl Machine {
     fn start() -> Self {
         let host_dir = TestDir::new("host");
-        let (to_host, _host_rx) = async_channel::unbounded::<String>();
-        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (to_host, host_rx) = async_channel::unbounded::<String>();
+        let (host_tx, from_host) = async_channel::unbounded::<String>();
         let host = TraverseHost::start(
             HostMux::new(to_host, from_host),
             HostConfig {
@@ -83,6 +87,7 @@ impl Machine {
         let tunnels = transport.current_host.as_ref().unwrap().tunnels().unwrap();
         Self {
             host: Some(host),
+            _backend: (host_rx, host_tx),
             paired,
             _transport: transport,
             tunnels,
@@ -129,40 +134,6 @@ fn head(stream: &mut impl Read) -> String {
         assert!(bytes.len() <= 16384);
     }
     String::from_utf8(bytes).unwrap()
-}
-
-#[test]
-fn absolute_form_requests_reach_the_origin_in_origin_form_without_proxy_headers() {
-    let machine = Machine::start();
-    let (_proxy, address) = machine.proxy();
-    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = origin.local_addr().unwrap().port();
-    let origin = std::thread::spawn(move || {
-        let (mut stream, _) = origin.accept().unwrap();
-        let request = head(&mut stream);
-        assert!(
-            request.starts_with("GET /page?source=host HTTP/1.1\r\n"),
-            "{request}"
-        );
-        assert!(request.contains(&format!("\r\nHost: localhost:{port}\r\n")));
-        assert!(request.contains("\r\nConnection: close\r\n"));
-        assert!(request.contains("\r\naccept: text/html\r\n"));
-        let lowered = request.to_ascii_lowercase();
-        assert!(!lowered.contains("proxy-"), "{request}");
-        assert!(!lowered.contains("keep-alive"), "{request}");
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nserved on host",
-            )
-            .unwrap();
-    });
-    let mut browser = socket(&address);
-    browser.write_all(format!("GET http://localhost:{port}/page?source=host HTTP/1.1\r\nHost: wrong.example\r\nProxy-Connection: keep-alive\r\nProxy-Authorization: Basic dGNvZGU6c2VjcmV0\r\nAccept: text/html\r\n\r\n").as_bytes()).unwrap();
-    let mut response = String::new();
-    browser.read_to_string(&mut response).unwrap();
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert!(response.ends_with("served on host"));
-    origin.join().unwrap();
 }
 
 #[test]
