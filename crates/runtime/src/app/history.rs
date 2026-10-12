@@ -611,16 +611,16 @@ impl Tail {
         let (mut low, mut bytes) = (end, 0);
         while low > start && bytes <= SESSION_WINDOW_BYTES {
             let from = low.saturating_sub(TAIL_ROWS).max(start);
-            let read = store.read_rows(session_id, from..low)?;
-            bytes += read
-                .records
-                .iter()
-                .map(|record| wire_len(&wire_record(record)) + 1)
-                .sum::<usize>();
-            tail.records.splice(0..0, read.records);
-            tail.rows.splice(0..0, read.rows);
+            store.visit_rows_backwards(session_id, from..low, |row, record| {
+                bytes += wire_len(&wire_record(&record)) + 1;
+                tail.records.push(record);
+                tail.rows.push(row);
+                bytes <= SESSION_WINDOW_BYTES
+            })?;
             low = from;
         }
+        tail.records.reverse();
+        tail.rows.reverse();
         Ok(tail)
     }
 

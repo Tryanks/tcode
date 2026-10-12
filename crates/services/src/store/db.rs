@@ -220,11 +220,24 @@ impl Db {
         params: impl turso::IntoParams,
         mut each: impl FnMut(&Row) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.query_while(connection, sql, params, |row| each(row).map(|()| true))
+    }
+
+    /// Stop a read when its consumer has enough rows. Reset even on an early
+    /// stop so a pooled connection never keeps the statement's read snapshot.
+    pub(super) fn query_while(
+        &self,
+        connection: &Connection,
+        sql: &str,
+        params: impl turso::IntoParams,
+        mut each: impl FnMut(&Row) -> io::Result<bool>,
+    ) -> io::Result<()> {
         block_on(async {
-            let mut rows = connection
+            let mut statement = connection
                 .prepare_cached(sql)
                 .await
-                .map_err(|error| sql_error(&self.path, sql, error))?
+                .map_err(|error| sql_error(&self.path, sql, error))?;
+            let mut rows = statement
                 .query(params)
                 .await
                 .map_err(|error| sql_error(&self.path, sql, error))?;
@@ -233,7 +246,13 @@ impl Db {
                 .await
                 .map_err(|error| sql_error(&self.path, sql, error))?
             {
-                each(&row)?;
+                if !each(&row)? {
+                    drop(rows);
+                    statement
+                        .reset()
+                        .map_err(|error| sql_error(&self.path, sql, error))?;
+                    break;
+                }
             }
             Ok(())
         })

@@ -995,6 +995,47 @@ impl SessionStore {
         })
     }
 
+    /// Visit decoded records newest first, stopping before fetching another
+    /// row when `visit` returns false. Legacy diffs resolve their provider at
+    /// their own position because relays are traversed backwards here.
+    pub fn visit_rows_backwards(
+        &self,
+        id: &str,
+        positions: std::ops::Range<u64>,
+        mut visit: impl FnMut(u64, StoredEvent) -> bool,
+    ) -> io::Result<()> {
+        let bound = |position: u64| i64::try_from(position).unwrap_or(i64::MAX);
+        self.run("read event tail", |db| {
+            db.read(|db, connection| {
+                db.query_while(
+                    connection,
+                    "SELECT position, line FROM events \
+                     WHERE session_id = ?1 AND position >= ?2 AND position < ?3 ORDER BY position DESC",
+                    (id, bound(positions.start), bound(positions.end)),
+                    |row| {
+                        let position = integer(row, 0)?;
+                        let line = blob(row, 1)?;
+                        match decode_row(&line) {
+                            Ok(Some(record)) => {
+                                let provider = if record.legacy_file_diff {
+                                    stored_provider_at(db, connection, id, position)?
+                                } else {
+                                    None
+                                };
+                                Ok(visit(position as u64, record.into_stored(provider)))
+                            }
+                            Ok(None) => Ok(true),
+                            Err(reason) => {
+                                log::warn!("skipping event {position} of {id}: {reason}");
+                                Ok(true)
+                            }
+                        }
+                    },
+                )
+            })
+        })
+    }
+
     /// The position the next row appended to a session's log takes.
     pub fn next_row(&self, id: &str) -> io::Result<u64> {
         self.run("read the end of an event log", |db| {
