@@ -11,7 +11,7 @@ mod repository;
 use crate::{
     forge::{
         Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, Verdicts, ViewedMarks,
+        Tails, ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -72,7 +72,6 @@ pub struct Azure {
     /// through them.
     changes: Mutex<Changes>,
     branches: Mutex<Branches>,
-    verdicts: Verdicts,
 }
 
 /// Files of the latest push, the push's id, and Azure's change entries of those files, which a
@@ -104,7 +103,6 @@ impl Azure {
             reads: Mutex::default(),
             changes: Mutex::default(),
             branches: Mutex::default(),
-            verdicts: Verdicts::default(),
         })
     }
 
@@ -155,18 +153,12 @@ impl Azure {
         format!("{}:{}", key.host, viewer.unwrap_or(ANONYMOUS))
     }
 
-    /// The trial merge as a watch may act on it: a conflict once it holds at one head. A pull
-    /// request no longer open has none to read.
-    fn mergeability(&self, key: &PullRequestKey, pr: &Value) -> Mergeability {
+    /// The trial merge; a pull request no longer open has none to read.
+    fn mergeability(pr: &Value) -> Mergeability {
         if reads::state(pr) != Some(PullRequestState::Open) {
             return Mergeability::Unknown;
         }
-        self.verdicts.read(
-            key,
-            reads::head(pr).as_deref(),
-            reads::mergeability(pr),
-            Instant::now(),
-        )
+        reads::mergeability(pr)
     }
 
     /// Every push, oldest first. Azure keeps them from anonymous reads.
@@ -576,7 +568,7 @@ impl Azure {
         let pr = self.pr(key);
         let read = pr.pr()?;
         let checks = pr.checks(&read)?;
-        let mergeability = self.mergeability(key, &read);
+        let mergeability = Self::mergeability(&read);
         let signed_in = self.api.credential(&key.host)?.is_some();
         Ok(PullRequestActionState {
             merge_state: reads::merge_state(&read, mergeability, &checks),
@@ -859,13 +851,13 @@ impl Forge for Azure {
         let read = pr.pr()?;
         let checks = pr.checks(&read)?;
         Ok(Summary {
-            snapshot: reads::snapshot(&read, &checks, self.mergeability(key, &read), Self::now())
+            snapshot: reads::snapshot(&read, &checks, Self::mergeability(&read), Self::now())
                 .ok_or_else(|| {
-                error(
-                    ForgeErrorKind::Uncertain,
-                    "Azure DevOps pull request unreadable",
-                )
-            })?,
+                    error(
+                        ForgeErrorKind::Uncertain,
+                        "Azure DevOps pull request unreadable",
+                    )
+                })?,
             stack_number: None,
         })
     }
@@ -1052,7 +1044,7 @@ impl Forge for Azure {
             state: reads::state(&read)
                 .ok_or_else(|| error(ForgeErrorKind::Uncertain, "Azure DevOps state unreadable"))?,
             checks: pr.checks(&read)?,
-            mergeability: self.mergeability(key, &read),
+            mergeability: Self::mergeability(&read),
             head_sha: reads::head(&read),
             base_branch: read["targetRefName"]
                 .as_str()

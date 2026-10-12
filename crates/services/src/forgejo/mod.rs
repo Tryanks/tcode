@@ -10,7 +10,7 @@ mod repository;
 use crate::{
     forge::{
         Anchoring, Discovered, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary,
-        Tails, Verdicts, ViewedMarks,
+        Tails, ViewedMarks,
     },
     settings::SettingsStore,
 };
@@ -60,7 +60,6 @@ pub struct Forgejo {
     known: RwLock<BTreeMap<String, HostKind>>,
     reads: Mutex<HashMap<(PullRequestKey, String), Slot>>,
     branches: Mutex<Branches>,
-    verdicts: Verdicts,
 }
 
 impl Forgejo {
@@ -75,7 +74,6 @@ impl Forgejo {
             known: RwLock::default(),
             reads: Mutex::default(),
             branches: Mutex::default(),
-            verdicts: Verdicts::default(),
         })
     }
 
@@ -116,20 +114,6 @@ impl Forgejo {
         reads.retain(|_, (at, _)| at.elapsed() < TEXT_TTL);
         reads.insert(slot, (Instant::now(), response.clone()));
         Ok((response, SystemTime::now() + ttl))
-    }
-
-    /// `mergeable` as a watch may act on it: a false is a conflict once it holds at one head.
-    fn mergeability(
-        &self,
-        key: &PullRequestKey,
-        pr: &Value,
-    ) -> tcode_core::pull_request::Mergeability {
-        self.verdicts.read(
-            key,
-            pr["head"]["sha"].as_str(),
-            reads::mergeability(pr),
-            Instant::now(),
-        )
     }
 
     fn account_of(&self, viewer: Option<&str>, key: &PullRequestKey) -> String {
@@ -546,15 +530,14 @@ impl Forgejo {
         let merge_state = if pr["draft"].as_bool() == Some(true) {
             PullRequestMergeState::Draft
         } else {
-            match self.mergeability(key, &pr) {
-                tcode_core::pull_request::Mergeability::Conflicting => PullRequestMergeState::Dirty,
-                tcode_core::pull_request::Mergeability::Unknown => PullRequestMergeState::Unknown,
+            match reads::mergeability(&pr) {
                 tcode_core::pull_request::Mergeability::Clean
                     if !failing.is_empty() || pending > 0 =>
                 {
                     PullRequestMergeState::Unstable
                 }
                 tcode_core::pull_request::Mergeability::Clean => PullRequestMergeState::Clean,
+                _ => PullRequestMergeState::Unknown,
             }
         };
         let allowed = |field: &str| repository[field].as_bool() == Some(true);
@@ -863,7 +846,7 @@ impl Forge for Forgejo {
         let head = text(&pr["head"], "sha").unwrap_or_default();
         let checks = reads::checks_state(&pull.checks(&head)?);
         Ok(Summary {
-            snapshot: reads::snapshot(&pr, checks, self.mergeability(key, &pr), Self::now())
+            snapshot: reads::snapshot(&pr, checks, reads::mergeability(&pr), Self::now())
                 .ok_or_else(|| {
                     error(ForgeErrorKind::Uncertain, "Forgejo pull request unreadable")
                 })?,
@@ -1046,7 +1029,7 @@ impl Forge for Forgejo {
             head_sha: head,
             base_branch: text(&pr["base"], "ref").unwrap_or_default(),
             checks,
-            mergeability: self.mergeability(key, &pr),
+            mergeability: reads::mergeability(&pr),
             viewer: pull.viewer()?,
             author: text(&pr["user"], "login"),
         })
