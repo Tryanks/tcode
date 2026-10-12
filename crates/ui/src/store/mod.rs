@@ -3260,10 +3260,10 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn read_file_bytes(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<Vec<u8>>> {
+    pub fn read_file_preview(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<Vec<u8>>> {
         let host = self.host.clone();
         cx.spawn(
-            async move |_| match host.query(Query::ReadFileBytes { path }).await {
+            async move |_| match host.query(Query::ReadFilePreview { path }).await {
                 Ok(QueryResponse::FileBytes(bytes)) => Ok(bytes),
                 Ok(other) => Err(protocol_io_error(format!(
                     "unexpected file-bytes response: {other:?}"

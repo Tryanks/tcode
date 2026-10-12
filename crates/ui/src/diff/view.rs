@@ -387,13 +387,12 @@ impl DiffPanel {
                 } else {
                     cwd.join(path)
                 };
-                let task = workspace_store.update(cx, |store, cx| store.read_file_bytes(path, cx));
+                let task =
+                    workspace_store.update(cx, |store, cx| store.read_file_preview(path, cx));
                 let Ok(bytes) = task.await else {
                     continue;
                 };
-                if bytes.len() <= 512 * 1024
-                    && let Ok(text) = String::from_utf8(bytes)
-                {
+                if let Ok(text) = String::from_utf8(bytes) {
                     fallback_texts[index] = Some(text);
                 }
             }

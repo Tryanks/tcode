@@ -1,4 +1,20 @@
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+
+pub fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let too_large = || io::Error::other(format!("file exceeds the {limit} byte size limit"));
+    if file.metadata()?.len() > limit {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    // Metadata can become stale while the file is read.
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
 
 /// Return the directory used to persist attachments for a session.
 pub fn attachment_dir(data_root: &Path, session_id: &str) -> PathBuf {

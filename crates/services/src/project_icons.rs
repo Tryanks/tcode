@@ -2,7 +2,7 @@
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use std::{
     fs,
-    io::{self, Cursor, Read},
+    io::{self, Cursor},
     path::Path,
 };
 use tcode_core::project::Project;
@@ -49,19 +49,6 @@ pub fn browse(directory: &Path) -> io::Result<QueryResponse> {
     })
 }
 
-fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(limit + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(io::Error::other(format!(
-            "file exceeds the {limit} byte size limit"
-        )));
-    }
-    Ok(bytes)
-}
-
 fn decode(bytes: &[u8], max_dimension: u32) -> io::Result<image::DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let mut limits = Limits::default();
@@ -94,7 +81,7 @@ fn raster(path: &Path, pixels: u32) -> io::Result<Vec<u8>> {
             "icon size must be between 1 and 128 pixels",
         ));
     }
-    let mut rgba = decode(&read_bounded(path, MAX_BYTES)?, 8192)?.into_rgba32f();
+    let mut rgba = decode(&crate::user_files::read_bounded(path, MAX_BYTES)?, 8192)?.into_rgba32f();
     // Average premultiplied colors so transparent pixels cannot darken the preview.
     for pixel in rgba.pixels_mut() {
         let alpha = pixel[3];

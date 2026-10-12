@@ -347,7 +347,9 @@ impl AppState {
                 Query::LoadGitDiff { cwd, .. } => {
                     self.authorize_path(cwd, project_ids, PathAccess::Workspace, cx)
                 }
-                Query::ReadFileBytes { path } | Query::ReadIconImage { path } => {
+                Query::ReadFileBytes { path }
+                | Query::ReadFilePreview { path }
+                | Query::ReadIconImage { path } => {
                     self.authorize_path(path, project_ids, PathAccess::Descendant, cx)
                 }
                 Query::RemoveUserFile { path } => {

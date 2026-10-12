@@ -956,6 +956,15 @@ fn dispatch_query(
                     .map_err(io_protocol_error)
             })
         }
+        Query::ReadFilePreview { path } => {
+            let task =
+                cx.unblock(move || tcode_services::user_files::read_bounded(&path, 512 * 1024));
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::FileBytes)
+                    .map_err(io_protocol_error)
+            })
+        }
         Query::ReadFileBytes { path } => {
             let task = cx.unblock(move || std::fs::read(&path));
             cx.spawn_background(async move {
