@@ -6,7 +6,6 @@
 pub(crate) mod anchors;
 pub(crate) mod checkout;
 mod http;
-mod verdicts;
 #[cfg(test)]
 pub(crate) mod verification_tests;
 mod viewed;
@@ -33,7 +32,6 @@ use tcode_protocol::{
     PullRequestRead, PullRequestReadResponse, PullRequestRejection as Rejection,
     PullRequestReviewVerdict, PullRequestStackHead,
 };
-pub(crate) use verdicts::Verdicts;
 pub(crate) use viewed::{ViewedMarks, revisions};
 
 /// The hosts Tcode reads pull requests from, with credentials from `store` and the launch

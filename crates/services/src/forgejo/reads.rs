@@ -177,17 +177,13 @@ pub(super) fn state(pr: &Value) -> Option<PullRequestState> {
     }
 }
 
-/// What `mergeable` alone says: false while the server checks the branch, when the check
-/// failed, when it conflicts, and for every draft. A draft's is never worked out, so it stays
-/// unknown; otherwise false may be a conflict.
+/// What `mergeable` says: true is clean, and false is as much a check unfinished or failed, or
+/// a draft, as a conflict, and the API states nothing that tells them apart, so it is unknown.
 pub(super) fn mergeability(pr: &Value) -> Mergeability {
-    match (
-        pr["mergeable"].as_bool(),
-        pr["draft"].as_bool() == Some(true),
-    ) {
-        (Some(true), _) => Mergeability::Clean,
-        (Some(false), false) => Mergeability::Conflicting,
-        _ => Mergeability::Unknown,
+    if pr["mergeable"].as_bool() == Some(true) {
+        Mergeability::Clean
+    } else {
+        Mergeability::Unknown
     }
 }
 
@@ -499,20 +495,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// #643's fixes to upstream: a `warning` status fails, a non-draft that cannot merge
-    /// conflicts, and a draft, whose mergeability the servers never work out, stays unknown.
+    /// A `warning` status fails (#643); `mergeable` false is never a conflict, draft or not
+    /// (upstream #15441).
     #[test]
     fn statuses_and_mergeability_read_as_the_watch_needs() {
         assert!(check_status("warning").failed());
         assert_eq!(check_status("pending"), CheckStatus::Pending);
-        assert_eq!(
-            mergeability(&json!({"mergeable": false, "draft": false})),
-            Mergeability::Conflicting
-        );
-        assert_eq!(
-            mergeability(&json!({"mergeable": false, "draft": true})),
-            Mergeability::Unknown
-        );
+        for draft in [false, true] {
+            assert_eq!(
+                mergeability(&json!({"mergeable": false, "draft": draft})),
+                Mergeability::Unknown
+            );
+        }
         assert_eq!(
             mergeability(&json!({"mergeable": true, "draft": true})),
             Mergeability::Clean

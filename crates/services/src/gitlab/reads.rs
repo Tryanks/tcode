@@ -299,8 +299,7 @@ pub(super) fn state(mr: &Value) -> Option<PullRequestState> {
     }
 }
 
-/// What one read says of conflicts. `has_conflicts` holds while GitLab rechecks a push, so it
-/// is a conflict only once [`crate::forge::Verdicts`] has seen it hold.
+/// What one read says of conflicts; a check GitLab has yet to finish is pending.
 pub(super) fn mergeability(mr: &Value) -> Mergeability {
     let detailed = mr["detailed_merge_status"].as_str().unwrap_or_default();
     let status = mr["merge_status"].as_str().unwrap_or_default();
@@ -316,7 +315,7 @@ pub(super) fn mergeability(mr: &Value) -> Mergeability {
         status,
         "checking" | "unchecked" | "cannot_be_merged_recheck"
     ) {
-        Mergeability::Unknown
+        Mergeability::Pending
     } else {
         Mergeability::Clean
     }
@@ -866,7 +865,7 @@ mod tests {
     use super::*;
 
     /// The watch's conflict and the merge state come from GitLab's detailed status: a conflict
-    /// is one even while GitLab rechecks, a check in progress is unknown, and anything else
+    /// is one even while GitLab rechecks, a check in progress is pending, and anything else
     /// that stops a merge blocks it rather than reading as a conflict.
     #[test]
     fn merge_status_reads_as_mergeability_and_merge_state() {
@@ -878,7 +877,7 @@ mod tests {
             mergeability(&mr("checking", true)),
             Mergeability::Conflicting
         );
-        assert_eq!(mergeability(&mr("checking", false)), Mergeability::Unknown);
+        assert_eq!(mergeability(&mr("checking", false)), Mergeability::Pending);
         assert_eq!(
             mergeability(&mr("not_approved", false)),
             Mergeability::Clean

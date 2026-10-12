@@ -16,6 +16,9 @@ const QUIET_REREAD: Duration = Duration::from_secs(10 * 60);
 /// With a host fingerprint, how long until the activity is read again anyway: the fingerprint
 /// does not see edits to comments inside review threads.
 const FINGERPRINT_REREAD: Duration = Duration::from_secs(30 * 60);
+/// How long mergeability the host is still working out keeps a pull request read every pass;
+/// past it the host's answer is not coming soon, and the usual cadence resumes.
+const PENDING_MERGEABILITY: Duration = Duration::from_secs(10 * 60);
 const GROUP_CONCURRENCY: usize = 4;
 
 /// Reads are shared per project and pull request; each thread keeps its own watermarks.
@@ -26,13 +29,26 @@ pub(super) struct LastRead {
     /// When the activity was last read.
     at: Instant,
     snapshot: String,
-    /// A check was still running or mergeability unknown, so the detail can move unannounced.
-    in_flight: bool,
+    /// A check was still running, so the detail can move unannounced.
+    checks_running: bool,
+    /// The head whose mergeability the host was still working out, and since when.
+    pending: Option<(Option<String>, Instant)>,
     remarks_complete: bool,
     /// The watch generations this read evaluated; one started since takes a full first look.
     watches: HashSet<(String, String)>,
     status: Option<String>,
     remarks: Option<String>,
+}
+
+impl LastRead {
+    /// Whether the detail can move unannounced: a check is running, or the host has not yet
+    /// worked out mergeability for long. A host that cannot work it out at all moves nothing.
+    fn in_flight(&self, now: Instant) -> bool {
+        self.checks_running
+            || self.pending.as_ref().is_some_and(|(_, since)| {
+                now.saturating_duration_since(*since) < PENDING_MERGEABILITY
+            })
+    }
 }
 
 pub(super) struct WatchRuntime {
@@ -130,7 +146,7 @@ fn plan(
     };
     let elapsed = now.saturating_duration_since(last.at);
     let Some(fingerprint) = fingerprint else {
-        let read = last.in_flight
+        let read = last.in_flight(now)
             || !last.remarks_complete
             || last.snapshot != group.snapshot
             || elapsed >= QUIET_REREAD;
@@ -145,7 +161,9 @@ fn plan(
         || !last.remarks_complete
         || reread_tails;
     Plan {
-        detail: activity || last.status.as_ref() != Some(&fingerprint.status) || last.in_flight,
+        detail: activity
+            || last.status.as_ref() != Some(&fingerprint.status)
+            || last.in_flight(now),
         activity,
         reread_tails,
     }
@@ -470,18 +488,25 @@ impl AppState {
         // An incomplete read never advances the watermark; a pass without the activity has none.
         let remarks = activity.flatten();
         let previous = self.pull_request_watches.last_reads.get(&key);
+        let now = Instant::now();
         let read = LastRead {
             at: if plan.activity {
-                Instant::now()
+                now
             } else {
-                previous.map_or_else(Instant::now, |last| last.at)
+                previous.map_or(now, |last| last.at)
             },
             snapshot,
-            in_flight: detail.mergeability == tcode_core::pull_request::Mergeability::Unknown
-                || detail
-                    .checks
-                    .iter()
-                    .any(|check| check.status == watch::CheckStatus::Pending),
+            checks_running: detail
+                .checks
+                .iter()
+                .any(|check| check.status == watch::CheckStatus::Pending),
+            pending: (detail.mergeability == pull_request::Mergeability::Pending).then(|| {
+                let since = previous
+                    .and_then(|last| last.pending.as_ref())
+                    .filter(|(head, _)| *head == detail.head_sha)
+                    .map_or(now, |(_, since)| *since);
+                (detail.head_sha.clone(), since)
+            }),
             remarks_complete: if plan.activity {
                 remarks.is_some()
             } else {
