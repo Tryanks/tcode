@@ -233,6 +233,8 @@ pub(super) enum Joined {
 /// a range of cursors can hold fewer records than it spans.
 struct LogView<'a> {
     records: &'a [SessionEventRecord],
+    /// Lower cursor covered by this read, including blank or undecodable rows.
+    from: u64,
     /// The row each record is in, ascending.
     rows: &'a [u64],
     end: u64,
@@ -263,7 +265,7 @@ impl LogView<'_> {
     /// was asked to start at `requested`, the row of record `first`.
     fn start(&self, index: usize, first: usize, requested: u64) -> u64 {
         if index == first {
-            requested
+            requested.max(self.from)
         } else {
             self.rows[index]
         }
@@ -482,6 +484,7 @@ impl SessionLog {
     fn view(&self) -> LogView<'_> {
         LogView {
             records: &self.records,
+            from: 0,
             rows: &self.rows,
             end: self.next_row,
             turn_starts: &self.turn_starts,
@@ -577,6 +580,7 @@ impl SessionLog {
 pub(super) struct Tail {
     records: Vec<SessionEventRecord>,
     rows: Vec<u64>,
+    from: u64,
     end: u64,
     index: TurnIndex,
 }
@@ -596,6 +600,7 @@ impl Tail {
     ) -> std::io::Result<Self> {
         let start = LogView {
             records: &[],
+            from: 0,
             rows: &[],
             end,
             turn_starts: &index.starts,
@@ -605,6 +610,7 @@ impl Tail {
         let mut tail = Self {
             records: Vec::new(),
             rows: Vec::new(),
+            from: start,
             end,
             index,
         };
@@ -615,6 +621,9 @@ impl Tail {
                 bytes += wire_len(&wire_record(&record)) + 1;
                 tail.records.push(record);
                 tail.rows.push(row);
+                if bytes > SESSION_WINDOW_BYTES {
+                    tail.from = row;
+                }
                 bytes <= SESSION_WINDOW_BYTES
             })?;
             low = from;
@@ -627,6 +636,7 @@ impl Tail {
     fn view(&self) -> LogView<'_> {
         LogView {
             records: &self.records,
+            from: self.from,
             rows: &self.rows,
             end: self.end,
             turn_starts: &self.index.starts,
