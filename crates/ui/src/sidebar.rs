@@ -4728,8 +4728,8 @@ mod tests {
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
-        let (sidebar, cx) =
-            cx.add_window_view(|_, cx| SessionsSidebar::new(store, window_state.clone(), cx));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(800.)));
         draw(cx);
