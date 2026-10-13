@@ -5819,6 +5819,7 @@ mod tests {
             chat: Entity<ChatView>,
             source: gpui::ImageSource,
             ready: std::rc::Rc<std::cell::Cell<bool>>,
+            renders: std::rc::Rc<std::cell::Cell<usize>>,
         }
         impl gpui::Render for LoadedImageChat {
             fn render(
@@ -5826,6 +5827,7 @@ mod tests {
                 window: &mut gpui::Window,
                 cx: &mut gpui::Context<Self>,
             ) -> impl gpui::IntoElement {
+                self.renders.set(self.renders.get() + 1);
                 if let gpui::ImageSource::Custom(load) = &self.source {
                     match load(window, cx) {
                         Some(Ok(_)) => self.ready.set(true),
@@ -5837,6 +5839,7 @@ mod tests {
             }
         }
         let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+        let renders = std::rc::Rc::new(std::cell::Cell::new(0));
         let image_source = crate::store::host_image(path.clone());
         let (root, cx) = cx.add_window_view(|window, cx| {
             let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
@@ -5844,6 +5847,7 @@ mod tests {
                 chat,
                 source: image_source,
                 ready: ready.clone(),
+                renders: renders.clone(),
             });
             gpui_base::Root::new(surface, window, cx)
         });
@@ -5866,7 +5870,8 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "inline host image finishes loading"
+                "inline host image finishes loading; renders={}",
+                renders.get()
             );
             std::thread::sleep(Duration::from_millis(1));
         }

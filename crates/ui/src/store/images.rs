@@ -66,6 +66,8 @@ impl Asset for HostImage {
             };
             let host = host?;
             #[cfg(test)]
+            eprintln!("host image query started: {query:?}");
+            #[cfg(test)]
             let result = if blocking_queries {
                 futures_lite::future::block_on(host.query(query))
             } else {
@@ -82,6 +84,8 @@ impl Asset for HostImage {
                     .into());
                 }
             };
+            #[cfg(test)]
+            eprintln!("host image bytes received: {}", bytes.len());
             let format = image::guess_format(&bytes)?;
             let format = gpui::ImageFormat::from_mime_type(format.to_mime_type())
                 .ok_or_else(|| std::io::Error::other("unsupported host image format"))?;
