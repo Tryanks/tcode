@@ -380,7 +380,8 @@ impl GitHubApi {
                 .take(cap as u64 + 1)
                 .read_to_end(&mut body)
                 .map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::TimedOut || started.elapsed() >= timeout {
+                    if error.kind() == std::io::ErrorKind::TimedOut || started.elapsed() >= timeout
+                    {
                         GitHubError::Deadline
                     } else {
                         GitHubError::Request
