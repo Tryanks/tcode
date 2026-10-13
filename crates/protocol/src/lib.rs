@@ -150,6 +150,8 @@ pub use wire::{
 // host then sends the text as an ordinary turn. Index subscriptions may carry
 // known_index; matching content receives IndexUnchanged instead of a snapshot.
 // ReadFilePreview rejects files larger than 512 KiB before transferring bytes.
+// SessionUsageChanged carries usage and meter capacity when the rest of the
+// session status is unchanged; subscription replies remain full statuses.
 pub const PROTOCOL_VERSION: u32 = 12;
 
 #[cfg(test)]
