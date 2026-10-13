@@ -14,11 +14,12 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::navigate_thread);
     // With nothing focused the shell's own Undo listener is off the dispatch path.
     cx.on_action(crate::shell::undo_thread_action);
-    cx.bind_keys([KeyBinding::new(
-        "secondary-z",
-        crate::sidebar::ThreadUndo,
-        None,
-    )]);
+    cx.bind_keys([
+        KeyBinding::new("secondary-z", crate::sidebar::ThreadUndo, None),
+        // GPUI gives later bindings precedence, including a global binding over
+        // the editor's earlier contextual one. Keep the editor's native action.
+        KeyBinding::new("secondary-z", gpui_base::input::Undo, Some("Input")),
+    ]);
     for number in 1..=9 {
         let key = format!("secondary-{number}");
         cx.bind_keys([
