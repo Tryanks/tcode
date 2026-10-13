@@ -31,6 +31,12 @@ pub(crate) trait SessionActor {
         &mut self,
         item: Result<Self::TransportItem, RecvError>,
     ) -> TransportOutcome;
+    fn wake_at(&self) -> Option<std::time::Instant> {
+        None
+    }
+    async fn wake(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     async fn settle_shutdown(&mut self) {}
     async fn teardown(self, reason: Option<String>) -> Option<String>;
 }
@@ -39,15 +45,41 @@ pub(crate) async fn run<A: SessionActor>(mut actor: A, commands: &Receiver<Sessi
     enum Input<T> {
         Command(Result<SessionCommand, RecvError>),
         Transport(Result<T, RecvError>),
+        Wake,
     }
 
     let reason = loop {
-        let input = future::race(async { Input::Command(commands.recv().await) }, async {
-            Input::Transport(actor.transport().recv().await)
-        })
+        let deadline = actor.wake_at();
+        let input = future::race(
+            async { Input::Command(commands.recv().await) },
+            future::race(
+                async { Input::Transport(actor.transport().recv().await) },
+                async {
+                    match deadline {
+                        Some(at) => {
+                            smol::Timer::at(at).await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                    Input::Wake
+                },
+            ),
+        )
         .await;
 
         match input {
+            Input::Wake => {
+                if let Err(message) = actor.wake().await {
+                    actor
+                        .events()
+                        .emit(AgentEvent::Error {
+                            message: message.clone(),
+                            fatal: true,
+                        })
+                        .await;
+                    break Some(message);
+                }
+            }
             Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => {
                 actor.settle_shutdown().await;
                 break None;

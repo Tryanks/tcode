@@ -11,7 +11,7 @@ pub(crate) struct DomainDiff {
     index: IndexSnapshot,
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
-    providers: ProvidersStatus,
+    providers: Option<ProvidersStatus>,
     git_status: HashMap<String, GitStatusStatus>,
     session_statuses: HashMap<String, SessionStatus>,
     session_plans: HashMap<String, SessionPlan>,
@@ -21,10 +21,21 @@ impl DomainDiff {
     pub(crate) fn new(state: &AppState) -> Self {
         Self {
             subscriptions: state.subscriptions.clone(),
-            index: state.index_snapshot(),
+            index: if state.subscriptions.contains(&Topic::Index) {
+                state.index_snapshot()
+            } else {
+                IndexSnapshot {
+                    summary: IndexSummary::default(),
+                    sessions: Vec::new(),
+                    projects: state.projects.clone(),
+                }
+            },
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
-            providers: state.providers_status_snapshot(),
+            providers: state
+                .subscriptions
+                .contains(&Topic::Providers)
+                .then(|| state.providers_status_snapshot()),
             git_status: HashMap::new(),
             session_statuses: state.subscribed_session_status_snapshots(),
             session_plans: state.subscribed_session_plan_snapshots(),
@@ -36,19 +47,34 @@ impl DomainDiff {
             state.space_archives_revision = None;
         }
         state.refresh_space_archives();
-        let summary = state.index_summary();
-        if self.index.summary != summary
-            || self.index.projects != state.projects
-            || !self.index.sessions.iter().eq(state
-                .sessions
-                .iter()
-                .filter(|meta| meta.archived_at.is_none()))
-        {
-            let index = state.index_snapshot_with_summary(summary);
-            for event in index_changes(&self.index, &index) {
-                emit_replacement(Topic::Index, event, cx);
+        if state.subscriptions.contains(&Topic::Index) {
+            if !self.subscriptions.contains(&Topic::Index) {
+                self.index = state.index_snapshot();
+            } else {
+                let summary = state.index_summary();
+                if self.index.summary != summary
+                    || self.index.projects != state.projects
+                    || !self.index.sessions.iter().eq(state
+                        .sessions
+                        .iter()
+                        .filter(|meta| meta.archived_at.is_none()))
+                {
+                    let index = state.index_snapshot_with_summary(summary);
+                    for event in index_changes(&self.index, &index) {
+                        emit_replacement(Topic::Index, event, cx);
+                    }
+                    self.index = index;
+                }
             }
-            self.index = index;
+        } else {
+            if self.subscriptions.contains(&Topic::Index) {
+                self.index.sessions = Vec::new();
+                self.index.summary = IndexSummary::default();
+            }
+            // Project changes also invalidate scoped archives without a global subscriber.
+            if self.index.projects != state.projects {
+                self.index.projects.clone_from(&state.projects);
+            }
         }
 
         self.space_indexes.retain(|id, _| {
@@ -81,14 +107,20 @@ impl DomainDiff {
             self.settings = settings;
         }
 
-        let providers = state.providers_status_snapshot();
-        if self.providers != providers {
-            self.providers = providers.clone();
-            emit_replacement(
-                Topic::Providers,
-                ServerEvent::ProvidersReplaced(providers),
-                cx,
-            );
+        if state.subscriptions.contains(&Topic::Providers) {
+            let providers = state.providers_status_snapshot();
+            if self.providers.as_ref() != Some(&providers) {
+                if self.providers.is_some() {
+                    emit_replacement(
+                        Topic::Providers,
+                        ServerEvent::ProvidersReplaced(providers.clone()),
+                        cx,
+                    );
+                }
+                self.providers = Some(providers);
+            }
+        } else {
+            self.providers = None;
         }
 
         let git_status: HashMap<_, _> = state
@@ -278,23 +310,15 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 // Borrowing the host state confines cached results to one immutable snapshot.
 pub(super) struct ActivityProjection<'a> {
     state: &'a AppState,
-    children: HashMap<&'a str, Vec<&'a SessionMeta>>,
+    children: &'a HashMap<String, Vec<usize>>,
     holding: std::cell::RefCell<HashMap<&'a str, bool>>,
 }
 
 impl<'a> ActivityProjection<'a> {
     pub(super) fn new(state: &'a AppState) -> Self {
-        let mut children: HashMap<&str, Vec<&SessionMeta>> = HashMap::new();
-        for meta in &state.sessions {
-            if meta.archived_at.is_none()
-                && let Some(parent) = meta.parent_session_id.as_deref()
-            {
-                children.entry(parent).or_default().push(meta);
-            }
-        }
         Self {
             state,
-            children,
+            children: state.sessions.children(),
             holding: std::cell::RefCell::new(HashMap::new()),
         }
     }
@@ -302,19 +326,22 @@ impl<'a> ActivityProjection<'a> {
     /// Whether a child of this thread holds it: one still runs, or a
     /// dispatched one awaits its lead's settle.
     pub(super) fn children_hold(&self, parent_id: &str) -> bool {
-        let Some((&parent_id, children)) = self.children.get_key_value(parent_id) else {
+        let Some((parent_id, children)) = self.children.get_key_value(parent_id) else {
             return false;
         };
+        let parent_id = parent_id.as_str();
         if let Some(holds) = self.holding.borrow().get(parent_id) {
             return *holds;
         }
-        let holds = children.iter().any(|child| match self.agent_status(child) {
-            Some(status) => status.delivery.holds_parent(),
-            None => {
-                self.state
-                    .resident(&child.id)
-                    .is_some_and(|session| session.is_unfinished() || session.timeline.turn_running)
-                    || self.children_hold(&child.id)
+        let holds = children.iter().any(|index| {
+            let child = &self.state.sessions[*index];
+            match self.agent_status(child) {
+                Some(status) => status.delivery.holds_parent(),
+                None => {
+                    self.state.resident(&child.id).is_some_and(|session| {
+                        session.is_unfinished() || session.timeline.turn_running
+                    }) || self.children_hold(&child.id)
+                }
             }
         });
         self.holding.borrow_mut().insert(parent_id, holds);
@@ -384,7 +411,9 @@ impl<'a> ActivityProjection<'a> {
                         .iter()
                         .any(|message| message.origin == MessageOrigin::Human)
             }),
-            turn_running: resident.is_some_and(|session| session.turn_in_flight),
+            turn_running: resident.is_some_and(|session| {
+                session.turn_in_flight && session.timeline.turn_retry.is_none()
+            }),
             waiting: resident.is_some_and(|session| session.background_task_count > 0)
                 || self.children_hold(&meta.id)
                 || tcode_core::pull_request::watched(&meta.pull_requests)
@@ -429,7 +458,7 @@ impl AppState {
             archived_revision: self.archived_revision,
             ..IndexSummary::default()
         };
-        let sharing = self.worktree_sharing();
+        let sharing = std::cell::OnceCell::new();
         for meta in &self.sessions {
             if meta.archived_at.is_none() {
                 let resident = self.resident(&meta.id);
@@ -438,7 +467,11 @@ impl AppState {
                     activity
                         .session_activity(resident.map_or(meta, |session| &session.meta), resident),
                 );
-                if sharing.is_shared(meta) {
+                if meta.worktree.is_some()
+                    && sharing
+                        .get_or_init(|| self.worktree_sharing())
+                        .is_shared(meta)
+                {
                     summary.worktree_shared.insert(meta.id.clone());
                 }
                 continue;
@@ -459,7 +492,11 @@ impl AppState {
                     id.to_string(),
                     activity.session_activity(&session.meta, Some(session)),
                 );
-                if sharing.is_shared(&session.meta) {
+                if session.meta.worktree.is_some()
+                    && sharing
+                        .get_or_init(|| self.worktree_sharing())
+                        .is_shared(&session.meta)
+                {
                     summary.worktree_shared.insert(id.to_string());
                 }
             }
@@ -1010,6 +1047,9 @@ impl AppState {
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
             stopping: session.interrupt_requested,
+            turn_retry: matches!(session.runtime, Runtime::Live(_))
+                .then(|| session.timeline.turn_retry.clone())
+                .flatten(),
             native_rewind_blocked: self.native_rewind_blocked(session),
             checkout_blocked: Self::checkout_blocked(session),
             conversation_read_only: Self::conversation_read_only(meta),

@@ -929,6 +929,17 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-provider-diff-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Providers,
+            after: None,
+            known_index: None,
+        }),
+    );
+    cx.run_until_parked();
+    cx.drain_outgoing();
     let command = Command::SetProfileSecret {
         profile_id: "codex".into(),
         name: "OPENAI_API_KEY".into(),
@@ -1476,6 +1487,17 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             state.set_provider_launcher_for_test(scripted.launcher);
             state
         });
+        state.deliver(
+            cx,
+            1000,
+            tcode_protocol::ClientPayload::Subscribe(Subscription {
+                topic: Topic::Index,
+                after: None,
+                known_index: None,
+            }),
+        );
+        cx.run_until_parked();
+        cx.drain_outgoing();
         if outcome == "cached" {
             state.update(cx, |state, cx| {
                 state.record_event(
@@ -2838,7 +2860,7 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
         let store = TestStore::new("tcode-draft-defaults");
         let state = cx.new_entity(TestClientState::new((*store).clone()));
         state.update(cx, |state, cx| {
-            state.sessions = sessions;
+            state.sessions = sessions.into();
             state.start_draft("target".into(), PathBuf::from("/new-project"), cx);
             let draft = state.selected_session().unwrap();
             assert!(draft.draft, "{name}");
@@ -2891,7 +2913,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
             id: "reasoningEffort".into(),
             value: serde_json::json!("high"),
         });
-        state.sessions = vec![previous];
+        state.sessions = vec![previous].into();
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
         let draft = state.selected_session().unwrap();
@@ -2949,7 +2971,7 @@ fn model_switch_restores_last_effort_used_with_that_model() {
         );
         fable.project_id = Some("project-target".into());
         fable.updated_at = 20;
-        state.sessions = vec![sol, fable];
+        state.sessions = vec![sol, fable].into();
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
         // Switching the draft to a model brings back the effort it last ran at,
@@ -4478,6 +4500,92 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
         state.drop_queued("scheduled-active", drop_id, cx);
         assert!(state.selected_session().unwrap().queue.is_empty());
     });
+}
+
+#[test]
+fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
+    for automatic in [true, false] {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("native-retry-queue");
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        let (commands, receiver) = smol::channel::unbounded();
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "retry".into();
+            if automatic {
+                active.push_queued("queued user message".into(), Vec::new());
+            }
+            state.install_selected(active);
+            state.on_event(
+                "retry",
+                AgentEvent::TurnStarted {
+                    turn_id: "failed".into(),
+                },
+                cx,
+            );
+            let retry = agent::TurnRetry {
+                turn_id: "failed".into(),
+                retry_at: automatic.then(|| now_secs() + 10),
+            };
+            state.on_event(
+                "retry",
+                AgentEvent::TurnRetry {
+                    retry: Some(retry.clone()),
+                },
+                cx,
+            );
+            state.on_event(
+                "retry",
+                AgentEvent::TurnCompleted {
+                    turn_id: "failed".into(),
+                    status: TurnStatus::Failed,
+                    usage: None,
+                },
+                cx,
+            );
+            let status = state.session_status_snapshot("retry").unwrap();
+            assert_eq!(status.activity.working, automatic);
+            assert!(!status.activity.turn_running);
+            assert_eq!(status.turn_retry, Some(retry));
+            assert!(
+                receiver.try_recv().is_err(),
+                "queued text must not race the native retry"
+            );
+            if automatic {
+                state.interrupt("retry", cx).unwrap();
+                assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Interrupt)));
+                state.on_event("retry", AgentEvent::TurnRetry { retry: None }, cx);
+            } else {
+                state
+                    .selected_session_mut()
+                    .unwrap()
+                    .push_queued("queued user message".into(), Vec::new());
+                state.dispatch_next_queued("retry", cx).unwrap();
+            }
+            let Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) = receiver.try_recv()
+            else {
+                panic!("queued message was not sent")
+            };
+            assert_eq!(text, "queued user message");
+            state.on_event("retry", AgentEvent::TurnAccepted { delivery_id }, cx);
+            // A rejected new start has no TurnStarted to clear the previous offer.
+            state.on_event(
+                "retry",
+                AgentEvent::TurnCompleted {
+                    turn_id: String::new(),
+                    status: TurnStatus::Failed,
+                    usage: None,
+                },
+                cx,
+            );
+            let status = state.session_status_snapshot("retry").unwrap();
+            assert!(status.turn_retry.is_none());
+            assert!(!status.activity.working);
+            assert!(state.retry_turn("retry", "failed".into()).is_err());
+        });
+    }
 }
 
 #[test]
@@ -6492,7 +6600,7 @@ fn an_accepted_user_message_moves_the_thread_updated_time() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "one more change".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -6523,7 +6631,7 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -6772,7 +6880,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
 
         // A live session with a running turn (the overnight workflow).
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id_a, "run the long migration".into(), Vec::new(), cx);
         state.send_turn(&id_a, "queued follow-up".into(), Vec::new(), cx);
@@ -6900,7 +7008,7 @@ fn drained_parked_session_stays_resident() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "one last thing".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -8421,6 +8529,15 @@ fn index_and_visit_changes_cross_the_wire_one_thread_at_a_time() {
         store.upsert_meta(&meta).unwrap();
     }
     let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.deliver(
+        cx,
+        1000,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Index,
+            after: None,
+            known_index: None,
+        }),
+    );
     cx.run_until_parked();
     cx.drain_outgoing();
 

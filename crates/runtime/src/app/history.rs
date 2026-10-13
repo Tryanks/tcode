@@ -38,15 +38,20 @@ fn shorten(text: &mut String, keep_tail: bool) -> Option<u64> {
     }
     let full = text.len() as u64;
     if keep_tail {
-        let mut start = text.len() - OUTPUT_PREVIEW_BYTES;
-        while !text.is_char_boundary(start) {
-            start += 1;
-        }
+        let start = text.len() - output_tail(text).len();
         text.drain(..start);
     } else {
         text.truncate(text.floor_char_boundary(OUTPUT_PREVIEW_BYTES));
     }
     Some(full)
+}
+
+fn output_tail(text: &str) -> &str {
+    let mut start = text.len().saturating_sub(OUTPUT_PREVIEW_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
 }
 
 fn oversized_output(event: &AgentEvent) -> bool {
@@ -88,6 +93,57 @@ pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRe
     if !oversized_output(&record.event) {
         return Cow::Borrowed(record);
     }
+    if let AgentEvent::Delta {
+        item_id,
+        kind: DeltaKind::CommandOutput,
+        text,
+    } = &record.event
+    {
+        return Cow::Owned(SessionEventRecord {
+            origin: record.origin,
+            author: record.author.clone(),
+            ts: record.ts,
+            event: AgentEvent::Delta {
+                item_id: item_id.clone(),
+                kind: DeltaKind::CommandOutput,
+                text: output_tail(text).to_owned(),
+            },
+            elided: Some(text.len() as u64),
+        });
+    }
+    if let AgentEvent::ItemStarted(item)
+    | AgentEvent::ItemUpdated(item)
+    | AgentEvent::ItemCompleted(item) = &record.event
+        && let ItemContent::CommandExecution {
+            command,
+            output,
+            exit_code,
+            status,
+        } = &item.content
+    {
+        let preview = agent::ThreadItem {
+            id: item.id.clone(),
+            parent_item_id: item.parent_item_id.clone(),
+            content: ItemContent::CommandExecution {
+                command: command.clone(),
+                output: output_tail(output).to_owned(),
+                exit_code: *exit_code,
+                status: *status,
+            },
+        };
+        let event = match &record.event {
+            AgentEvent::ItemStarted(_) => AgentEvent::ItemStarted(preview),
+            AgentEvent::ItemUpdated(_) => AgentEvent::ItemUpdated(preview),
+            _ => AgentEvent::ItemCompleted(preview),
+        };
+        return Cow::Owned(SessionEventRecord {
+            origin: record.origin,
+            author: record.author.clone(),
+            ts: record.ts,
+            event,
+            elided: Some(output.len() as u64),
+        });
+    }
     let mut record = record.clone();
     record.elided = match &mut record.event {
         AgentEvent::ItemStarted(item)
@@ -123,10 +179,8 @@ pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRe
                 image.data_base64.clear();
                 None
             }
-            ItemContent::CommandExecution { output, .. } => shorten(output, true),
             _ => None,
         },
-        AgentEvent::Delta { text, .. } => shorten(text, true),
         _ => None,
     };
     Cow::Owned(record)
@@ -186,25 +240,37 @@ fn wire_window(
             text,
         } = &record.event
             && index > range.start
-            && let Some(AgentEvent::Delta {
+            && let Some(last) = merged.last_mut()
+            && let AgentEvent::Delta {
                 item_id: last_id,
                 kind: last_kind,
                 text: last_text,
-            }) = merged.last_mut().map(|last| &mut last.event)
+            } = &mut last.event
             && matches!(&records[index - 1].event, AgentEvent::Delta { .. })
             && last_id == item_id
             && last_kind == kind
         {
-            last_text.push_str(text);
+            if *kind == DeltaKind::CommandOutput {
+                let full = last.elided.unwrap_or(last_text.len() as u64) + text.len() as u64;
+                if text.len() >= OUTPUT_PREVIEW_BYTES {
+                    last_text.clear();
+                    last_text.push_str(output_tail(text));
+                } else {
+                    last_text.push_str(text);
+                    shorten(last_text, true);
+                }
+                last.elided = (full > OUTPUT_PREVIEW_BYTES as u64).then_some(full);
+            } else {
+                last_text.push_str(text);
+            }
             continue;
         }
-        merged.push(record.clone());
+        merged.push(wire_record(record).into_owned());
     }
-    let records = merged
-        .iter()
-        .map(|record| wire_record(record).into_owned())
-        .collect();
-    Ok(Window { range, records })
+    Ok(Window {
+        range,
+        records: merged,
+    })
 }
 
 /// A stored turn-changes snapshot that an append supersedes.

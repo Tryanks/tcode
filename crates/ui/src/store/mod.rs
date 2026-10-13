@@ -1868,6 +1868,10 @@ impl WorkspaceStore {
     /// places the running turn among the held ones. Status and events are
     /// separate topics, so each settles the replica whenever it changes.
     fn settle_running_turn(&self, timeline: &mut Timeline) {
+        timeline.turn_retry = self
+            .session_status_replica
+            .as_ref()
+            .and_then(|status| status.turn_retry.clone());
         let running = self
             .session_status_replica
             .as_ref()
@@ -4469,7 +4473,7 @@ pub(crate) mod tests {
         ));
         let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         let mut host = tcode_client::pairing::PairedHost {
-            host_id: "machine".into(),
+            host_id: "09e5c592f3234ef329634a0baa6bfe06193be6b64801121d84242af1d27dbecf".into(),
             name: "Machine".into(),
             traverse: Vec::new(),
             relay: None,

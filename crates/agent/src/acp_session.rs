@@ -1176,6 +1176,7 @@ async fn handle_command<D: Dialect>(
                 })
                 .await;
         }
+        SessionCommand::RetryTurn { .. } => {}
         SessionCommand::Shutdown => unreachable!("handled by the caller"),
     }
 }

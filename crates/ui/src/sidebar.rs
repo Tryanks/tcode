@@ -4725,7 +4725,7 @@ mod tests {
             spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
-            state.sessions = vec![meta];
+            state.sessions = vec![meta].into();
         }))
         .expect("seed sidebar host");
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4789,7 +4789,7 @@ mod tests {
         claude.project_id = Some(project.id.clone());
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
-            state.sessions = vec![codex, claude];
+            state.sessions = vec![codex, claude].into();
         }))
         .unwrap();
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -4909,7 +4909,7 @@ mod tests {
         )
         .unwrap();
         let project = Project::from_root(root.clone());
-        let sessions = (0..12)
+        let sessions: Vec<_> = (0..12)
             .map(|index| {
                 let mut meta = session(&format!("menu-{index}"), None);
                 meta.project_id = Some(project.id.clone());
@@ -4920,7 +4920,7 @@ mod tests {
             .collect();
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
-            state.sessions = sessions;
+            state.sessions = sessions.into();
         }))
         .unwrap();
         let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
@@ -5031,7 +5031,7 @@ mod tests {
         let projects_seed = seeded.clone();
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = projects_seed;
-            state.sessions = sessions;
+            state.sessions = sessions.into();
         }))
         .expect("seed projects");
 
@@ -5174,7 +5174,8 @@ mod tests {
                     meta.updated_at = now_secs().saturating_sub(index);
                     meta
                 })
-                .collect();
+                .collect::<Vec<_>>()
+                .into();
             state.projects = vec![project];
         }))
         .unwrap();

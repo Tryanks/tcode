@@ -1009,15 +1009,19 @@ impl ChatView {
                 .collect();
             store
                 .with_active_timeline(|timeline| {
-                    timeline.entries.iter().any(|entry| {
-                        matches!(
-                            entry.content,
-                            EntryContent::Error {
-                                limit_resets_at: Some(resets_at),
-                                ..
-                            } if deadlines.contains(&resets_at)
-                        )
-                    })
+                    timeline
+                        .turn_retry
+                        .as_ref()
+                        .is_some_and(|retry| retry.retry_at.is_some())
+                        || timeline.entries.iter().any(|entry| {
+                            matches!(
+                                entry.content,
+                                EntryContent::Error {
+                                    limit_resets_at: Some(resets_at),
+                                    ..
+                                } if deadlines.contains(&resets_at)
+                            )
+                        })
                 })
                 .unwrap_or(false)
         };
@@ -1672,6 +1676,47 @@ impl ChatView {
                         }
                         _ => None,
                     };
+                    let retry = self
+                        .workspace_store
+                        .read(cx)
+                        .with_active_timeline(|timeline| {
+                            timeline
+                                .turn_retry
+                                .as_ref()
+                                .filter(|retry| {
+                                    !timeline.turn_running
+                                        && turn.provider_turn_id.as_deref()
+                                            == Some(retry.turn_id.as_str())
+                                        && timeline
+                                            .entries
+                                            .iter()
+                                            .rev()
+                                            .find(|entry| {
+                                                matches!(entry.content, EntryContent::Error { .. })
+                                            })
+                                            .is_some_and(|last| last.id == entry.id)
+                                })
+                                .cloned()
+                        })
+                        .flatten();
+                    let resume = retry
+                        .map(|retry| {
+                            let turn_id = retry.turn_id;
+                            components::error_card::LimitResume::Retry {
+                                remaining_secs: retry
+                                    .retry_at
+                                    .map(|at| at.saturating_sub(now_secs())),
+                                on_retry: Box::new(cx.listener(move |this, _, _, cx| {
+                                    this.workspace_store
+                                        .update(cx, |store, _| store.retry_turn(turn_id.clone()));
+                                })),
+                                on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
+                                    this.workspace_store
+                                        .update(cx, |store, _| store.interrupt());
+                                })),
+                            }
+                        })
+                        .or(resume);
                     let copy_key = format!("error:{}", entry.id);
                     let copied = self.copied.is(&copy_key);
                     let mark = copy_key;

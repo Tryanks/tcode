@@ -1526,6 +1526,9 @@ pub enum SessionCommand {
         /// turns). Each provider maps these onto its native content blocks.
         attachments: Vec<Attachment>,
     },
+    RetryTurn {
+        turn_id: String,
+    },
     Interrupt,
     RespondApproval {
         request_id: String,
@@ -1666,9 +1669,20 @@ impl ClassifierCategory {
     }
 }
 
+/// A failed native turn can be continued without adding user input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnRetry {
+    pub turn_id: String,
+    /// Unix seconds; None leaves only the manual retry available.
+    pub retry_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    TurnRetry {
+        retry: Option<TurnRetry>,
+    },
     /// A tcode-level handoff between providers. This is never emitted by an
     /// adapter; the runtime persists it before the first relayed user turn.
     ProviderRelay {

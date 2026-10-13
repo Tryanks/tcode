@@ -462,6 +462,8 @@ pub struct SessionStatus {
     /// An interrupt was accepted by the provider and its turn has not ended yet.
     #[serde(default)]
     pub stopping: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_retry: Option<agent::TurnRetry>,
     pub native_rewind_blocked: bool,
     pub checkout_blocked: bool,
     pub conversation_read_only: bool,
