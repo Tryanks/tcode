@@ -5976,7 +5976,7 @@ pub(crate) mod tests {
         };
     }
 
-    fn await_with_events<T>(
+    pub(crate) fn await_with_events<T>(
         cx: &mut TestAppContext,
         workspace: &gpui::Entity<WorkspaceStore>,
         future: impl std::future::Future<Output = T>,

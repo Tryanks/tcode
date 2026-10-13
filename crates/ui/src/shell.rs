@@ -6249,8 +6249,14 @@ mod tests {
         }
         let store = store_of(shell, cx);
         store.update(cx, |store, _| store.select_session(session.into()));
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::store::tests::wait_until(cx, &store, "thread status and diff history", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .session_status()
+                    .is_some_and(|status| status.session_id == session)
+                    && store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+            })
+        });
     }
 
     #[gpui::test]
