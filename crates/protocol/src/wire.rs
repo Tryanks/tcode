@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{Command, CommandResponse, EventEnvelope, Query, QueryResponse, Topic};
 
-/// Bound on one encoded protocol line in either direction. Every transport
-/// and every client queue admits a line up to this size, so the largest
+/// Bound on one encoded network protocol line in either direction. In-process
+/// connections have no frame limit. Network queues admit the largest
 /// single payload — one attachment of [`tcode_core::attachments::MAX_BYTES`]
 /// bytes, base64-encoded — always fits.
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;

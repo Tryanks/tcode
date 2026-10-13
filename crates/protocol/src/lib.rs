@@ -145,6 +145,7 @@ pub use wire::{
 // instruction channel, an MCP server's instructions, Codex's developer
 // instructions).
 //
+// Unreleased: ReadFileBytes accepts an optional max_bytes read budget, capped by network bridges.
 // Unreleased: adds TurnRetry events, SessionStatus.turn_retry and the RetryTurn command
 // for native capacity continuations.
 // Unreleased: the agent event stream gains steer_rejected, a provider's

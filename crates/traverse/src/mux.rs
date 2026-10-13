@@ -49,9 +49,18 @@ impl HostMux {
     }
 
     pub fn attach(&self, principal: Principal) -> Connection {
+        self.attach_with_budget(principal, true)
+    }
+
+    /// In-process clients have no reconnect loop or network frame boundary.
+    pub fn attach_local(&self, principal: Principal) -> Connection {
+        self.attach_with_budget(principal, false)
+    }
+
+    fn attach_with_budget(&self, principal: Principal, bounded: bool) -> Connection {
         let connection_id = self.inner.next_connection.fetch_add(1, Ordering::Relaxed);
         let (client_tx, client_rx) = async_channel::unbounded();
-        let (output_tx, forward, output_rx) = Outbox::new(client_rx.clone());
+        let (output_tx, forward, output_rx) = Outbox::new(client_rx.clone(), bounded);
         let ingress = self.inner.ingress.clone();
         let _ = ingress.try_send(Ingress::Add(connection_id, output_tx, principal));
         std::thread::Builder::new()
@@ -60,13 +69,18 @@ impl HostMux {
                 futures_lite::future::block_on(futures_lite::future::race(
                     async {
                         while let Ok(line) = client_rx.recv().await {
-                            if client_rx.is_closed()
-                                || ingress
-                                    .send(Ingress::Line(connection_id, line))
-                                    .await
-                                    .is_err()
-                            {
+                            if client_rx.is_closed() {
                                 break;
+                            }
+                            if ingress
+                                .send(Ingress::Line(connection_id, line))
+                                .await
+                                .is_err()
+                            {
+                                client_rx.close();
+                                // Host EOF still owns replies waiting in the output queue.
+                                // Let the forwarder finish instead of winning this race.
+                                std::future::pending::<()>().await;
                             }
                         }
                     },
@@ -187,6 +201,29 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                 let Some(principal) = principals.get(&connection_id) else {
                     continue;
                 };
+                if value
+                    .pointer("/payload/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("query")
+                    && value
+                        .pointer("/payload/content/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("read_file_bytes")
+                    && let Some(limit) = clients
+                        .get(&connection_id)
+                        .and_then(Outbox::file_bytes_limit)
+                    && let Some(content) = value
+                        .pointer_mut("/payload/content/content")
+                        .and_then(serde_json::Value::as_object_mut)
+                {
+                    let requested = content.get("max_bytes").and_then(serde_json::Value::as_u64);
+                    content.insert(
+                        "max_bytes".into(),
+                        requested
+                            .map_or(limit, |requested| requested.min(limit))
+                            .into(),
+                    );
+                }
                 value["principal"] = principal.clone();
                 value["id"] = next_global_id.into();
                 routes.insert(next_global_id, (connection_id, local_id));
