@@ -372,17 +372,21 @@ impl GitHubApi {
         );
         let cap = options.body_limit.min(BODY_LIMIT);
         let mut body = Vec::new();
-        response
-            .into_reader()
-            .take(cap as u64 + 1)
-            .read_to_end(&mut body)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::TimedOut || started.elapsed() >= timeout {
-                    GitHubError::Deadline
-                } else {
-                    GitHubError::Request
-                }
-            })?;
+        // A 304 has no message body, even when GitHub includes the cached
+        // representation's Content-Encoding. Reading it asks ureq 2 to decode an empty gzip stream.
+        if status != 304 {
+            response
+                .into_reader()
+                .take(cap as u64 + 1)
+                .read_to_end(&mut body)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::TimedOut || started.elapsed() >= timeout {
+                        GitHubError::Deadline
+                    } else {
+                        GitHubError::Request
+                    }
+                })?;
+        }
         if started.elapsed() >= timeout {
             return Err(GitHubError::Deadline);
         }
