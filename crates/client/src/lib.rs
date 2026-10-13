@@ -697,6 +697,12 @@ impl HostLink {
             .lock()
             .unwrap()
             .insert(subscription.topic.clone(), id);
+        if matches!(
+            self.connection_state(),
+            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+        ) {
+            return Ok(());
+        }
         self.send_payload(id, ClientPayload::Subscribe(subscription))
     }
 
@@ -739,6 +745,12 @@ impl HostLink {
             .lock()
             .unwrap()
             .insert(id, subscription.topic.clone());
+        if matches!(
+            self.connection_state(),
+            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+        ) {
+            return Ok(());
+        }
         self.send_payload(id, ClientPayload::Unsubscribe(subscription))
     }
 
