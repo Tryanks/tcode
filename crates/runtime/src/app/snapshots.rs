@@ -52,8 +52,7 @@ impl DomainDiff {
                 self.index = state.index_snapshot();
             } else {
                 let summary = state.index_summary();
-                if self.index.summary != summary
-                    || self.index.projects != state.projects
+                if self.index.projects != state.projects
                     || !self.index.sessions.iter().eq(state
                         .sessions
                         .iter()
@@ -64,6 +63,11 @@ impl DomainDiff {
                         emit_replacement(Topic::Index, event, cx);
                     }
                     self.index = index;
+                } else if self.index.summary != summary {
+                    for event in index_summary_changes(&self.index.summary, &summary) {
+                        emit_replacement(Topic::Index, event, cx);
+                    }
+                    self.index.summary = summary;
                 }
             }
         } else {
@@ -242,27 +246,32 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
             });
         }
     }
-    if old.summary != new.summary {
+    events.extend(index_summary_changes(&old.summary, &new.summary));
+    events
+}
+
+fn index_summary_changes(old: &IndexSummary, new: &IndexSummary) -> Vec<ServerEvent> {
+    let mut events = Vec::new();
+    if old != new {
         let IndexSummary {
             activity,
             title_generating,
             archived_counts,
             worktree_shared,
             archived_revision,
-        } = &new.summary;
-        if old.summary.title_generating == *title_generating
-            && old.summary.archived_counts == *archived_counts
-            && old.summary.worktree_shared == *worktree_shared
-            && old.summary.archived_revision == *archived_revision
+        } = new;
+        if old.title_generating == *title_generating
+            && old.archived_counts == *archived_counts
+            && old.worktree_shared == *worktree_shared
+            && old.archived_revision == *archived_revision
         {
             events.push(ServerEvent::IndexActivitiesChanged {
                 upserts: activity
                     .iter()
-                    .filter(|(id, value)| old.summary.activity.get(*id) != Some(*value))
+                    .filter(|(id, value)| old.activity.get(*id) != Some(*value))
                     .map(|(id, value)| (id.clone(), value.clone()))
                     .collect(),
                 removed: old
-                    .summary
                     .activity
                     .keys()
                     .filter(|id| !activity.contains_key(*id))
@@ -270,7 +279,7 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
                     .collect(),
             });
         } else {
-            events.push(ServerEvent::IndexSummaryReplaced(new.summary.clone()));
+            events.push(ServerEvent::IndexSummaryReplaced(new.clone()));
         }
     }
     events
