@@ -1593,7 +1593,7 @@ mod tests {
             PairingProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
         });
         let host = |name: &str| PairedHost {
-            host_id: "machine".into(),
+            host_id: "09e5c592f3234ef329634a0baa6bfe06193be6b64801121d84242af1d27dbecf".into(),
             name: name.into(),
             traverse: Vec::new(),
             relay: None,
