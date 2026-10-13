@@ -21,7 +21,7 @@ use gpui::{
     Action, AnimationExt as _, App, AppContext as _, Context, Entity, InteractiveElement as _,
     IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SharedString,
     SpringAnimation, SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, canvas, div, list, prelude::FluentBuilder as _, px,
+    Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -3578,30 +3578,20 @@ impl SessionsSidebar {
                 ))
                 .into_any_element()
         } else {
-            if self.compact_reveal_active {
+            if std::mem::take(&mut self.compact_reveal_active) {
                 let active = self.store.read(cx).roster_session_id();
-                match model.rows.iter().position(|row| {
+                if let Some(index) = model.rows.iter().position(|row| {
                     matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
                 }) {
-                    Some(index) => self.compact_list_state.scroll_to(gpui::ListOffset {
+                    // gpui-fast 3755a55 does not roll back accessibility nodes
+                    // when child autoscroll retries prepaint. Position the list
+                    // before it paints instead of issuing a child request.
+                    self.compact_list_state.scroll_to(gpui::ListOffset {
                         item_ix: index,
                         offset_in_item: px(0.),
-                    }),
-                    None => self.compact_reveal_active = false,
+                    });
                 }
             }
-            // The list borrows its state while it renders rows, so the lead
-            // is measured here. The last layout is the one before the thread
-            // page; a list never laid out takes a third of the window.
-            let reveal_lead = self.compact_reveal_active.then(|| {
-                let viewport = self.compact_list_state.viewport_bounds().size.height;
-                let height = if viewport > px(0.) {
-                    viewport
-                } else {
-                    window.viewport_size().height
-                };
-                height / 3.
-            });
             div()
                 .id("compact-thread-list")
                 .debug_selector(|| "compact-thread-list".into())
@@ -3627,34 +3617,23 @@ impl SessionsSidebar {
                             CompactListRow::Project(row) => {
                                 this.render_compact_group_header(row, cx).into_any_element()
                             }
-                            CompactListRow::Thread(row) => {
-                                let reveal = reveal_lead.filter(|_| {
-                                    this.compact_reveal_active
-                                        && this.store.read(cx).active_session_id().as_deref()
-                                            == Some(row.meta.id.as_str())
-                                });
-                                this.compact_reveal_active &= reveal.is_none();
-                                v_flex()
-                                    .w_full()
-                                    .when_some(reveal, |item, lead| {
-                                        item.relative().child(reveal_row(lead))
-                                    })
-                                    .child(this.render_compact_thread(row, cx))
-                                    .when(row.separator, |list| {
-                                        list.child(
-                                            div()
-                                                .w_full()
-                                                .pl(px(crate::material::COMPACT_PAGE_INSET))
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .h(px(1.))
-                                                        .bg(cx.theme().border.opacity(0.6)),
-                                                ),
-                                        )
-                                    })
-                                    .into_any_element()
-                            }
+                            CompactListRow::Thread(row) => v_flex()
+                                .w_full()
+                                .child(this.render_compact_thread(row, cx))
+                                .when(row.separator, |list| {
+                                    list.child(
+                                        div()
+                                            .w_full()
+                                            .pl(px(crate::material::COMPACT_PAGE_INSET))
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .h(px(1.))
+                                                    .bg(cx.theme().border.opacity(0.6)),
+                                            ),
+                                    )
+                                })
+                                .into_any_element(),
                             CompactListRow::BottomInset => div().h(px(24.)).into_any_element(),
                         }),
                     )
@@ -3976,26 +3955,6 @@ impl SessionsSidebar {
             );
         self.thread_context_menu(row, meta, state, working, true, cx)
     }
-}
-
-/// Scrolls the list so the row this is painted in sits `lead` below the
-/// viewport top, or as far down as the list start allows. The list answers
-/// a child's autoscroll request by walking into the rows above and measuring
-/// them as it goes, so nothing above the row has to be laid out beforehand.
-fn reveal_row(lead: gpui::Pixels) -> impl IntoElement {
-    canvas(
-        move |bounds, window, _| {
-            window.request_autoscroll(gpui::Bounds::from_corners(
-                gpui::point(bounds.left(), bounds.top() - lead),
-                bounds.bottom_right(),
-            ));
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
 }
 
 /// The 20×20 status slot at the head of a compact row. The slot is
@@ -5603,231 +5562,6 @@ mod tests {
             );
         });
         assert!(cx.debug_bounds("sidebar-thread-other-0").is_some());
-    }
-
-    #[gpui::test]
-    fn returning_from_a_thread_reveals_its_row_below_the_top_edge(cx: &mut TestAppContext) {
-        use tcode_protocol::{
-            EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
-        };
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        /// The compact shell mounts only the page on top of the history and
-        /// answers `OpenThread` by pushing the thread page.
-        struct TopPage {
-            sidebar: Entity<SessionsSidebar>,
-            window_state: Entity<WindowState>,
-        }
-        impl Render for TopPage {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let threads = self.window_state.read(cx).destination() == Destination::Threads;
-                div()
-                    .size_full()
-                    .when(threads, |page| page.child(self.sidebar.clone()))
-            }
-        }
-        cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let projects = ["alpha", "beta"].map(|id| {
-            let mut project = Project::from_root(PathBuf::from(format!("/{id}")));
-            project.id = id.into();
-            project
-        });
-        let sessions = projects
-            .iter()
-            .flat_map(|project| {
-                (0..40).map(move |index| {
-                    let mut meta = session(&format!("{}-{index}", project.id), None);
-                    meta.project_id = Some(project.id.clone());
-                    meta.updated_at = 10_000 - index;
-                    meta.created_at = meta.updated_at;
-                    meta
-                })
-            })
-            .collect();
-        let settings = tcode_core::settings::Settings {
-            sidebar_layout: SidebarLayout::Grouped,
-            project_sort: tcode_core::settings::ProjectSort::NameAsc,
-            ..Default::default()
-        };
-        for (topic, event) in [
-            (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
-            (
-                Topic::Index,
-                ServerEvent::IndexSnapshot(IndexSnapshot {
-                    summary: Default::default(),
-                    sessions,
-                    projects: projects.to_vec(),
-                }),
-            ),
-        ] {
-            incoming
-                .try_send(
-                    encode_line(&HostMessage::Event(EventEnvelope {
-                        request_id: None,
-                        topic,
-                        event,
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("beta-0".into()));
-        let window_state = cx.new(|cx| {
-            let mut state = WindowState::new(false).with_compact(true);
-            state.enter_workspace(cx);
-            state
-        });
-        let (page, cx) = cx.add_window_view(|_, cx| {
-            cx.observe(&window_state, |_, _, cx| cx.notify()).detach();
-            cx.subscribe(
-                &window_state,
-                |_, state, _: &crate::window_state::OpenThread, cx| {
-                    state.update(cx, |state, cx| state.go(Destination::Thread, cx));
-                },
-            )
-            .detach();
-            TopPage {
-                sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx)),
-                window_state: window_state.clone(),
-            }
-        });
-        let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        let list = sidebar.read_with(cx, |sidebar, _| sidebar.compact_list_state.clone());
-        let rows = sidebar.read_with(cx, |sidebar, _| {
-            sidebar.compact_model.as_ref().unwrap().rows.clone()
-        });
-        assert_eq!(rows.len(), 83, "two project headers, 80 threads, the inset");
-        let row_selector = |index: usize| -> &'static str {
-            match &rows[index] {
-                CompactListRow::Thread(row) => format!("compact-row-{}", row.meta.id).leak(),
-                other => panic!("row {index} is a thread, not {:?}", other.key()),
-            }
-        };
-        let open_and_return = |cx: &mut VisualTestContext, selector: &'static str| {
-            let row = cx
-                .debug_bounds(selector)
-                .expect("the row to open is on screen");
-            cx.simulate_click(row.center(), gpui::Modifiers::default());
-            draw(cx);
-            assert_eq!(
-                window_state.read_with(cx, |state, _| state.destination()),
-                Destination::Thread
-            );
-            assert!(
-                cx.debug_bounds("compact-thread-list").is_none(),
-                "the thread page covers the list"
-            );
-            // An admitted message moves the thread's updated time, so it heads its project.
-            let active = store.read_with(cx, |store, _| store.active_session_id().unwrap());
-            let mut sessions = store.read_with(cx, |store, _| store.sidebar_sessions());
-            let latest = sessions.iter().map(|meta| meta.updated_at).max().unwrap();
-            sessions
-                .iter_mut()
-                .find(|meta| meta.id == active)
-                .unwrap()
-                .updated_at = latest + 1;
-            sessions.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
-            incoming
-                .try_send(
-                    encode_line(&HostMessage::Event(EventEnvelope {
-                        request_id: None,
-                        topic: Topic::Index,
-                        event: ServerEvent::IndexSnapshot(IndexSnapshot {
-                            summary: Default::default(),
-                            sessions,
-                            projects: projects.to_vec(),
-                        }),
-                    }))
-                    .unwrap(),
-                )
-                .unwrap();
-            cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            window_state.update(cx, |state, cx| assert!(state.back(cx)));
-            draw(cx);
-            draw(cx);
-        };
-
-        let deep = 55;
-        sidebar.update(cx, |sidebar, cx| {
-            sidebar.compact_list_state.scroll_to(gpui::ListOffset {
-                item_ix: deep - 9,
-                offset_in_item: px(0.),
-            });
-            cx.notify();
-        });
-        draw(cx);
-        let viewport = list.viewport_bounds();
-        let before = cx.debug_bounds(row_selector(deep)).unwrap();
-        assert!(
-            before.top() > viewport.center().y,
-            "the row starts in the lower half"
-        );
-        open_and_return(cx, row_selector(deep));
-        let key = rows[deep].key();
-        sidebar.read_with(cx, |sidebar, _| {
-            let rows = &sidebar.compact_model.as_ref().unwrap().rows;
-            let index = rows.iter().position(|row| row.key() == key).unwrap();
-            assert!(
-                matches!(rows[index - 1], CompactListRow::Project(_)),
-                "the thread just left heads its project group"
-            );
-        });
-        let row = cx
-            .debug_bounds(row_selector(deep))
-            .expect("the thread just left is on screen");
-        let depth = row.top() - viewport.top();
-        assert!(
-            depth >= viewport.size.height / 4. && depth <= viewport.size.height / 2.,
-            "the row sits in the upper part of the list, not on its edge: {depth:?} of {:?}",
-            viewport.size.height
-        );
-
-        sidebar.update(cx, |sidebar, cx| {
-            sidebar.compact_list_state.scroll_to(gpui::ListOffset {
-                item_ix: 1,
-                offset_in_item: px(0.),
-            });
-            cx.notify();
-        });
-        draw(cx);
-        open_and_return(cx, row_selector(1));
-        let top = list.logical_scroll_top();
-        assert_eq!(
-            (top.item_ix, top.offset_in_item),
-            (0, px(0.)),
-            "a row near the start leaves the list at its top"
-        );
-        assert_eq!(
-            cx.debug_bounds("compact-group-header").unwrap().top(),
-            list.viewport_bounds().top(),
-            "the first project header is back on screen"
-        );
     }
 
     #[gpui::test]
