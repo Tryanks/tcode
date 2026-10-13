@@ -1442,10 +1442,11 @@ impl WorkspaceStore {
                 }
                 let after = *end;
                 self.session_catching_up = after < *total;
-                let _ = self.host.update_after(&envelope.topic, after);
                 if self.session_catching_up {
+                    let _ = self.host.update_after(&envelope.topic, after);
                     return;
                 }
+                self.host.remember_after(&envelope.topic, after);
                 self.threads
                     .get_mut(session_id)
                     .expect("snapshot thread")
@@ -1485,7 +1486,7 @@ impl WorkspaceStore {
                 };
                 held.extend(std::slice::from_ref(record), held.end + 1);
                 let after = held.end;
-                let _ = self.host.update_after(&envelope.topic, after);
+                self.host.remember_after(&envelope.topic, after);
                 // A new turn means the user moved on; the recovery card for the
                 // stopped one is stale.
                 if matches!(record.event, agent::AgentEvent::TurnStarted { .. }) {

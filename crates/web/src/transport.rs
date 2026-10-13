@@ -1,7 +1,8 @@
-//! A single browser task owns the socket and replay queue. Every browser
-//! callback only enqueues an event; dropping a connection removes callbacks,
+//! A single browser task owns the socket and pending writes. HostLink restores
+//! subscriptions from applied cursors. Every browser callback only enqueues
+//! an event; dropping a connection removes callbacks,
 //! event listeners and timers so stale sockets cannot affect a newer attempt.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 use async_channel::{Receiver, Sender};
 use futures_lite::future::race;
@@ -183,7 +184,6 @@ async fn connection_loop(
     incoming: &Sender<String>,
     state: &Sender<ConnectionState>,
 ) {
-    let mut subscriptions = BTreeMap::<String, String>::new();
     let mut buffered = VecDeque::<String>::new();
     let mut backoff = Backoff::default();
     let mut delay = 0;
@@ -214,7 +214,7 @@ async fn connection_loop(
             let _timer = Timer::new(delay, tx.clone());
             loop {
                 match next(outgoing, &events).await {
-                    Input::Line(Ok(line)) => remember(line, &mut subscriptions, &mut buffered),
+                    Input::Line(Ok(line)) => buffer_write(line, &mut buffered),
                     Input::Line(Err(_)) => return,
                     Input::Event(Event::Timeout | Event::Wake) => break,
                     _ => {}
@@ -236,9 +236,6 @@ async fn connection_loop(
                 match next(outgoing, &events).await {
                     Input::Line(Err(_)) => return,
                     Input::Line(Ok(line)) => {
-                        if let Some(key) = subscription_key(&line) {
-                            subscriptions.insert(key, line.clone());
-                        }
                         if !ready || socket.send(&line).is_err() {
                             if subscription_key(&line).is_none() {
                                 buffered.push_back(line);
@@ -290,12 +287,6 @@ async fn connection_loop(
                         }
                         let _ = state.try_send(ConnectionState::Syncing { path: None });
                         timer.take();
-                        if subscriptions
-                            .values()
-                            .any(|line| socket.send(line).is_err())
-                        {
-                            break;
-                        }
                         let mut failed = false;
                         while let Some(line) = buffered.front() {
                             if socket.send(line).is_err() {
@@ -383,14 +374,8 @@ async fn connection_loop(
     }
 }
 
-fn remember(
-    line: String,
-    subscriptions: &mut BTreeMap<String, String>,
-    buffered: &mut VecDeque<String>,
-) {
-    if let Some(key) = subscription_key(&line) {
-        subscriptions.insert(key, line);
-    } else {
+fn buffer_write(line: String, buffered: &mut VecDeque<String>) {
+    if subscription_key(&line).is_none() {
         buffered.push_back(line);
     }
 }
