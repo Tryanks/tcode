@@ -60,7 +60,10 @@ struct CodeCacheKey {
 
 thread_local! {
     static CODE_HIGHLIGHTS: RefCell<RecentCache<CodeCacheKey, SharedHighlightRuns>> =
-        RefCell::new(RecentCache::new(64));
+        RefCell::new(RecentCache::with_weight_limit(64, 32 * 1024 * 1024, |key, value| {
+            key.code.len() + key.lang.len()
+                + value.runs.capacity() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
+        }));
 }
 
 /// The most recent results of a render step keyed by its inputs, so a repaint
@@ -69,14 +72,24 @@ pub(super) struct RecentCache<K, V> {
     capacity: usize,
     entries: HashMap<K, V>,
     order: VecDeque<K>,
+    weight: usize,
+    weight_limit: usize,
+    weigh: fn(&K, &V) -> usize,
 }
 
 impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
     pub(super) fn new(capacity: usize) -> Self {
+        Self::with_weight_limit(capacity, capacity, |_, _| 1)
+    }
+
+    fn with_weight_limit(capacity: usize, weight_limit: usize, weigh: fn(&K, &V) -> usize) -> Self {
         Self {
             capacity,
             entries: HashMap::new(),
             order: VecDeque::new(),
+            weight: 0,
+            weight_limit,
+            weigh,
         }
     }
 
@@ -85,12 +98,21 @@ impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
             return value.clone();
         }
         let value = compute();
-        while self.entries.len() >= self.capacity {
+        let weight = (self.weigh)(&key, &value);
+        // Keep the newest result even when it alone exceeds the budget: a single
+        // large block's visible slices must share one highlighting pass.
+        while !self.entries.is_empty()
+            && (self.entries.len() >= self.capacity
+                || self.weight.saturating_add(weight) > self.weight_limit)
+        {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
-            self.entries.remove(&oldest);
+            if let Some(value) = self.entries.remove(&oldest) {
+                self.weight -= (self.weigh)(&oldest, &value);
+            }
         }
+        self.weight = self.weight.saturating_add(weight);
         self.order.push_back(key.clone());
         self.entries.insert(key, value.clone());
         value
