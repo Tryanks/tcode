@@ -3546,6 +3546,41 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
+    fn render_compact_row(
+        &mut self,
+        row: &CompactListRow,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        match row {
+            CompactListRow::Settled { key, count } => {
+                self.render_settled_header(key, *count, None, cx)
+            }
+            CompactListRow::Caption { label, .. } => {
+                crate::material::list_caption(label.clone(), cx).into_any_element()
+            }
+            CompactListRow::More { key, count } => {
+                self.render_settled_more(key.trim_end_matches("-more"), *count, cx)
+            }
+            CompactListRow::Empty { .. } => self.render_active_empty(cx),
+            CompactListRow::Project(row) => {
+                self.render_compact_group_header(row, cx).into_any_element()
+            }
+            CompactListRow::Thread(row) => v_flex()
+                .w_full()
+                .child(self.render_compact_thread(row, cx))
+                .when(row.separator, |list| {
+                    list.child(
+                        div()
+                            .w_full()
+                            .pl(px(crate::material::COMPACT_PAGE_INSET))
+                            .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
+                    )
+                })
+                .into_any_element(),
+            CompactListRow::BottomInset => div().h(px(24.)).into_any_element(),
+        }
+    }
+
     fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         #[cfg(test)]
         self.compact_rows_rendered.set(0);
@@ -3578,63 +3613,66 @@ impl SessionsSidebar {
                 ))
                 .into_any_element()
         } else {
-            if std::mem::take(&mut self.compact_reveal_active) {
-                let active = self.store.read(cx).roster_session_id();
-                if let Some(index) = model.rows.iter().position(|row| {
-                    matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
-                }) {
-                    // gpui-fast 3755a55 does not roll back accessibility nodes
-                    // when child autoscroll retries prepaint. Position the list
-                    // before it paints instead of issuing a child request.
-                    self.compact_list_state.scroll_to(gpui::ListOffset {
-                        item_ix: index,
-                        offset_in_item: px(0.),
-                    });
-                }
-            }
+            let reveal = std::mem::take(&mut self.compact_reveal_active)
+                .then(|| {
+                    let active = self.store.read(cx).roster_session_id();
+                    model.rows.iter().position(|row| {
+                        matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
+                    })
+                })
+                .flatten();
+            let reveal_model = model.clone();
             div()
                 .id("compact-thread-list")
                 .debug_selector(|| "compact-thread-list".into())
                 .flex_1()
                 .min_h_0()
                 .relative()
+                .when_some(reveal, |list, index| {
+                    list.child(
+                        gpui::canvas(
+                            cx.processor(
+                                move |this, bounds: gpui::Bounds<gpui::Pixels>, window, cx| {
+                                    // Child autoscroll retries prepaint without rolling back
+                                    // accessibility nodes in gpui-fast 3755a55. Measure the
+                                    // lead using this frame's bounds before the list prepaints.
+                                    let mut remaining = bounds.size.height / 3.;
+                                    let mut first = index;
+                                    while first > 0 && remaining > px(0.) {
+                                        first -= 1;
+                                        remaining -= this
+                                            .render_compact_row(&reveal_model.rows[first], cx)
+                                            .layout_as_root(
+                                                gpui::size(
+                                                    gpui::AvailableSpace::Definite(
+                                                        bounds.size.width,
+                                                    ),
+                                                    gpui::AvailableSpace::MinContent,
+                                                ),
+                                                window,
+                                                cx,
+                                            )
+                                            .height;
+                                    }
+                                    this.compact_list_state.scroll_to(gpui::ListOffset {
+                                        item_ix: first,
+                                        offset_in_item: (-remaining).max(px(0.)),
+                                    });
+                                },
+                            ),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                })
                 .child(crate::scroll::page_viewport(
                     "compact-thread-bounce",
                     crate::wheel_easing::Handle::List(self.compact_list_state.clone()),
                     list(
                         self.compact_list_state.clone(),
-                        cx.processor(move |this, index: usize, _, cx| match &model.rows[index] {
-                            CompactListRow::Settled { key, count } => {
-                                this.render_settled_header(key, *count, None, cx)
-                            }
-                            CompactListRow::Caption { label, .. } => {
-                                crate::material::list_caption(label.clone(), cx).into_any_element()
-                            }
-                            CompactListRow::More { key, count } => {
-                                this.render_settled_more(key.trim_end_matches("-more"), *count, cx)
-                            }
-                            CompactListRow::Empty { .. } => this.render_active_empty(cx),
-                            CompactListRow::Project(row) => {
-                                this.render_compact_group_header(row, cx).into_any_element()
-                            }
-                            CompactListRow::Thread(row) => v_flex()
-                                .w_full()
-                                .child(this.render_compact_thread(row, cx))
-                                .when(row.separator, |list| {
-                                    list.child(
-                                        div()
-                                            .w_full()
-                                            .pl(px(crate::material::COMPACT_PAGE_INSET))
-                                            .child(
-                                                div()
-                                                    .w_full()
-                                                    .h(px(1.))
-                                                    .bg(cx.theme().border.opacity(0.6)),
-                                            ),
-                                    )
-                                })
-                                .into_any_element(),
-                            CompactListRow::BottomInset => div().h(px(24.)).into_any_element(),
+                        cx.processor(move |this, index: usize, _, cx| {
+                            this.render_compact_row(&model.rows[index], cx)
                         }),
                     )
                     .size_full(),
