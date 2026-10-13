@@ -706,6 +706,8 @@ fn tool_counts(threads: &[ExternalThread]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future as _;
+
     use gpui::{TestAppContext, VisualTestContext};
     use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
@@ -731,18 +733,48 @@ mod tests {
             HostServices::default(),
         )
         .expect("spawn add-project test host");
+        let link = tcode_client::HostLink::new(host.to_host.clone(), host.from_host.clone());
+        let mut pump = std::pin::pin!(link.pump());
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
-                host.link(),
+                link.clone(),
                 WorkspaceAttachment::Remote {
                     host_id: "build-box".into(),
                     host_name: "build-box".into(),
                 },
                 None,
                 None,
-                true,
+                false,
                 cx,
             )
+        });
+        fn wait_until(
+            cx: &mut TestAppContext,
+            store: &Entity<WorkspaceStore>,
+            mut pump: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+            description: &str,
+            mut ready: impl FnMut(&TestAppContext) -> bool,
+        ) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            loop {
+                // Host replies arrive on an OS thread. Decode them here so ACKs
+                // wake GPUI tasks on the test scheduler's own thread.
+                let _ = pump.as_mut().poll(&mut task_cx);
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
+                if ready(cx) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "waiting for {description}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        wait_until(cx, &store, pump.as_mut(), "host baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
         });
         // The dialog closes itself on success, which routes through the
         // window's overlay root — so mount it the way the app does.
@@ -772,7 +804,7 @@ mod tests {
         // A Windows-style path on a Unix host (or a nonexistent one on Windows):
         // rejected there, not here.
         type_and_open(cx, r"C:\Users\dev\src");
-        crate::store::tests::wait_until(cx, &store, "host path refusal", |cx| {
+        wait_until(cx, &store, pump.as_mut(), "host path refusal", |cx| {
             dialog.read_with(cx, |dialog, _| dialog.error.is_some())
         });
         let error = dialog.read_with(cx, |dialog, _| dialog.error.clone());
@@ -790,7 +822,7 @@ mod tests {
         // A directory that exists on the host is accepted even though this
         // client never looked at it.
         type_and_open(cx, workspace.to_str().unwrap());
-        crate::store::tests::wait_until(cx, &store, "host project draft", |cx| {
+        wait_until(cx, &store, pump.as_mut(), "host project draft", |cx| {
             store.read_with(cx, |store, _| store.active_session_id().is_some())
         });
         assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
@@ -806,7 +838,18 @@ mod tests {
             vec![workspace.clone()]
         );
 
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        let mut shutdown = std::pin::pin!(link.shutdown());
+        wait_until(cx, &store, pump.as_mut(), "host shutdown", |_| {
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            match shutdown.as_mut().poll(&mut task_cx) {
+                std::task::Poll::Ready(result) => {
+                    result.expect("stop host");
+                    true
+                }
+                std::task::Poll::Pending => false,
+            }
+        });
+        host.stopped.recv_blocking().expect("host stopped");
         let _ = std::fs::remove_dir_all(root);
     }
 }
