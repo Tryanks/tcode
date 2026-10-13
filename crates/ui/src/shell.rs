@@ -4578,6 +4578,15 @@ mod tests {
         .unwrap();
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let (shell, _transport, cx) = mount(cx);
+        // Establish the startup viewport before the baseline can select a draft.
+        // Shrinking an already populated wide layout intentionally opens its thread.
+        if compact {
+            as_mobile(cx);
+        }
+        cx.simulate_resize(size(px(if compact { 393. } else { 1024. }), px(852.)));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        draw(cx);
         let store = store_of(&shell, cx);
         // Keep the shell's transport deterministic; the real host link owns
         // its pump, as in the store tests, and snapshots are drained below.
@@ -4594,12 +4603,6 @@ mod tests {
         driver.wait_until(cx, &store, "project baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        if compact {
-            as_mobile(cx);
-        }
-        cx.simulate_resize(size(px(if compact { 393. } else { 1024. }), px(852.)));
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(250));
         draw(cx);
         let focus = shell.read_with(cx, |shell, cx| {
             shell
