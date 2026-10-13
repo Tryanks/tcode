@@ -730,6 +730,35 @@ impl AppState {
         self.reschedule_scheduled_wake(cx);
     }
 
+    pub fn retry_turn(
+        &mut self,
+        target_id: &str,
+        turn_id: String,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let active = self
+            .resident_mut(target_id)
+            .ok_or_else(|| provider_command_error("The thread is no longer available."))?;
+        if active.timeline.turn_running
+            || !active
+                .timeline
+                .turn_retry
+                .as_ref()
+                .is_some_and(|retry| retry.turn_id == turn_id)
+        {
+            return Err(provider_command_error(
+                "This turn can no longer be retried.",
+            ));
+        }
+        let Runtime::Live(commands) = &active.runtime else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::RetryTurn { turn_id })
+            .map_err(provider_command_error)?;
+        active.turn_in_flight = true;
+        Ok(())
+    }
+
     pub fn interrupt(
         &mut self,
         target_id: &str,

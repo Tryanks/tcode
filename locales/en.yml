@@ -86,6 +86,9 @@ chat:
   copy_input: "Copy input"
   copy_text: "Copy text"
   copy_error: "Copy error"
+  capacity_retry:
+    countdown: "Retry in %{seconds}s"
+    retry: "Retry"
   limit_resume:
     resumes_in: "Resumes in %{countdown}"
     cancel: "Cancel"

@@ -145,6 +145,8 @@ pub use wire::{
 // instruction channel, an MCP server's instructions, Codex's developer
 // instructions).
 //
+// Unreleased: adds TurnRetry events, SessionStatus.turn_retry and the RetryTurn command
+// for native capacity continuations.
 // Unreleased: the agent event stream gains steer_rejected, a provider's
 // report that the correlated steer reached it after its turn had ended; the
 // host then sends the text as an ordinary turn. Index subscriptions may carry

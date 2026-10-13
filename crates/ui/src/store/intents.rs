@@ -576,6 +576,12 @@ impl WorkspaceStore {
             id,
         });
     }
+    pub fn retry_turn(&mut self, turn_id: String) {
+        self.dispatch(Command::RetryTurn {
+            session_id: self.active_session_id().unwrap_or_default(),
+            turn_id,
+        });
+    }
     pub fn interrupt(&mut self) {
         self.dispatch(Command::Interrupt {
             session_id: self.active_session_id().unwrap_or_default(),
