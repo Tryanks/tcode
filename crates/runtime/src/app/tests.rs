@@ -1015,7 +1015,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
         state.deliver(
             cx,
             id,
-            ClientPayload::Subscribe(Subscription {
+            tcode_protocol::ClientPayload::Subscribe(Subscription {
                 topic,
                 after: None,
                 known_index: None,
