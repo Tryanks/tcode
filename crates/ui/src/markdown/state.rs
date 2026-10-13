@@ -2,6 +2,7 @@
 //! Apache-2.0 `text/state.rs` implementation.
 
 use std::{
+    collections::HashMap,
     ops::RangeInclusive,
     path::{Path, PathBuf},
     rc::Rc,
@@ -10,8 +11,8 @@ use std::{
 use crate::widgets::copy::CopiedMark;
 use gpui::{
     Bounds, ClipboardItem, Context, FocusHandle, ImageSource, IntoElement, ListAlignment,
-    ListState, ParentElement as _, Pixels, Point, Render, SharedString, SharedUri, Styled as _,
-    Window, px,
+    ListState, ParentElement as _, Pixels, Point, Render, SharedString, SharedUri, Size,
+    Styled as _, Window, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
@@ -84,6 +85,8 @@ pub struct MarkdownState {
     has_potential_link_reference_definition: bool,
     pub(super) list_state: ListState,
     measured_content_height: Option<Pixels>,
+    image_sizes: HashMap<String, Size<Pixels>>,
+    image_layout_dirty: bool,
     selection_revision: usize,
     pub(super) selection_adapter: MarkdownSelectionAdapter,
     #[cfg(test)]
@@ -133,6 +136,8 @@ impl MarkdownState {
             list_state: ListState::new(items.len(), ListAlignment::Top, px(1000.)).measure_all(),
             items,
             measured_content_height: None,
+            image_sizes: HashMap::new(),
+            image_layout_dirty: false,
             selection_revision: 0,
             selection_adapter,
             #[cfg(test)]
@@ -259,6 +264,33 @@ impl MarkdownState {
             None => path,
         };
         crate::store::host_image(path)
+    }
+
+    pub(super) fn image_layout(&self, path: &str) -> (usize, Option<Size<Pixels>>) {
+        (self.selection_revision, self.image_sizes.get(path).copied())
+    }
+
+    pub(super) fn image_resized(
+        &mut self,
+        path: String,
+        revision: usize,
+        size: Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if revision != self.selection_revision || self.image_sizes.get(&path) == Some(&size) {
+            return;
+        }
+        self.image_sizes.insert(path, size);
+        if std::mem::replace(&mut self.image_layout_dirty, true) {
+            return;
+        }
+        self.selection_adapter
+            .virtual_blocks
+            .borrow_mut()
+            .forget_positions();
+        self.list_state.remeasure_items(0..self.items.len());
+        self.measured_content_height = None;
+        cx.notify();
     }
 
     pub(super) fn set_math_source(&mut self, path: &str, source: bool, cx: &mut Context<Self>) {
@@ -419,6 +451,7 @@ impl MarkdownState {
     }
 
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
+        self.image_sizes.clear();
         render::clear_code_measurements(cx.entity_id(), cx);
         self.prepare_reparse(cx);
         let parsed_document = super::parse::parse_document(&self.text);
@@ -604,6 +637,7 @@ fn contains_potential_link_reference_definition(source: &str) -> bool {
 
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.image_layout_dirty = false;
         let state = cx.entity();
         let measured_content_height = self.measured_content_height;
         v_flex()
