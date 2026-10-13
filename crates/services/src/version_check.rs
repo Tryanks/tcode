@@ -1,58 +1,69 @@
 //! Update assessments and their host-facing adapters.
 
-use std::time::Duration;
-
-use crate::{
-    github::{
-        Credentials, GitHubApi, GitHubError, RequestOptions, RestRequest, api::Authentication,
-    },
-    settings::SettingsStore,
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
 };
+
+use crate::github::{GitHubApi, GitHubError, RequestOptions, RestRequest, api::Authentication};
 use serde::Deserialize;
-use std::sync::Arc;
 
 pub mod provider_updates;
 
 /// Tcode's own releases, read without a credential from GitHub, where Tcode is published.
-pub struct ReleaseFeed(Arc<GitHubApi>);
+pub struct ReleaseFeed {
+    api: Arc<GitHubApi>,
+    cached: Mutex<Option<(String, Vec<u8>)>>,
+}
 impl ReleaseFeed {
-    pub fn new(store: SettingsStore) -> Self {
-        Self(GitHubApi::host(Credentials::new(store, [])))
+    pub fn new(api: Arc<GitHubApi>) -> Self {
+        Self {
+            api,
+            cached: Mutex::new(None),
+        }
     }
 
     pub fn latest_json(&self) -> Result<Vec<u8>, FetchError> {
-        fetch_latest_tcode_release_json(&self.0)
-    }
-}
-
-pub fn fetch_latest_tcode_release_json(api: &GitHubApi) -> Result<Vec<u8>, FetchError> {
-    api.rest(
-        "github.com",
-        RestRequest::get("/repos/Tryanks/tcode/releases/latest"),
-        &RequestOptions {
-            authentication: Authentication::Anonymous,
-            operation: "LatestRelease",
-            timeout: Duration::from_secs(10),
-            body_limit: 1024 * 1024,
-            ..Default::default()
-        },
-    )
-    .and_then(|response| {
-        if response.truncated {
-            Err(GitHubError::BodyTooLarge)
-        } else {
-            Ok(response.body)
+        let mut cached = self.cached.lock().unwrap();
+        let mut request = RestRequest::get("/repos/Tryanks/tcode/releases/latest");
+        request.if_none_match = cached.as_ref().map(|(etag, _)| etag.as_str());
+        let response = self
+            .api
+            .rest(
+                "github.com",
+                request,
+                &RequestOptions {
+                    authentication: Authentication::Anonymous,
+                    operation: "LatestRelease",
+                    timeout: Duration::from_secs(10),
+                    body_limit: 1024 * 1024,
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| match error {
+                GitHubError::RateLimited { status, .. } => FetchError::RateLimited { status },
+                GitHubError::Paused { .. } => FetchError::RateLimited { status: 429 },
+                GitHubError::Response { status, .. } => FetchError::Http { status },
+                GitHubError::Unauthorized => FetchError::Http { status: 401 },
+                GitHubError::NotFound => FetchError::Http { status: 404 },
+                GitHubError::BodyTooLarge => FetchError::ResponseTooLarge,
+                _ => FetchError::Network,
+            })?;
+        if response.status == 304 {
+            return cached
+                .as_ref()
+                .map(|(_, body)| body.clone())
+                .ok_or(FetchError::Network);
         }
-    })
-    .map_err(|error| match error {
-        GitHubError::RateLimited { status, .. } => FetchError::RateLimited { status },
-        GitHubError::Paused { .. } => FetchError::RateLimited { status: 429 },
-        GitHubError::Response { status, .. } => FetchError::Http { status },
-        GitHubError::Unauthorized => FetchError::Http { status: 401 },
-        GitHubError::NotFound => FetchError::Http { status: 404 },
-        GitHubError::BodyTooLarge => FetchError::ResponseTooLarge,
-        _ => FetchError::Network,
-    })
+        if response.truncated {
+            return Err(FetchError::ResponseTooLarge);
+        }
+        *cached = response
+            .headers
+            .get("etag")
+            .map(|etag| (etag.clone(), response.body.clone()));
+        Ok(response.body)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -494,7 +494,9 @@ impl AppState {
         let settings = settings_store.load();
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
         forge.configure(settings.source_control.hosts.clone());
-        let releases = Arc::new(ReleaseFeed::new(settings_store.clone()));
+        let releases = Arc::new(ReleaseFeed::new(tcode_services::github::GitHubApi::host(
+            tcode_services::github::Credentials::new(settings_store.clone(), []),
+        )));
         let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
