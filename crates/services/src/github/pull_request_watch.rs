@@ -62,17 +62,24 @@ pub fn fingerprints(
 ) -> Vec<Result<Option<Fingerprint>, GitHubError>> {
     let mut results: Vec<_> = keys.iter().map(|_| Ok(None)).collect();
     let mut by_host: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut positions: HashMap<&PullRequestKey, Vec<usize>> = HashMap::new();
     for (index, key) in keys.iter().enumerate() {
-        by_host.entry(key.host.as_str()).or_default().push(index);
+        let copies = positions.entry(key).or_default();
+        if copies.is_empty() {
+            by_host.entry(key.host.as_str()).or_default().push(index);
+        }
+        copies.push(index);
     }
     for (host, indexes) in by_host {
         for chunk in indexes.chunks(FINGERPRINT_BATCH) {
             let read = read_fingerprints(api, host, chunk.iter().map(|index| &keys[*index]));
             for (position, index) in chunk.iter().enumerate() {
-                results[*index] = match &read {
-                    Ok(rows) => Ok(rows.get(&position).cloned()),
-                    Err(error) => Err(error.clone()),
-                };
+                for index in &positions[&keys[*index]] {
+                    results[*index] = match &read {
+                        Ok(rows) => Ok(rows.get(&position).cloned()),
+                        Err(error) => Err(error.clone()),
+                    };
+                }
             }
         }
     }
