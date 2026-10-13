@@ -1342,6 +1342,30 @@ impl WorkspaceStore {
                     self.sync_active_conversation_ui();
                 }
             }
+            (
+                Topic::SessionStatus { session_id },
+                ServerEvent::SessionUsageChanged {
+                    usage,
+                    context_window,
+                },
+            ) if self.baseline_topics.contains(&envelope.topic) => {
+                if let Some(status) = self
+                    .threads
+                    .get_mut(session_id)
+                    .and_then(|thread| thread.status.as_mut())
+                {
+                    status.usage = *usage;
+                    status.context_window = *context_window;
+                }
+                if let Some(status) = self
+                    .session_status_replica
+                    .as_mut()
+                    .filter(|status| status.session_id == *session_id)
+                {
+                    status.usage = *usage;
+                    status.context_window = *context_window;
+                }
+            }
             (Topic::SessionPlan { session_id }, ServerEvent::SessionPlanReplaced(plan))
                 if plan.session_id == *session_id =>
             {
