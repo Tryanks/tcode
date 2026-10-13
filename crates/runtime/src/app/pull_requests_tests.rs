@@ -1539,7 +1539,7 @@ fn a_review_draft_is_the_hosts_across_a_restart_and_a_moved_head_keeps_it_until_
     let state = cx.new_entity(TestClientState::new(store.clone()));
     state.update(&mut cx, |state, _| {
         state.pull_requests = PullRequestRuntime::new(api);
-        state.sessions = sessions;
+        state.sessions = sessions.into();
     });
     let submit = |head: &str| Command::RunPullRequestAction {
         session_id: "active".into(),

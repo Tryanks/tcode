@@ -257,6 +257,7 @@ mod pull_request_stacks;
 mod pull_request_watch;
 mod pull_requests;
 mod send;
+mod session_index;
 mod sessions;
 mod settlement;
 mod snapshots;
@@ -281,6 +282,7 @@ use providers::{
     computer_use_attaches, effort_selection, launch_env_for_profile, normalized_selections,
     provider_secret_names, session_launch_env, session_options,
 };
+pub use session_index::SessionIndex;
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
 use store_write::{StoreWrite, StoreWriteFailure, StoreWriter};
@@ -345,7 +347,7 @@ pub struct AppState {
     store_writer: Option<std::thread::JoinHandle<()>>,
     /// Set once the store failed and every thread was stopped.
     store_failed: bool,
-    pub sessions: Vec<SessionMeta>,
+    pub sessions: SessionIndex,
     archived_revision: u64,
     settlement_sweep_running: bool,
     turn_index_backfill: TurnIndexBackfill,
@@ -543,7 +545,7 @@ impl AppState {
             store_write_failure_receiver: Some(store_write_failure_receiver),
             store_writer: None,
             store_failed: false,
-            sessions,
+            sessions: sessions.into(),
             projects,
             archived_revision: 0,
             settlement_sweep_running: false,
