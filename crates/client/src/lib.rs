@@ -704,14 +704,18 @@ impl HostLink {
     /// already queued for the UI when it advanced its replica. Check on application,
     /// not just in the transport pump, to avoid a stale tail resetting live records.
     pub fn subscription_reply_is_current(&self, envelope: &EventEnvelope) -> bool {
-        envelope.request_id.is_none_or(|id| {
-            self.inner
-                .subscription_requests
-                .lock()
-                .unwrap()
-                .get(&envelope.topic)
-                == Some(&id)
-        })
+        envelope
+            .request_id
+            .is_none_or(|id| self.subscription_request_id(&envelope.topic) == Some(id))
+    }
+
+    pub fn subscription_request_id(&self, topic: &Topic) -> Option<u64> {
+        self.inner
+            .subscription_requests
+            .lock()
+            .unwrap()
+            .get(topic)
+            .copied()
     }
 
     pub fn unsubscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
