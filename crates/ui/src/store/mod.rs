@@ -6039,6 +6039,26 @@ pub(crate) mod tests {
             }
         }
 
+        fn command(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            command: Command,
+        ) {
+            let link = self.link.clone();
+            let mut command = std::pin::pin!(link.command(command));
+            self.wait_until(cx, store, "host command acknowledgement", |_| {
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                match std::future::Future::poll(command.as_mut(), &mut task_cx) {
+                    std::task::Poll::Ready(result) => {
+                        result.expect("typed host command");
+                        true
+                    }
+                    std::task::Poll::Pending => false,
+                }
+            });
+        }
+
         pub(crate) fn shutdown(
             &mut self,
             cx: &mut TestAppContext,
@@ -6664,29 +6684,29 @@ pub(crate) mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| WorkspaceStore::new_attached(driver.link.clone(), false, cx));
 
         workspace.update(cx, |store, _| store.select_session("parent".into()));
-        wait_until(cx, &workspace, "parent on screen", |cx| {
+        driver.wait_until(cx, &workspace, "parent on screen", |cx| {
             selected_status(cx, &workspace, "parent")
                 && workspace.read_with(cx, |store, _| held_window(store, "parent").is_some())
         });
         let parent_cursor =
             workspace.read_with(cx, |store, _| Some(held_history(store, "parent").end));
         workspace.update(cx, |store, _| store.select_session("child".into()));
-        wait_until(cx, &workspace, "child selected", |cx| {
+        driver.wait_until(cx, &workspace, "child selected", |cx| {
             selected_status(cx, &workspace, "child")
         });
 
-        command(
+        driver.command(
             cx,
-            Some(&workspace),
-            &host,
+            &workspace,
             Command::ArchiveSession {
                 session_id: "child".into(),
             },
         );
-        wait_until(cx, &workspace, "parent reopened", |cx| {
+        driver.wait_until(cx, &workspace, "parent reopened", |cx| {
             selected_status(cx, &workspace, "parent")
         });
         workspace.read_with(cx, |store, _| {
@@ -6709,19 +6729,18 @@ pub(crate) mod tests {
         // The index and its summary replicate on their own topics: the
         // return to the parent follows the index, the archived count the
         // summary, and nothing orders one before the other.
-        wait_until(cx, &workspace, "child archived", |cx| {
+        driver.wait_until(cx, &workspace, "child archived", |cx| {
             archived(cx, &workspace, "child")
         });
 
-        command(
+        driver.command(
             cx,
-            Some(&workspace),
-            &host,
+            &workspace,
             Command::ArchiveSession {
                 session_id: "sibling".into(),
             },
         );
-        wait_until(cx, &workspace, "sibling archived", |cx| {
+        driver.wait_until(cx, &workspace, "sibling archived", |cx| {
             archived(cx, &workspace, "sibling")
         });
         assert!(
@@ -6729,7 +6748,7 @@ pub(crate) mod tests {
             "archiving a background thread moved the user"
         );
 
-        shutdown_test_host(cx, &workspace, &host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6754,17 +6773,18 @@ pub(crate) mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| WorkspaceStore::new_attached(driver.link.clone(), false, cx));
 
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
-        wait_until(cx, &workspace, "launch draft", |cx| {
+        driver.wait_until(cx, &workspace, "launch draft", |cx| {
             workspace.read_with(cx, |store, _| store.selected_session_id.is_some())
         });
         workspace.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)
         });
-        wait_until(cx, &workspace, "draft for the last project", |cx| {
+        driver.wait_until(cx, &workspace, "draft for the last project", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_status_replica
@@ -6784,19 +6804,18 @@ pub(crate) mod tests {
         });
 
         workspace.update(cx, |store, _| store.select_session("child".into()));
-        wait_until(cx, &workspace, "child selected", |cx| {
+        driver.wait_until(cx, &workspace, "child selected", |cx| {
             selected_status(cx, &workspace, "child")
         });
 
-        command(
+        driver.command(
             cx,
-            Some(&workspace),
-            &host,
+            &workspace,
             Command::ArchiveSession {
                 session_id: "parent".into(),
             },
         );
-        wait_until(cx, &workspace, "the standing draft reopened", |cx| {
+        driver.wait_until(cx, &workspace, "the standing draft reopened", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.selected_session_id.as_deref() == Some(draft_id.as_str())
             })
@@ -6813,7 +6832,7 @@ pub(crate) mod tests {
         assert!(archived(cx, &workspace, "parent"));
         assert!(archived(cx, &workspace, "child"));
 
-        shutdown_test_host(cx, &workspace, &host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6830,30 +6849,30 @@ pub(crate) mod tests {
             .expect("persist project");
         disk.upsert_project(&project_at("remembered", &root))
             .expect("persist project");
+        tcode_services::settings::SettingsStore::new(root.clone())
+            .save(&tcode_core::settings::Settings {
+                last_project_id: Some("remembered".into()),
+                ..Default::default()
+            })
+            .expect("persist remembered project");
         let host = test_host(disk);
-        command(
-            cx,
-            None,
-            &host,
-            Command::PatchSettings {
-                patch: tcode_core::settings::SettingsPatch::LastProject(Some("remembered".into())),
-            },
-        );
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        wait_until(cx, &workspace, "remembered project draft", |cx| {
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| WorkspaceStore::new_attached(driver.link.clone(), false, cx));
+        driver.wait_until(cx, &workspace, "remembered project draft", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
                     status.draft && status.project_id.as_deref() == Some("remembered")
                 })
             })
         });
-        shutdown_test_host(cx, &workspace, &host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
 
         let empty_root = scratch_root("no-projects");
         let empty_host = test_host(SessionStore::open_at(empty_root.clone()).expect("open store"));
-        let empty = cx.new(|cx| WorkspaceStore::new(empty_host.link(), cx));
-        wait_until(cx, &empty, "empty workspace baseline", |cx| {
+        let mut empty_driver = LocalHostDriver::new(&empty_host);
+        let empty = cx.new(|cx| WorkspaceStore::new_attached(empty_driver.link.clone(), false, cx));
+        empty_driver.wait_until(cx, &empty, "empty workspace baseline", |cx| {
             empty.read_with(cx, |store, _| store.baseline_ready())
         });
         empty.read_with(cx, |store, _| {
@@ -6863,7 +6882,7 @@ pub(crate) mod tests {
                 "a workspace with no project must stay on its add-project state"
             );
         });
-        shutdown_test_host(cx, &empty, &empty_host);
+        empty_driver.shutdown(cx, &empty, &empty_host);
         let _ = std::fs::remove_dir_all(&empty_root);
     }
 
