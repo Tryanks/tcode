@@ -1,6 +1,6 @@
 //! App-owned Git process and filesystem infrastructure.
 
-use std::path::Path;
+use std::{io::Read, path::Path, process::Stdio};
 
 use agent::{FileChange, FileChangeKind};
 use tcode_core::git::{GitAction, GitStatus, parse_status};
@@ -43,6 +43,39 @@ fn git_output(cwd: &Path, args: &[String]) -> Result<std::process::Output, Strin
         .current_dir(cwd)
         .output()
         .map_err(|error| error.to_string())
+}
+
+fn git_output_limited(
+    cwd: &Path,
+    args: &[String],
+    limit: u64,
+) -> Result<std::process::Output, String> {
+    let mut child = crate::process::command("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            stdout.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+            // Drain excess output so Git can exit normally and report failures.
+            std::io::copy(&mut stdout, &mut std::io::sink())?;
+            Ok(bytes)
+        });
+        let result = child.wait_with_output();
+        let stdout = reader
+            .join()
+            .map_err(|_| "Git stdout reader panicked".to_string())?
+            .map_err(|error| error.to_string())?;
+        let mut output = result.map_err(|error| error.to_string())?;
+        output.stdout = stdout;
+        Ok(output)
+    })
 }
 
 fn append_capped(raw: &mut Vec<u8>, bytes: &[u8], truncated: &mut bool) {
@@ -152,16 +185,12 @@ fn repo_root_path(path: &str, prefix: &str) -> String {
 }
 
 fn read_disk_text(path: &Path) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.len() > MAX_FILE_TEXT_BYTES {
-        return None;
-    }
-    std::fs::read_to_string(path).ok()
+    String::from_utf8(crate::user_files::read_bounded(path, MAX_FILE_TEXT_BYTES).ok()?).ok()
 }
 
 fn read_git_text(cwd: &Path, revision: &str, path: &str) -> Option<String> {
     let args = vec!["show".into(), format!("{revision}:{path}")];
-    let output = git_output(cwd, &args).ok()?;
+    let output = git_output_limited(cwd, &args, MAX_FILE_TEXT_BYTES).ok()?;
     if !output.status.success() || output.stdout.len() as u64 > MAX_FILE_TEXT_BYTES {
         return None;
     }
@@ -294,7 +323,7 @@ pub fn load_git_diff(
             };
         }
     };
-    let output = match git_output(cwd, &args) {
+    let output = match git_output_limited(cwd, &args, MAX_RAW_DIFF_BYTES as u64) {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             return GitDiffResult {
@@ -333,8 +362,11 @@ pub fn load_git_diff(
             {
                 let path = String::from_utf8_lossy(path).to_string();
                 let args = vec!["diff".into(), "--no-index".into(), "/dev/null".into(), path];
-                if let Ok(output) = git_output(cwd, &args)
-                    && (output.status.success() || output.status.code() == Some(1))
+                if let Ok(output) = git_output_limited(
+                    cwd,
+                    &args,
+                    MAX_RAW_DIFF_BYTES.saturating_sub(raw.len()) as u64,
+                ) && (output.status.success() || output.status.code() == Some(1))
                 {
                     append_capped(&mut raw, &output.stdout, &mut truncated);
                 }
