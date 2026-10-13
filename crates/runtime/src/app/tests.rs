@@ -10023,9 +10023,9 @@ fn message_origins_survive_queue_acknowledgement_and_callback_steering() {
     );
 }
 
-fn next_host_event(link: &tcode_client::HostLink) -> EventEnvelope {
+fn next_host_event(events: &async_channel::Receiver<EventEnvelope>) -> EventEnvelope {
     smol::block_on(smol::future::race(
-        async { link.events().recv().await.unwrap() },
+        async { events.recv().await.unwrap() },
         async {
             smol::Timer::after(Duration::from_secs(5)).await;
             panic!("host did not publish the expected lifecycle change")
@@ -10036,6 +10036,20 @@ fn next_host_event(link: &tcode_client::HostLink) -> EventEnvelope {
 #[test]
 fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename() {
     use crate::pipe::{HostServices, spawn_host};
+    let collect = |link: &tcode_client::HostLink| {
+        let source = link.events();
+        let (sender, events) = async_channel::unbounded();
+        // Keep receiving while requests wait, as the app's event task does.
+        smol::spawn(async move {
+            while let Ok(event) = source.recv().await {
+                if sender.send(event).await.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        events
+    };
     let store = TestStore::new("cold-settlement");
     let stamp = now_millis() - 10 * 86_400_000;
     for id in ["inherit", "never"] {
@@ -10086,6 +10100,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     .unwrap();
     let host = spawn_host((*store).clone(), HostServices::default()).unwrap();
     let link = host.link();
+    let events = collect(&link);
     link.subscribe(Subscription {
         known_index: None,
         topic: Topic::Index,
@@ -10119,7 +10134,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     })
     .unwrap();
     loop {
-        if let ServerEvent::IndexUpsertSession(meta) = next_host_event(&link).event
+        if let ServerEvent::IndexUpsertSession(meta) = next_host_event(&events).event
             && meta.id == "aged"
             && meta.is_settled()
         {
@@ -10137,6 +10152,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     )
     .unwrap();
     let link = restarted.link();
+    let events = collect(&link);
     link.subscribe(Subscription {
         known_index: None,
         topic: Topic::Index,
@@ -10144,7 +10160,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     })
     .unwrap();
     loop {
-        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&link).event {
+        if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
             let find = |id: &str| snapshot.sessions.iter().find(|meta| meta.id == id).unwrap();
             assert_eq!(
                 find("legacy").settled_override,
@@ -10166,7 +10182,7 @@ fn cold_lifecycle_migrates_legacy_settlement_and_ages_from_events_after_rename()
     let inherited: Command = serde_json::from_str(r#"{"type":"patch_settings","content":{"patch":{"type":"project_settlement","content":{"project_id":"never","value":{}}}}}"#).unwrap();
     link.command_blocking(inherited).unwrap();
     loop {
-        if let ServerEvent::IndexUpsertSession(meta) = next_host_event(&link).event
+        if let ServerEvent::IndexUpsertSession(meta) = next_host_event(&events).event
             && meta.id == "never"
             && meta.is_settled()
         {

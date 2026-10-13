@@ -4762,7 +4762,7 @@ mod tests {
                 .expect("read host title");
         assert_eq!(title, "Original title");
 
-        host.shutdown_blocking().unwrap();
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4928,7 +4928,7 @@ mod tests {
         draw(cx);
         // A remote host may not have sent status yet. Selection must repaint
         // from the client notification without waiting for a host event.
-        host.shutdown_blocking().unwrap();
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         draw(cx);
         let a = cx.debug_bounds("compact-row-menu-0").unwrap();
         let b = cx.debug_bounds("compact-row-menu-10").unwrap();
@@ -5120,7 +5120,7 @@ mod tests {
             }
         }
 
-        host.shutdown_blocking().expect("stop host");
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         let persisted = tcode_services::settings::SettingsStore::new(root.clone()).load();
         assert_eq!(
             persisted.sidebar_layout,
@@ -5240,7 +5240,7 @@ mod tests {
                 "dragging must not activate a thread under the scrollbar"
             );
         }
-        host.shutdown_blocking().unwrap();
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

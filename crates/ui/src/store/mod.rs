@@ -4174,8 +4174,8 @@ pub(crate) mod tests {
             }
         }
 
-        fn barrier(&self) {
-            smol::block_on(self.link.query(tcode_protocol::Query::Ping)).unwrap();
+        fn barrier(&self, cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>) {
+            await_with_events(cx, workspace, self.link.query(tcode_protocol::Query::Ping)).unwrap();
         }
     }
 
@@ -4199,7 +4199,7 @@ pub(crate) mod tests {
         wait_until(cx, &workspace, "member baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
-        host.barrier();
+        host.barrier(cx, &workspace);
         workspace.read_with(cx, |store, _| {
             assert_eq!(
                 store
@@ -4275,7 +4275,7 @@ pub(crate) mod tests {
                 store.projects().first().is_some_and(|p| p.id == "other") && store.index_hydrated()
             })
         });
-        host.barrier();
+        host.barrier(cx, &workspace);
         workspace.read_with(cx, |store, _| {
             assert!(store.enabled_profiles().is_empty());
             assert_eq!(
@@ -4419,7 +4419,7 @@ pub(crate) mod tests {
         wait_until(cx, &workspace, "member baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
-        host.barrier();
+        host.barrier(cx, &workspace);
         host.requests.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
             store.toggle_project_collapsed("shared".into(), cx);
@@ -4441,7 +4441,7 @@ pub(crate) mod tests {
             );
             assert_eq!(store.settings().favorite_models, ["team-model"]);
         });
-        host.barrier();
+        host.barrier(cx, &workspace);
         assert!(
             host.requests
                 .lock()
@@ -5037,7 +5037,7 @@ pub(crate) mod tests {
         let key = link.failed_commands()[0].0.key.clone();
         workspace.update(cx, |store, _| store.discard_delivery(&key));
         assert!(link.pending_commands().is_empty() && link.failed_commands().is_empty());
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5532,7 +5532,8 @@ pub(crate) mod tests {
             state.session_status_snapshot(&id).unwrap()
         }))
         .unwrap();
-        shutdown_test_host(&host);
+        host.shutdown_blocking()
+            .expect("stop unsubscribed fixture host");
         std::fs::remove_dir_all(root).unwrap();
 
         let (to_host, outgoing) = async_channel::unbounded();
@@ -5728,7 +5729,8 @@ pub(crate) mod tests {
             state.session_status_snapshot(&id).unwrap()
         }))
         .unwrap();
-        shutdown_test_host(&host);
+        host.shutdown_blocking()
+            .expect("stop unsubscribed fixture host");
         std::fs::remove_dir_all(root).unwrap();
         status
     }
@@ -5974,13 +5976,53 @@ pub(crate) mod tests {
         };
     }
 
-    fn command(host: &SpawnedHost, command: Command) {
-        smol::block_on(host.link().command(command)).expect("typed host command");
+    fn await_with_events<T>(
+        cx: &mut TestAppContext,
+        workspace: &gpui::Entity<WorkspaceStore>,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        let mut future = std::pin::pin!(future);
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            if let std::task::Poll::Ready(result) =
+                std::future::Future::poll(future.as_mut(), &mut task_cx)
+            {
+                workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                return result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "host request did not finish while consuming events"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
-    fn shutdown_test_host(host: &SpawnedHost) {
-        host.shutdown_blocking()
-            .expect("drain test store and stop host");
+    fn command(
+        cx: &mut TestAppContext,
+        workspace: Option<&gpui::Entity<WorkspaceStore>>,
+        host: &SpawnedHost,
+        command: Command,
+    ) {
+        let link = host.link();
+        let result = if let Some(workspace) = workspace {
+            await_with_events(cx, workspace, link.command(command))
+        } else {
+            smol::block_on(link.command(command))
+        };
+        result.expect("typed host command");
+    }
+
+    pub(crate) fn shutdown_test_host(
+        cx: &mut TestAppContext,
+        workspace: &gpui::Entity<WorkspaceStore>,
+        host: &SpawnedHost,
+    ) {
+        let link = host.link();
+        await_with_events(cx, workspace, link.shutdown()).expect("drain test store and stop host");
+        host.stopped.recv_blocking().expect("host stopped");
     }
 
     /// Drain the host's events into `workspace` until `ready`. A host
@@ -6041,7 +6083,7 @@ pub(crate) mod tests {
         wait_until(cx, &workspace, "correlated reconnect baselines", |cx| {
             workspace.read_with(cx, |store, _| store.connection_state().is_connected())
         });
-        host.shutdown_blocking().unwrap();
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6213,6 +6255,8 @@ pub(crate) mod tests {
         let deleted = ids[47].clone();
         assert!(workspace.read_with(cx, |store, _| store.threads.contains_key(&deleted)));
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::DeleteSession {
                 session_id: deleted.clone(),
@@ -6226,7 +6270,7 @@ pub(crate) mod tests {
         });
         assert!(!workspace.read_with(cx, |store, _| store.threads.contains_key(&deleted)));
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6550,6 +6594,8 @@ pub(crate) mod tests {
         });
 
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::ArchiveSession {
                 session_id: "child".into(),
@@ -6583,6 +6629,8 @@ pub(crate) mod tests {
         });
 
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::ArchiveSession {
                 session_id: "sibling".into(),
@@ -6596,7 +6644,7 @@ pub(crate) mod tests {
             "archiving a background thread moved the user"
         );
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6656,6 +6704,8 @@ pub(crate) mod tests {
         });
 
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::ArchiveSession {
                 session_id: "parent".into(),
@@ -6678,7 +6728,7 @@ pub(crate) mod tests {
         assert!(archived(cx, &workspace, "parent"));
         assert!(archived(cx, &workspace, "child"));
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6697,6 +6747,8 @@ pub(crate) mod tests {
             .expect("persist project");
         let host = test_host(disk);
         command(
+            cx,
+            None,
             &host,
             Command::PatchSettings {
                 patch: tcode_core::settings::SettingsPatch::LastProject(Some("remembered".into())),
@@ -6710,7 +6762,7 @@ pub(crate) mod tests {
                 })
             })
         });
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
 
         let empty_root = scratch_root("no-projects");
@@ -6726,7 +6778,7 @@ pub(crate) mod tests {
                 "a workspace with no project must stay on its add-project state"
             );
         });
-        shutdown_test_host(&empty_host);
+        shutdown_test_host(cx, &empty, &empty_host);
         let _ = std::fs::remove_dir_all(&empty_root);
     }
 
@@ -6769,7 +6821,7 @@ pub(crate) mod tests {
             });
         host.link()
             .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
-        command(&host, Command::ClearRelaunchMarker);
+        command(cx, Some(&workspace), &host, Command::ClearRelaunchMarker);
         workspace.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);
             assert_eq!(held_history(store, "reconnect").records.len(), 3);
@@ -6822,7 +6874,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(subscription.after, Some(3));
         });
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6980,7 +7032,7 @@ pub(crate) mod tests {
         });
         assert_eq!(replica, live);
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7030,8 +7082,15 @@ pub(crate) mod tests {
         // directory has to exist before it will accept it.
         let created_root = root.join("created");
         std::fs::create_dir_all(&created_root).unwrap();
-        command(&host, Command::CreateProject { root: created_root });
         command(
+            cx,
+            Some(&workspace),
+            &host,
+            Command::CreateProject { root: created_root },
+        );
+        command(
+            cx,
+            Some(&workspace),
             &host,
             Command::ArchiveSession {
                 session_id: seed_session_id.clone(),
@@ -7041,6 +7100,8 @@ pub(crate) mod tests {
         settings.word_wrap_diffs = !settings.word_wrap_diffs;
         let expected_word_wrap = settings.word_wrap_diffs;
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::PatchSettings {
                 patch: tcode_protocol::SettingsPatch::WordWrapDiffs(settings.word_wrap_diffs),
@@ -7117,7 +7178,7 @@ pub(crate) mod tests {
             },
         );
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7144,6 +7205,8 @@ pub(crate) mod tests {
         update_host!(&host, move |state, _| state
             .set_provider_launcher_for_test(scripted.launcher));
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::SendTurn {
                 session_id: session_id.clone(),
@@ -7152,6 +7215,8 @@ pub(crate) mod tests {
             },
         );
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::AddReviewComment {
                 session_id: session_id.clone(),
@@ -7202,7 +7267,7 @@ pub(crate) mod tests {
             replica.review_comment_drafts
         );
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7278,7 +7343,7 @@ pub(crate) mod tests {
             Some("second parked prefill".into())
         );
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7368,7 +7433,7 @@ pub(crate) mod tests {
             },
         );
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7391,7 +7456,7 @@ pub(crate) mod tests {
         wait_until(cx, &workspace, "initial git probe", |cx| {
             workspace.read_with(cx, |store, _| store.git_status_replica.status.is_some())
         });
-        command(&host, Command::ClearRelaunchMarker);
+        command(cx, Some(&workspace), &host, Command::ClearRelaunchMarker);
         update_host!(&host, |state, _cx| {
             state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
@@ -7465,7 +7530,7 @@ pub(crate) mod tests {
             "src/replica.rs"
         );
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7532,7 +7597,7 @@ pub(crate) mod tests {
                 );
             }
 
-            shutdown_test_host(&host);
+            shutdown_test_host(cx, &workspace, &host);
             let _ = std::fs::remove_dir_all(&root);
         }
     }
@@ -7579,6 +7644,8 @@ pub(crate) mod tests {
         update_host!(&host, move |state, _| state
             .set_provider_launcher_for_test(launcher));
         command(
+            cx,
+            Some(&workspace),
             &host,
             Command::SendTurn {
                 session_id: draft_id.clone(),
@@ -7610,7 +7677,7 @@ pub(crate) mod tests {
             );
         });
 
-        shutdown_test_host(&host);
+        shutdown_test_host(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

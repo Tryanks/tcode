@@ -7187,7 +7187,21 @@ This begins after the hard break."#;
             }
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        cx.on_quit(move || host.shutdown_blocking().expect("stop chat test host"));
+        cx.on_quit(move || {
+            let link = host.link();
+            let events = link.events();
+            smol::block_on(smol::future::race(
+                async { link.shutdown().await.expect("stop chat test host") },
+                async {
+                    // The UI is gone at test teardown; drain its retired subscriptions.
+                    while events.recv().await.is_ok() {}
+                    std::future::pending::<()>().await;
+                },
+            ));
+            host.stopped
+                .recv_blocking()
+                .expect("chat test host stopped");
+        });
         (workspace_store, window_state, session_id)
     }
 }

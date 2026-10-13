@@ -1421,6 +1421,7 @@ mod tests {
 
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let link = host.link();
+        let _events = super::p4b_tests::observed_events(&link);
         // The host only renders what it has folded; a client reads a thread by
         // subscribing to it, which is what makes the timeline resident.
         link.subscribe(tcode_protocol::Subscription {
@@ -1548,7 +1549,7 @@ mod tests {
         )
         .unwrap();
         let link = host.link();
-        let events = link.events();
+        let events = super::p4b_tests::observed_events(&link);
         for (topic, expected) in [
             (
                 Topic::Scope,
@@ -1616,7 +1617,7 @@ mod tests {
             topic: Topic::Index,
         })
         .unwrap();
-        let events = link.events();
+        let events = super::p4b_tests::observed_events(&link);
         next_event(&events, |event| {
             matches!(event.event, ServerEvent::IndexSnapshot(_))
         });
@@ -1866,7 +1867,7 @@ mod tests {
         }
         let host = spawn_host(store, HostServices::default()).unwrap();
         let link = host.link();
-        let stream = link.events();
+        let stream = super::p4b_tests::observed_events(&link);
         let topic = Topic::SessionEvents {
             session_id: "legacy-thread".into(),
         };
@@ -1938,7 +1939,7 @@ mod tests {
         };
         assert_eq!(decode_error.code, "decode_error");
         let link = host.link();
-        let events = link.events();
+        let events = super::p4b_tests::observed_events(&link);
 
         link.subscribe(Subscription {
             known_index: None,

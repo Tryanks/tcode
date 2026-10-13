@@ -5426,7 +5426,7 @@ mod tests {
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        host.shutdown_blocking().unwrap();
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5600,7 +5600,7 @@ mod tests {
                 .any(|meta| meta.id == "second" && !meta.is_settled())
         });
         assert!(!cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
-        host.shutdown_blocking().unwrap();
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
