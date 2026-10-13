@@ -152,6 +152,8 @@ pub use wire::{
 // ReadFilePreview rejects files larger than 512 KiB before transferring bytes.
 // SessionUsageChanged carries usage and meter capacity when the rest of the
 // session status is unchanged; subscription replies remain full statuses.
+// IndexActivitiesChanged sends changed activity entries when other index facts
+// are unchanged; subscription replies remain full index snapshots.
 pub const PROTOCOL_VERSION: u32 = 12;
 
 #[cfg(test)]

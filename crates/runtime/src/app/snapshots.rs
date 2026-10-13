@@ -173,8 +173,6 @@ impl DomainDiff {
     }
 }
 
-/// The events that turn a client's `old` index into `new`: the changed
-/// threads and projects one by one, and the summary whole.
 fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
     let mut events = Vec::new();
     let old_projects: HashMap<_, _> = old.projects.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -206,7 +204,35 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
         }
     }
     if old.summary != new.summary {
-        events.push(ServerEvent::IndexSummaryReplaced(new.summary.clone()));
+        let IndexSummary {
+            activity,
+            title_generating,
+            archived_counts,
+            worktree_shared,
+            archived_revision,
+        } = &new.summary;
+        if old.summary.title_generating == *title_generating
+            && old.summary.archived_counts == *archived_counts
+            && old.summary.worktree_shared == *worktree_shared
+            && old.summary.archived_revision == *archived_revision
+        {
+            events.push(ServerEvent::IndexActivitiesChanged {
+                upserts: activity
+                    .iter()
+                    .filter(|(id, value)| old.summary.activity.get(*id) != Some(*value))
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect(),
+                removed: old
+                    .summary
+                    .activity
+                    .keys()
+                    .filter(|id| !activity.contains_key(*id))
+                    .cloned()
+                    .collect(),
+            });
+        } else {
+            events.push(ServerEvent::IndexSummaryReplaced(new.summary.clone()));
+        }
     }
     events
 }
