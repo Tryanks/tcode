@@ -5834,9 +5834,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        let row = cx
-            .debug_bounds("timeline-row-89")
-            .expect("last assistant row");
+        let row = cx.debug_bounds("timeline-row-89").unwrap_or_else(|| {
+            panic!(
+                "last assistant row: selected={:?}, list_items={}",
+                store.read_with(cx, |store, _| store.active_session_id()),
+                list.item_count()
+            )
+        });
         cx.simulate_event(ScrollWheelEvent {
             position: list.viewport_bounds().center(),
             delta: ScrollDelta::Pixels(point(px(0.), list.viewport_bounds().top() - row.top())),
@@ -7214,7 +7218,10 @@ This begins after the hard break."#;
                 let active = state.residents.live.get_mut(&id).expect("selected draft");
                 active.timeline = timeline;
                 active.draft = false;
-                (active.meta.id.clone(), active.timeline.clone())
+                let result = (active.meta.id.clone(), active.timeline.clone());
+                let meta = active.meta.clone();
+                state.sessions.push(meta);
+                result
             }))
             .expect("seed markdown host");
         (host, session_id, timeline)
