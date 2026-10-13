@@ -68,6 +68,10 @@ pub enum ServerEvent {
     },
     SessionEvent(StoredEvent),
     SessionStatusReplaced(Box<SessionStatus>),
+    SessionUsageChanged {
+        usage: Option<TokenUsage>,
+        context_window: Option<u64>,
+    },
     SessionPlanReplaced(SessionPlan),
     ProvidersReplaced(ProvidersStatus),
     GitStatusReplaced(GitStatusStatus),

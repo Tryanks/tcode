@@ -109,12 +109,25 @@ impl DomainDiff {
             .collect();
         changed_ids.sort_unstable();
         for id in changed_ids {
-            let status = session_statuses[id].clone();
+            let status = &session_statuses[id];
+            let usage_only = self.session_statuses.get_mut(id).is_some_and(|previous| {
+                previous.usage = status.usage;
+                previous.context_window = status.context_window;
+                previous == status
+            });
+            let event = if usage_only {
+                ServerEvent::SessionUsageChanged {
+                    usage: status.usage,
+                    context_window: status.context_window,
+                }
+            } else {
+                ServerEvent::SessionStatusReplaced(Box::new(status.clone()))
+            };
             emit_replacement(
                 Topic::SessionStatus {
                     session_id: id.to_string(),
                 },
-                ServerEvent::SessionStatusReplaced(Box::new(status)),
+                event,
                 cx,
             );
         }
