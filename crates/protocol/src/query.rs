@@ -45,6 +45,7 @@ pub enum Query {
         /// Physical display size, from 1 through 128 pixels.
         pixels: u32,
     },
+    /// Complete file contents whose base64 reply fits the transport line limit.
     ReadFileBytes {
         path: PathBuf,
     },
