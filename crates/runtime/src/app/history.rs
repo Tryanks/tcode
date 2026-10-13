@@ -111,6 +111,39 @@ pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRe
             elided: Some(text.len() as u64),
         });
     }
+    if let AgentEvent::ItemStarted(item)
+    | AgentEvent::ItemUpdated(item)
+    | AgentEvent::ItemCompleted(item) = &record.event
+        && let ItemContent::CommandExecution {
+            command,
+            output,
+            exit_code,
+            status,
+        } = &item.content
+    {
+        let preview = agent::ThreadItem {
+            id: item.id.clone(),
+            parent_item_id: item.parent_item_id.clone(),
+            content: ItemContent::CommandExecution {
+                command: command.clone(),
+                output: output_tail(output).to_owned(),
+                exit_code: *exit_code,
+                status: *status,
+            },
+        };
+        let event = match &record.event {
+            AgentEvent::ItemStarted(_) => AgentEvent::ItemStarted(preview),
+            AgentEvent::ItemUpdated(_) => AgentEvent::ItemUpdated(preview),
+            _ => AgentEvent::ItemCompleted(preview),
+        };
+        return Cow::Owned(SessionEventRecord {
+            origin: record.origin,
+            author: record.author.clone(),
+            ts: record.ts,
+            event,
+            elided: Some(output.len() as u64),
+        });
+    }
     let mut record = record.clone();
     record.elided = match &mut record.event {
         AgentEvent::ItemStarted(item)
@@ -146,7 +179,6 @@ pub(super) fn wire_record(record: &SessionEventRecord) -> Cow<'_, SessionEventRe
                 image.data_base64.clear();
                 None
             }
-            ItemContent::CommandExecution { output, .. } => shorten(output, true),
             _ => None,
         },
         _ => None,
