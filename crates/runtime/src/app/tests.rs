@@ -2860,7 +2860,7 @@ fn draft_defaults_follow_project_history_then_global_history_without_persisting_
         let store = TestStore::new("tcode-draft-defaults");
         let state = cx.new_entity(TestClientState::new((*store).clone()));
         state.update(cx, |state, cx| {
-            state.sessions = sessions;
+            state.sessions = sessions.into();
             state.start_draft("target".into(), PathBuf::from("/new-project"), cx);
             let draft = state.selected_session().unwrap();
             assert!(draft.draft, "{name}");
@@ -2913,7 +2913,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
             id: "reasoningEffort".into(),
             value: serde_json::json!("high"),
         });
-        state.sessions = vec![previous];
+        state.sessions = vec![previous].into();
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
         let draft = state.selected_session().unwrap();
@@ -2971,7 +2971,7 @@ fn model_switch_restores_last_effort_used_with_that_model() {
         );
         fable.project_id = Some("project-target".into());
         fable.updated_at = 20;
-        state.sessions = vec![sol, fable];
+        state.sessions = vec![sol, fable].into();
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
         // Switching the draft to a model brings back the effort it last ran at,
@@ -6514,7 +6514,7 @@ fn an_accepted_user_message_moves_the_thread_updated_time() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "one more change".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -6545,7 +6545,7 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
@@ -6794,7 +6794,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
 
         // A live session with a running turn (the overnight workflow).
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id_a, "run the long migration".into(), Vec::new(), cx);
         state.send_turn(&id_a, "queued follow-up".into(), Vec::new(), cx);
@@ -6922,7 +6922,7 @@ fn drained_parked_session_stays_resident() {
 
     state.update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
-        state.sessions = state.store.load_index().unwrap();
+        state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "one last thing".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {

@@ -310,23 +310,15 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 // Borrowing the host state confines cached results to one immutable snapshot.
 pub(super) struct ActivityProjection<'a> {
     state: &'a AppState,
-    children: HashMap<&'a str, Vec<&'a SessionMeta>>,
+    children: &'a HashMap<String, Vec<usize>>,
     holding: std::cell::RefCell<HashMap<&'a str, bool>>,
 }
 
 impl<'a> ActivityProjection<'a> {
     pub(super) fn new(state: &'a AppState) -> Self {
-        let mut children: HashMap<&str, Vec<&SessionMeta>> = HashMap::new();
-        for meta in &state.sessions {
-            if meta.archived_at.is_none()
-                && let Some(parent) = meta.parent_session_id.as_deref()
-            {
-                children.entry(parent).or_default().push(meta);
-            }
-        }
         Self {
             state,
-            children,
+            children: state.sessions.children(),
             holding: std::cell::RefCell::new(HashMap::new()),
         }
     }
@@ -334,19 +326,22 @@ impl<'a> ActivityProjection<'a> {
     /// Whether a child of this thread holds it: one still runs, or a
     /// dispatched one awaits its lead's settle.
     pub(super) fn children_hold(&self, parent_id: &str) -> bool {
-        let Some((&parent_id, children)) = self.children.get_key_value(parent_id) else {
+        let Some((parent_id, children)) = self.children.get_key_value(parent_id) else {
             return false;
         };
+        let parent_id = parent_id.as_str();
         if let Some(holds) = self.holding.borrow().get(parent_id) {
             return *holds;
         }
-        let holds = children.iter().any(|child| match self.agent_status(child) {
-            Some(status) => status.delivery.holds_parent(),
-            None => {
-                self.state
-                    .resident(&child.id)
-                    .is_some_and(|session| session.is_unfinished() || session.timeline.turn_running)
-                    || self.children_hold(&child.id)
+        let holds = children.iter().any(|index| {
+            let child = &self.state.sessions[*index];
+            match self.agent_status(child) {
+                Some(status) => status.delivery.holds_parent(),
+                None => {
+                    self.state.resident(&child.id).is_some_and(|session| {
+                        session.is_unfinished() || session.timeline.turn_running
+                    }) || self.children_hold(&child.id)
+                }
             }
         });
         self.holding.borrow_mut().insert(parent_id, holds);
