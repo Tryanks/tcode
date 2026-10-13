@@ -334,7 +334,10 @@ fn build_staging(root: &Path, progress: &mut Progress) -> io::Result<Summary> {
             logs.push((id, root.join(name)));
         }
     }
-    let index = migrate_index(read_legacy_index(root)?);
+    let mut index = migrate_index(read_legacy_index(root)?);
+    for session in &mut index.sessions {
+        session.migrate_lifecycle();
+    }
     reject_duplicates(&index)?;
     let staging = root.join(STAGING_FILE);
     let db = Db::open(&staging, true)?;
