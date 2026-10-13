@@ -515,9 +515,24 @@ mod tests {
                     ServerEvent::IndexUpsertProject(project.clone())
                 } else {
                     if reconnect == Some(true) {
-                        store.apply_connection_state(tcode_client::ConnectionState::Syncing {
-                            path: None,
-                        });
+                        for state in [
+                            tcode_client::ConnectionState::Reconnecting {
+                                attempt: 1,
+                                reason: None,
+                            },
+                            tcode_client::ConnectionState::Syncing { path: None },
+                        ] {
+                            store.host.set_connection_state(state.clone());
+                            store.apply_connection_state(state);
+                        }
+                        store.apply_domain_event(
+                            &EventEnvelope {
+                                request_id: store.host.subscription_request_id(&Topic::Scope),
+                                topic: Topic::Scope,
+                                event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
+                            },
+                            cx,
+                        );
                     }
                     // Seed a baseline before caching the error, then replace it on reconnect.
                     ServerEvent::IndexSnapshot(IndexSnapshot {

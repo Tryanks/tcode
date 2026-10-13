@@ -195,6 +195,7 @@ pub struct WorkspaceStore {
     /// editable input must not treat the defaults as the host's answer.
     settings_hydrated: bool,
     baseline_topics: HashSet<Topic>,
+    applied_scope_request: Option<u64>,
     index_hydrated: bool,
     /// The `updated_at` this view last reported read, so an acknowledgement
     /// is sent once per change rather than once per event until the host's
@@ -408,6 +409,7 @@ impl WorkspaceStore {
             settings_replica: Settings::default(),
             settings_hydrated: false,
             baseline_topics: HashSet::new(),
+            applied_scope_request: None,
             index_hydrated: false,
             read_acknowledged: None,
             conversation_on_screen: false,
@@ -826,7 +828,13 @@ impl WorkspaceStore {
                 ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
             ),
         };
-        if restarts {
+        let scope_is_current = self.applied_scope_request.is_some()
+            && self.applied_scope_request == self.host.subscription_request_id(&Topic::Scope);
+        let disconnected = matches!(
+            self.host.connection_state(),
+            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+        );
+        if restarts && (!scope_is_current || disconnected) {
             for subscription in self.host.subscriptions() {
                 if subscription.topic != Topic::Scope {
                     let _ = self.host.unsubscribe(subscription);
@@ -836,22 +844,6 @@ impl WorkspaceStore {
             self.archived_task = None;
         }
         self.connection_state = state;
-        if restarts
-            && matches!(
-                self.connection_state,
-                ConnectionState::Syncing { .. } | ConnectionState::Connected { .. }
-            )
-        {
-            // State and domain events arrive on separate queues. Request a fresh
-            // baseline after invalidation, so a late event from the old socket
-            // cannot satisfy readiness for the new one. HostLink correlates the
-            // replies against these new request IDs and retains applied cursors.
-            let _ = self.host.subscribe(Subscription {
-                known_index: None,
-                topic: Topic::Scope,
-                after: None,
-            });
-        }
     }
 
     /// Outbox-derived navigation only; no host metadata is invented or cached.
@@ -1098,9 +1090,14 @@ impl WorkspaceStore {
         if envelope.topic == Topic::Scope {
             if let ServerEvent::ScopeSnapshot(scope) = &envelope.event
                 && envelope.request_id.is_some()
-                && !self.baseline_topics.contains(&Topic::Scope)
+                && envelope.request_id != self.applied_scope_request
+                && !matches!(
+                    self.host.connection_state(),
+                    ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+                )
             {
                 self.apply_scope(scope, cx);
+                self.applied_scope_request = envelope.request_id;
             }
             return;
         }
@@ -4231,11 +4228,15 @@ pub(crate) mod tests {
             providers: Vec::new(),
         };
         workspace.update(cx, |store, _| {
-            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+            let state = tcode_client::ConnectionState::Reconnecting {
                 attempt: 1,
                 reason: None,
-            });
-            store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
+            };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
+            let state = tcode_client::ConnectionState::Syncing { path: None };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
         });
         host.driver
             .wait_until(cx, &workspace, "new space baseline", |cx| {
@@ -4278,11 +4279,15 @@ pub(crate) mod tests {
         );
         *host.scope.lock().unwrap() = tcode_protocol::Scope::Full;
         workspace.update(cx, |store, _| {
-            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+            let state = tcode_client::ConnectionState::Reconnecting {
                 attempt: 1,
                 reason: None,
-            });
-            store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
+            };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
+            let state = tcode_client::ConnectionState::Syncing { path: None };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
         });
         host.driver
             .wait_until(cx, &workspace, "full scope baseline", |cx| {
@@ -4326,10 +4331,12 @@ pub(crate) mod tests {
             providers: vec![],
         };
         workspace.update(cx, |store, cx| {
-            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+            let state = tcode_client::ConnectionState::Reconnecting {
                 attempt: 1,
                 reason: None,
-            });
+            };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -4354,7 +4361,9 @@ pub(crate) mod tests {
             "the cached share badges are invalidated"
         );
         workspace.update(cx, |store, _| {
-            store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None })
+            let state = tcode_client::ConnectionState::Syncing { path: None };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
         });
         host.driver
             .wait_until(cx, &workspace, "moved member baseline", |cx| {
@@ -4833,10 +4842,15 @@ pub(crate) mod tests {
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         cx.run_until_parked();
         store.update(cx, |store, cx| {
-            store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
+            let state = tcode_client::ConnectionState::Reconnecting {
                 attempt: 1,
                 reason: None,
-            });
+            };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
+            let state = tcode_client::ConnectionState::Syncing { path: None };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -6140,10 +6154,12 @@ pub(crate) mod tests {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
         workspace.update(cx, |store, cx| {
-            store.apply_connection_state(ConnectionState::Reconnecting {
+            let state = ConnectionState::Reconnecting {
                 attempt: 2,
                 reason: None,
-            });
+            };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -6153,7 +6169,9 @@ pub(crate) mod tests {
                 cx,
             );
             assert!(!store.baseline_ready());
-            store.apply_connection_state(ConnectionState::Syncing { path: None });
+            let state = ConnectionState::Syncing { path: None };
+            store.host.set_connection_state(state.clone());
+            store.apply_connection_state(state);
             assert!(!store.threads_loading(), "cached list remains visible");
             assert!(!store.chat_loading(), "cached thread remains visible");
             assert_eq!(store.active_session_id().as_deref(), Some("one"));
