@@ -98,21 +98,32 @@ fn read_fingerprints<'a>(
             })
         })
         .collect();
-    let document = graphql::aliases(
+    let items = items.ok_or(GitHubError::Request)?;
+    let selection = if items.len() > 1 {
+        "...WatchFingerprint"
+    } else {
+        FINGERPRINT_SELECTION
+    };
+    let mut document = graphql::aliases(
         "query",
         "PullRequestWatchFingerprints",
         "w",
-        &items.ok_or(GitHubError::Request)?,
+        &items,
         &Variables::new(),
         |v| {
             format!(
-                "repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {FINGERPRINT_SELECTION} }} }}",
+                "repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{ {selection} }} }}",
                 v["owner"], v["name"], v["number"]
             )
         },
         |fields| fields,
     )
     .ok_or(GitHubError::Request)?;
+    if items.len() > 1 {
+        document.query.push_str(&format!(
+            "\nfragment WatchFingerprint on PullRequest {{ {FINGERPRINT_SELECTION} }}"
+        ));
+    }
     let response: Value = api
         .graphql(
             host,
