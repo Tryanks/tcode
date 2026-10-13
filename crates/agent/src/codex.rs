@@ -616,6 +616,11 @@ struct Actor {
     seen_subagent_activities: HashSet<String>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
+    retry: Option<crate::TurnRetry>,
+    retry_deadline: Option<std::time::Instant>,
+    capacity_retries: usize,
+    last_turn_options: Option<TurnOptions>,
+    interrupted: bool,
     /// Steers the server acknowledged but has not yet consumed, as
     /// `(request_id, text)`. `turn/steer` only enqueues the input; the turn
     /// loop drains it before its next model request and echoes it back as a
@@ -699,6 +704,11 @@ async fn run_actor(
         seen_subagent_activities: HashSet::new(),
         usage_by_turn: HashMap::new(),
         active_turn: None,
+        retry: None,
+        retry_deadline: None,
+        capacity_retries: 0,
+        last_turn_options: None,
+        interrupted: false,
         pending_steers: Vec::new(),
         instructions: opts.instructions.clone(),
     };
@@ -755,6 +765,11 @@ impl SessionActor for Actor {
                 options,
                 attachments,
             } => {
+                self.retry = None;
+                self.retry_deadline = None;
+                self.capacity_retries = 0;
+                self.last_turn_options = options.clone();
+                self.interrupted = false;
                 let params = self.build_turn_params(&text, options.as_ref(), &attachments);
                 self.request(
                     "turn/start",
@@ -769,7 +784,35 @@ impl SessionActor for Actor {
                     .await;
                 Ok(())
             }
+            SessionCommand::RetryTurn { turn_id } => {
+                if self
+                    .retry
+                    .as_ref()
+                    .is_some_and(|retry| retry.turn_id == turn_id)
+                {
+                    self.wake().await?;
+                }
+                Ok(())
+            }
             SessionCommand::Interrupt => {
+                self.interrupted = true;
+                if self.retry.is_some()
+                    && !self
+                        .pending_requests
+                        .values()
+                        .any(|request| matches!(request, PendingRequest::TurnStart { .. }))
+                {
+                    self.clear_retry().await;
+                    return Ok(());
+                }
+                if self.active_turn.is_none()
+                    && self
+                        .pending_requests
+                        .values()
+                        .any(|request| matches!(request, PendingRequest::TurnStart { .. }))
+                {
+                    return Ok(());
+                }
                 let Some(turn_id) = self.active_turn.clone() else {
                     self.events
                         .emit(AgentEvent::Warning {
@@ -1009,7 +1052,34 @@ impl SessionActor for Actor {
         }
     }
 
+    fn wake_at(&self) -> Option<std::time::Instant> {
+        self.retry_deadline
+    }
+
+    async fn wake(&mut self) -> Result<(), String> {
+        if self.retry.is_none()
+            || self
+                .pending_requests
+                .values()
+                .any(|request| matches!(request, PendingRequest::TurnStart { .. }))
+        {
+            return Ok(());
+        }
+        self.retry_deadline = None;
+        let mut params = self.build_turn_params("", self.last_turn_options.as_ref(), &[]);
+        params["input"] = json!([]);
+        self.request(
+            "turn/start",
+            params,
+            PendingRequest::TurnStart {
+                permission: self.requested_permission.clone(),
+                settings: None,
+            },
+        )
+    }
+
     async fn settle_shutdown(&mut self) {
+        self.clear_retry().await;
         self.settle_pending_user_inputs_on_shutdown().await;
     }
 
@@ -1587,6 +1657,15 @@ impl Actor {
         Ok(())
     }
 
+    async fn clear_retry(&mut self) {
+        self.retry_deadline = None;
+        if self.retry.take().is_some() {
+            self.events
+                .emit(AgentEvent::TurnRetry { retry: None })
+                .await;
+        }
+    }
+
     fn build_turn_params(
         &self,
         text: &str,
@@ -1771,6 +1850,7 @@ impl Actor {
         {
             return;
         }
+        self.clear_retry().await;
         self.events
             .emit(AgentEvent::TurnCompleted {
                 turn_id: String::new(),
@@ -2082,6 +2162,15 @@ impl Actor {
             "turn/started" => {
                 if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
                     self.active_turn = Some(id.into());
+                    self.retry = None;
+                    self.retry_deadline = None;
+                    if self.interrupted {
+                        let _ = self.request(
+                            "turn/interrupt",
+                            json!({"threadId":self.thread_id,"turnId":id}),
+                            PendingRequest::Interrupt,
+                        );
+                    }
                     self.events
                         .emit(AgentEvent::TurnStarted { turn_id: id.into() })
                         .await;
@@ -2099,6 +2188,39 @@ impl Actor {
                     Some("failed") => TurnStatus::Failed,
                     _ => TurnStatus::Completed,
                 };
+                if status == TurnStatus::Failed
+                    && !self.interrupted
+                    && turn
+                        .pointer("/error/codexErrorInfo")
+                        .and_then(Value::as_str)
+                        == Some("serverOverloaded")
+                {
+                    // Codex App retries overload failures with empty input at these intervals.
+                    // app-server ends the native turn instead of scheduling this continuation.
+                    let delay = [10, 30, 120, 300].get(self.capacity_retries).copied();
+                    self.capacity_retries = self.capacity_retries.saturating_add(1);
+                    self.retry_deadline = delay.map(|seconds| {
+                        std::time::Instant::now() + std::time::Duration::from_secs(seconds)
+                    });
+                    self.retry = Some(crate::TurnRetry {
+                        turn_id: id.clone(),
+                        retry_at: delay.map(|seconds| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                                + seconds
+                        }),
+                    });
+                    self.events
+                        .emit(AgentEvent::TurnRetry {
+                            retry: self.retry.clone(),
+                        })
+                        .await;
+                } else {
+                    self.clear_retry().await;
+                    self.capacity_retries = 0;
+                }
                 self.active_turn = None;
                 self.async_questions = None;
                 let usage = self.usage_by_turn.remove(&id);
@@ -4198,6 +4320,11 @@ mod tests {
                 pending_steers: Vec::new(),
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
+                retry: None,
+                retry_deadline: None,
+                capacity_retries: 0,
+                last_turn_options: None,
+                interrupted: false,
                 instructions: None,
             },
             event_rx,
@@ -4999,6 +5126,135 @@ mod tests {
         assert!(message.contains("Cannot find module"), "{message}");
         assert!(message.contains("exit status: 1"), "{message}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn capacity_failure_offers_native_continuation_after_ten_seconds() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (attempt, delay) in [Some(10), Some(30), Some(120), Some(300), None]
+                .into_iter()
+                .enumerate()
+            {
+                let turn_id = format!("capacity-{attempt}");
+                actor
+                    .handle_notification("turn/started", &json!({"turn":{"id":turn_id}}))
+                    .await;
+                let before = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                actor.handle_notification("error", &json!({
+                    "turnId": turn_id, "willRetry": false,
+                    "error": {"message": "Selected model is capacity. Please try a different model.",
+                              "codexErrorInfo": "serverOverloaded"}
+                })).await;
+                actor.handle_notification("turn/completed", &json!({
+                    "turn": {"id": turn_id, "status": "failed",
+                    "error": {"message": "Selected model is capacity. Please try a different model.",
+                              "codexErrorInfo": "serverOverloaded"}}
+                })).await;
+                let mut offered = None;
+                while let Ok(event) = events.try_recv() {
+                    if let AgentEvent::TurnRetry { retry: Some(retry) } = event {
+                        offered = Some(retry);
+                    }
+                }
+                let offered = offered.expect("capacity failure must offer a native retry");
+                assert_eq!(offered.turn_id, turn_id);
+                assert_eq!(offered.retry_at.is_some(), delay.is_some());
+                if let Some(delay) = delay {
+                    let deadline = offered.retry_at.unwrap();
+                    let after = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    assert!((before + delay..=after + delay).contains(&deadline));
+                }
+                // Both automatic and manual paths must continue without duplicating input.
+                if attempt == 0 {
+                    actor.wake().await.unwrap();
+                } else {
+                    actor
+                        .handle_command(SessionCommand::RetryTurn {
+                            turn_id: turn_id.clone(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("missing continuation")
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], "turn/start");
+                assert_eq!(request["params"]["threadId"], "thread-1");
+                assert_eq!(request["params"]["input"], json!([]));
+                // A second client cannot submit the same retry while start is pending.
+                actor
+                    .handle_command(SessionCommand::RetryTurn { turn_id })
+                    .await
+                    .unwrap();
+                assert!(actor.lines.try_recv().is_err());
+                actor.handle_line(&json!({"id":request["id"], "result":{"turn":{"id":format!("capacity-{}",attempt + 1)}}}).to_string()).await;
+            }
+            actor
+                .handle_command(SessionCommand::Interrupt)
+                .await
+                .unwrap();
+            actor
+                .handle_notification("turn/started", &json!({"turn":{"id":"capacity-5"}}))
+                .await;
+            let ChildOutput::Line(interrupt) = actor.lines.recv().await.unwrap() else {
+                panic!("missing interrupt")
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&interrupt).unwrap()["method"],
+                "turn/interrupt"
+            );
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn capacity_retry_cancellation_and_non_capacity_failures_do_not_restart() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for error in ["usageLimitExceeded", "other", "serverOverloaded"] {
+                actor
+                    .handle_notification("turn/started", &json!({"turn":{"id":error}}))
+                    .await;
+                actor
+                    .handle_notification(
+                        "turn/completed",
+                        &json!({"turn":{"id":error,"status":"failed",
+                    "error":{"message":"capacity","codexErrorInfo":error}}}),
+                    )
+                    .await;
+                let offers = std::iter::from_fn(|| events.try_recv().ok())
+                    .filter(|event| matches!(event, AgentEvent::TurnRetry { retry: Some(_) }))
+                    .count();
+                assert_eq!(offers, usize::from(error == "serverOverloaded"));
+            }
+            actor
+                .handle_command(SessionCommand::Interrupt)
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::TurnRetry { retry: None })
+            ));
+            actor.wake().await.unwrap();
+            actor
+                .handle_command(SessionCommand::RetryTurn {
+                    turn_id: "serverOverloaded".into(),
+                })
+                .await
+                .unwrap();
+            assert!(actor.lines.try_recv().is_err());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]

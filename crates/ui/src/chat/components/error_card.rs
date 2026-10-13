@@ -14,6 +14,11 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 pub(crate) enum LimitResume {
+    Retry {
+        remaining_secs: Option<u64>,
+        on_retry: ClickHandler,
+        on_cancel: ClickHandler,
+    },
     /// No resume is queued and the reset is still ahead: offer to schedule one.
     Offer { on_schedule: ClickHandler },
     /// A resume is queued for the reset: live countdown plus cancel.
@@ -52,6 +57,35 @@ pub(crate) fn error_card(
         })
         .on_click(on_copy);
     let resume_row = resume.map(|resume| match resume {
+        LimitResume::Retry {
+            remaining_secs,
+            on_retry,
+            on_cancel,
+        } => h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new(SharedString::from(format!("retry-turn:{id}")))
+                    .outline()
+                    .xsmall()
+                    .label(match remaining_secs {
+                        Some(seconds) => {
+                            crate::tr!("chat.capacity_retry.countdown", seconds = seconds)
+                        }
+                        None => crate::tr!("chat.capacity_retry.retry"),
+                    })
+                    .on_click(on_retry),
+            )
+            .when(remaining_secs.is_some(), |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("cancel-retry:{id}")))
+                        .ghost()
+                        .xsmall()
+                        .label(crate::tr!("chat.limit_resume.cancel"))
+                        .on_click(on_cancel),
+                )
+            })
+            .into_any_element(),
         LimitResume::Offer { on_schedule } => h_flex()
             .gap_2()
             .items_center()

@@ -86,6 +86,9 @@ chat:
   copy_input: "复制输入"
   copy_text: "复制文字"
   copy_error: "复制错误信息"
+  capacity_retry:
+    countdown: "%{seconds} 秒后重试"
+    retry: "重试"
   limit_resume:
     resumes_in: "将在 %{countdown} 后继续"
     cancel: "取消"

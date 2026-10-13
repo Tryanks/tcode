@@ -1868,6 +1868,10 @@ impl WorkspaceStore {
     /// places the running turn among the held ones. Status and events are
     /// separate topics, so each settles the replica whenever it changes.
     fn settle_running_turn(&self, timeline: &mut Timeline) {
+        timeline.turn_retry = self
+            .session_status_replica
+            .as_ref()
+            .and_then(|status| status.turn_retry.clone());
         let running = self
             .session_status_replica
             .as_ref()

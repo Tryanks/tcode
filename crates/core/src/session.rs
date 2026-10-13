@@ -533,6 +533,7 @@ pub struct Timeline {
     /// One entry per turn ("Work Log" section), in order.
     pub turns: Vec<TurnMeta>,
     pub turn_running: bool,
+    pub turn_retry: Option<agent::TurnRetry>,
     pub pending_approvals: Vec<ApprovalRequest>,
     /// The latest structured plan/task list (`PlanUpdated`), if any.
     pub plan_steps: Vec<PlanStep>,
@@ -598,6 +599,7 @@ impl Timeline {
     /// Clear any lingering "running" state (used after replaying a stored
     /// session whose provider process is no longer live).
     pub fn mark_idle(&mut self) {
+        self.turn_retry = None;
         self.turn_running = false;
         self.pending_approvals.clear();
         self.pending_user_input = None;
@@ -656,6 +658,9 @@ impl Timeline {
             self.tool_clock.observe(ts);
         }
         match event {
+            AgentEvent::TurnRetry { retry } => {
+                self.turn_retry = retry.clone();
+            }
             AgentEvent::ProviderRelay {
                 from_provider,
                 from_model,
@@ -715,6 +720,7 @@ impl Timeline {
                 self.last_served_model = Some(model.clone());
             }
             AgentEvent::TurnStarted { turn_id } => {
+                self.turn_retry = None;
                 if let Some(usage) = self.usage.as_mut()
                     && usage.freshness == agent::ContextFreshness::Current
                 {
@@ -956,6 +962,7 @@ impl Timeline {
                 });
             }
             AgentEvent::SessionClosed { reason } => {
+                self.turn_retry = None;
                 // An abnormal close carries the provider's dying words (exit
                 // status, stderr tail). Fold them into the transcript so the
                 // cause survives past the one-shot toast — a reopened session
@@ -1137,6 +1144,7 @@ impl Timeline {
     /// Turn a user message belongs to: a fresh turn when the previous one has
     /// already completed (a new exchange), otherwise the current open turn.
     fn begin_user_turn(&mut self, ts: Option<u64>) -> usize {
+        self.turn_retry = None;
         let need_new = match self.current_turn {
             None => true,
             Some(turn) => self.turns[turn].end_ts.is_some() || self.turns[turn].status.is_some(),

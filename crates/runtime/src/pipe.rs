@@ -811,6 +811,15 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.steer(&session_id, text, attachment_paths, cx),
         Command::SteerQueued { session_id, id } => app.steer_queued(&session_id, id, cx),
         Command::DropQueued { session_id, id } => app.drop_queued(&session_id, id, cx),
+        Command::RetryTurn {
+            session_id,
+            turn_id,
+        } => {
+            return CommandOutcome::Immediate(
+                app.retry_turn(&session_id, turn_id)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::Interrupt { session_id } => {
             return CommandOutcome::Immediate(
                 app.interrupt(&session_id, cx)

@@ -402,7 +402,9 @@ impl SessionActor for OpenCodeActor {
                     .await;
                 Ok(())
             }
-            SessionCommand::SetOption { .. } | SessionCommand::Shutdown => Ok(()),
+            SessionCommand::RetryTurn { .. }
+            | SessionCommand::SetOption { .. }
+            | SessionCommand::Shutdown => Ok(()),
         }
     }
 

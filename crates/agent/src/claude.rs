@@ -898,6 +898,7 @@ async fn handle_command(
             write_steering_message(stdin, &msg, request_id, mapper, event_tx).await;
             ControlFlow::Continue(())
         }
+        SessionCommand::RetryTurn { .. } => ControlFlow::Continue(()),
         SessionCommand::Shutdown => {
             // Settle pending AskUserQuestion callbacks before closing stdin.
             for (request_id, response) in mapper.cancel_pending_user_input() {

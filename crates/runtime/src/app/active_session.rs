@@ -423,7 +423,7 @@ impl ActiveSession {
             SendRouting::Send
         } else if !steer {
             SendRouting::Queue
-        } else if self.can_steer() {
+        } else if self.can_steer() && self.timeline.turn_retry.is_none() {
             SendRouting::Steer
         } else {
             SendRouting::QueueUnsupported
