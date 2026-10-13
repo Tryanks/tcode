@@ -388,6 +388,7 @@ impl WorkspaceStore {
     }
     pub(crate) fn leave_session(&mut self) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
+        self.draft_fallback_pending = false;
         self.history_task = None;
         self.history_trim = None;
         self.history_error = None;
