@@ -8,7 +8,7 @@ use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 use host::{WebHost, window};
 #[cfg(feature = "debug-exports")]
-use tcode_client::host::{ClientHost as _, Transport};
+use tcode_client::host::ClientHost as _;
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -138,9 +138,16 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
 
 #[cfg(feature = "debug-exports")]
 struct DebugConnection {
-    transport: Transport,
-    history: Vec<String>,
+    link: tcode_client::HostLink,
+    history: Rc<RefCell<Vec<String>>>,
     index_snapshots: usize,
+}
+
+#[cfg(feature = "debug-exports")]
+impl Drop for DebugConnection {
+    fn drop(&mut self) {
+        self.link.close();
+    }
 }
 
 /// Exercise the actual WebHost methods without depending on screen state:
@@ -162,20 +169,52 @@ pub async fn debug_connect() -> String {
         return serde_json::json!({"error":"not signed in"}).to_string();
     };
     let transport = host.connect(&paired);
-    let _ = transport.to_host.try_send(
-        r#"{"id":1,"payload":{"type":"subscribe","content":{"topic":{"type":"index"}}}}"#.into(),
-    );
-    let line = transport
-        .from_host
-        .recv()
-        .await
-        .unwrap_or_else(|error| serde_json::json!({"error":error.to_string()}).to_string());
+    let link = tcode_client::HostLink::new(transport.to_host, transport.from_host);
+    if let Err(error) = link.subscribe(tcode_protocol::Subscription {
+        known_index: None,
+        topic: tcode_protocol::Topic::Index,
+        after: None,
+    }) {
+        return serde_json::json!({"error": error.message}).to_string();
+    }
+    let history = Rc::new(RefCell::new(Vec::new()));
+    wasm_bindgen_futures::spawn_local({
+        let link = link.clone();
+        async move { link.pump().await }
+    });
+    wasm_bindgen_futures::spawn_local({
+        let link = link.clone();
+        let history = history.clone();
+        async move {
+            while let Ok(state) = transport.state.recv().await {
+                let mut history = history.borrow_mut();
+                if history.len() == 64 {
+                    history.remove(0);
+                }
+                history.push(format!("{state:?}"));
+                link.set_connection_state(state);
+            }
+        }
+    });
+    let event = match link.events().recv().await {
+        Ok(event) => event,
+        Err(error) => {
+            link.close();
+            return serde_json::json!({"error": error.to_string()}).to_string();
+        }
+    };
+    let index_snapshots = usize::from(matches!(
+        &event.event,
+        tcode_protocol::ServerEvent::IndexSnapshot(_)
+    ));
+    let line =
+        tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(event)).unwrap_or_default();
     DEBUG.with(|slot| {
         *slot.borrow_mut() = Some(DebugConnection {
-            transport,
-            history: Vec::new(),
-            index_snapshots: usize::from(is_index_snapshot(&line)),
-        })
+            link,
+            history,
+            index_snapshots,
+        });
     });
     line
 }
@@ -190,26 +229,18 @@ pub fn debug_connection_state() -> String {
         let Some(debug) = slot.as_mut() else {
             return serde_json::json!({"state":"Offline"}).to_string();
         };
-        while let Ok(state) = debug.transport.state.try_recv() {
-            if debug.history.len() == 64 {
-                debug.history.remove(0);
-            }
-            debug.history.push(format!("{state:?}"));
+        while let Ok(event) = debug.link.events().try_recv() {
+            debug.index_snapshots += usize::from(matches!(
+                event.event,
+                tcode_protocol::ServerEvent::IndexSnapshot(_)
+            ));
         }
-        while let Ok(line) = debug.transport.from_host.try_recv() {
-            debug.index_snapshots += usize::from(is_index_snapshot(&line));
-        }
+        let history = debug.history.borrow();
         serde_json::json!({
-            "state": debug.history.last(),
-            "history": debug.history,
+            "state": history.last(),
+            "history": *history,
             "index_snapshots": debug.index_snapshots,
         })
         .to_string()
     })
-}
-
-#[cfg(feature = "debug-exports")]
-fn is_index_snapshot(line: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(line)
-        .is_ok_and(|value| value["content"]["event"]["type"].as_str() == Some("index_snapshot"))
 }

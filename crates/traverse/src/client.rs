@@ -788,7 +788,6 @@ async fn connection_loop(
     let state = Arc::new(state);
     let mut host = live.snapshot();
     let mut buffered = VecDeque::<String>::new();
-    let mut subscriptions = HashMap::<String, String>::new();
     let mut backoff = Backoff::default();
     let mut reason = None;
     while !outgoing.is_closed() && !incoming.is_closed() {
@@ -830,6 +829,7 @@ async fn connection_loop(
                 live.authenticated(&host);
                 persist_addresses(&device, &host);
                 // Tunnels are available by the time Syncing is observable.
+                // HostLink restores subscriptions from its latest applied cursors.
                 tunnels.set(Some(established.connection.clone()));
                 state
                     .syncing(crate::host::path_info(&established.connection))
@@ -841,15 +841,8 @@ async fn connection_loop(
                     state.clone(),
                 ));
                 let started = Instant::now();
-                let lost = relay_connected(
-                    established,
-                    &outgoing,
-                    &incoming,
-                    &state,
-                    &mut subscriptions,
-                    &mut buffered,
-                )
-                .await;
+                let lost =
+                    relay_connected(established, &outgoing, &incoming, &state, &mut buffered).await;
                 paths.abort();
                 tunnels.set(None);
                 if lost.healthy {
@@ -882,7 +875,7 @@ async fn connection_loop(
             })
             .await;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(delay);
-        buffer_during_backoff(&outgoing, &mut buffered, &mut subscriptions, deadline).await;
+        buffer_during_backoff(&outgoing, &mut buffered, deadline).await;
     }
     let _ = state
         .send(ConnectionState::Offline {
@@ -1060,7 +1053,6 @@ async fn relay_connected(
     outgoing: &Arc<OutgoingReceiver>,
     incoming: &Sender<String>,
     state: &StateSender,
-    subscriptions: &mut HashMap<String, String>,
     buffered: &mut VecDeque<String>,
 ) -> Lost {
     let Established {
@@ -1107,9 +1099,6 @@ async fn relay_connected(
         }
         unsent
     });
-    for line in subscriptions.values() {
-        let _ = wire_tx.send(line.clone()).await;
-    }
     while let Some(line) = buffered.pop_front() {
         if subscription_key(&line).is_none() {
             let _ = wire_tx.send(line).await;
@@ -1142,9 +1131,6 @@ async fn relay_connected(
         tokio::select! {
             line = outgoing.recv() => match line {
                 Ok(line) => {
-                    if let Some(key) = subscription_key(&line) {
-                        subscriptions.insert(key, line.clone());
-                    }
                     if wire_tx.send(line).await.is_err() {
                         break Lost { failure: ConnectionFailure::Unreachable(None), healthy, wake: None };
                     }
@@ -1204,7 +1190,6 @@ async fn relay_connected(
 async fn buffer_during_backoff(
     outgoing: &OutgoingReceiver,
     buffered: &mut VecDeque<String>,
-    subscriptions: &mut HashMap<String, String>,
     deadline: tokio::time::Instant,
 ) {
     let done = tokio::time::sleep_until(deadline);
@@ -1213,9 +1198,7 @@ async fn buffer_during_backoff(
         tokio::select! {
             line = outgoing.recv() => match line {
                 Ok(line) => {
-                    if let Some(key) = subscription_key(&line) {
-                        subscriptions.insert(key, line);
-                    } else {
+                    if subscription_key(&line).is_none() {
                         buffered.push_back(line);
                     }
                 }
