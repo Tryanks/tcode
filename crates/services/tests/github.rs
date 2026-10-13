@@ -175,7 +175,7 @@ fn maps_hosts_and_keeps_saved_environment_and_enterprise_credentials_in_their_bo
     );
     // Anonymous release checks never read a saved token or the disabled switch.
     let (answer, request, _) = fixture.call(
-        || tcode_services::version_check::fetch_latest_tcode_release_json(&api),
+        || tcode_services::version_check::ReleaseFeed::new(api.clone()).latest_json(),
         200,
         "",
         b"{\"tag_name\":\"v99.0.0\"}",
@@ -411,7 +411,7 @@ fn conditional_reads_reuse_the_validator_without_debiting_and_reserve_stays_inte
     );
     answer.unwrap();
     let (answer, _, _) = fixture.call(
-        || tcode_services::version_check::fetch_latest_tcode_release_json(&api),
+        || tcode_services::version_check::ReleaseFeed::new(api.clone()).latest_json(),
         200,
         "",
         b"{}",
@@ -638,7 +638,7 @@ fn body_cap_and_deadline_cover_streaming_after_headers() {
         Err(GitHubError::RateLimited { status: 429, .. })
     ));
     let (answer, _, _) = fixture.call(
-        || tcode_services::version_check::fetch_latest_tcode_release_json(&api),
+        || tcode_services::version_check::ReleaseFeed::new(api.clone()).latest_json(),
         200,
         "",
         &vec![b'a'; 1024 * 1024 + 1],
