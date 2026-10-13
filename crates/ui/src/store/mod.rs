@@ -5976,6 +5976,81 @@ pub(crate) mod tests {
         };
     }
 
+    pub(crate) struct LocalHostDriver {
+        pub(crate) link: tcode_client::HostLink,
+        pump: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
+    }
+
+    impl LocalHostDriver {
+        pub(crate) fn new(host: &SpawnedHost) -> Self {
+            let link = tcode_client::HostLink::new(host.to_host.clone(), host.from_host.clone());
+            Self::from_link(link)
+        }
+
+        pub(crate) fn from_link(link: tcode_client::HostLink) -> Self {
+            let pump_link = link.clone();
+            Self {
+                link,
+                pump: Box::pin(async move { pump_link.pump().await }),
+            }
+        }
+
+        pub(crate) fn step(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+        ) {
+            // The real host sends from an OS thread. Route replies here so
+            // asset and command futures wake on GPUI's test scheduler thread.
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let _ = self.pump.as_mut().poll(&mut task_cx);
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
+        }
+
+        pub(crate) fn wait_until(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            description: &str,
+            mut ready: impl FnMut(&TestAppContext) -> bool,
+        ) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                self.step(cx, store);
+                if ready(cx) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "waiting for {description}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+
+        pub(crate) fn shutdown(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            host: &SpawnedHost,
+        ) {
+            let link = self.link.clone();
+            let mut shutdown = std::pin::pin!(link.shutdown());
+            self.wait_until(cx, store, "host shutdown", |_| {
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                match std::future::Future::poll(shutdown.as_mut(), &mut task_cx) {
+                    std::task::Poll::Ready(result) => {
+                        result.expect("stop host");
+                        true
+                    }
+                    std::task::Poll::Pending => false,
+                }
+            });
+            host.stopped.recv_blocking().expect("host stopped");
+        }
+    }
+
     pub(crate) fn await_with_events<T>(
         cx: &mut TestAppContext,
         workspace: &gpui::Entity<WorkspaceStore>,

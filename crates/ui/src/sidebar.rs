@@ -6473,7 +6473,7 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The host side answers every command and records the pins.
-        std::thread::spawn(move || smol::block_on(link.pump()));
+        let mut driver = crate::store::tests::LocalHostDriver::from_link(link);
         let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let host_recorded = recorded.clone();
         let host_incoming = incoming.clone();
@@ -6496,7 +6496,7 @@ mod tests {
                 }
             }
         });
-        crate::store::tests::wait_until(cx, &store, "the threads", |cx| {
+        driver.wait_until(cx, &store, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
         let window_state = cx.new(|_| WindowState::new(false));
@@ -6541,7 +6541,9 @@ mod tests {
             sidebar.update_in(cx, |sidebar, window, cx| {
                 sidebar.on_pin(&ThreadPin(id.into()), window, cx)
             });
-            cx.run_until_parked();
+            driver.wait_until(cx, &store, "pin command reaches the host", |_| {
+                !recorded.lock().unwrap().is_empty()
+            });
             let pins = std::mem::take(&mut *recorded.lock().unwrap());
             let first = store.read_with(cx, |store, _| store.flat_sessions()[0].pin_order.clone());
             let [(pinned, Some(key))] = pins.as_slice() else {
@@ -6553,7 +6555,7 @@ mod tests {
             meta.pinned_at = Some(2);
             meta.pin_order = Some(key.clone());
             incoming.try_send(snapshot(&sessions)).unwrap();
-            crate::store::tests::wait_until(cx, &store, "the pin", |cx| {
+            driver.wait_until(cx, &store, "the pin", |cx| {
                 store.read_with(cx, |store, _| {
                     store
                         .thread_meta(id)
@@ -6595,7 +6597,7 @@ mod tests {
         started.updated_at = 2_000;
         sessions.push(started);
         incoming.try_send(snapshot(&sessions)).unwrap();
-        crate::store::tests::wait_until(cx, &store, "the new thread", |cx| {
+        driver.wait_until(cx, &store, "the new thread", |cx| {
             store.read_with(cx, |store, _| {
                 store.thread_meta("started-elsewhere").is_some()
             })

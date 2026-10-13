@@ -5760,16 +5760,79 @@ mod tests {
             path.display(),
             "Text after the screenshot.\n\n".repeat(80)
         ));
-        let (store, window_state, _) = seed_chat(cx, timeline);
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            let chat = cx.new(|cx| ChatView::new(store, window_state, window, cx));
-            gpui_base::Root::new(chat, window, cx)
+        let (host, session_id, timeline) = seeded_chat_host(cx, timeline, false);
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
-        let view = root.read_with(cx, |root, _| {
-            root.view().clone().downcast::<ChatView>().unwrap()
+        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        driver.wait_until(cx, &store, "chat baseline", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.chat_loading()
+            })
+        });
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx)
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        struct LoadedImageChat {
+            chat: Entity<ChatView>,
+            source: gpui::ImageSource,
+            ready: std::rc::Rc<std::cell::Cell<bool>>,
+        }
+        impl gpui::Render for LoadedImageChat {
+            fn render(
+                &mut self,
+                window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                if let gpui::ImageSource::Custom(load) = &self.source {
+                    self.ready.set(matches!(load(window, cx), Some(Ok(_))));
+                }
+                self.chat.clone()
+            }
+        }
+        let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+        let image_source = crate::store::host_image(path.clone());
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
+            let surface = cx.new(|_| LoadedImageChat {
+                chat,
+                source: image_source,
+                ready: ready.clone(),
+            });
+            gpui_base::Root::new(surface, window, cx)
+        });
+        let view = root.read_with(cx, |root, cx| {
+            root.view()
+                .clone()
+                .downcast::<LoadedImageChat>()
+                .unwrap()
+                .read(cx)
+                .chat
+                .clone()
         });
         cx.simulate_resize(gpui::size(px(393.), px(600.)));
-        draw(cx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            driver.step(cx, &store);
+            draw(cx);
+            if ready.get() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "inline host image finishes loading"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let row = cx
             .debug_bounds("timeline-row-89")
@@ -5807,6 +5870,7 @@ mod tests {
             cx.debug_bounds("image-viewer-image").is_none(),
             "pill click opened the image underneath"
         );
+        driver.shutdown(cx, &store, &host);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -7113,11 +7177,11 @@ This begins after the hard break."#;
         seed_chat_with_history(cx, timeline, false)
     }
 
-    fn seed_chat_with_history(
+    fn seeded_chat_host(
         cx: &mut TestAppContext,
         timeline: Timeline,
         paged: bool,
-    ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
+    ) -> (tcode_runtime::pipe::SpawnedHost, String, Timeline) {
         use tcode_runtime::pipe::{HostServices, spawn_host};
         use tcode_services::store::SessionStore;
 
@@ -7153,6 +7217,15 @@ This begins after the hard break."#;
                 (active.meta.id.clone(), active.timeline.clone())
             }))
             .expect("seed markdown host");
+        (host, session_id, timeline)
+    }
+
+    fn seed_chat_with_history(
+        cx: &mut TestAppContext,
+        timeline: Timeline,
+        paged: bool,
+    ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
+        let (host, session_id, timeline) = seeded_chat_host(cx, timeline, paged);
         if paged {
             // The history is the thread's before a client opens it: the host
             // answers a page only once it has read the log the records joined.
