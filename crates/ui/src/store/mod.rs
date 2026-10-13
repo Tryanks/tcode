@@ -6686,7 +6686,16 @@ pub(crate) mod tests {
         }
         let host = test_host(disk);
         let mut driver = LocalHostDriver::new(&host);
-        let workspace = cx.new(|cx| WorkspaceStore::new_attached(driver.link.clone(), false, cx));
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
 
         workspace.update(cx, |store, _| store.select_session("parent".into()));
         driver.wait_until(cx, &workspace, "parent on screen", |cx| {
@@ -6775,7 +6784,16 @@ pub(crate) mod tests {
         }
         let host = test_host(disk);
         let mut driver = LocalHostDriver::new(&host);
-        let workspace = cx.new(|cx| WorkspaceStore::new_attached(driver.link.clone(), false, cx));
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
 
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
@@ -6858,7 +6876,16 @@ pub(crate) mod tests {
             .expect("persist remembered project");
         let host = test_host(disk);
         let mut driver = LocalHostDriver::new(&host);
-        let workspace = cx.new(|cx| WorkspaceStore::new_attached(driver.link.clone(), false, cx));
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
         driver.wait_until(cx, &workspace, "remembered project draft", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
@@ -6872,7 +6899,16 @@ pub(crate) mod tests {
         let empty_root = scratch_root("no-projects");
         let empty_host = test_host(SessionStore::open_at(empty_root.clone()).expect("open store"));
         let mut empty_driver = LocalHostDriver::new(&empty_host);
-        let empty = cx.new(|cx| WorkspaceStore::new_attached(empty_driver.link.clone(), false, cx));
+        let empty = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                empty_driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
         empty_driver.wait_until(cx, &empty, "empty workspace baseline", |cx| {
             empty.read_with(cx, |store, _| store.baseline_ready())
         });
