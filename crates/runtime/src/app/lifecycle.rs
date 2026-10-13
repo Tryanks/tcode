@@ -471,26 +471,27 @@ impl AppState {
             || native_rewind_pending;
         let parkable = active.draft
             || has_work
-            || matches!(active.runtime, Runtime::Live(_) | Runtime::Starting { .. });
-        if parkable {
-            log::info!(
-                "parking session {} (turn in flight: {}, queued: {}, background tasks: {})",
-                active.meta.id,
-                active.turn_in_flight,
-                active.queue.len(),
-                active.background_task_count
-            );
-            let session_id = active.meta.id.clone();
-            if has_work {
-                active.idle_since = None;
-            }
-            self.residents.park(active);
-            self.reschedule_scheduled_wake(cx);
-            if !has_work {
-                self.mark_resident_idle(&session_id, cx);
-            }
-        } else {
+            || matches!(active.runtime, Runtime::Live(_) | Runtime::Starting { .. })
+            || self.event_records.contains_key(target_id);
+        if !parkable {
             self.release_stale_session_logs(cx);
+            return;
+        }
+        log::info!(
+            "parking session {} (turn in flight: {}, queued: {}, background tasks: {})",
+            active.meta.id,
+            active.turn_in_flight,
+            active.queue.len(),
+            active.background_task_count
+        );
+        let session_id = active.meta.id.clone();
+        if has_work {
+            active.idle_since = None;
+        }
+        self.residents.park(active);
+        self.reschedule_scheduled_wake(cx);
+        if !has_work {
+            self.mark_resident_idle(&session_id, cx);
         }
     }
 
@@ -531,11 +532,23 @@ impl AppState {
                         && session.background_task_count == 0
                         && !self.pending_native_rewinds.contains_key(id.as_str())
                 })
-                .filter_map(|(id, session)| session.idle_since.map(|idle| (id.clone(), idle)))
+                .filter_map(|(id, session)| {
+                    session.idle_since.map(|idle| {
+                        (
+                            id.clone(),
+                            idle,
+                            !session.draft && matches!(session.runtime, Runtime::Idle),
+                        )
+                    })
+                })
                 .collect();
-            if residents.len() > MAX_IDLE_RESIDENTS {
-                residents.sort_unstable_by_key(|(_, idle)| *idle);
-                residents.first().map(|(id, _)| id.clone())
+            let replay_only = residents.iter().filter(|(_, _, replay)| *replay).count();
+            if replay_only > MAX_IDLE_REPLAY_RESIDENTS || residents.len() > MAX_IDLE_RESIDENTS {
+                residents.sort_unstable_by_key(|(_, idle, _)| *idle);
+                residents
+                    .iter()
+                    .find(|(_, _, replay)| replay_only <= MAX_IDLE_REPLAY_RESIDENTS || *replay)
+                    .map(|(id, _, _)| id.clone())
             } else {
                 None
             }

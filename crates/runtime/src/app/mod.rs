@@ -92,6 +92,7 @@ const RESIDENT_IDLE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// the primary bound, while this comfortably preserves typical orchestrate
 /// fleets whose idle children may be re-messaged.
 const MAX_IDLE_RESIDENTS: usize = 16;
+const MAX_IDLE_REPLAY_RESIDENTS: usize = 4;
 
 type ProviderLaunchFuture =
     Pin<Box<dyn Future<Output = Result<SessionHandle, AgentError>> + Send + 'static>>;
