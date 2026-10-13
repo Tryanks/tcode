@@ -503,29 +503,40 @@ pub fn read_status(cwd: &Path) -> GitStatus {
     if !is_git_repo(cwd) {
         return GitStatus::default();
     }
-    let porcelain = run_git(cwd, &["status", "--porcelain=2", "--branch"]).unwrap_or_default();
-    let numstat = read_numstat(cwd);
-    let has_origin_remote = run_git(cwd, &["remote"])
-        .map(|out| out.lines().any(|line| line.trim() == "origin"))
-        .unwrap_or(false);
-    let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .ok()
-        .map(|value| {
-            value
-                .trim()
-                .trim_start_matches("refs/remotes/origin/")
-                .to_string()
-        })
-        .filter(|value| !value.is_empty());
-    let mut status = parse_status(
-        &porcelain,
-        &numstat,
-        default_branch.as_deref(),
-        has_origin_remote,
-    );
-    status.github_repository = crate::github::repository::resolve(cwd)
-        .map(|repository| format!("{}/{}", repository.owner, repository.name));
-    status
+    std::thread::scope(|scope| {
+        let numstat = scope.spawn(|| read_numstat(cwd));
+        let remote = scope.spawn(|| {
+            let has_origin_remote = run_git(cwd, &["remote"])
+                .map(|out| out.lines().any(|line| line.trim() == "origin"))
+                .unwrap_or(false);
+            let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
+                .ok()
+                .map(|value| {
+                    value
+                        .trim()
+                        .trim_start_matches("refs/remotes/origin/")
+                        .to_string()
+                })
+                .filter(|value| !value.is_empty());
+            (has_origin_remote, default_branch)
+        });
+        let repository = scope.spawn(|| {
+            crate::github::repository::resolve(cwd)
+                .map(|repository| format!("{}/{}", repository.owner, repository.name))
+        });
+        let porcelain = run_git(cwd, &["status", "--porcelain=2", "--branch"]).unwrap_or_default();
+        let numstat = numstat.join().expect("Git numstat reader panicked");
+        let (has_origin_remote, default_branch) =
+            remote.join().expect("Git remote reader panicked");
+        let mut status = parse_status(
+            &porcelain,
+            &numstat,
+            default_branch.as_deref(),
+            has_origin_remote,
+        );
+        status.github_repository = repository.join().expect("Git repository reader panicked");
+        status
+    })
 }
 
 fn read_numstat(cwd: &Path) -> Vec<(String, u32, u32)> {
