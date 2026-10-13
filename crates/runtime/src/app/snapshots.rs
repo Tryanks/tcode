@@ -36,8 +36,15 @@ impl DomainDiff {
             state.space_archives_revision = None;
         }
         state.refresh_space_archives();
-        let index = state.index_snapshot();
-        if self.index != index {
+        let summary = state.index_summary();
+        if self.index.summary != summary
+            || self.index.projects != state.projects
+            || !self.index.sessions.iter().eq(state
+                .sessions
+                .iter()
+                .filter(|meta| meta.archived_at.is_none()))
+        {
+            let index = state.index_snapshot_with_summary(summary);
             for event in index_changes(&self.index, &index) {
                 emit_replacement(Topic::Index, event, cx);
             }
@@ -373,6 +380,23 @@ impl<'a> ActivityProjection<'a> {
 
 impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
+        self.index_snapshot_with_summary(self.index_summary())
+    }
+
+    fn index_snapshot_with_summary(&self, summary: IndexSummary) -> IndexSnapshot {
+        IndexSnapshot {
+            summary,
+            sessions: self
+                .sessions
+                .iter()
+                .filter(|meta| meta.archived_at.is_none())
+                .cloned()
+                .collect(),
+            projects: self.projects.clone(),
+        }
+    }
+
+    fn index_summary(&self) -> IndexSummary {
         let activity = ActivityProjection::new(self);
         let mut summary = IndexSummary {
             title_generating: self.title_generating.clone(),
@@ -380,10 +404,8 @@ impl AppState {
             ..IndexSummary::default()
         };
         let sharing = self.worktree_sharing();
-        let mut sessions = Vec::new();
         for meta in &self.sessions {
             if meta.archived_at.is_none() {
-                sessions.push(meta.clone());
                 let resident = self.resident(&meta.id);
                 summary.activity.insert(
                     meta.id.clone(),
@@ -416,11 +438,7 @@ impl AppState {
                 }
             }
         }
-        IndexSnapshot {
-            summary,
-            sessions,
-            projects: self.projects.clone(),
-        }
+        summary
     }
 
     fn space_projects(&self, ids: &BTreeSet<String>) -> Vec<Project> {
