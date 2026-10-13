@@ -479,6 +479,8 @@ pub(crate) struct ManifestState {
     fetched_at_ms: Option<u64>,
     last_attempt_ms: Option<u64>,
     disk_loaded: bool,
+    #[cfg(feature = "process")]
+    source_responses: HashMap<String, (String, Vec<u8>)>,
 }
 
 static STATE: Mutex<Option<ManifestState>> = Mutex::new(None);
@@ -502,6 +504,8 @@ impl ManifestState {
             fetched_at_ms: None,
             last_attempt_ms: None,
             disk_loaded: false,
+            #[cfg(feature = "process")]
+            source_responses: HashMap::new(),
         }
     }
 }
@@ -614,12 +618,22 @@ mod refresh {
         }
     }
 
-    fn fetch(url: &str) -> Result<Vec<u8>, String> {
-        let response = ureq::get(url)
+    fn fetch(url: &str, now: u64) -> Result<Option<Value>, String> {
+        let cached = with_state(|state| state.source_responses.get(url).cloned());
+        let mut request = ureq::get(url)
             .set("User-Agent", "tcode")
-            .timeout(FETCH_TIMEOUT)
-            .call()
-            .map_err(|error| error.to_string())?;
+            .timeout(FETCH_TIMEOUT);
+        if let Some((etag, _)) = &cached {
+            request = request.set("If-None-Match", etag);
+        }
+        let response = request.call().map_err(|error| error.to_string())?;
+        // A 304 can retain Content-Encoding despite having no response body.
+        // Do not pass it through the decompressor.
+        if response.status() == 304 {
+            let (_, body) = cached.ok_or("304 without a cached manifest")?;
+            return with_state(|state| state.install(now, &body));
+        }
+        let etag = response.header("ETag").map(str::to_owned);
         let mut body = Vec::new();
         response
             .into_reader()
@@ -629,7 +643,15 @@ mod refresh {
         if body.len() as u64 > MAX_RESPONSE_BYTES {
             return Err("response exceeds 1 MiB".into());
         }
-        Ok(body)
+        with_state(|state| {
+            let adopted = state.install(now, &body)?;
+            if let Some(etag) = etag {
+                state.source_responses.insert(url.to_owned(), (etag, body));
+            } else {
+                state.source_responses.remove(url);
+            }
+            Ok(adopted)
+        })
     }
 
     /// Load the disk cache under `cache_dir` and, when the TTL allows and
@@ -653,7 +675,7 @@ mod refresh {
         // last adoption is the newest manifest of the round.
         let mut newest = None;
         for (name, url) in MANIFEST_SOURCES {
-            match fetch(url).and_then(|body| with_state(|state| state.install(now, &body))) {
+            match fetch(url, now) {
                 Ok(Some(manifest)) => newest = Some(manifest),
                 Ok(None) => {
                     log::info!("{name} Claude model manifest is older than the current one")
