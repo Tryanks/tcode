@@ -2091,6 +2091,13 @@ impl AppState {
             parked.idle_since = None;
             let terminal_preferences = self.terminal_preferences_for(&parked);
             let restored_terminal = self.restore_terminal_workspace(&mut parked);
+            let mark_idle = !parked.draft
+                && matches!(parked.runtime, Runtime::Idle)
+                && !parked.turn_in_flight
+                && parked.delivery_in_flight.is_none()
+                && parked.queue.is_empty()
+                && parked.background_task_count == 0
+                && !self.pending_native_rewinds.contains_key(session_id);
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
             if parked.draft && self.archived_sharing_affected(&parked.meta) {
                 self.archived_revision += 1;
@@ -2098,7 +2105,7 @@ impl AppState {
             self.residents.live.insert(session_id.to_string(), parked);
             self.schedule_timeline_load(
                 session_id.to_string(),
-                TimelineLoadTarget::Active { mark_idle: false },
+                TimelineLoadTarget::Active { mark_idle },
                 cx,
             );
             if !restored_terminal {
