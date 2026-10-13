@@ -900,8 +900,13 @@ async fn establish(
         log::error!("device endpoint unavailable: {error}");
         ConnectionFailure::Unreachable(Some(format!("device endpoint unavailable: {error}")))
     })?;
-    let addr = dial_addr(&host.host_id, host.relay.as_deref(), &host.addrs)
-        .ok_or_else(|| ConnectionFailure::Unreachable(Some("invalid machine id".into())))?;
+    let addr = dial_addr(&host.host_id, host.relay.as_deref(), &host.addrs).ok_or_else(|| {
+        log::warn!(
+            "{:?} is not a machine id; the saved machine cannot be dialled",
+            host.host_id
+        );
+        ConnectionFailure::Unreachable(Some("invalid machine id".into()))
+    })?;
     client.ensure_lookups(&host.traverse).await;
     let connection = match tokio::time::timeout(
         CONNECT_BUDGET,
