@@ -22,7 +22,7 @@ fn fixture(documents: bool) -> (SpawnedHost, std::path::PathBuf) {
 fn create_new_project_creates_and_registers_a_host_directory() {
     let (host, root) = fixture(true);
     let link = host.link();
-    let events = link.events();
+    let events = super::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
         known_index: None,
         topic: Topic::Index,
@@ -66,7 +66,7 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
     for documents in [true, false] {
         let (host, root) = fixture(documents);
         let link = host.link();
-        let events = link.events();
+        let events = super::p4b_tests::observed_events(&link);
         link.subscribe(Subscription {
             known_index: None,
             topic: Topic::Index,

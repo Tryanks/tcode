@@ -15,6 +15,27 @@ pub(super) fn linked(mux: &HostMux) -> HostLink {
     link
 }
 
+/// Consume like the app while synchronous assertions retain an ordered event history.
+pub(super) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventEnvelope> {
+    let events = link.events();
+    let (observed, received) = async_channel::unbounded();
+    smol::spawn(async move {
+        smol::future::race(
+            async {
+                while let Ok(event) = events.recv().await {
+                    if observed.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            },
+            observed.closed(),
+        )
+        .await;
+    })
+    .detach();
+    received
+}
+
 pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
     let root = std::env::temp_dir().join(format!("tcode-p4b-{}", uuid::Uuid::new_v4()));
     let project = root.join("project");
@@ -65,6 +86,8 @@ pub(super) fn next(
 fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscriber_refusal() {
     let (host, mux, link, _viewed) = fixture();
     let second = linked(&mux);
+    let events = observed_events(&link);
+    let other_events = observed_events(&second);
     for client in [&link, &second] {
         client
             .subscribe(Subscription {
@@ -78,8 +101,6 @@ fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscribe
     // Neither client views `background`: the agent's thread may be off every
     // screen while it drives the preview.
     let session_id = "background".to_string();
-    let events = link.events();
-    let other_events = second.events();
     let (requests, receiver) = async_channel::unbounded();
     smol::block_on(
         host.update_state_for_test(move |state, cx| {
@@ -198,7 +219,7 @@ fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscribe
 #[test]
 fn attachments_mux_uses_host_session_directory_and_returns_identical_bytes() {
     let (_host, _mux, link, _session_id) = fixture();
-    let events = link.events();
+    let events = observed_events(&link);
     let ServerEvent::SessionStatusReplaced(status) = next(&events, |event| {
         matches!(event, ServerEvent::SessionStatusReplaced(_))
     }) else {
@@ -325,7 +346,7 @@ fn import_status(event: &ServerEvent) -> Option<&ExternalImportStatus> {
 #[test]
 fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
     let (host, mux, link, _root, project_id) = project_fixture();
-    let events = link.events();
+    let events = observed_events(&link);
     link.subscribe(Subscription {
         known_index: None,
         after: None,
@@ -400,7 +421,7 @@ fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
     // A client that attaches only after that instantaneous completion still
     // recovers the outcome, because the snapshot retains the latest run.
     let late = linked(&mux);
-    let late_events = late.events();
+    let late_events = observed_events(&late);
     late.subscribe(Subscription {
         known_index: None,
         after: None,
@@ -476,7 +497,7 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
         claude_thread(&history, "thread-b", "second imported conversation"),
     ];
 
-    let events = watcher.events();
+    let events = observed_events(&watcher);
     for topic in [
         Topic::Index,
         Topic::ExternalImport {
@@ -589,7 +610,7 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
         },
     })
     .unwrap();
-    let events = link.events();
+    let events = observed_events(&link);
     link.command_blocking(Command::StartExternalImport {
         project_id,
         threads,

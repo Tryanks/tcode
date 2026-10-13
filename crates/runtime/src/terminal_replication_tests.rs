@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::p4b_tests::{fixture, linked, next};
+use super::p4b_tests::{fixture, linked, next, observed_events};
 use super::*;
 use tcode_protocol::terminal::{
     CellWidth, HISTORY_LIMIT, TerminalCell, TerminalFrame, TerminalLink, TerminalRow, TerminalStyle,
@@ -228,7 +228,7 @@ struct Session {
 /// Open a terminal panel and take a host handle for the PTY behind it.
 fn terminal_session() -> Session {
     let (host, mux, link, session_id) = fixture();
-    let events = link.events();
+    let events = observed_events(&link);
     link.command_blocking(Command::ToggleTerminalPanel {
         session_id: session_id.clone(),
     })
@@ -347,7 +347,7 @@ fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
     session.wait_for("RSZOK");
 
     let late = linked(&session.mux);
-    let late_events = late.events();
+    let late_events = observed_events(&late);
     let mut replica = Replica::attach(&late, late_events, session.terminal_id);
     let host = host_frame(&session.terminal);
     assert_eq!(
@@ -407,7 +407,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
     first.settle(&session.terminal);
 
     let second_link = linked(&session.mux);
-    let second_events = second_link.events();
+    let second_events = observed_events(&second_link);
     let mut second = Replica::attach(&second_link, second_events, session.terminal_id);
     assert_eq!(difference(&second.frame, &first.frame), None);
 
@@ -450,7 +450,7 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
     // Selection lives in the client. The host stores only what a client sends
     // it, and publishes that to everyone watching the session.
     let watcher = linked(&session.mux);
-    let watcher_events = watcher.events();
+    let watcher_events = observed_events(&watcher);
     watcher
         .subscribe(Subscription {
             known_index: None,
@@ -495,7 +495,7 @@ fn attachment_between_output_chunks_and_resize_preserves_contiguous_history() {
     );
     session.wait_for("PAUSED");
     let late = linked(&session.mux);
-    let late_events = late.events();
+    let late_events = observed_events(&late);
     let mut replica = Replica::attach(&late, late_events, session.terminal_id);
     session.resize(88, 21);
     session.send("continue\r");

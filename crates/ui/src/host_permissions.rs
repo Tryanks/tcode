@@ -220,8 +220,9 @@ mod tests {
             }
         };
         baseline();
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::store::tests::wait_until(cx, &store, "host permission baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         let panel = cx.new(|cx| HostPermissions::new(store.clone(), cx));
         cx.run_until_parked();
         let next_query = || {
@@ -303,8 +304,9 @@ mod tests {
             cx,
         );
         baseline();
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::store::tests::wait_until(cx, &store, "host permission baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         cx.run_until_parked();
         reply(
             next_query(),

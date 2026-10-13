@@ -293,8 +293,8 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
 /// A LAN-only machine the browse cannot find: the link names no address,
 /// so the first attempt opens no path and sends no secret. The same
 /// invitation then pairs at the address the person types, on the link's
-/// port, and the paired machine is reached again at the address that
-/// worked, with nothing else to find it by.
+/// port, and the paired machine is reached again from its saved addresses,
+/// with nothing else to find it by.
 #[test]
 fn an_invitation_that_finds_no_path_pairs_at_a_typed_address() {
     let host_dir = TestDir::new("typed-host");
@@ -320,11 +320,19 @@ fn an_invitation_that_finds_no_path_pairs_at_a_typed_address() {
     let typed = std::net::Ipv4Addr::LOCALHOST.into();
     let paired = tcode_traverse::pair_blocking(&link, Some(typed), &phone).unwrap();
     assert_eq!(paired.name, "Test Host");
-    let worked = std::net::SocketAddr::new(typed, link.port).to_string();
-    assert!(paired.addrs.contains(&worked), "{:?}", paired.addrs);
     assert!(host.invitation().is_none(), "the invitation is used");
 
-    let client = tcode_traverse::connect(&paired, &phone);
+    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&paired)).unwrap();
+    drop(phone);
+    // Multipath may leave the typed socket for another interface. A fresh
+    // endpoint must reconnect from the saved record, not its pairing path cache.
+    let phone = DeviceIdentity::load_or_create(&dir.0).unwrap();
+    phone.set_lan_options(tcode_traverse::lan::LanOptions {
+        browse: tcode_traverse::lan::Browse::Off,
+        multicast_lock: None,
+    });
+    let saved = tcode_traverse::hosts::load_hosts(&dir.0).unwrap();
+    let client = tcode_traverse::connect(&saved[0], &phone);
     wait_state(&client, syncing_directly);
     client.to_host.close();
     host.shutdown();

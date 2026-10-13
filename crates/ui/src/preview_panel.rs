@@ -723,7 +723,7 @@ mod tests {
             Err(crate::tr!("preview.unsupported_client").into_owned())
         );
 
-        host.shutdown_blocking().expect("stop host");
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

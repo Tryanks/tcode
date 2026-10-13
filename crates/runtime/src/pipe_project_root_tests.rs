@@ -46,7 +46,7 @@ fn fixture() -> Fixture {
     store.apply(&mutations).unwrap();
     let host = spawn_host(store.clone(), HostServices::default()).unwrap();
     let link = host.link();
-    let events = link.events();
+    let events = super::p4b_tests::observed_events(&link);
     link.subscribe(Subscription {
         known_index: None,
         topic: Topic::Index,

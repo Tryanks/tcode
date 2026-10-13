@@ -5805,20 +5805,124 @@ mod tests {
             path.display(),
             "Text after the screenshot.\n\n".repeat(80)
         ));
-        let (store, window_state, _) = seed_chat(cx, timeline);
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            let chat = cx.new(|cx| ChatView::new(store, window_state, window, cx));
-            gpui_base::Root::new(chat, window, cx)
+        let (host, session_id, timeline) = seeded_chat_host(cx, timeline, false);
+        let seeded_id = session_id.clone();
+        smol::block_on(host.update_state_for_test(move |state, cx| {
+            state.residents.live.get_mut(&seeded_id).unwrap().timeline = Timeline::default();
+            let mut ts = 0;
+            for turn in 0..timeline.turns.len() {
+                let mut events = vec![agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                }];
+                events.extend(
+                    timeline
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.turn == turn)
+                        .map(|entry| {
+                            let EntryContent::Item(content) = &entry.content else {
+                                panic!("image fixture contains provider items");
+                            };
+                            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                                id: entry.id.clone(),
+                                parent_item_id: None,
+                                content: content.clone(),
+                            })
+                        }),
+                );
+                events.push(agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                });
+                for event in events {
+                    state.record_event_for_replica_test(&seeded_id, ts, &event, cx);
+                    ts += 1;
+                }
+            }
+        }))
+        .expect("record inline image conversation");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
-        let view = root.read_with(cx, |root, _| {
-            root.view().clone().downcast::<ChatView>().unwrap()
+        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        driver.wait_until(cx, &store, "chat baseline", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.chat_loading()
+            })
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        struct LoadedImageChat {
+            chat: Entity<ChatView>,
+            source: gpui::ImageSource,
+            ready: std::rc::Rc<std::cell::Cell<bool>>,
+        }
+        impl gpui::Render for LoadedImageChat {
+            fn render(
+                &mut self,
+                window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                if let gpui::ImageSource::Custom(load) = &self.source {
+                    match load(window, cx) {
+                        Some(Ok(_)) => self.ready.set(true),
+                        Some(Err(error)) => panic!("inline host image load failed: {error:?}"),
+                        None => {}
+                    }
+                }
+                self.chat.clone()
+            }
+        }
+        let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+        let image_source = crate::store::host_image(path.clone());
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
+            let surface = cx.new(|_| LoadedImageChat {
+                chat,
+                source: image_source,
+                ready: ready.clone(),
+            });
+            gpui_base::Root::new(surface, window, cx)
+        });
+        let view = root.read_with(cx, |root, cx| {
+            root.view()
+                .clone()
+                .downcast::<LoadedImageChat>()
+                .unwrap()
+                .read(cx)
+                .chat
+                .clone()
         });
         cx.simulate_resize(gpui::size(px(393.), px(600.)));
-        draw(cx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            driver.step(cx, &store);
+            draw(cx);
+            if ready.get() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "inline host image finishes loading"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        let row = cx
-            .debug_bounds("timeline-row-89")
-            .expect("last assistant row");
+        let row = cx.debug_bounds("timeline-row-89").unwrap_or_else(|| {
+            panic!(
+                "last assistant row: selected={:?}, list_items={}",
+                store.read_with(cx, |store, _| store.active_session_id()),
+                list.item_count()
+            )
+        });
         cx.simulate_event(ScrollWheelEvent {
             position: list.viewport_bounds().center(),
             delta: ScrollDelta::Pixels(point(px(0.), list.viewport_bounds().top() - row.top())),
@@ -5852,6 +5956,7 @@ mod tests {
             cx.debug_bounds("image-viewer-image").is_none(),
             "pill click opened the image underneath"
         );
+        driver.shutdown(cx, &store, &host);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -6355,6 +6460,11 @@ mod tests {
                 truncated: false,
             },
         );
+        crate::store::tests::wait_until(cx, &store, "initial ten-turn history window", |cx| {
+            store.read_with(cx, |store, _| {
+                store.with_active_timeline(|timeline| timeline.turns.len()) == Some(10)
+            })
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
@@ -7153,11 +7263,11 @@ This begins after the hard break."#;
         seed_chat_with_history(cx, timeline, false)
     }
 
-    fn seed_chat_with_history(
+    fn seeded_chat_host(
         cx: &mut TestAppContext,
         timeline: Timeline,
         paged: bool,
-    ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
+    ) -> (tcode_runtime::pipe::SpawnedHost, String, Timeline) {
         use tcode_runtime::pipe::{HostServices, spawn_host};
         use tcode_services::store::SessionStore;
 
@@ -7190,9 +7300,21 @@ This begins after the hard break."#;
                 let active = state.residents.live.get_mut(&id).expect("selected draft");
                 active.timeline = timeline;
                 active.draft = false;
-                (active.meta.id.clone(), active.timeline.clone())
+                let result = (active.meta.id.clone(), active.timeline.clone());
+                let meta = active.meta.clone();
+                state.sessions.push(meta);
+                result
             }))
             .expect("seed markdown host");
+        (host, session_id, timeline)
+    }
+
+    fn seed_chat_with_history(
+        cx: &mut TestAppContext,
+        timeline: Timeline,
+        paged: bool,
+    ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
+        let (host, session_id, timeline) = seeded_chat_host(cx, timeline, paged);
         if paged {
             // The history is the thread's before a client opens it: the host
             // answers a page only once it has read the log the records joined.
@@ -7232,7 +7354,21 @@ This begins after the hard break."#;
             }
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        cx.on_quit(move || host.shutdown_blocking().expect("stop chat test host"));
+        cx.on_quit(move || {
+            let link = host.link();
+            let events = link.events();
+            smol::block_on(smol::future::race(
+                async { link.shutdown().await.expect("stop chat test host") },
+                async {
+                    // The UI is gone at test teardown; drain its retired subscriptions.
+                    while events.recv().await.is_ok() {}
+                    std::future::pending::<()>().await;
+                },
+            ));
+            host.stopped
+                .recv_blocking()
+                .expect("chat test host stopped");
+        });
         (workspace_store, window_state, session_id)
     }
 }
