@@ -272,7 +272,7 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 pub(super) struct ActivityProjection<'a> {
     state: &'a AppState,
     children: HashMap<&'a str, Vec<&'a SessionMeta>>,
-    holding: std::cell::RefCell<HashMap<String, bool>>,
+    holding: std::cell::RefCell<HashMap<&'a str, bool>>,
 }
 
 impl<'a> ActivityProjection<'a> {
@@ -295,22 +295,22 @@ impl<'a> ActivityProjection<'a> {
     /// Whether a child of this thread holds it: one still runs, or a
     /// dispatched one awaits its lead's settle.
     pub(super) fn children_hold(&self, parent_id: &str) -> bool {
+        let Some((&parent_id, children)) = self.children.get_key_value(parent_id) else {
+            return false;
+        };
         if let Some(holds) = self.holding.borrow().get(parent_id) {
             return *holds;
         }
-        let holds = self.children.get(parent_id).is_some_and(|children| {
-            children.iter().any(|child| match self.agent_status(child) {
-                Some(status) => status.delivery.holds_parent(),
-                None => {
-                    self.state.resident(&child.id).is_some_and(|session| {
-                        session.is_unfinished() || session.timeline.turn_running
-                    }) || self.children_hold(&child.id)
-                }
-            })
+        let holds = children.iter().any(|child| match self.agent_status(child) {
+            Some(status) => status.delivery.holds_parent(),
+            None => {
+                self.state
+                    .resident(&child.id)
+                    .is_some_and(|session| session.is_unfinished() || session.timeline.turn_running)
+                    || self.children_hold(&child.id)
+            }
         });
-        self.holding
-            .borrow_mut()
-            .insert(parent_id.to_string(), holds);
+        self.holding.borrow_mut().insert(parent_id, holds);
         holds
     }
 
