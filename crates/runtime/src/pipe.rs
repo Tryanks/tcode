@@ -975,7 +975,20 @@ fn dispatch_query(
             })
         }
         Query::ReadFileBytes { path } => {
-            let task = cx.unblock(move || std::fs::read(&path));
+            let task = cx.unblock(move || {
+                let empty = HostMessage::QueryResult {
+                    id: u64::MAX,
+                    result: Ok(QueryResponse::FileBytes(Vec::new())),
+                };
+                let envelope = tcode_protocol::encode_line(&empty)
+                    .map_err(|error| std::io::Error::other(error.message))?
+                    .len();
+                // Base64 expands each three bytes into four; reserve the actual
+                // reply envelope with the longest possible request id.
+                let limit =
+                    (tcode_protocol::MAX_LINE_BYTES.saturating_sub(envelope) / 4 * 3) as u64;
+                tcode_services::user_files::read_bounded(&path, limit)
+            });
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::FileBytes)
