@@ -3327,7 +3327,7 @@ mod tests {
             assert!(custom.right() <= body.right());
             assert!(body.bottom() < px(height));
         }
-        host.shutdown_blocking().unwrap();
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3462,7 +3462,7 @@ mod tests {
             crate::window_state::Destination::Settings
         );
 
-        host.shutdown_blocking().expect("stop host");
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3553,9 +3553,13 @@ mod tests {
             assert!(page.home_url_input.dirty, "a typed value is a user edit");
         });
 
-        smol::block_on(host.link().command(tcode_protocol::Command::PatchSettings {
-            patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
-        }))
+        crate::store::tests::await_with_events(
+            cx,
+            &store,
+            host.link().command(tcode_protocol::Command::PatchSettings {
+                patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
+            }),
+        )
         .expect("patch settings");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -3581,7 +3585,7 @@ mod tests {
             );
         });
 
-        host.shutdown_blocking().expect("stop host");
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 

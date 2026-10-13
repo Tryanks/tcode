@@ -1843,6 +1843,7 @@ mod tests {
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         send_settings(&incoming, settings);
+        let profile_id = catalog.profile_id.clone();
         send_providers(&incoming, catalog);
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -1857,6 +1858,11 @@ mod tests {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        crate::store::tests::wait_until(cx, &store, "plugin settings and catalog", |cx| {
+            store.read_with(cx, |store, _| {
+                store.provider_plugin_catalog(&profile_id).is_some()
+            })
+        });
         Host {
             outgoing,
             incoming,

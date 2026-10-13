@@ -153,15 +153,7 @@ impl WorkspaceStore {
             });
         }
         let host = self.host.clone();
-        #[cfg(test)]
-        {
-            let result = futures_lite::future::block_on(host.command(command));
-            cx.spawn(async move |_| result)
-        }
-        #[cfg(not(test))]
-        {
-            cx.spawn(async move |_| host.command(command).await)
-        }
+        cx.spawn(async move |_| host.command(command).await)
     }
 }
 

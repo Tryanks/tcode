@@ -1709,8 +1709,9 @@ mod replica_tests {
             },
             ServerEvent::SessionStatusReplaced(Box::new(status)),
         );
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::store::tests::wait_until(cx, &store, "waiting thread status", |cx| {
+            store.read_with(cx, |store, _| store.session_status().is_some())
+        });
         let (composer, cx) =
             cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
         cx.simulate_resize(gpui::size(px(1200.), px(800.)));

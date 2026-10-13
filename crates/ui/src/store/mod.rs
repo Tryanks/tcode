@@ -3917,11 +3917,7 @@ pub(crate) mod tests {
         scope: std::sync::Arc<std::sync::Mutex<tcode_protocol::Scope>>,
         requests: std::sync::Arc<std::sync::Mutex<Vec<tcode_protocol::ClientMessage>>>,
         worker: Option<std::thread::JoinHandle<()>>,
-        pump_thread: Option<(async_channel::Sender<()>, std::thread::JoinHandle<()>)>,
-        scheduled_pump: Option<gpui::Task<()>>,
-        scheduled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        pending_replies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        replies: async_channel::Sender<String>,
+        driver: LocalHostDriver,
     }
 
     impl ScriptedSpace {
@@ -3950,18 +3946,6 @@ pub(crate) mod tests {
             let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let worker_scope = scope.clone();
             let worker_recorded = recorded.clone();
-            let scheduled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let pending_replies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let worker_scheduled = scheduled.clone();
-            let worker_replies = pending_replies.clone();
-            let fixture_replies = replies.clone();
-            let pump = link.clone();
-            let (stop_pump, stopped) = async_channel::bounded(1);
-            let pump_thread = std::thread::spawn(move || {
-                smol::block_on(futures_lite::future::race(pump.pump(), async move {
-                    let _ = stopped.recv().await;
-                }));
-            });
             let worker = std::thread::spawn(move || {
                 smol::block_on(async move {
                     while let Ok(line) = requests.recv().await {
@@ -4120,29 +4104,23 @@ pub(crate) mod tests {
                             other => panic!("unexpected member request: {other:?}"),
                         };
                         let line = tcode_protocol::encode_line(&response).unwrap();
-                        if worker_scheduled.load(std::sync::atomic::Ordering::Acquire) {
-                            worker_replies.lock().unwrap().push(line);
-                        } else if replies.send(line).await.is_err() {
+                        if replies.send(line).await.is_err() {
                             break;
                         }
                     }
                 });
             });
             Self {
+                driver: LocalHostDriver::from_link(link.clone()),
                 link,
                 scope,
                 requests: recorded,
                 worker: Some(worker),
-                pump_thread: Some((stop_pump, pump_thread)),
-                scheduled_pump: None,
-                scheduled,
-                pending_replies,
-                replies: fixture_replies,
             }
         }
 
-        fn store(&self, cx: &mut TestAppContext) -> gpui::Entity<WorkspaceStore> {
-            cx.new(|cx| {
+        fn store(&mut self, cx: &mut TestAppContext) -> gpui::Entity<WorkspaceStore> {
+            let workspace = cx.new(|cx| {
                 WorkspaceStore::new_attached(
                     self.link.clone(),
                     WorkspaceAttachment::Remote {
@@ -4151,46 +4129,27 @@ pub(crate) mod tests {
                     },
                     None,
                     None,
-                    true,
+                    false,
                     cx,
                 )
-            })
+            });
+            self.driver
+                .wait_until(cx, &workspace, "space baseline", |cx| {
+                    workspace.read_with(cx, |store, _| store.baseline_ready())
+                });
+            workspace
         }
 
-        // GPUI's test scheduler rejects wakes from OS threads; synchronous
-        // command fixtures need that thread until management queries begin.
-        fn schedule_pump(&mut self, cx: &TestAppContext) {
-            self.scheduled
-                .store(true, std::sync::atomic::Ordering::Release);
-            let (stop, pump) = self.pump_thread.take().unwrap();
-            stop.send_blocking(()).unwrap();
-            pump.join().unwrap();
-            let link = self.link.clone();
-            let executor = cx.executor();
-            self.scheduled_pump = Some(cx.executor().spawn(async move {
-                link.pump_with_timer(move || executor.timer(std::time::Duration::from_secs(1)))
-                    .await;
-            }));
-        }
-
-        fn flush_replies(&self) {
-            for line in self.pending_replies.lock().unwrap().drain(..) {
-                self.replies.try_send(line).unwrap();
-            }
-        }
-
-        fn barrier(&self) {
-            smol::block_on(self.link.query(tcode_protocol::Query::Ping)).unwrap();
+        fn barrier(&mut self, cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>) {
+            self.driver
+                .await_with_events(cx, workspace, self.link.query(tcode_protocol::Query::Ping))
+                .unwrap();
         }
     }
 
     impl Drop for ScriptedSpace {
         fn drop(&mut self) {
             self.link.close();
-            if let Some((stop, pump)) = self.pump_thread.take() {
-                let _ = stop.try_send(());
-                pump.join().unwrap();
-            }
             self.worker.take().unwrap().join().unwrap();
         }
     }
@@ -4201,10 +4160,11 @@ pub(crate) mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         let mut host = ScriptedSpace::new();
         let workspace = host.store(cx);
-        wait_until(cx, &workspace, "member baseline", |cx| {
-            workspace.read_with(cx, |store, _| store.baseline_ready())
-        });
-        host.barrier();
+        host.driver
+            .wait_until(cx, &workspace, "member baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
+        host.barrier(cx, &workspace);
         workspace.read_with(cx, |store, _| {
             assert_eq!(
                 store
@@ -4275,12 +4235,14 @@ pub(crate) mod tests {
             });
             store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
         });
-        wait_until(cx, &workspace, "new space baseline", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.projects().first().is_some_and(|p| p.id == "other") && store.index_hydrated()
-            })
-        });
-        host.barrier();
+        host.driver
+            .wait_until(cx, &workspace, "new space baseline", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store.projects().first().is_some_and(|p| p.id == "other")
+                        && store.index_hydrated()
+                })
+            });
+        host.barrier(cx, &workspace);
         workspace.read_with(cx, |store, _| {
             assert!(store.enabled_profiles().is_empty());
             assert_eq!(
@@ -4312,7 +4274,6 @@ pub(crate) mod tests {
             cx.update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
                 .is_none()
         );
-        host.schedule_pump(cx);
         *host.scope.lock().unwrap() = tcode_protocol::Scope::Full;
         workspace.update(cx, |store, _| {
             store.apply_connection_state(tcode_client::ConnectionState::Reconnecting {
@@ -4321,12 +4282,12 @@ pub(crate) mod tests {
             });
             store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None });
         });
-        wait_until(cx, &workspace, "full scope baseline", |cx| {
-            host.flush_replies();
-            workspace.read_with(cx, |store, _| {
-                store.scope().is_full() && store.baseline_ready()
-            })
-        });
+        host.driver
+            .wait_until(cx, &workspace, "full scope baseline", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store.scope().is_full() && store.baseline_ready()
+                })
+            });
 
         let spaces = cx
             .update(|_, cx| crate::remote::spaces::for_store(&workspace, cx))
@@ -4340,10 +4301,10 @@ pub(crate) mod tests {
             *captured.borrow_mut() = Some(created.await);
         })
         .detach();
-        wait_until(cx, &workspace, "created space and project share", |_| {
-            host.flush_replies();
-            result.borrow().is_some()
-        });
+        host.driver
+            .wait_until(cx, &workspace, "created space and project share", |_| {
+                result.borrow().is_some()
+            });
         assert_eq!(
             result.borrow().as_ref().unwrap().as_ref().unwrap().id,
             "created"
@@ -4393,12 +4354,12 @@ pub(crate) mod tests {
         workspace.update(cx, |store, _| {
             store.apply_connection_state(tcode_client::ConnectionState::Syncing { path: None })
         });
-        wait_until(cx, &workspace, "moved member baseline", |cx| {
-            host.flush_replies();
-            workspace.read_with(cx, |store, _| {
-                !store.scope().is_full() && store.baseline_ready()
-            })
-        });
+        host.driver
+            .wait_until(cx, &workspace, "moved member baseline", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    !store.scope().is_full() && store.baseline_ready()
+                })
+            });
         workspace.update(cx, |store, cx| {
             store.apply_domain_event(
                 &EventEnvelope {
@@ -4419,12 +4380,13 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn member_sidebar_and_read_preferences_change_without_host_commands(cx: &mut TestAppContext) {
-        let host = ScriptedSpace::new();
+        let mut host = ScriptedSpace::new();
         let workspace = host.store(cx);
-        wait_until(cx, &workspace, "member baseline", |cx| {
-            workspace.read_with(cx, |store, _| store.baseline_ready())
-        });
-        host.barrier();
+        host.driver
+            .wait_until(cx, &workspace, "member baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
+        host.barrier(cx, &workspace);
         host.requests.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
             store.toggle_project_collapsed("shared".into(), cx);
@@ -4446,7 +4408,7 @@ pub(crate) mod tests {
             );
             assert_eq!(store.settings().favorite_models, ["team-model"]);
         });
-        host.barrier();
+        host.barrier(cx, &workspace);
         assert!(
             host.requests
                 .lock()
@@ -4992,10 +4954,11 @@ pub(crate) mod tests {
         disk.upsert_meta(&thread(&root, "deleted", "p", None))
             .unwrap();
         let host = test_host(disk);
-        let link = host.link();
-        let workspace = cx.new(|cx| WorkspaceStore::new(link.clone(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let link = driver.link.clone();
+        let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session("deleted".into()));
-        wait_until(cx, &workspace, "selected thread", |cx| {
+        driver.wait_until(cx, &workspace, "selected thread", |cx| {
             selected_status(cx, &workspace, "deleted")
         });
         link.set_connection_state(tcode_client::ConnectionState::Reconnecting {
@@ -5026,7 +4989,7 @@ pub(crate) mod tests {
             Some("deleted".into())
         );
         link.set_connection_state(tcode_client::ConnectionState::Connected { path: None });
-        wait_until(cx, &workspace, "rejected send", |cx| {
+        driver.wait_until(cx, &workspace, "rejected send", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .delivery_messages()
@@ -5042,7 +5005,7 @@ pub(crate) mod tests {
         let key = link.failed_commands()[0].0.key.clone();
         workspace.update(cx, |store, _| store.discard_delivery(&key));
         assert!(link.pending_commands().is_empty() && link.failed_commands().is_empty());
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5537,7 +5500,8 @@ pub(crate) mod tests {
             state.session_status_snapshot(&id).unwrap()
         }))
         .unwrap();
-        shutdown_test_host(&host);
+        host.shutdown_blocking()
+            .expect("stop unsubscribed fixture host");
         std::fs::remove_dir_all(root).unwrap();
 
         let (to_host, outgoing) = async_channel::unbounded();
@@ -5733,7 +5697,8 @@ pub(crate) mod tests {
             state.session_status_snapshot(&id).unwrap()
         }))
         .unwrap();
-        shutdown_test_host(&host);
+        host.shutdown_blocking()
+            .expect("stop unsubscribed fixture host");
         std::fs::remove_dir_all(root).unwrap();
         status
     }
@@ -5979,13 +5944,160 @@ pub(crate) mod tests {
         };
     }
 
-    fn command(host: &SpawnedHost, command: Command) {
-        smol::block_on(host.link().command(command)).expect("typed host command");
+    pub(crate) struct LocalHostDriver {
+        pub(crate) link: tcode_client::HostLink,
+        pump: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
     }
 
-    fn shutdown_test_host(host: &SpawnedHost) {
-        host.shutdown_blocking()
-            .expect("drain test store and stop host");
+    impl LocalHostDriver {
+        pub(crate) fn new(host: &SpawnedHost) -> Self {
+            let link = tcode_client::HostLink::new(host.to_host.clone(), host.from_host.clone());
+            Self::from_link(link)
+        }
+
+        pub(crate) fn from_link(link: tcode_client::HostLink) -> Self {
+            let pump_link = link.clone();
+            Self {
+                link,
+                pump: Box::pin(async move { pump_link.pump().await }),
+            }
+        }
+
+        fn workspace(&mut self, cx: &mut TestAppContext) -> gpui::Entity<WorkspaceStore> {
+            let workspace = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    self.link.clone(),
+                    WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            self.wait_until(cx, &workspace, "workspace baseline", |cx| {
+                workspace.read_with(cx, |store, _| store.baseline_ready())
+            });
+            workspace
+        }
+
+        fn await_with_events<T>(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            future: impl std::future::Future<Output = T>,
+        ) -> T {
+            let mut future = std::pin::pin!(future);
+            let mut answer = None;
+            self.wait_until(cx, store, "host reply", |_| {
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                if let std::task::Poll::Ready(value) =
+                    std::future::Future::poll(future.as_mut(), &mut task_cx)
+                {
+                    answer = Some(value);
+                    true
+                } else {
+                    false
+                }
+            });
+            answer.expect("reply observed")
+        }
+
+        pub(crate) fn step(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+        ) {
+            // The real host sends from an OS thread. Route replies here so
+            // asset and command futures wake on GPUI's test scheduler thread.
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            loop {
+                let _ = self.pump.as_mut().poll(&mut task_cx);
+                let delivered = !self.link.events().is_empty();
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
+                if !delivered {
+                    break;
+                }
+            }
+        }
+
+        pub(crate) fn wait_until(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            description: &str,
+            mut ready: impl FnMut(&TestAppContext) -> bool,
+        ) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                self.step(cx, store);
+                if ready(cx) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "waiting for {description}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+
+        fn command(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            command: Command,
+        ) {
+            let link = self.link.clone();
+            self.await_with_events(cx, store, link.command(command))
+                .expect("typed host command");
+        }
+
+        pub(crate) fn shutdown(
+            &mut self,
+            cx: &mut TestAppContext,
+            store: &gpui::Entity<WorkspaceStore>,
+            host: &SpawnedHost,
+        ) {
+            let link = self.link.clone();
+            self.await_with_events(cx, store, link.shutdown())
+                .expect("stop host");
+            host.stopped.recv_blocking().expect("host stopped");
+        }
+    }
+
+    pub(crate) fn await_with_events<T>(
+        cx: &mut TestAppContext,
+        workspace: &gpui::Entity<WorkspaceStore>,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        let mut future = std::pin::pin!(future);
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            if let std::task::Poll::Ready(result) =
+                std::future::Future::poll(future.as_mut(), &mut task_cx)
+            {
+                workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                return result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "host request did not finish while consuming events"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    pub(crate) fn shutdown_test_host(
+        cx: &mut TestAppContext,
+        workspace: &gpui::Entity<WorkspaceStore>,
+        host: &SpawnedHost,
+    ) {
+        let link = host.link();
+        await_with_events(cx, workspace, link.shutdown()).expect("drain test store and stop host");
+        host.stopped.recv_blocking().expect("host stopped");
     }
 
     /// Drain the host's events into `workspace` until `ready`. A host
@@ -6019,9 +6131,10 @@ pub(crate) mod tests {
         disk.upsert_project(&project_at("p", &root)).unwrap();
         disk.upsert_meta(&thread(&root, "one", "p", None)).unwrap();
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session("one".into()));
-        wait_until(cx, &workspace, "selected thread baseline", |cx| {
+        driver.wait_until(cx, &workspace, "selected thread baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
         workspace.update(cx, |store, cx| {
@@ -6043,10 +6156,10 @@ pub(crate) mod tests {
             assert!(!store.chat_loading(), "cached thread remains visible");
             assert_eq!(store.active_session_id().as_deref(), Some("one"));
         });
-        wait_until(cx, &workspace, "correlated reconnect baselines", |cx| {
+        driver.wait_until(cx, &workspace, "correlated reconnect baselines", |cx| {
             workspace.read_with(cx, |store, _| store.connection_state().is_connected())
         });
-        host.shutdown_blocking().unwrap();
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -6098,10 +6211,14 @@ pub(crate) mod tests {
             disk.apply(&appends).unwrap();
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        let open = |cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>, id: &str| {
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
+        let open = |driver: &mut LocalHostDriver,
+                    cx: &mut TestAppContext,
+                    workspace: &gpui::Entity<WorkspaceStore>,
+                    id: &str| {
             workspace.update(cx, |store, _| store.select_session(id.into()));
-            wait_until(cx, workspace, id, |cx| {
+            driver.wait_until(cx, workspace, id, |cx| {
                 workspace.read_with(cx, |store, _| {
                     store.baseline_ready() && !store.session_loading() && !store.session_catching_up
                 })
@@ -6123,7 +6240,7 @@ pub(crate) mod tests {
                 .count()
         };
         for id in &ids {
-            open(cx, &workspace, id);
+            open(&mut driver, cx, &workspace, id);
         }
         workspace.read_with(cx, |store, _| {
             let mut held: Vec<&String> = store.threads.keys().collect();
@@ -6149,7 +6266,7 @@ pub(crate) mod tests {
             assert_eq!(events_cursor(store), Some(Some(end)));
         });
         let total = end + missed.len() as u64;
-        wait_until(cx, &workspace, "the kept thread's continuation", |cx| {
+        driver.wait_until(cx, &workspace, "the kept thread's continuation", |cx| {
             workspace.read_with(cx, |store, _| {
                 held_window(store, kept).is_some_and(|held| held.end == total)
                     && store.session_replica.is_some()
@@ -6160,7 +6277,7 @@ pub(crate) mod tests {
             let (kept, after_reselect) = (kept.clone(), after_reselect.clone());
             move |state, cx| state.record_event_for_replica_test(&kept, 1000, &after_reselect, cx)
         });
-        wait_until(cx, &workspace, "the kept thread's live record", |cx| {
+        driver.wait_until(cx, &workspace, "the kept thread's live record", |cx| {
             workspace.read_with(cx, |store, _| {
                 held_window(store, kept).is_some_and(|held| held.end == total + 1)
             })
@@ -6186,7 +6303,7 @@ pub(crate) mod tests {
             store.select_session(released.clone());
             assert_eq!(events_cursor(store), Some(None));
         });
-        wait_until(cx, &workspace, "the released thread's baseline", |cx| {
+        driver.wait_until(cx, &workspace, "the released thread's baseline", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.session_loading()
             })
@@ -6195,13 +6312,13 @@ pub(crate) mod tests {
             let (released, live) = (released.clone(), live.clone());
             move |state, cx| state.record_event_for_replica_test(&released, 101, &live, cx)
         });
-        wait_until(cx, &workspace, "the live record", |cx| {
+        driver.wait_until(cx, &workspace, "the live record", |cx| {
             workspace.read_with(cx, |store, _| {
                 held_window(store, released).is_some_and(|held| held.end == 11)
             })
         });
-        let fresh = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        open(cx, &fresh, released);
+        let fresh = driver.workspace(cx);
+        open(&mut driver, cx, &fresh, released);
         let fresh = fresh.read_with(cx, |store, _| {
             (store.session_replica.clone(), store.session_turn_offset)
         });
@@ -6217,21 +6334,22 @@ pub(crate) mod tests {
 
         let deleted = ids[47].clone();
         assert!(workspace.read_with(cx, |store, _| store.threads.contains_key(&deleted)));
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::DeleteSession {
                 session_id: deleted.clone(),
                 remove_worktree: false,
             },
         );
-        wait_until(cx, &workspace, "the deletion", |cx| {
+        driver.wait_until(cx, &workspace, "the deletion", |cx| {
             workspace.read_with(cx, |store, _| {
                 !store.index_replica.0.iter().any(|meta| meta.id == deleted)
             })
         });
         assert!(!workspace.read_with(cx, |store, _| store.threads.contains_key(&deleted)));
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6540,27 +6658,38 @@ pub(crate) mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
 
         workspace.update(cx, |store, _| store.select_session("parent".into()));
-        wait_until(cx, &workspace, "parent on screen", |cx| {
+        driver.wait_until(cx, &workspace, "parent on screen", |cx| {
             selected_status(cx, &workspace, "parent")
                 && workspace.read_with(cx, |store, _| held_window(store, "parent").is_some())
         });
         let parent_cursor =
             workspace.read_with(cx, |store, _| Some(held_history(store, "parent").end));
         workspace.update(cx, |store, _| store.select_session("child".into()));
-        wait_until(cx, &workspace, "child selected", |cx| {
+        driver.wait_until(cx, &workspace, "child selected", |cx| {
             selected_status(cx, &workspace, "child")
         });
 
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::ArchiveSession {
                 session_id: "child".into(),
             },
         );
-        wait_until(cx, &workspace, "parent reopened", |cx| {
+        driver.wait_until(cx, &workspace, "parent reopened", |cx| {
             selected_status(cx, &workspace, "parent")
         });
         workspace.read_with(cx, |store, _| {
@@ -6583,17 +6712,18 @@ pub(crate) mod tests {
         // The index and its summary replicate on their own topics: the
         // return to the parent follows the index, the archived count the
         // summary, and nothing orders one before the other.
-        wait_until(cx, &workspace, "child archived", |cx| {
+        driver.wait_until(cx, &workspace, "child archived", |cx| {
             archived(cx, &workspace, "child")
         });
 
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::ArchiveSession {
                 session_id: "sibling".into(),
             },
         );
-        wait_until(cx, &workspace, "sibling archived", |cx| {
+        driver.wait_until(cx, &workspace, "sibling archived", |cx| {
             archived(cx, &workspace, "sibling")
         });
         assert!(
@@ -6601,7 +6731,7 @@ pub(crate) mod tests {
             "archiving a background thread moved the user"
         );
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6626,17 +6756,27 @@ pub(crate) mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
 
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
-        wait_until(cx, &workspace, "launch draft", |cx| {
+        driver.wait_until(cx, &workspace, "launch draft", |cx| {
             workspace.read_with(cx, |store, _| store.selected_session_id.is_some())
         });
         workspace.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)
         });
-        wait_until(cx, &workspace, "draft for the last project", |cx| {
+        driver.wait_until(cx, &workspace, "draft for the last project", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_status_replica
@@ -6656,17 +6796,18 @@ pub(crate) mod tests {
         });
 
         workspace.update(cx, |store, _| store.select_session("child".into()));
-        wait_until(cx, &workspace, "child selected", |cx| {
+        driver.wait_until(cx, &workspace, "child selected", |cx| {
             selected_status(cx, &workspace, "child")
         });
 
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::ArchiveSession {
                 session_id: "parent".into(),
             },
         );
-        wait_until(cx, &workspace, "the standing draft reopened", |cx| {
+        driver.wait_until(cx, &workspace, "the standing draft reopened", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.selected_session_id.as_deref() == Some(draft_id.as_str())
             })
@@ -6683,7 +6824,7 @@ pub(crate) mod tests {
         assert!(archived(cx, &workspace, "parent"));
         assert!(archived(cx, &workspace, "child"));
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6700,28 +6841,48 @@ pub(crate) mod tests {
             .expect("persist project");
         disk.upsert_project(&project_at("remembered", &root))
             .expect("persist project");
+        tcode_services::settings::SettingsStore::new(root.clone())
+            .save(&tcode_core::settings::Settings {
+                last_project_id: Some("remembered".into()),
+                ..Default::default()
+            })
+            .expect("persist remembered project");
         let host = test_host(disk);
-        command(
-            &host,
-            Command::PatchSettings {
-                patch: tcode_core::settings::SettingsPatch::LastProject(Some("remembered".into())),
-            },
-        );
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        wait_until(cx, &workspace, "remembered project draft", |cx| {
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &workspace, "remembered project draft", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
                     status.draft && status.project_id.as_deref() == Some("remembered")
                 })
             })
         });
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
 
         let empty_root = scratch_root("no-projects");
         let empty_host = test_host(SessionStore::open_at(empty_root.clone()).expect("open store"));
-        let empty = cx.new(|cx| WorkspaceStore::new(empty_host.link(), cx));
-        wait_until(cx, &empty, "empty workspace baseline", |cx| {
+        let mut empty_driver = LocalHostDriver::new(&empty_host);
+        let empty = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                empty_driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        empty_driver.wait_until(cx, &empty, "empty workspace baseline", |cx| {
             empty.read_with(cx, |store, _| store.baseline_ready())
         });
         empty.read_with(cx, |store, _| {
@@ -6731,7 +6892,7 @@ pub(crate) mod tests {
                 "a workspace with no project must stay on its add-project state"
             );
         });
-        shutdown_test_host(&empty_host);
+        empty_driver.shutdown(cx, &empty, &empty_host);
         let _ = std::fs::remove_dir_all(&empty_root);
     }
 
@@ -6745,9 +6906,10 @@ pub(crate) mod tests {
         meta.id = "reconnect".into();
         disk.upsert_meta(&meta).unwrap();
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session("reconnect".into()));
-        wait_until(cx, &workspace, "selected status", |cx| {
+        driver.wait_until(cx, &workspace, "selected status", |cx| {
             workspace.read_with(cx, |store, _| store.session_status_replica.is_some())
         });
         update_host!(&host, |state, cx| {
@@ -6762,19 +6924,21 @@ pub(crate) mod tests {
                 );
             }
         });
-        wait_until(cx, &workspace, "three records", |cx| {
+        driver.wait_until(cx, &workspace, "three records", |cx| {
             workspace.read_with(cx, |store, _| {
                 held_window(store, "reconnect").is_some_and(|held| held.records.len() == 3)
             })
         });
-        host.link()
+        driver
+            .link
             .set_connection_state(tcode_client::ConnectionState::Reconnecting {
                 attempt: 1,
                 reason: None,
             });
-        host.link()
+        driver
+            .link
             .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
-        command(&host, Command::ClearRelaunchMarker);
+        driver.command(cx, &workspace, Command::ClearRelaunchMarker);
         workspace.update(cx, |store, cx| {
             store.drain_host_events_for_test(cx);
             assert_eq!(held_history(store, "reconnect").records.len(), 3);
@@ -6800,7 +6964,7 @@ pub(crate) mod tests {
                 "invalid tail must request a full replacement"
             );
         });
-        wait_until(
+        driver.wait_until(
             cx,
             &workspace,
             "full replacement after invalid tail",
@@ -6827,7 +6991,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(subscription.after, Some(3));
         });
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6871,9 +7035,10 @@ pub(crate) mod tests {
         }
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
-        wait_until(cx, &workspace, "initial session timeline replica", |cx| {
+        driver.wait_until(cx, &workspace, "initial session timeline replica", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_replica
@@ -6887,7 +7052,7 @@ pub(crate) mod tests {
         // timeline is hydrated by a detached load; on slow disks (Windows CI) it
         // can still be empty here, so live events would land on nothing and the
         // snapshot below would miss turn-1.
-        wait_until(cx, &workspace, "host resident timeline hydration", |_| {
+        driver.wait_until(cx, &workspace, "host resident timeline hydration", |_| {
             let target_id = session_id.clone();
             update_host!(&host, move |state, _| {
                 state
@@ -6954,7 +7119,7 @@ pub(crate) mod tests {
         });
         // Both timelines can have the same entry and turn counts before the
         // new events arrive. Wait for the final event before comparing contents.
-        wait_until(
+        driver.wait_until(
             cx,
             &workspace,
             "incremental session timeline replica",
@@ -6985,7 +7150,7 @@ pub(crate) mod tests {
         });
         assert_eq!(replica, live);
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7005,8 +7170,9 @@ pub(crate) mod tests {
             .upsert_meta(&seed_session)
             .expect("persist seed session");
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        wait_until(cx, &workspace, "initial session index", |cx| {
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
+        driver.wait_until(cx, &workspace, "initial session index", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .index_replica
@@ -7035,9 +7201,14 @@ pub(crate) mod tests {
         // directory has to exist before it will accept it.
         let created_root = root.join("created");
         std::fs::create_dir_all(&created_root).unwrap();
-        command(&host, Command::CreateProject { root: created_root });
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
+            Command::CreateProject { root: created_root },
+        );
+        driver.command(
+            cx,
+            &workspace,
             Command::ArchiveSession {
                 session_id: seed_session_id.clone(),
             },
@@ -7045,13 +7216,14 @@ pub(crate) mod tests {
         let mut settings = workspace.read_with(cx, |store, _cx| store.settings());
         settings.word_wrap_diffs = !settings.word_wrap_diffs;
         let expected_word_wrap = settings.word_wrap_diffs;
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::PatchSettings {
                 patch: tcode_protocol::SettingsPatch::WordWrapDiffs(settings.word_wrap_diffs),
             },
         );
-        wait_until(cx, &workspace, "index and settings replicas", |cx| {
+        driver.wait_until(cx, &workspace, "index and settings replicas", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.index_replica.1.len() == 2
                     && !store
@@ -7062,9 +7234,14 @@ pub(crate) mod tests {
                     && store.settings_replica.word_wrap_diffs == expected_word_wrap
             })
         });
-        let tcode_protocol::QueryResponse::ArchivedSessions(archived) =
-            smol::block_on(host.link().query(tcode_protocol::Query::ArchivedSessions))
-                .expect("archived threads")
+        let link = driver.link.clone();
+        let tcode_protocol::QueryResponse::ArchivedSessions(archived) = driver
+            .await_with_events(
+                cx,
+                &workspace,
+                link.query(tcode_protocol::Query::ArchivedSessions),
+            )
+            .expect("archived threads")
         else {
             panic!("archived threads")
         };
@@ -7099,7 +7276,7 @@ pub(crate) mod tests {
 
         // Credential discovery can update settings after the command reply.
         // Let the UI consume those events before comparing the live replicas.
-        wait_until(
+        driver.wait_until(
             cx,
             &workspace,
             "index and settings equal to live state",
@@ -7122,7 +7299,7 @@ pub(crate) mod tests {
             },
         );
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7135,9 +7312,10 @@ pub(crate) mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
-        wait_until(cx, &workspace, "selected session status", |cx| {
+        driver.wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_status_replica
@@ -7148,16 +7326,18 @@ pub(crate) mod tests {
         let scripted = tcode_runtime::app::scripted_provider(ProviderKind::Codex);
         update_host!(&host, move |state, _| state
             .set_provider_launcher_for_test(scripted.launcher));
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::SendTurn {
                 session_id: session_id.clone(),
                 text: "queued for replication".into(),
                 attachment_paths: Vec::new(),
             },
         );
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::AddReviewComment {
                 session_id: session_id.clone(),
                 comment: ReviewComment::new(
@@ -7177,7 +7357,7 @@ pub(crate) mod tests {
         // The scripted provider keeps moving the host (delivery, steering
         // support) after the queue change, so the replica is compared with the
         // live status of the same moment rather than a later snapshot.
-        wait_until(cx, &workspace, "replica equal to the live status", |cx| {
+        driver.wait_until(cx, &workspace, "replica equal to the live status", |cx| {
             let live_id = session_id.clone();
             let live = update_host!(&host, move |state, _| {
                 state
@@ -7207,7 +7387,7 @@ pub(crate) mod tests {
             replica.review_comment_drafts
         );
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7225,9 +7405,10 @@ pub(crate) mod tests {
             .expect("persist second session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session(first.id.clone()));
-        wait_until(cx, &workspace, "first selected session", |cx| {
+        driver.wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_status_replica
@@ -7238,7 +7419,8 @@ pub(crate) mod tests {
 
         // This replica test deliberately owns both status subscriptions. Ordinary
         // navigation owns only its selected session; mux isolation is tested separately.
-        host.link()
+        driver
+            .link
             .subscribe(tcode_protocol::Subscription {
                 known_index: None,
                 topic: Topic::SessionStatus {
@@ -7261,7 +7443,7 @@ pub(crate) mod tests {
                 }));
             });
         }
-        wait_until(cx, &workspace, "both rewind prefill events", |cx| {
+        driver.wait_until(cx, &workspace, "both rewind prefill events", |cx| {
             workspace.read_with(cx, |store, _| store.native_rewind_prefills.len() == 2)
         });
 
@@ -7270,7 +7452,7 @@ pub(crate) mod tests {
             Some("first parked prefill".into())
         );
         workspace.update(cx, |store, _| store.select_session(second.id.clone()));
-        wait_until(cx, &workspace, "second selected session", |cx| {
+        driver.wait_until(cx, &workspace, "second selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_status_replica
@@ -7283,7 +7465,7 @@ pub(crate) mod tests {
             Some("second parked prefill".into())
         );
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7297,9 +7479,10 @@ pub(crate) mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
         workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
-        wait_until(cx, &workspace, "selected session baseline", |cx| {
+        driver.wait_until(cx, &workspace, "selected session baseline", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
 
@@ -7319,7 +7502,7 @@ pub(crate) mod tests {
                 },
             }));
         });
-        wait_until(cx, &workspace, "classifier block", |cx| {
+        driver.wait_until(cx, &workspace, "classifier block", |cx| {
             workspace.read_with(cx, |store, _| store.active_fallback_block().is_some())
         });
 
@@ -7337,7 +7520,7 @@ pub(crate) mod tests {
                 },
             }));
         });
-        wait_until(cx, &workspace, "review ready", |cx| {
+        driver.wait_until(cx, &workspace, "review ready", |cx| {
             workspace.read_with(cx, |store, _| store.active_fallback_review().is_some())
         });
         workspace.read_with(cx, |store, _| {
@@ -7361,7 +7544,7 @@ pub(crate) mod tests {
                 cx,
             );
         });
-        wait_until(
+        driver.wait_until(
             cx,
             &workspace,
             "block and review cleared by the next turn",
@@ -7373,7 +7556,7 @@ pub(crate) mod tests {
             },
         );
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7387,16 +7570,17 @@ pub(crate) mod tests {
         meta.id = "git-replica".into();
         session_store.upsert_meta(&meta).unwrap();
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
 
         workspace.update(cx, |store, _| store.select_session("git-replica".into()));
         // Subscribing adopts the session and spawns a real git probe of the
         // (non-repo) cwd. Let that probe land before injecting the fixture
         // status, or its late result overwrites the injected one.
-        wait_until(cx, &workspace, "initial git probe", |cx| {
+        driver.wait_until(cx, &workspace, "initial git probe", |cx| {
             workspace.read_with(cx, |store, _| store.git_status_replica.status.is_some())
         });
-        command(&host, Command::ClearRelaunchMarker);
+        driver.command(cx, &workspace, Command::ClearRelaunchMarker);
         update_host!(&host, |state, _cx| {
             state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
@@ -7434,7 +7618,7 @@ pub(crate) mod tests {
             );
             state.git_busy.insert("git-replica".into());
         });
-        wait_until(cx, &workspace, "provider and git replicas", |cx| {
+        driver.wait_until(cx, &workspace, "provider and git replicas", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.providers_replica.providers_checking
                     && store
@@ -7470,7 +7654,7 @@ pub(crate) mod tests {
             "src/replica.rs"
         );
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -7491,12 +7675,13 @@ pub(crate) mod tests {
             disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
                 .expect("persist session");
             let host = test_host(disk);
-            let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+            let mut driver = LocalHostDriver::new(&host);
+            let workspace = driver.workspace(cx);
 
             workspace.update(cx, |store, cx| {
                 store.start_draft("doomed".into(), root.clone(), cx)
             });
-            wait_until(cx, &workspace, "draft for the doomed project", |cx| {
+            driver.wait_until(cx, &workspace, "draft for the doomed project", |cx| {
                 workspace.read_with(cx, |store, _| {
                     store.session_status_replica.as_ref().is_some_and(|status| {
                         status.draft && status.project_id.as_deref() == Some("doomed")
@@ -7507,12 +7692,12 @@ pub(crate) mod tests {
 
             if !viewing_draft {
                 workspace.update(cx, |store, _| store.select_session("kept-thread".into()));
-                wait_until(cx, &workspace, "kept thread selected", |cx| {
+                driver.wait_until(cx, &workspace, "kept thread selected", |cx| {
                     selected_status(cx, &workspace, "kept-thread")
                 });
             }
             workspace.update(cx, |store, _| store.delete_project("doomed".into()));
-            wait_until(cx, &workspace, "project removed", |cx| {
+            driver.wait_until(cx, &workspace, "project removed", |cx| {
                 workspace.read_with(cx, |store, _| {
                     !store
                         .index_replica
@@ -7523,7 +7708,7 @@ pub(crate) mod tests {
             });
             assert_no_draft_state(cx, &workspace);
             if viewing_draft {
-                wait_until(cx, &workspace, "kept project's draft", |cx| {
+                driver.wait_until(cx, &workspace, "kept project's draft", |cx| {
                     workspace.read_with(cx, |store, _| {
                         store.session_status_replica.as_ref().is_some_and(|status| {
                             status.draft && status.project_id.as_deref() == Some("kept")
@@ -7537,7 +7722,7 @@ pub(crate) mod tests {
                 );
             }
 
-            shutdown_test_host(&host);
+            driver.shutdown(cx, &workspace, &host);
             let _ = std::fs::remove_dir_all(&root);
         }
     }
@@ -7552,12 +7737,13 @@ pub(crate) mod tests {
         disk.upsert_project(&project_at("p", &root))
             .expect("persist project");
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
 
         workspace.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)
         });
-        wait_until(cx, &workspace, "draft for p", |cx| {
+        driver.wait_until(cx, &workspace, "draft for p", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_status_replica
@@ -7583,15 +7769,16 @@ pub(crate) mod tests {
         let launcher = scripted.launcher.clone();
         update_host!(&host, move |state, _| state
             .set_provider_launcher_for_test(launcher));
-        command(
-            &host,
+        driver.command(
+            cx,
+            &workspace,
             Command::SendTurn {
                 session_id: draft_id.clone(),
                 text: "first turn".into(),
                 attachment_paths: Vec::new(),
             },
         );
-        wait_until(cx, &workspace, "draft committed", |cx| {
+        driver.wait_until(cx, &workspace, "draft committed", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
                     .session_status_replica
@@ -7615,7 +7802,7 @@ pub(crate) mod tests {
             );
         });
 
-        shutdown_test_host(&host);
+        driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

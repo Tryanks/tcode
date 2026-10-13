@@ -4576,19 +4576,33 @@ mod tests {
             state.settings.language = Some("en".into());
         }))
         .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let (shell, _transport, cx) = mount(cx);
-        let store = store_of(&shell, cx);
-        // Keep the shell's transport deterministic; the real host link owns
-        // its pump, as in the store tests, and snapshots are drained below.
-        store.update(cx, |store, cx| {
-            *store = WorkspaceStore::new(host.link(), cx)
-        });
+        // Establish the startup viewport before the baseline can select a draft.
+        // Shrinking an already populated wide layout intentionally opens its thread.
         if compact {
             as_mobile(cx);
         }
         cx.simulate_resize(size(px(if compact { 393. } else { 1024. }), px(852.)));
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(250));
+        draw(cx);
+        let store = store_of(&shell, cx);
+        // Keep the shell's transport deterministic; the real host link owns
+        // its pump, as in the store tests, and snapshots are drained below.
+        store.update(cx, |store, cx| {
+            *store = WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "project baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
         draw(cx);
         let mut selected_draft = None;
         for reopen in [false, true] {
@@ -4654,7 +4668,7 @@ mod tests {
             });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
-                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                driver.step(cx, &store);
                 draw(cx);
                 if store.read_with(cx, |store, _| {
                     !store.chat_loading()
@@ -4723,8 +4737,7 @@ mod tests {
             }
             selected_draft = selected;
         }
-        host.to_host.close();
-        smol::block_on(host.stopped.recv()).unwrap();
+        driver.shutdown(cx, &store, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5379,14 +5392,26 @@ mod tests {
             state.sessions = vec![meta].into();
         }))
         .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let (shell, _transport, cx) = mount(cx);
         cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
-            *store = WorkspaceStore::new(host.link(), cx);
+            *store = WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            );
             store.select_session("first".into());
         });
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+            })
+        });
         let search = shell.read_with(cx, |shell, cx| {
             let chat = shell.attachment.as_ref().unwrap().chat.read(cx);
             chat.composer().read(cx).model_search_focus_handle(cx)
@@ -5426,7 +5451,7 @@ mod tests {
             cx.update(|window, _| assert!(!search.is_focused(window)));
         }
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
-        host.shutdown_blocking().unwrap();
+        driver.shutdown(cx, &store, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5463,15 +5488,27 @@ mod tests {
             state.sessions = sessions.into();
         }))
         .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let (shell, _transport, cx) = mount(cx);
         cx.update(|_, cx| crate::shortcut::init(cx));
         cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
-            *store = WorkspaceStore::new(host.link(), cx);
+            *store = WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            );
             store.select_session("first".into());
         });
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+            })
+        });
         resize(cx, 1200.);
         draw(cx);
 
@@ -5504,7 +5541,11 @@ mod tests {
             (first_key, "first"),
         ] {
             cx.simulate_keystrokes(keys);
-            await_restore_update(&shell, cx, |store| !store.chat_loading());
+            driver.wait_until(cx, &store, "selected thread baseline", |cx| {
+                store.read_with(cx, |store, _| {
+                    store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+                })
+            });
             assert_eq!(
                 store
                     .read_with(cx, |store, _| store.active_session_id())
@@ -5554,11 +5595,13 @@ mod tests {
         cx.simulate_mouse_move(settle, None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(settle, gpui::Modifiers::default());
-        await_restore_update(&shell, cx, |store| {
-            store
-                .sidebar_sessions()
-                .iter()
-                .any(|meta| meta.id == "second" && meta.is_settled())
+        driver.wait_until(cx, &store, "thread settlement update", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .sidebar_sessions()
+                    .iter()
+                    .any(|meta| meta.id == "second" && meta.is_settled())
+            })
         });
         draw(cx);
         assert!(cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
@@ -5593,14 +5636,16 @@ mod tests {
         cx.update(|window, cx| window.blur(cx));
         draw(cx);
         cx.simulate_keystrokes(undo_key);
-        await_restore_update(&shell, cx, |store| {
-            store
-                .sidebar_sessions()
-                .iter()
-                .any(|meta| meta.id == "second" && !meta.is_settled())
+        driver.wait_until(cx, &store, "thread settlement update", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .sidebar_sessions()
+                    .iter()
+                    .any(|meta| meta.id == "second" && !meta.is_settled())
+            })
         });
         assert!(!cx.update(|window, cx| window.has_notification::<crate::sidebar::ThreadUndo>(cx)));
-        host.shutdown_blocking().unwrap();
+        driver.shutdown(cx, &store, &host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -6250,8 +6295,14 @@ mod tests {
         }
         let store = store_of(shell, cx);
         store.update(cx, |store, _| store.select_session(session.into()));
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::store::tests::wait_until(cx, &store, "thread status and diff history", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .session_status()
+                    .is_some_and(|status| status.session_id == session)
+                    && store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+            })
+        });
     }
 
     #[gpui::test]
