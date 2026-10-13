@@ -48,7 +48,10 @@ impl Asset for HostImage {
         let blocking_queries = images.blocking_queries;
         async move {
             let query = match request {
-                ImageRequest::File(path) => Query::ReadFileBytes { path },
+                ImageRequest::File(path) => Query::ReadFileBytes {
+                    path,
+                    max_bytes: None,
+                },
                 ImageRequest::Item {
                     session_id,
                     item_id,
@@ -679,7 +682,8 @@ mod tests {
                 assert_eq!(
                     request.payload,
                     ClientPayload::Query(Query::ReadFileBytes {
-                        path: expected_path
+                        path: expected_path,
+                        max_bytes: None
                     }),
                     "{markdown}",
                 );
@@ -770,7 +774,8 @@ mod tests {
         assert_eq!(
             request.payload,
             ClientPayload::Query(Query::ReadFileBytes {
-                path: cwd.join("preview.png")
+                path: cwd.join("preview.png"),
+                max_bytes: None
             })
         );
         assert!(

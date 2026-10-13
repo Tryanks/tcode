@@ -489,6 +489,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         member.clone(),
         ClientPayload::Query(Query::ReadFileBytes {
             path: host.b.root.join("private.txt"),
+            max_bytes: None,
         }),
     ));
     denied(host.request(
@@ -512,7 +513,8 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         host.query(
             member.clone(),
             Query::ReadFileBytes {
-                path: host.a.root.join("visible.txt")
+                path: host.a.root.join("visible.txt"),
+                max_bytes: None
             }
         ),
         QueryResponse::FileBytes(b"A".to_vec())
@@ -575,6 +577,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             member.clone(),
             ClientPayload::Query(Query::ReadFileBytes {
                 path: host.a.root.join("escape.txt"),
+                max_bytes: None,
             }),
         ));
     }

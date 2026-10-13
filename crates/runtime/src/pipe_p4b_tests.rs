@@ -242,7 +242,11 @@ fn attachments_mux_uses_host_session_directory_and_returns_identical_bytes() {
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some(ext));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(
-            smol::block_on(link.query(Query::ReadFileBytes { path })).unwrap(),
+            smol::block_on(link.query(Query::ReadFileBytes {
+                path,
+                max_bytes: None
+            }))
+            .unwrap(),
             QueryResponse::FileBytes(bytes.clone())
         );
     }
