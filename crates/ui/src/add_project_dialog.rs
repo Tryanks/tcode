@@ -767,12 +767,14 @@ mod tests {
                     dialog.open_typed_path(window, cx);
                 });
             });
-            cx.run_until_parked();
         };
 
         // A Windows-style path on a Unix host (or a nonexistent one on Windows):
         // rejected there, not here.
         type_and_open(cx, r"C:\Users\dev\src");
+        crate::store::tests::wait_until(cx, &store, "host path refusal", |cx| {
+            dialog.read_with(cx, |dialog, _| dialog.error.is_some())
+        });
         let error = dialog.read_with(cx, |dialog, _| dialog.error.clone());
         assert!(
             error.is_some_and(|error| error.contains(r"C:\Users\dev\src")),
@@ -788,6 +790,9 @@ mod tests {
         // A directory that exists on the host is accepted even though this
         // client never looked at it.
         type_and_open(cx, workspace.to_str().unwrap());
+        crate::store::tests::wait_until(cx, &store, "host project draft", |cx| {
+            store.read_with(cx, |store, _| store.active_session_id().is_some())
+        });
         assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
         assert_eq!(
             smol::block_on(host.update_state_for_test(|state, _| {

@@ -6310,6 +6310,11 @@ mod tests {
                 truncated: false,
             },
         );
+        crate::store::tests::wait_until(cx, &store, "initial ten-turn history window", |cx| {
+            store.read_with(cx, |store, _| {
+                store.with_active_timeline(|timeline| timeline.turns.len()) == Some(10)
+            })
+        });
         let window_state = cx.new(|_| WindowState::new(false));
         let (view, cx) =
             cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
