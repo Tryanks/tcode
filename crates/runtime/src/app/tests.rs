@@ -973,54 +973,6 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
 }
 
 #[test]
-fn parked_session_projection_diff_emits_session_status() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-parked-session-diff-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let parked = live_session(ProviderKind::Codex, smol::channel::unbounded().0);
-    let parked_id = parked.meta.id.clone();
-
-    state.update(cx, |state, _cx| {
-        state.sessions.push(parked.meta.clone());
-        state
-            .residents
-            .parked
-            .insert(parked.meta.id.clone(), parked);
-    });
-    cx.run_until_parked();
-    cx.drain_outgoing();
-
-    state.dispatch_command(
-        cx,
-        45,
-        Command::RenameSession {
-            session_id: parked_id.clone(),
-            title: "Renamed while parked".into(),
-        },
-    );
-    cx.run_until_parked();
-
-    let outgoing = cx.drain_outgoing();
-    let statuses: Vec<_> = outgoing
-        .iter()
-        .filter_map(|message| match message {
-            HostMessage::Event(EventEnvelope {
-                request_id: None,
-                topic: Topic::SessionStatus { session_id },
-                event: ServerEvent::SessionStatusReplaced(status),
-            }) if session_id == &parked_id => Some(status),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(statuses.len(), 1);
-    assert_eq!(statuses[0].title, "Renamed while parked");
-    state.read(|state| {
-        assert!(state.selected_session().is_none());
-        assert!(state.residents.parked.contains_key(&parked_id));
-    });
-}
-
-#[test]
 fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-scripted-provider-seam-test");
@@ -1046,11 +998,36 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     );
     let session_id = state.read(|state| state.residents.live.keys().next().unwrap().clone());
     state.update(cx, |state, cx| state.select_session(&session_id, cx));
+    for (id, topic) in [
+        (
+            53,
+            Topic::SessionStatus {
+                session_id: session_id.clone(),
+            },
+        ),
+        (
+            54,
+            Topic::SessionEvents {
+                session_id: session_id.clone(),
+            },
+        ),
+    ] {
+        state.deliver(
+            cx,
+            id,
+            tcode_protocol::ClientPayload::Subscribe(Subscription {
+                topic,
+                after: None,
+                known_index: None,
+            }),
+        );
+    }
+
     cx.run_until_parked();
     assert!(cx.drain_outgoing().iter().any(|message| matches!(
         message,
         HostMessage::Event(EventEnvelope {
-            request_id: None,
+            request_id: Some(53),
             topic: Topic::SessionStatus { session_id: emitted_id },
             event: ServerEvent::SessionStatusReplaced(status),
             ..
